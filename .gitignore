@@ -1,0 +1,8 @@
+# Vendored third-party benchmark tools and their caches
+/vendor/
+# Benchmark scratch: tool outputs, caches, rendered sheets
+/benchmark/out/
+__pycache__/
+*.pyc
+# Rust
+/target/
