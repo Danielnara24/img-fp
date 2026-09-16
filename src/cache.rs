@@ -129,7 +129,7 @@ fn read_all(data: &[u8], want: Settings, out: &mut HashMap<String, (Key, Record)
         let px = c.take(tw as usize * th as usize)?.to_vec();
         out.insert(
             path,
-            (key, Record { feats: Features { w, h, kps, desc }, thumb: Thumb { w: tw, h: th, scale: ts, px } }),
+            (key, Record { feats: Features { w, h, kps, desc }, thumb: Thumb::new(tw, th, ts, px) }),
         );
     }
     Ok(())

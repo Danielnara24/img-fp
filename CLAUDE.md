@@ -7,15 +7,17 @@ changing how anything is scored.
 
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
-every amount drawn per seed — F1 **0.958** at 99.6% precision and 92.3% recall,
-against SSCD's 0.762 / 92.6% / 64.8%, in 157 s against SSCD's 1,949 s.
+every amount drawn per seed — F1 **0.969** at 99.6% precision and 94.4% recall,
+against SSCD's 0.762 / 92.6% / 64.8%, in 148 s against SSCD's 1,949 s.
 
 **50 of 87 transformations are handled perfectly** (all 62 seeds found across
 the whole range of the amount). Every other tool manages **zero**.
 
-Precision holds where it matters: of 833 false pairs, 821 are the deliberate
-rearrangement traps, leaving **12 wrong pairs in 215,817 proposals** against
-15.65 million chances to be wrong.
+Precision holds where it matters: of 832 false pairs, 830 are the deliberate
+rearrangement traps, leaving **2 wrong pairs in 220,657 proposals** against
+15.65 million chances to be wrong. Those two are two wrong cluster merges,
+which is the number to watch: a merge's cost is every pair the two families
+imply, so it grows with the corpus while a lone bad pair does not.
 
 `benchmark/BASELINE.md` holds the competition's numbers,
 `benchmark/VALIDATION.md` records the held-out experiment that shaped the
@@ -161,6 +163,30 @@ Each derived file records `region` (rectangle of the original that survives),
 - **Flat blocks abstain** in the pixel check, neither agreeing nor
   disagreeing. Counting them as agreement let a thumbnail matched into a tenth
   of a large image — where the large side is a smear — score 0.9.
+- **The pixel check reads both sides through a mip pyramid** (`Thumb::lod`),
+  each at the footprint one comparison sample covers in *that* thumbnail. It
+  used to take a plain bilinear tap from both, which samples whichever side is
+  finer far below its Nyquist rate; an aliased view does not correlate with a
+  properly filtered one, so the check was reporting disagreement for a
+  difference its own sampling had introduced. Fixing it was worth 2.1 points of
+  recall, and it is why two fitted constants could then be deleted: a floor on
+  comparable blocks and the per-octave inlier surcharge both existed to
+  distrust comparisons across a large scale gap, and that distrust was earned
+  by the sampling bug rather than by the geometry. Do not reintroduce a plain
+  tap here.
+- **An anchor's correspondences must bracket the middle of what it claims**
+  (`verify::encloses_centre`). A transform interpolates inside the bounding box
+  of its inliers and extrapolates outside it. Two different photographs laid
+  out on the same page furniture match along the furniture, and the fitted
+  transform then claims the whole page — and with it the photograph — on
+  evidence that never touched it. Seventeen such anchors caused every
+  cross-family error the tool made; requiring enclosure took wrong merges from
+  four to two. The middle is taken over the *keypoints* inside the claimed
+  region, not over its area, because a building under a clear sky has nothing
+  to match in its top half; measuring against the frame's centre instead costs
+  13 of the 50 perfect transformations. It is asked of both frames and passes
+  on either, since a photograph inside a slide legitimately has all its
+  evidence in one corner of the slide.
 - **Propagation composes transforms and re-checks them.** It is not closure
   expansion: every propagated pair is tested against the pixels. It is worth
   about 1.5 points of F1 and costs under a second. The tree is breadth-first
@@ -187,16 +213,19 @@ Each derived file records `region` (rectangle of the original that survives),
 
 ### What still misses
 
-17,896 pairs. The worst rows, out of 62 seeds: `crop_micro` 35 (a twentieth of
-the frame), `embed_tiny` 46, `contact_sheet` 50, `barrel_distort` 54,
-`wave_vertical` 54, `thumbnail` 55, `crop_strip_top` 57, `picture_in_picture`
-57. The pattern is what it has always been — very small crops, heavy
-downscales, and warps that break a fitted affine model — but the ranges now
-reach further into each, so the same failure modes cost more.
+13,055 pairs. The worst rows, out of 62 seeds: `crop_micro` 40 (a twentieth of
+the frame), `contact_sheet` 54, `embed_tiny` 54, `halftone` 56, `crop_strip_top`
+57, `wave_vertical` 57, `barrel_distort` 58, `picture_in_picture` 58. The
+pattern is what it has always been — very small crops, heavy downscales, and
+warps that break a fitted affine model — though the warps are much less of it
+than they were, because the pixel check no longer aliases across a scale gap.
 
-The one axis where a competitor leads: SSCD takes `perspective_top` 61/62
-against 59 and `keystone_side` 61 against 58. Worth knowing before claiming
-geometry is solved here.
+Two rows where a competitor still leads: PDQ takes `halftone` 58/62 against 56,
+and SSCD `rot180` 61 against 60. `rot180` is a cost of the anchor's
+enclosure test and is worth revisiting if it grows. img-fp no longer trails on
+the warps — `perspective_top` and `keystone_side` are 61/62, level with SSCD,
+and it leads on `barrel_distort` 58 against 48 and `wave_vertical` 57 against
+49.
 
 A note on the traps, since they dominate both FP counts and will keep doing so:
 `column_roll_37` slides an image sideways and wraps, leaving 63% of it a rigid
@@ -221,6 +250,14 @@ acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
 at equal F1 on the corpus the numbers came from and better F1 on one they had
 never seen. Removing a parameter is the cheap experiment; run it before adding
 one.
+
+The acceptance policy is now down to **zero** fitted numbers beyond the CLI's
+own defaults and `CLUSTER_SLACK_*`: `MIN_BLOCKS` and `inliers_per_octave` were
+both deleted once the pixel check stopped aliasing, each verified by deleting
+it and measuring. Neither cost anything; the surcharge's removal was worth
+0.4 points of recall on its own. What replaced them is not a threshold —
+`encloses_centre` asks about position, not degree, so it has no magnitude to
+fit.
 
 Two things that did *not* survive deletion, and why they stay — both measured
 against the held-out corpus while it still existed:

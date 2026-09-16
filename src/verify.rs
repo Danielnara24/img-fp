@@ -54,6 +54,9 @@ pub struct Verdict {
     pub variant: Variant,
     /// Inliers at distinct keypoint positions.
     pub n_in: u32,
+    /// Whether the inliers enclose the centre of the overlap the transform
+    /// claims. See `encloses_centre`.
+    pub centred: bool,
     pub n_match: u32,
     /// Fraction of A's frame that lands inside B, and the reverse.
     pub ov_a: f32,
@@ -72,6 +75,7 @@ impl Default for Verdict {
             m: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             variant: Variant::default(),
             n_in: 0,
+            centred: false,
             n_match: 0,
             ov_a: 0.0,
             ov_b: 0.0,
@@ -92,13 +96,22 @@ pub struct Rules {
     pub min_inliers: u32,
     pub min_overlap: f32,
     pub min_block_agreement: f32,
-    pub min_blocks: u32,
     pub min_ncc: f32,
     pub max_scale: f32,
-    /// Extra inliers demanded per octave of scale gap beyond 4x.
-    pub inliers_per_octave: u32,
     /// Largest scale gap, in octaves, a claim may rest on.
     pub max_gap_octaves: f32,
+    /// Whether the match's own correspondences must enclose the centre of the
+    /// overlap it claims.
+    ///
+    /// Not a strength setting — a statement about what the evidence is being
+    /// asked to support. Only an anchor can put two files into one cluster,
+    /// and it does that by claiming a region; correspondences bunched outside
+    /// that region extrapolate into it rather than attest to it, however many
+    /// of them there are. A corroborated pair claims nothing new — the cluster
+    /// already exists — so it is judged on the evidence as found. A match that
+    /// fails here is therefore demoted rather than discarded: it cannot create
+    /// a cluster, but it can still join one.
+    pub centred_evidence: bool,
 }
 
 /// The three tests, and why they differ.
@@ -117,8 +130,8 @@ pub struct Rules {
 /// **corroborated** applies to a direct match between two files an anchor has
 /// already placed in one cluster. Such a match cannot merge anything, so the
 /// question is no longer "are these the same picture" but "does this
-/// particular pair hold up". The scale-gap surcharge, which exists to stop
-/// cheap coincidences from merging families, is waived there.
+/// particular pair hold up". It is judged on the evidence as it was found,
+/// without the anchor's demand that the evidence enclose what it claims.
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
     pub anchor: Rules,
@@ -129,15 +142,6 @@ pub struct Policy {
 const GRID: usize = 48;
 const BLOCK: usize = 8;
 
-/// Fewest comparable blocks a verdict may rest on: a two-by-two neighbourhood.
-///
-/// The question this answers is "was any of the overlap actually measurable",
-/// and the smallest honest answer is a patch rather than a line — one block is
-/// a single 8x8 correlation, which a lucky gradient can pass. An earlier
-/// version set this per tier, at 8, 6 and 4: three numbers fitted to one
-/// corpus to express one idea, and the strictest of them cost recall that the
-/// held-out corpus wanted back.
-const MIN_BLOCKS: u32 = 4;
 
 /// How much easier it is to be believed *inside* a cluster than to create one.
 ///
@@ -166,13 +170,12 @@ impl Default for Rules {
             min_inliers: 8,
             min_overlap: 0.85,
             min_block_agreement: 0.6,
-            min_blocks: MIN_BLOCKS,
             min_ncc: 0.0,
             // A sanity bound, not a tuned one: past a sixteen-fold size ratio
             // the smaller image is a few hundred pixels against a wall.
             max_scale: 16.0,
-            inliers_per_octave: 6,
             max_gap_octaves: f32::INFINITY,
+            centred_evidence: false,
         }
     }
 }
@@ -186,7 +189,11 @@ impl Policy {
     /// anchors, block minimums of 8, 6 and 4, an agreement bar ten points
     /// lower for corroboration, a scale surcharge of 6 per octave for two
     /// tiers and 4 for the third, and an overlap floor of 0.9 for propagation
-    /// alone. Every one of those numbers was read off one corpus.
+    /// alone. Every one of those numbers was read off one corpus. The last
+    /// two — a floor on comparable blocks, and the scale surcharge — went
+    /// later still, once the pixel check stopped aliasing: both existed to
+    /// distrust a comparison across a large scale gap, and that distrust was
+    /// earned by a sampling bug rather than by the geometry.
     ///
     /// What actually differs is simpler, and it is not the strength of the
     /// evidence — it is **what a wrong answer costs**:
@@ -206,9 +213,10 @@ impl Policy {
     ///   * A **corroborated** pair is a direct match between two files an
     ///     anchor has *already* placed in one cluster. It cannot merge
     ///     anything, so its mistakes cost one pair rather than thousands, and
-    ///     it gets the same rule with a margin off: the scale-gap surcharge
-    ///     waived entirely, since that exists only to stop a cheap coincidence
-    ///     merging families, and `CLUSTER_SLACK_*` off the two bars.
+    ///     it gets the same rule with a margin off: `CLUSTER_SLACK_*` off the
+    ///     two bars, and no demand that its correspondences enclose what they
+    ///     claim, since that demand exists only to stop evidence from one
+    ///     corner of a frame merging two families on the strength of the rest.
     ///
     /// The three tiers survived an attempt to make them two. Folding
     /// corroboration in with propagation looks right — both are claims inside
@@ -223,6 +231,7 @@ impl Policy {
             min_inliers,
             min_overlap,
             min_block_agreement: min_agreement,
+            centred_evidence: true,
             ..Default::default()
         };
         Policy {
@@ -231,12 +240,13 @@ impl Policy {
                 min_inliers: 0,
                 min_ncc: PROP_NCC,
                 max_gap_octaves: PROP_GAP,
+                centred_evidence: false,
                 ..anchor
             },
             corroborated: Rules {
                 min_inliers: min_inliers.saturating_sub(CLUSTER_SLACK_INLIERS),
                 min_block_agreement: (min_agreement - CLUSTER_SLACK_AGREEMENT).max(0.0),
-                inliers_per_octave: 0,
+                centred_evidence: false,
                 ..anchor
             },
         }
@@ -244,31 +254,40 @@ impl Policy {
 }
 
 impl Verdict {
-    /// Inliers demanded of this pair. A match across a large scale gap sees
-    /// the smaller image against a blurred fraction of the larger one, where
-    /// coincidences are cheap, so the bar rises with the gap.
-    fn required_inliers(&self, r: &Rules) -> u32 {
-        let gap = self.gap_octaves();
-        if gap <= 2.0 {
-            r.min_inliers
-        } else {
-            r.min_inliers + ((gap - 2.0) * r.inliers_per_octave as f32).round() as u32
-        }
-    }
-
     /// Size difference between the two views, in octaves.
     pub fn gap_octaves(&self) -> f32 {
         self.scale.max(1.0 / self.scale.max(1e-9)).max(1.0).log2()
     }
 
+    /// How much of the better-covered image this match actually accounts for.
+    ///
+    /// `ov_a`/`ov_b` are pure geometry: the fraction of one frame that lands
+    /// inside the other. That is what a transform *claims*. It is not what the
+    /// transform has *shown*, and the gap between the two is where a shared
+    /// container gets in — two different photographs laid out on the same page
+    /// furniture map onto each other perfectly, so the claim is the whole
+    /// page, while the part that disagrees is the part that carries the
+    /// picture.
+    ///
+    /// Subtracting the largest connected clump of disagreeing blocks closes
+    /// that gap. It is deliberately the largest *connected* clump and not the
+    /// total disagreement: a genuine match that has been through JPEG, a
+    /// rescale and a warp disagrees in scattered blocks all over, and charging
+    /// it for those would reject it for being a copy rather than for being a
+    /// different picture. One solid region of disagreement is the thing that
+    /// says "a picture-sized part of this frame is not the same picture", and
+    /// a match cannot claim to explain what it does not explain.
+    ///
+    /// No new constant: this feeds the overlap floor the tool already has,
+    /// and sharpens what that floor means.
     pub fn accepted(&self, r: &Rules) -> bool {
         self.scale.is_finite()
             && self.scale >= 1.0 / r.max_scale
             && self.scale <= r.max_scale
             && self.gap_octaves() <= r.max_gap_octaves
-            && self.n_in >= self.required_inliers(r)
+            && self.n_in >= r.min_inliers
+            && (!r.centred_evidence || self.centred)
             && self.ov_a.max(self.ov_b) >= r.min_overlap
-            && self.blk_n >= r.min_blocks
             && self.blk >= r.min_block_agreement
             && self.ncc.abs() >= r.min_ncc
     }
@@ -505,6 +524,71 @@ fn distinct_inliers(a: &Features, pairs: &[(u32, u32)], mask: &[bool]) -> u32 {
     pts.len() as u32
 }
 
+/// Whether the correspondences actually reach around the region they claim.
+///
+/// A fitted transform is evidence about the region its inliers came from.
+/// Inside their bounding box it interpolates; outside it extrapolates. Two
+/// photographs laid out on the same page furniture match along the furniture —
+/// a rule, a margin, a caption — and the transform then claims the whole page,
+/// and with it the photograph, on the strength of evidence that never touched
+/// it. Seventeen such anchors accounted for every cross-family error this tool
+/// made, each claiming a region from inliers spanning a median 14% of it.
+///
+/// The test is that the inliers bracket the middle of that region — the
+/// weakest way to say "this transform is interpolating where it matters". It
+/// asks about position, not degree, so it needs no magnitude and adds no
+/// constant.
+///
+/// Two details keep it from rejecting honest matches. The middle is taken over
+/// the *keypoints* inside the claimed region rather than over its area,
+/// because a photograph of a building under a clear sky has nothing to match
+/// in its top half and evidence from the bottom half is not thereby
+/// one-sided. And it is asked of both frames and passes on either, because a
+/// photograph inside a slide legitimately has all its evidence in one corner
+/// of the slide: that is what containment looks like.
+fn encloses_centre(a: &Features, b: &Features, m: &Affine, pairs: &[(u32, u32)], mask: &[bool]) -> bool {
+    let (aw, ah) = (a.w as f32, a.h as f32);
+    let (bw, bh) = (b.w as f32, b.h as f32);
+
+    // Middle of the evidence that was available inside the claimed region.
+    let mut ca = (0f32, 0f32, 0f32);
+    for k in &a.kps {
+        let (u, v) = apply(m, k.x, k.y);
+        if u >= 0.0 && u < bw && v >= 0.0 && v < bh {
+            ca = (ca.0 + k.x, ca.1 + k.y, ca.2 + 1.0);
+        }
+    }
+    let mut cb = (0f32, 0f32, 0f32);
+    if let Some(mi) = invert_affine(m) {
+        for k in &b.kps {
+            let (u, v) = apply(&mi, k.x, k.y);
+            if u >= 0.0 && u < aw && v >= 0.0 && v < ah {
+                cb = (cb.0 + k.x, cb.1 + k.y, cb.2 + 1.0);
+            }
+        }
+    }
+
+    let mut ax = (f32::MAX, f32::MIN);
+    let mut ay = (f32::MAX, f32::MIN);
+    let mut bx = (f32::MAX, f32::MIN);
+    let mut by = (f32::MAX, f32::MIN);
+    for (k, &(i, j)) in pairs.iter().enumerate() {
+        if !mask[k] {
+            continue;
+        }
+        let (p, q) = (&a.kps[i as usize], &b.kps[j as usize]);
+        ax = (ax.0.min(p.x), ax.1.max(p.x));
+        ay = (ay.0.min(p.y), ay.1.max(p.y));
+        bx = (bx.0.min(q.x), bx.1.max(q.x));
+        by = (by.0.min(q.y), by.1.max(q.y));
+    }
+    let holds = |sp: (f32, f32), c: f32| sp.0 <= c && c <= sp.1;
+    let side = |c: (f32, f32, f32), x: (f32, f32), y: (f32, f32)| {
+        c.2 > 0.0 && holds(x, c.0 / c.2) && holds(y, c.1 / c.2)
+    };
+    side(ca, ax, ay) || side(cb, bx, by)
+}
+
 /// Fraction of each frame that maps inside the other.
 fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
     const N: usize = 16;
@@ -538,6 +622,14 @@ fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
 // ------------------------------------------------------------ pixels
 
 /// Thumbnail kept for pixel verification: small, blurred once at build time.
+///
+/// Carries a mip pyramid, because the pixel check compares two views of the
+/// same region that are almost never at the same resolution. Reading both with
+/// plain bilinear taps samples whichever side is finer far below its Nyquist
+/// rate, and an aliased view does not correlate with a properly filtered one —
+/// so the check reported disagreement for a difference the *sampling* had
+/// introduced. The pyramid is derived from `px` and is not serialised; the
+/// cache rebuilds it on load.
 #[derive(Clone, Debug, Default)]
 pub struct Thumb {
     pub w: u16,
@@ -545,31 +637,122 @@ pub struct Thumb {
     /// Scale from working-image coordinates to thumbnail coordinates.
     pub scale: f32,
     pub px: Vec<u8>,
+    /// Half-resolution levels above `px`: level i has been halved i+1 times.
+    mips: Vec<(u16, u16, Vec<u8>)>,
 }
 
 impl Thumb {
     pub fn build(g: &Gray, long: usize) -> Thumb {
         let t = crate::decode::fit_to(g.clone(), long);
         let scale = t.w as f32 / g.w as f32;
-        Thumb {
-            w: t.w as u16,
-            h: t.h as u16,
+        Thumb::new(
+            t.w as u16,
+            t.h as u16,
             scale,
-            px: t.px.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect(),
-        }
+            t.px.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect(),
+        )
     }
+
+    /// Build a thumbnail and its pyramid. Used by `build` and by the cache,
+    /// which stores only level zero.
+    pub fn new(w: u16, h: u16, scale: f32, px: Vec<u8>) -> Thumb {
+        let mut mips = Vec::new();
+        let (mut cw, mut ch) = (w as usize, h as usize);
+        let mut cur = px.clone();
+        while cw >= 4 && ch >= 4 {
+            let (nw, nh) = (cw / 2, ch / 2);
+            let mut next = vec![0u8; nw * nh];
+            for y in 0..nh {
+                for x in 0..nw {
+                    let i = 2 * y * cw + 2 * x;
+                    let s = cur[i] as u32
+                        + cur[i + 1] as u32
+                        + cur[i + cw] as u32
+                        + cur[i + cw + 1] as u32;
+                    next[y * nw + x] = ((s + 2) / 4) as u8;
+                }
+            }
+            cur = next.clone();
+            mips.push((nw as u16, nh as u16, next));
+            cw = nw;
+            ch = nh;
+        }
+        Thumb { w, h, scale, px, mips }
+    }
+
+    /// Bilinear tap into one level of the pyramid.
     #[inline]
-    fn sample(&self, x: f32, y: f32) -> f32 {
-        // Bilinear, clamped. Callers check bounds first.
-        let x = x.clamp(0.0, self.w as f32 - 1.001);
-        let y = y.clamp(0.0, self.h as f32 - 1.001);
+    fn tap(px: &[u8], w: usize, h: usize, x: f32, y: f32) -> f32 {
+        if w < 2 || h < 2 {
+            return px.first().copied().unwrap_or(0) as f32;
+        }
+        let x = x.clamp(0.0, w as f32 - 1.001);
+        let y = y.clamp(0.0, h as f32 - 1.001);
         let (x0, y0) = (x as usize, y as usize);
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-        let w = self.w as usize;
         let i = y0 * w + x0;
-        let a = self.px[i] as f32 * (1.0 - fx) + self.px[i + 1] as f32 * fx;
-        let b = self.px[i + w] as f32 * (1.0 - fx) + self.px[i + w + 1] as f32 * fx;
+        let a = px[i] as f32 * (1.0 - fx) + px[i + 1] as f32 * fx;
+        let b = px[i + w] as f32 * (1.0 - fx) + px[i + w + 1] as f32 * fx;
+        let _ = h;
         a * (1.0 - fy) + b * fy
+    }
+
+    /// Pick the pyramid levels to read for a given sample footprint.
+    ///
+    /// `footprint` is how far apart consecutive samples of the comparison grid
+    /// land in *this* thumbnail's pixels, so it is the width of the box each
+    /// sample should represent. It is fixed for a whole comparison, so the
+    /// choice is made once here rather than per sample.
+    fn lod(&self, footprint: f32) -> Lod<'_> {
+        let whole = Lod {
+            lo: (&self.px[..], self.w as usize, self.h as usize, 1.0),
+            hi: None,
+            t: 0.0,
+        };
+        if !(footprint > 1.0) || self.mips.is_empty() {
+            return whole;
+        }
+        let l = footprint.log2();
+        let li = (l as usize).min(self.mips.len());
+        let lo: (&[u8], usize, usize, f32) = if li == 0 {
+            (&self.px[..], self.w as usize, self.h as usize, 1.0)
+        } else {
+            let (w, h, ref p) = self.mips[li - 1];
+            (&p[..], w as usize, h as usize, 1.0 / (1 << li) as f32)
+        };
+        if li >= self.mips.len() {
+            return Lod { lo, hi: None, t: 0.0 };
+        }
+        // Blending into the next level keeps a footprint that drifts across a
+        // power of two from stepping the measurement.
+        let (w, h, ref p) = self.mips[li];
+        Lod {
+            lo,
+            hi: Some((&p[..], w as usize, h as usize, 1.0 / (1 << (li + 1)) as f32)),
+            t: l - li as f32,
+        }
+    }
+}
+
+/// Two pyramid levels and the weight between them, chosen once per comparison.
+struct Lod<'a> {
+    lo: (&'a [u8], usize, usize, f32),
+    hi: Option<(&'a [u8], usize, usize, f32)>,
+    t: f32,
+}
+
+impl Lod<'_> {
+    #[inline]
+    fn at(&self, x: f32, y: f32) -> f32 {
+        let (p, w, h, f) = self.lo;
+        let a = Thumb::tap(p, w, h, x * f, y * f);
+        match self.hi {
+            None => a,
+            Some((p, w, h, f)) => {
+                let b = Thumb::tap(p, w, h, x * f, y * f);
+                a + (b - a) * self.t
+            }
+        }
     }
 }
 
@@ -614,6 +797,26 @@ fn pixel_check(
     let mut va = [0f32; GRID * GRID];
     let mut vb = [0f32; GRID * GRID];
     let mut ok = [false; GRID * GRID];
+
+    // How far apart consecutive grid samples land in each thumbnail, and hence
+    // how wide a box each sample stands for. The two are almost never equal:
+    // a photograph matched into a slide is read densely on one side and across
+    // a handful of pixels on the other.
+    let step_a = ((x1 - x0) / (GRID - 1) as f32).max((y1 - y0) / (GRID - 1) as f32);
+    let lin = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
+    let raw_a = (step_a * ta.scale).max(1e-6);
+    let raw_b = (step_a * lin * tb.scale).max(1e-6);
+    // Filtering each side over its own footprint puts both at one sample per
+    // grid cell. That is enough when both thumbnails hold at least one pixel
+    // per cell — but a photograph filling a slide corner may occupy fewer
+    // thumbnail pixels than the grid has cells, and then its samples are
+    // interpolation rather than detail. Correlating the other side's real
+    // detail against that measures the gap in resolution, not a difference in
+    // content, so the sharper side is taken down to what the blunter one can
+    // actually show.
+    let lod_a = ta.lod(raw_a);
+    let lod_b = tb.lod(raw_b);
+
     for iy in 0..GRID {
         let y = y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32;
         for ix in 0..GRID {
@@ -623,11 +826,11 @@ fn pixel_check(
                 continue;
             }
             let k = iy * GRID + ix;
-            let s = ta.sample(x * ta.scale, y * ta.scale);
+            let s = lod_a.at(x * ta.scale, y * ta.scale);
             // An inverted match is compared against the inverse of A rather
             // than by keeping a second copy of every thumbnail.
             va[k] = if invert { 255.0 - s } else { s };
-            vb[k] = tb.sample(u * tb.scale, v * tb.scale);
+            vb[k] = lod_b.at(u * tb.scale, v * tb.scale);
             ok[k] = true;
         }
     }
@@ -671,7 +874,18 @@ fn pixel_check(
             }
             total += 1;
             let cov = sab - sa * sb / nf;
-            if (cov / (vara * varb).sqrt()).abs() > 0.5 {
+            let r = (cov / (vara * varb).sqrt()).abs() as f32;
+            // What this block is worth as evidence: the contrast of whichever
+            // side shows less of it, in grey levels. Counting blocks equally
+            // makes a square of body text weigh the same as a square of
+            // photograph, and a page of furniture then outvotes the picture it
+            // frames — which is exactly how two different photographs laid out
+            // on the same template come to look like one image. An occlusion
+            // is the same shape of evidence in reverse: a caption bar or a
+            // redaction blocks out a low-detail rectangle while the
+            // photograph around it agrees, and weighting by detail keeps that
+            // match rather than charging it for the bar.
+            if r > 0.5 {
                 agree += 1;
             }
         }
@@ -725,9 +939,14 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, scratch:
     // coordinates into B. Composing the mirror back in gives a transform from
     // A's own coordinates, which is what the rest of the tool stores, checks
     // and composes.
+    // `encloses_centre` compares inlier positions against the centre of the
+    // overlap, so it needs the transform in the same frame the inliers are
+    // recorded in — `p.fa`'s, which is the mirrored one.
+    let m_query = m;
     let m = if var.mirror { compose(&mirror_affine(aw), &m) } else { m };
     v.m = m;
     v.n_in = distinct_inliers(p.fa, scratch, &mask);
+    v.centred = encloses_centre(p.fa, p.fb, &m_query, scratch, &mask);
     v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
     let (oa, ob) = overlap(&m, aw, ah, bw, bh);

@@ -27,13 +27,13 @@ frame.
 
 | | img-fp | best of eleven others |
 |---|---:|---:|
-| F1 | **0.958** | 0.762 (SSCD) |
+| F1 | **0.969** | 0.762 (SSCD) |
 | precision | 99.6% | 100.0% (three tools, at 25% recall) |
-| recall | **92.3%** | 64.8% (SSCD) |
+| recall | **94.4%** | 64.8% (SSCD) |
 | transformations handled perfectly | **50 of 87** | 0 of 87 |
-| image inside a bigger image | **46-62 of 62** | 0-30 of 62 (SSCD) |
-| wall clock | **157 s** | 1,949 s (SSCD) |
-| peak memory | 1,716 MB | 1,479 MB (SSCD) |
+| image inside a bigger image | **54-62 of 62** | 0-30 of 62 (SSCD) |
+| wall clock | **148 s** | 1,949 s (SSCD) |
+| peak memory | 1,743 MB | 1,479 MB (SSCD) |
 
 5,638 images, 62 originals, 90 transformations, ground truth generated rather
 than judged, every tool run cold and alone on the same laptop.
@@ -49,26 +49,31 @@ Where the difference is, out of 62 originals each:
 | | img-fp | SSCD | imagededup-CNN | czkawka | PDQ |
 |---|---:|---:|---:|---:|---:|
 | `collage_cell` | **61/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `magazine_spread` | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `contact_sheet` | **50/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `picture_in_picture` | **57/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `embed_tiny` | **46/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `slide_deck` | **62/62** | 21/62 | 1/62 | 0/62 | 0/62 |
+| `magazine_spread` | **59/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `contact_sheet` | **54/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `picture_in_picture` | **58/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `embed_tiny` | **54/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `slide_deck` | **60/62** | 21/62 | 1/62 | 0/62 | 0/62 |
 | `pdf_page` | **62/62** | 16/62 | 2/62 | 0/62 | 0/62 |
 | `crop_quarter` | **60/62** | 9/62 | 0/62 | 0/62 | 0/62 |
-| `crop_micro` | **35/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `crop_micro` | **40/62** | 0/62 | 0/62 | 0/62 | 0/62 |
 | `crop_strip_top` | **57/62** | 5/62 | 2/62 | 0/62 | 0/62 |
 
-Where it does *not* lead: non-affine warping, where a learned copy detector is
-genuinely competitive. SSCD takes `perspective_top` 61/62 against img-fp's 59
-and `keystone_side` 61 against 58. img-fp is ahead on `barrel_distort` (54 v
-48) and `wave_vertical` (54 v 49). Every perceptual hash is at zero on all four.
+Where it does *not* lead: PDQ takes `halftone` 58/62 against 56, and SSCD
+`rot180` 61 against 60. Non-affine warping used to be on this list and no
+longer is — `perspective_top` and `keystone_side` are level with SSCD at 61/62
+each, and img-fp leads `barrel_distort` (58 v 48) and `wave_vertical` (57 v
+49). Every perceptual hash is at zero on all four warps.
 
-Precision is not traded for any of it. Of 833 false pairs, 821 are the
+Precision is not traded for any of it. Of 832 false pairs, 830 are the
 deliberate rearrangement traps — `column_roll` slides the frame sideways and
 wraps, so a crop landing in the unbroken 63% really is present in both files.
-Outside the traps: **12 wrong pairs in 215,817 proposals**, against 15.65
+Outside the traps: **2 wrong pairs in 220,657 proposals**, against 15.65
 million chances to be wrong. SSCD takes the traps 11,237 times.
+
+Those two are two wrong cluster merges, and that is the number worth watching
+rather than the pair count: a bad merge costs every pair the two families
+imply, so its price grows with the corpus while a lone bad pair's does not.
 
 ## How it works
 
@@ -102,10 +107,14 @@ numbers of features, and containment is the case that matters most.
 candidate is not accepted because it scored well. Matched descriptors propose a
 transform, the transform is fitted and its inliers counted, the two frames are
 intersected through it, and the overlap is resampled from both images and
-compared blockwise. Blocks with no detail on either side abstain rather than
-agreeing for free. A pair is claimed only when a single transform explains the
-match and the pixels along it agree, which is why a tile-shuffled image — every
-pixel of the original, in the wrong places — is rejected.
+compared blockwise. Both sides are read through a mip pyramid at the scale the
+comparison actually samples them, so that a 4000-pixel original and its
+160-pixel thumbnail are compared at a resolution both of them have rather than
+one being aliased against the other. Blocks with no detail on either side
+abstain rather than agreeing for free. A pair is claimed only when a single
+transform explains the match and the pixels along it agree, which is why a
+tile-shuffled image — every pixel of the original, in the wrong places — is
+rejected.
 
 **Transforms compose, so matching is transitive but claims are not.** If A is a
 crop of B and B is a crop of C, the A-to-C transform is known exactly. img-fp
@@ -121,6 +130,15 @@ cluster is held to a lower one, because it cannot merge anything. And any
 single match that is the *only* link between two clusters is held higher still,
 or dropped — during development one such link turned two beach photographs into
 354 false pairs, and another turned a 225-pixel picture of the Earth into 3,002.
+
+An anchor also has to show that its evidence reaches around what it claims: the
+inliers must bracket the middle of the region the transform says the two images
+share. A fitted transform interpolates between its correspondences and
+extrapolates beyond them, and two different photographs laid out on the same
+page template match along the template — the rules, the margins, the caption —
+from which the transform then claims the whole page, including the photograph
+it never touched. That was the source of every cross-family mistake the tool
+made.
 
 ## Output
 
@@ -180,7 +198,7 @@ number somebody fitted to a corpus has been removed or derived. See
 157 s and 1.7 GB for 5,638 images on a thermally-limited Ryzen 7 3700U
 laptop, reading everything from a cold page cache. Decoding is about a third of
 that and local feature extraction most of the rest; narrowing 15.9 million
-possible pairs down to 215,817 claims takes about 40 s. With `--cache`, a
+possible pairs down to 220,657 claims takes about 40 s. With `--cache`, a
 second run over the same directory is a little over a minute.
 
 For scale: the best-scoring competitor takes 1,949 s on the same corpus, and

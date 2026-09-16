@@ -635,15 +635,15 @@ fn main() -> Result<()> {
     if let Some(path) = &args.dump {
         let f = std::fs::File::create(path)?;
         let mut w = std::io::BufWriter::new(f);
-        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,inverted")?;
+        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted")?;
         for (kind, set) in [("direct", &all_direct), ("variant", &variant_edges), ("propagated", &all_propagated)] {
             for (a, b, _, iv, v) in set.iter() {
                 writeln!(
                     w,
-                    "{:?},{:?},{},{},{},{:.4},{:.4},{:.5},{:.1},{:.4},{},{:.4},{}",
+                    "{:?},{:?},{},{},{},{:.4},{:.4},{:.5},{:.1},{:.4},{},{:.4},{},{}",
                     files[*a].display().to_string(),
                     files[*b].display().to_string(),
-                    kind, v.n_match, v.n_in, v.ov_a, v.ov_b, v.scale, v.rot_deg, v.blk, v.blk_n, v.ncc, *iv as u8
+                    kind, v.n_match, v.n_in, v.ov_a, v.ov_b, v.scale, v.rot_deg, v.blk, v.blk_n, v.ncc, v.centred as u8, *iv as u8
                 )?;
             }
         }
