@@ -1,8 +1,12 @@
-# Vendored third-party benchmark tools and their caches
-/vendor/
-# Benchmark scratch: tool outputs, caches, rendered sheets
-/benchmark/out/
-__pycache__/
-*.pyc
 # Rust
 /target/
+
+# Vendored third-party tools, venvs and their caches
+/vendor/
+
+# The benchmark is local for now: corpus paths, tool outputs and the
+# competitors' binaries are all machine-specific.
+/benchmark/
+
+__pycache__/
+*.pyc
