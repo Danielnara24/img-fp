@@ -27,62 +27,48 @@ frame.
 
 | | img-fp | best of eleven others |
 |---|---:|---:|
-| F1 | **0.980** | 0.890 (SSCD) |
-| precision | **100.0%** | 100.0% (six tools) |
-| recall | **96.1%** | 80.6% (SSCD) |
-| transformations handled perfectly | **102 of 121** | 34 of 121 (SSCD) |
-| image inside a bigger image | **6-8 of 8** | 0-3 of 8 |
-| wall clock | 84 s | 1178 s (SSCD) |
-| peak memory | 1038 MB | 1376 MB (SSCD) |
+| F1 | **0.958** | 0.762 (SSCD) |
+| precision | 99.6% | 100.0% (three tools, at 25% recall) |
+| recall | **92.3%** | 64.8% (SSCD) |
+| transformations handled perfectly | **50 of 87** | 0 of 87 |
+| image inside a bigger image | **46-62 of 62** | 0-30 of 62 (SSCD) |
+| wall clock | **157 s** | 1,949 s (SSCD) |
+| peak memory | 1,716 MB | 1,479 MB (SSCD) |
 
-3,137 images, 46 originals, 124 transformations, ground truth generated rather
+5,638 images, 62 originals, 90 transformations, ground truth generated rather
 than judged, every tool run cold and alone on the same laptop.
-`benchmark/BASELINE.md` has the method and the other ten tools.
+`benchmark/BASELINE.md` has the method and the other eleven tools.
 
-### And on a corpus it has never seen
+No transformation is a single fixed point: each draws its amount per seed, so
+`scale_small` runs from 0.09 to 0.27 and `jpeg_low` from quality 7 to 26. A
+transformation counts as *handled perfectly* only when all 62 seeds are found,
+across that whole range. img-fp clears 50 of them. **No other tool clears one.**
 
-Those numbers come from the corpus img-fp was built against, which is the
-weakest kind of evidence a tool can offer about itself. So there is a second
-corpus: 16 different photographs through 72 transformations that share no
-name, no parameter and — for several of them — not even the same encoder with
-the first. Nothing was ever tuned against it.
-
-| | tuning corpus | held out |
-|---|---:|---:|
-| F1 | 0.980 | **0.963** |
-| precision | 100.0% | **99.6%** |
-| recall | 96.1% | **93.2%** |
-| transformations handled perfectly | 102 of 121 | **61 of 72** |
-| false positives between different photographs | 1 | **0** |
-
-Two points of F1 between the familiar and the unfamiliar, and the failures on
-the unfamiliar corpus are harder instances of the same *kinds* — very small
-crops, heavy quantisation — rather than new kinds. `benchmark/VALIDATION.md`
-is the full argument, including which parameters that corpus deleted.
-
-Where the difference is, out of 8 originals each:
+Where the difference is, out of 62 originals each:
 
 | | img-fp | SSCD | imagededup-CNN | czkawka | PDQ |
 |---|---:|---:|---:|---:|---:|
-| `collage_2x2` | **8/8** | 0/8 | 0/8 | 0/8 | 0/8 |
-| `embed_half` | **8/8** | 1/8 | 0/8 | 0/8 | 0/8 |
-| `pdf_page` | **8/8** | 1/8 | 1/8 | 0/8 | 0/8 |
-| `slide_deck` | **8/8** | 3/8 | 1/8 | 0/8 | 0/8 |
-| `phone_screenshot` | **8/8** | 3/8 | 2/8 | 0/8 | 0/8 |
-| `crop_strip_top` | **8/8** | 1/8 | 1/8 | 0/8 | 0/8 |
+| `collage_cell` | **61/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `magazine_spread` | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `contact_sheet` | **50/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `picture_in_picture` | **57/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `embed_tiny` | **46/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `slide_deck` | **62/62** | 21/62 | 1/62 | 0/62 | 0/62 |
+| `pdf_page` | **62/62** | 16/62 | 2/62 | 0/62 | 0/62 |
+| `crop_quarter` | **60/62** | 9/62 | 0/62 | 0/62 | 0/62 |
+| `crop_micro` | **35/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `crop_strip_top` | **57/62** | 5/62 | 2/62 | 0/62 | 0/62 |
 
-and out of 38:
+Where it does *not* lead: non-affine warping, where a learned copy detector is
+genuinely competitive. SSCD takes `perspective_top` 61/62 against img-fp's 59
+and `keystone_side` 61 against 58. img-fp is ahead on `barrel_distort` (54 v
+48) and `wave_vertical` (54 v 49). Every perceptual hash is at zero on all four.
 
-| | img-fp | SSCD | imagededup-CNN | czkawka | PDQ |
-|---|---:|---:|---:|---:|---:|
-| `crop_center_25` | **33/38** | 0/38 | 0/38 | 0/38 | 0/38 |
-| `quadrant_tl` | **30/38** | 0/38 | 0/38 | 0/38 | 0/38 |
-| `crop_50_upscaled` | **36/38** | 13/38 | 0/38 | 0/38 | 0/38 |
-
-Precision is not traded for any of it: 14 false pairs in 96,638, and 12 of
-those are one deliberate trap — a crop that happens to fall inside a single
-tile of a tile-shuffled image, where one transform really does explain the
-match. SSCD takes that trap 565 times.
+Precision is not traded for any of it. Of 833 false pairs, 821 are the
+deliberate rearrangement traps — `column_roll` slides the frame sideways and
+wraps, so a crop landing in the unbroken 63% really is present in both files.
+Outside the traps: **12 wrong pairs in 215,817 proposals**, against 15.65
+million chances to be wrong. SSCD takes the traps 11,237 times.
 
 ## How it works
 
@@ -191,11 +177,15 @@ number somebody fitted to a corpus has been removed or derived. See
 
 ## Cost
 
-84 s and 1.0 GB for 3,137 images on a thermally-limited Ryzen 7 3700U
+157 s and 1.7 GB for 5,638 images on a thermally-limited Ryzen 7 3700U
 laptop, reading everything from a cold page cache. Decoding is about a third of
-that and local feature extraction most of the rest; matching 4.8 million
-possible pairs down to 96,638 claims takes under 30 s. With `--cache`, a second
-run over the same directory is about 30 s.
+that and local feature extraction most of the rest; narrowing 15.9 million
+possible pairs down to 215,817 claims takes about 40 s. With `--cache`, a
+second run over the same directory is a little over a minute.
+
+For scale: the best-scoring competitor takes 1,949 s on the same corpus, and
+the fastest thing that finds anything at all beyond byte-identical copies
+(imgdupes) takes 33 s to reach F1 0.107.
 
 ## Formats
 

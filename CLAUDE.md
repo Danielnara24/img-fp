@@ -5,16 +5,21 @@ at `/home/daniel/Documents/Vscode_repositories/deduplicator/`, whose
 `benchmark/README.md` is where this methodology comes from — read it before
 changing how anything is scored.
 
-**Status: the tool exists, beats every measured competitor, and has been
-checked against a corpus it was never tuned on.** F1 0.980 at 100.0% precision
-and 96.1% recall, against SSCD's 0.890 / 99.3% / 80.6%, with 102 of 121
-transformations handled perfectly against SSCD's 34.
+**Status: the tool exists and beats every measured competitor by a wide
+margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
+every amount drawn per seed — F1 **0.958** at 99.6% precision and 92.3% recall,
+against SSCD's 0.762 / 92.6% / 64.8%, in 157 s against SSCD's 1,949 s.
 
-On 72 held-out transformations it has never seen, F1 0.963 at 99.6% precision
-and 93.2% recall, and **every false positive there is a rearrangement trap** —
-not one pair of different photographs was claimed. `benchmark/BASELINE.md`
-holds the competition's numbers, `benchmark/VALIDATION.md` the held-out ones,
-`README.md` the design.
+**50 of 87 transformations are handled perfectly** (all 62 seeds found across
+the whole range of the amount). Every other tool manages **zero**.
+
+Precision holds where it matters: of 833 false pairs, 821 are the deliberate
+rearrangement traps, leaving **12 wrong pairs in 215,817 proposals** against
+15.65 million chances to be wrong.
+
+`benchmark/BASELINE.md` holds the competition's numbers,
+`benchmark/VALIDATION.md` records the held-out experiment that shaped the
+parameter surface, `README.md` explains the design.
 
 What is left is not accuracy-critical: decode is 35% of the runtime and has no
 downscaled JPEG path (the vendored `zune-jpeg` exposes none), the mirrored and
@@ -43,30 +48,56 @@ benchmark/
   runners/run_*.py    one wrapper per tool -> canonical JSON
   corpus/
     README.md         how the corpus and its ground truth are built
-    transforms.py     CATALOGUE (70, catalogue A) + CATALOGUE_B (54)
-    transforms_c.py   CATALOGUE_C (72) -- the held-out validation transforms
+    transforms.py     CATALOGUE: 90 transforms, every amount drawn per seed
     make_variants.py  the generator
   out/v4/             the baseline run: metrics.json, baseline.json, *.json
 vendor/               third-party tools and venvs, gitignored
 ```
 
-Corpora live outside the repo: `/home/daniel/Documents/IMGS` is the one
-everything was tuned against, `/home/daniel/Documents/IMGS-VAL` is the held-out
-one that nothing may ever be tuned against. Seeds for the second came from
-`/home/daniel/Documents/temp-imgs`.
+The corpus lives outside the repo at `/home/daniel/Documents/IMGS`: 54 seeds
+in the root, 8 in `archive/`. `/home/daniel/Documents/IMGS-VAL` holds the 16
+seeds that were once a separate validation set and are now folded in; it keeps
+no derived tree.
+
+**There is currently no held-out corpus.** There was one, and
+`benchmark/VALIDATION.md` records what it bought — it is why the parameter
+surface is as small as it is. Folding it in was a deliberate trade, taken on
+the grounds that per-seed variance plus a much smaller parameter surface make
+overfitting far less likely than it was. If a future change needs to be
+defended rather than merely measured, build a new one from fresh seeds: the
+machinery is still here, and the rule is in VALIDATION.md.
 
 ## The corpus
 
-3,137 files from 46 seeds through 124 transforms.
+62 seeds through **one catalogue** of 90 transforms. It was three catalogues
+over three sets of seeds — A for the corpus root, B for `archive/`, C for a
+held-out validation set — which meant a tool's score depended on which folder a
+photograph happened to be filed in. Now every seed faces every transformation.
 
-- 38 seeds in the corpus root get **catalogue A** (70 transforms): re-encode,
-  resize, crop, colour, rotate — the axes a perceptual hash is usually judged on.
-- 8 seeds in `archive/` get **catalogue B** (54 transforms): containment,
-  occlusion, non-affine warps, rearrangement, alpha — what A leaves untested.
+**Every transformation with an amount draws it per seed.** The old catalogues
+put one fixed number through every image: `scale_50` was exactly 0.50 for all
+38 of them, so its 38 measurements were 38 samples of a *single point* on the
+scale axis, and a threshold could settle just past a value it would never be
+asked to straddle. Now `scale_small` runs from 0.09 to 0.27, `jpeg_low` from
+quality 7 to 26, `rotate_small` from 0.6 to 9 degrees. One entry covers what
+used to take four, which is why 90 transforms replace 196 and still test more
+of every axis.
+
+Two things keep that honest, and both must survive any edit here:
+
+- **It is still deterministic.** The amount comes from `seed_key_of`, a hash of
+  the seed's own 16x16 grey thumbnail. Same bytes on every regeneration; no
+  call-time randomness.
+- **The ground truth cannot drift from the pixels.** Where an amount changes
+  what survives — a crop rectangle, a rotation angle, how much of a host canvas
+  the photograph fills — the transform *and* its region or coverage come out of
+  one factory over one key (`_crop_jit`, `_rotate_jit`, `_scales`). Check it
+  the way it was checked when it was written: crop each original by the region
+  the manifest records and correlate against the derived file. It is 1.000.
 
 Regenerate with `cd benchmark/corpus && ../../vendor/venv/bin/python
-make_variants.py --clean` (~5.5 min, deterministic: same bytes, same names).
-Add an image to the root to extend A, to `archive/` to extend B.
+make_variants.py --clean` (deterministic: same bytes, same names). Add an
+image anywhere under the corpus to extend it; seeds are found recursively.
 
 One known failure: `strip_metadata` on an AVIF seed, where exiftool produces a
 file no decoder opens. The generator deletes it rather than leaving an
@@ -84,13 +115,16 @@ sampling, the labelling app) was deleted.
 
 Generated ground truth is exact in both directions and needs nobody:
 
-- **positives** — same seed, regions say SAME or CROP (100,642)
+- **positives** — same seed, regions say SAME or CROP (232,880)
 - **negatives** — different seeds, so they were never the same photograph
-  (4,813,486); plus same-seed pairs with disjoint regions or a different
-  scramble (910)
-- **excluded** — PARTIAL overlaps and `exif_rot90` (4,688)
+  (~15.65 M); plus same-seed pairs with disjoint regions or a different
+  scramble (16,561)
+- **excluded** — PARTIAL overlaps (4,089)
 
-So there is **one F1**, not one per corpus half.
+So there is **one F1**. There always was one, but it used to span two
+catalogues over two sets of seeds; now it spans one catalogue over all of them.
+`exif_rot90` used to be excluded as well — it had two defensible right answers
+— and no longer exists in the catalogue.
 
 Negatives are harder than "different photographs" sounds: several seeds are
 deliberate near-misses — two Excel screenshots sharing all their UI chrome,
@@ -153,17 +187,16 @@ Each derived file records `region` (rectangle of the original that survives),
 
 ### What still misses
 
-On the tuning corpus, 3,888 pairs: very small crops (`crop_center_25`,
-`crop_tiny_detail`, `quadrant_tl`), heavy downscales (`scale_12`, `thumb_128`),
-and partial colour inversions (`solarize`). 15 false positives remain, 14 of
-them the `tile_shuffle` trap, where a crop legitimately lies inside one
-shuffled tile. The fifteenth — a 25% centre crop of one seed against a square
-crop of another — is the only real error in 96,769 claims.
+17,896 pairs. The worst rows, out of 62 seeds: `crop_micro` 35 (a twentieth of
+the frame), `embed_tiny` 46, `contact_sheet` 50, `barrel_distort` 54,
+`wave_vertical` 54, `thumbnail` 55, `crop_strip_top` 57, `picture_in_picture`
+57. The pattern is what it has always been — very small crops, heavy
+downscales, and warps that break a fitted affine model — but the ranges now
+reach further into each, so the same failure modes cost more.
 
-On the held-out corpus the same kinds fail harder: `crop_micro_15` (a 15%
-window) at 8/16, `fax_bilevel` at 12/16, `tiled_watermark` at 11/16, the mirror
-variants at 14-15/16. All 142 false positives there are rearrangement traps;
-none is a pair of different photographs.
+The one axis where a competitor leads: SSCD takes `perspective_top` 61/62
+against 59 and `keystone_side` 61 against 58. Worth knowing before claiming
+geometry is solved here.
 
 A note on the traps, since they dominate both FP counts and will keep doing so:
 `column_roll_37` slides an image sideways and wraps, leaving 63% of it a rigid
@@ -174,20 +207,23 @@ real errors separately, the way `BASELINE.md` does for SSCD.
 
 ### Parameters, and the rule about them
 
-**Tune on `/home/daniel/Documents/IMGS`. Report on
-`/home/daniel/Documents/IMGS-VAL`.** Never choose a value by looking at the
-validation column: the moment a decision is made against it, it stops being a
-held-out corpus and becomes a second tuning corpus, and there is no third.
-`benchmark/VALIDATION.md` has the full argument and the numbers.
+There is one corpus now, and no held-out one, so the discipline has to come
+from somewhere else: **a number earns its place by being derived from
+something, not by being the value that scored best.** Every amount in the
+catalogue varies per seed, so a threshold can no longer be parked just past a
+fixed transformation parameter — but it can still be fitted to these 62 seeds,
+and with no second corpus nothing will catch that. `benchmark/VALIDATION.md`
+records how the parameter surface was cut and what the held-out corpus proved
+while it existed; read it before adding a knob back.
 
-A number earns its place by being derived from something, or by measurably
-costing performance on *both* corpora when removed. One that barely moves the
-tuning corpus and improves the held-out one was never doing its job. Applying
-that rule took the CLI from 13 result-changing options to 8, the acceptance
-policy from 9 fitted numbers to 2, and the bridge test from 3 to 0, at equal
-tuning-corpus F1 and better held-out F1.
+Applying that rule took the CLI from 13 result-changing options to 8, the
+acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
+at equal F1 on the corpus the numbers came from and better F1 on one they had
+never seen. Removing a parameter is the cheap experiment; run it before adding
+one.
 
-Two things that did *not* survive deletion, and why they stay:
+Two things that did *not* survive deletion, and why they stay — both measured
+against the held-out corpus while it still existed:
 
 - **Three acceptance tiers.** Folding corroboration in with propagation looks
   right and is wrong: a corroborated pair has features vouching for it, a
