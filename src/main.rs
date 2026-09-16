@@ -61,7 +61,11 @@ struct Args {
     candidates: usize,
 
     /// Correspondences needed before a pair can be claimed.
-    #[arg(long, default_value_t = 8)]
+    ///
+    /// One number, used by every tier. It was two: the claim-anchoring tier
+    /// silently added 2, which is the sort of offset that looks principled and
+    /// is really just a corpus talking.
+    #[arg(long, default_value_t = 10)]
     min_inliers: u32,
 
     /// How much of one image must lie inside the other, 0..1.
@@ -72,30 +76,10 @@ struct Args {
     #[arg(long, default_value_t = 0.6)]
     min_agreement: f32,
 
-    /// Minimum retrieval score before a pair is worth verifying, 0..1.
-    #[arg(long, default_value_t = 0.005)]
-    min_score: f32,
-
     /// Lowe ratio test threshold. Higher keeps more ambiguous matches, which
     /// repetitive content (text, UI, tiling) needs and geometry can filter.
     #[arg(long, default_value_t = 0.9)]
     ratio: f32,
-
-    /// Extrema considered per image, as a multiple of --features.
-    #[arg(long, default_value_t = 3)]
-    candidate_pool: usize,
-
-    /// Minimum DoG response for a keypoint.
-    #[arg(long, default_value_t = 0.008)]
-    contrast: f32,
-
-    /// Re-query mirrored and inverted for images with fewer matches than this.
-    #[arg(long, default_value_t = 2)]
-    variant_below: u32,
-
-    /// Rounds of transform propagation.
-    #[arg(long, default_value_t = 4)]
-    propagate_rounds: usize,
 
     /// Skip the transform-propagation pass.
     #[arg(long)]
@@ -199,6 +183,12 @@ struct Item {
 }
 
 const THUMB_LONG: usize = 128;
+
+/// A ceiling, not a setting. Each round re-routes composed transforms through
+/// the pairs the last one accepted, and the loop stops as soon as a round adds
+/// nothing — which on every corpus tried has been the second or third. The
+/// constant only exists so a pathological graph cannot spin forever.
+const PROPAGATE_MAX_ROUNDS: usize = 8;
 
 static T_DECODE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static T_SIFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -347,8 +337,6 @@ fn main() -> Result<()> {
     // Decode and describe.
     let sp = sift::Params {
         max_features: args.features,
-        contrast: args.contrast,
-        candidate_pool: args.candidate_pool,
         ..Default::default()
     };
     let done = AtomicUsize::new(0);
@@ -356,7 +344,6 @@ fn main() -> Result<()> {
     let settings = cache::Settings {
         work_size: args.work_size as u32,
         features: args.features as u32,
-        contrast: args.contrast,
         thumb: THUMB_LONG as u32,
     };
     let cached = match &args.cache {
@@ -411,8 +398,8 @@ fn main() -> Result<()> {
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
 
-    // Vocabulary from the corpus itself.
-    let vp = index::VocabParams::default();
+    // Vocabulary from the corpus itself, at a depth the corpus chooses.
+    let vp = index::VocabParams::for_corpus(n_desc);
     let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc) * DESC_LEN);
     {
         // Even sampling across images, so one feature-rich image cannot own
@@ -461,7 +448,7 @@ fn main() -> Result<()> {
             || (vec![0f32; n], Vec::new(), Vec::new()),
             |(acc, touched, scored), i| {
                 inv.query(&lists[i], i as u32, acc, touched, scored);
-                scored.retain(|&(j, s)| items[j as usize].ok && s >= args.min_score);
+                scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
                 scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
                 scored.truncate(args.candidates);
                 scored
@@ -522,8 +509,15 @@ fn main() -> Result<()> {
             degree[i] += g.len() as u32 - 1;
         }
     }
-    let lonely: Vec<usize> =
-        (0..n).filter(|&i| items[i].ok && degree[i] < args.variant_below).collect();
+    // Ask again, mirrored and inverted, for images that no *pair* of matches
+    // has anchored yet. A file with one match is not safely found: that match
+    // may be the wrong one, and a mirrored query is cheap next to being wrong.
+    // Two is not a fitted threshold, it is "more than one" — the same minimal
+    // constant the bridge test uses for "more than one file", and the only
+    // place a count appears in either rule. Trying the tighter reading, "no
+    // matches at all", costs a seed apiece on three of the held-out mirror
+    // transforms.
+    let lonely: Vec<usize> = (0..n).filter(|&i| items[i].ok && degree[i] < 2).collect();
     let variant_edges: Vec<Edge> = lonely
         .par_iter()
         .map_init(
@@ -538,7 +532,7 @@ fn main() -> Result<()> {
                     let vf = variant_features(&items[i].feats, var);
                     let wl = quantise(&vocab, &vf);
                     inv.query(&wl, i as u32, acc, touched, scored);
-                    scored.retain(|&(j, s)| items[j as usize].ok && s >= args.min_score);
+                    scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
                     scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
                     scored.truncate(args.candidates);
                     for &(j, _) in scored.iter() {
@@ -583,7 +577,7 @@ fn main() -> Result<()> {
     // photograph of the Earth and a beach scene was the single edge that
     // merged two whole families into 3,002 false pairs.
     let n_before = all.len();
-    let all = drop_weak_bridges(all, n, &policy);
+    let all = drop_weak_bridges(all, n);
     stage!(t_start, "bridges: dropped {} lone links between clusters", n_before - all.len());
 
     // ---- propagate transforms inside each component
@@ -595,7 +589,7 @@ fn main() -> Result<()> {
     let mut all_propagated: Vec<Edge> = Vec::new();
     if !args.no_propagate {
         let mut pool: Vec<Edge> = all.clone();
-        for round in 0..args.propagate_rounds {
+        for round in 0..PROPAGATE_MAX_ROUNDS {
             let mut round_all = propagate(&items, &pool, n);
             let before = propagated.len();
             let seen: std::collections::HashSet<(usize, usize)> =
@@ -732,15 +726,13 @@ fn main() -> Result<()> {
         config: serde_json::json!({
             "work_size": args.work_size,
             "features": args.features,
-            "contrast": args.contrast,
             "candidates": args.candidates,
-            "min_score": args.min_score,
             "min_inliers": args.min_inliers,
             "min_overlap": args.min_overlap,
             "min_agreement": args.min_agreement,
             "stages": "anchor, propagate, corroborate",
             "ratio": args.ratio,
-            "propagate_rounds": if args.no_propagate { 0 } else { args.propagate_rounds },
+            "propagated": !args.no_propagate,
         }),
         files_enumerated: files.len(),
         files_analysed: n_ok,
@@ -798,7 +790,7 @@ fn round3(v: f32) -> f32 {
 /// carrying all of them. A bridge to a single isolated file is left alone:
 /// that is the ordinary case of a file matched exactly once, and it claims
 /// nothing beyond itself.
-fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize, policy: &verify::Policy) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize) -> Vec<(usize, usize, Affine, bool, Verdict)> {
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbour, edge index)
     for (e, (a, b, _, _, _)) in edges.iter().enumerate() {
         adj[*a].push((*b, e));
@@ -863,17 +855,17 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
             }
         }
     }
+    // A bridge whose far side is a *group* rather than a lone file is the sole
+    // evidence for every pair the two sides imply, and no single match is
+    // worth that much. It is dropped — not held to a higher bar, because
+    // "higher" was three more numbers fitted to one corpus (three times the
+    // inliers, fifteen points more agreement, under two octaves of gap) and a
+    // match strong enough to pass them is still one match. The pairs are not
+    // lost if the two sides really are one family: any second link between
+    // them stops the edge being a bridge at all.
     let mut drop = vec![false; edges.len()];
     for (e, far) in bridges {
-        if e == usize::MAX || far < 3 {
-            continue;
-        }
-        let v = &edges[e].4;
-        let need = &policy.anchor;
-        let strong = v.n_in >= need.min_inliers * 3
-            && v.blk >= (need.min_block_agreement + 0.15).min(1.0)
-            && v.gap_octaves() <= 2.0;
-        if !strong {
+        if e != usize::MAX && far >= 2 {
             drop[e] = true;
         }
     }
@@ -980,6 +972,30 @@ fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n:
 
 #[cfg(test)]
 mod tests {
+    /// The vocabulary has to scale with the corpus, and the reason is a bug
+    /// that a single-corpus benchmark could never have shown: with a fixed
+    /// 65,536 words, a folder of eight images put every descriptor in a word
+    /// of its own and img-fp found one pair out of twenty-eight.
+    #[test]
+    fn vocabulary_depth_follows_corpus_size() {
+        use crate::index::VocabParams;
+        let words = |n| {
+            let p = VocabParams::for_corpus(n);
+            p.branching.pow(p.depth as u32)
+        };
+        // A handful of files: a tree small enough that twins share a word.
+        assert_eq!(words(2_571), 256);
+        // A folder: deeper, but nothing like the full tree.
+        assert_eq!(words(36_500), 4_096);
+        // Both benchmark corpora land on the four-level tree the fixed
+        // vocabulary used, so this changes nothing at the size it was tuned.
+        assert_eq!(words(542_660), 65_536);
+        assert_eq!(words(1_340_021), 65_536);
+        // And the rule is insensitive where it matters: a sixteen-fold change
+        // in the target has to happen before the depth moves at all.
+        assert_eq!(words(1_340_021 / 4), words(1_340_021));
+    }
+
     use super::*;
 
     /// The mirrored-descriptor permutation must agree with actually mirroring

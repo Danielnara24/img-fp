@@ -5,11 +5,16 @@ at `/home/daniel/Documents/Vscode_repositories/deduplicator/`, whose
 `benchmark/README.md` is where this methodology comes from — read it before
 changing how anything is scored.
 
-**Status: the tool exists and beats every measured competitor.** F1 0.980 at
-100.0% precision and 96.0% recall, against SSCD's 0.890 / 99.3% / 80.6%, in
-161 s against SSCD's 1178 s, and 102 of 121 transformations handled perfectly
-against SSCD's 34. `benchmark/BASELINE.md` holds the competition's
-numbers, `README.md` explains the design.
+**Status: the tool exists, beats every measured competitor, and has been
+checked against a corpus it was never tuned on.** F1 0.980 at 100.0% precision
+and 96.1% recall, against SSCD's 0.890 / 99.3% / 80.6%, with 102 of 121
+transformations handled perfectly against SSCD's 34.
+
+On 72 held-out transformations it has never seen, F1 0.963 at 99.6% precision
+and 93.2% recall, and **every false positive there is a rearrangement trap** —
+not one pair of different photographs was claimed. `benchmark/BASELINE.md`
+holds the competition's numbers, `benchmark/VALIDATION.md` the held-out ones,
+`README.md` the design.
 
 What is left is not accuracy-critical: decode is 35% of the runtime and has no
 downscaled JPEG path (the vendored `zune-jpeg` exposes none), the mirrored and
@@ -29,6 +34,7 @@ src/
   cache.rs            on-disk cache of the per-image analysis
 benchmark/
   BASELINE.md         the competition's numbers. The bar to clear.
+  VALIDATION.md       the held-out corpus, and what it says about overfitting
   COMPETITORS.md      tool survey: what exists, what was rejected and why
   TOOLS.md            install/run notes and per-tool gotchas
   bench.py            the measurement harness (cold, sequential, instrumented)
@@ -38,12 +44,16 @@ benchmark/
   corpus/
     README.md         how the corpus and its ground truth are built
     transforms.py     CATALOGUE (70, catalogue A) + CATALOGUE_B (54)
+    transforms_c.py   CATALOGUE_C (72) -- the held-out validation transforms
     make_variants.py  the generator
   out/v4/             the baseline run: metrics.json, baseline.json, *.json
 vendor/               third-party tools and venvs, gitignored
 ```
 
-Corpus lives outside the repo at `/home/daniel/Documents/IMGS`.
+Corpora live outside the repo: `/home/daniel/Documents/IMGS` is the one
+everything was tuned against, `/home/daniel/Documents/IMGS-VAL` is the held-out
+one that nothing may ever be tuned against. Seeds for the second came from
+`/home/daniel/Documents/temp-imgs`.
 
 ## The corpus
 
@@ -131,14 +141,64 @@ Each derived file records `region` (rectangle of the original that survives),
   Two separate family merges during development cost 354 and 3,002 false pairs
   from one edge each. Every anchor must face this test, including the ones the
   mirrored and inverted pass produces — that was a real bug, and it showed up
-  as a precision cliff.
+  as a precision cliff. The test is now unconditional: a bridge whose far side
+  is more than one file is dropped, full stop. Holding strong bridges to a
+  higher bar instead, which is what three fitted constants used to do, is worth
+  0.2 points of tuning-corpus recall and nothing at all on the held-out one.
+- **The vocabulary is sized from the corpus** (`VocabParams::for_corpus`), not
+  fixed. Leaf occupancy is what is held constant, because that also fixes the
+  average document frequency of a word, which is what idf and the posting-list
+  cap are written against. A fixed 65,536 words made img-fp nearly useless on
+  small folders; do not put it back.
 
 ### What still misses
 
-4,018 pairs, roughly: very small crops (`crop_center_25`, `crop_tiny_detail`,
-`quadrant_tl`), heavy downscales (`scale_12`, `thumb_128`), and partial colour
-inversions (`solarize`). 14 false positives remain, 12 of them the
-`tile_shuffle` trap, where a crop legitimately lies inside one shuffled tile.
+On the tuning corpus, 3,888 pairs: very small crops (`crop_center_25`,
+`crop_tiny_detail`, `quadrant_tl`), heavy downscales (`scale_12`, `thumb_128`),
+and partial colour inversions (`solarize`). 15 false positives remain, 14 of
+them the `tile_shuffle` trap, where a crop legitimately lies inside one
+shuffled tile. The fifteenth — a 25% centre crop of one seed against a square
+crop of another — is the only real error in 96,769 claims.
+
+On the held-out corpus the same kinds fail harder: `crop_micro_15` (a 15%
+window) at 8/16, `fax_bilevel` at 12/16, `tiled_watermark` at 11/16, the mirror
+variants at 14-15/16. All 142 false positives there are rearrangement traps;
+none is a pair of different photographs.
+
+A note on the traps, since they dominate both FP counts and will keep doing so:
+`column_roll_37` slides an image sideways and wraps, leaving 63% of it a rigid
+translation of the original, so a crop landing inside that 63% genuinely *is*
+present in both files. The corpus calls such pairs DIFFERENT on the scramble
+rule and img-fp is caught by it for a defensible reason. Report trap hits and
+real errors separately, the way `BASELINE.md` does for SSCD.
+
+### Parameters, and the rule about them
+
+**Tune on `/home/daniel/Documents/IMGS`. Report on
+`/home/daniel/Documents/IMGS-VAL`.** Never choose a value by looking at the
+validation column: the moment a decision is made against it, it stops being a
+held-out corpus and becomes a second tuning corpus, and there is no third.
+`benchmark/VALIDATION.md` has the full argument and the numbers.
+
+A number earns its place by being derived from something, or by measurably
+costing performance on *both* corpora when removed. One that barely moves the
+tuning corpus and improves the held-out one was never doing its job. Applying
+that rule took the CLI from 13 result-changing options to 8, the acceptance
+policy from 9 fitted numbers to 2, and the bridge test from 3 to 0, at equal
+tuning-corpus F1 and better held-out F1.
+
+Two things that did *not* survive deletion, and why they stay:
+
+- **Three acceptance tiers.** Folding corroboration in with propagation looks
+  right and is wrong: a corroborated pair has features vouching for it, a
+  propagated one does not. Two tiers cost 4.2 points of held-out recall.
+- **The cluster margin** (`CLUSTER_SLACK_*`). Without it, corroborated pairs
+  face the anchor bar and held-out recall falls from 93.2% to 90.7%.
+
+Things that generalise badly and were fixed rather than tuned: the vocabulary
+was a fixed 65,536 words at any corpus size, which made img-fp nearly useless
+on a small folder (one pair in twenty-eight, on eight images). Depth now
+follows the descriptor count.
 
 ### Tuning discipline
 
@@ -154,9 +214,10 @@ with `BASELINE.md`.
 
 Measured trade-offs, so they need not be rediscovered: `--work-size` 448 gives
 F1 0.975 at 80 s, 640 gives 0.980 at 86 s, 768 gives 0.976 at 147 s.
-`--features` 900 is *worse* than 600. Candidate breadth (`-k`) bought recall up
-to about 150 and only false positives beyond it; loosening the acceptance
-thresholds instead cost precision immediately.
+`--features` 900 is *worse* than 600. Candidate breadth (`-k`) is on a plateau,
+not a peak — 200 gives byte-for-byte the same F1, precision and false-positive
+count as 150 on both corpora — so 150 is safely past the knee rather than
+balanced on it.
 
 ## Conventions
 

@@ -18,13 +18,15 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-const MAGIC: &[u8; 8] = b"IMGFPC01";
+const MAGIC: &[u8; 8] = b"IMGFPC02";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+/// What the cached analysis depends on. Only the settings a run can actually
+/// change belong here; the detector's own constants are compiled in, so a
+/// binary that changes them changes the magic instead.
 pub struct Settings {
     pub work_size: u32,
     pub features: u32,
-    pub contrast: f32,
     pub thumb: u32,
 }
 
@@ -109,7 +111,7 @@ fn read_all(data: &[u8], want: Settings, out: &mut HashMap<String, (Key, Record)
     if c.take(8)? != MAGIC {
         bail!("not a cache file");
     }
-    let got = Settings { work_size: c.u32()?, features: c.u32()?, contrast: c.f32()?, thumb: c.u32()? };
+    let got = Settings { work_size: c.u32()?, features: c.u32()?, thumb: c.u32()? };
     if got != want {
         bail!("settings changed");
     }
@@ -138,7 +140,6 @@ pub fn save(path: &Path, settings: Settings, entries: &[(&str, Key, &Features, &
     b.0.extend_from_slice(MAGIC);
     b.u32(settings.work_size);
     b.u32(settings.features);
-    b.f32(settings.contrast);
     b.u32(settings.thumb);
     for (p, k, f, t) in entries {
         b.bytes(p.as_bytes());

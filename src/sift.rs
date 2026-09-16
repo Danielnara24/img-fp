@@ -33,13 +33,16 @@ const MAX_INTERP_STEPS: usize = 5;
 pub struct Params {
     pub n_layers: usize,
     pub sigma: f32,
-    /// Minimum |DoG| response. Deliberately far below the 0.04 a standard
-    /// SIFT uses: keypoints are then ranked by response and cut to
-    /// `max_features`, so a textured image ends up with the same strong
-    /// features either way, while a dark or nearly flat one gets weak
-    /// features instead of none at all. A fixed threshold silently returns
-    /// almost nothing on a low-light photograph or a product on white, and an
-    /// image with no features cannot be matched to anything.
+    /// Minimum |DoG| response, in units of the input's own quantisation.
+    ///
+    /// Deliberately far below the 0.04 a standard SIFT uses, and deliberately
+    /// not a tuned number: keypoints are ranked by response and cut to
+    /// `max_features`, so on a textured image the threshold decides nothing at
+    /// all — the ranking does. What it must not do is starve a dark or nearly
+    /// flat image, where a standard threshold returns almost nothing and an
+    /// image with no features cannot be matched to anything. So it is pinned
+    /// to the smallest difference the input can actually carry: two 8-bit
+    /// codes, below which a lossy codec preserves nothing anyway.
     pub contrast: f32,
     pub edge: f32,
     pub max_features: usize,
@@ -47,7 +50,8 @@ pub struct Params {
     pub upsample_below: usize,
     /// Detected extrema considered, as a multiple of `max_features`. A wider
     /// pool costs only the ranking, since the losers are never described, and
-    /// buys a better-chosen set of keypoints.
+    /// buys a better-chosen set of keypoints. Measured flat from 2 upwards, so
+    /// it is a constant rather than an option.
     pub candidate_pool: usize,
 }
 
@@ -56,7 +60,7 @@ impl Default for Params {
         Params {
             n_layers: 3,
             sigma: 1.6,
-            contrast: 0.008,
+            contrast: 2.0 / 255.0,
             edge: 10.0,
             max_features: 800,
             upsample_below: 512,

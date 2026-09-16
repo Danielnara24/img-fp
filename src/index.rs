@@ -25,6 +25,9 @@ use rayon::prelude::*;
 
 pub struct VocabParams {
     pub branching: usize,
+    /// Levels of the tree. Not a constant: `for_corpus` derives it, so that a
+    /// folder of eighty photographs and a drive of eighty thousand both get a
+    /// vocabulary of the right grain.
     pub depth: usize,
     pub sample: usize,
     pub iters: usize,
@@ -32,6 +35,43 @@ pub struct VocabParams {
     pub max_paths: usize,
     pub path_ratio: f32,
     pub seed: u64,
+}
+
+/// Descriptors per leaf word the tree aims for.
+///
+/// Fixing *occupancy* rather than the word count is what makes the vocabulary
+/// independent of how many files are being scanned. Every image contributes
+/// roughly the same number of features, so a constant number of descriptors
+/// per word also fixes the average document frequency of a word — which is the
+/// quantity idf weighting and the posting-list cap are both written against.
+///
+/// The value is also close to unfittable, which is the point. The tree has
+/// `16^depth` leaves, so the depth only moves when the target crosses a factor
+/// of sixteen: on the benchmark corpus every value from 21 to 327 descriptors
+/// per word gives the same four-level tree, and on the validation corpus every
+/// value from 9 to 132 does. What the rule does
+/// change is the small end, where the old fixed 65,536 words failed outright —
+/// a folder of eight images put every descriptor in a word of its own, and the
+/// tool found one pair out of twenty-eight.
+const DESC_PER_WORD: usize = 32;
+
+impl VocabParams {
+    /// Shallowest tree with at least `n_desc/DESC_PER_WORD` leaves.
+    ///
+    /// Rounded up rather than to the nearest, because the two directions are
+    /// not symmetric: too many words splits a true match across two of them,
+    /// which multi-path descent already exists to survive, while too few makes
+    /// every image share words with every other and the score stops meaning
+    /// anything.
+    pub fn for_corpus(n_desc: usize) -> VocabParams {
+        let p = VocabParams::default();
+        let target = (n_desc / DESC_PER_WORD).max(p.branching);
+        let mut depth = 1usize;
+        while depth < 6 && p.branching.pow(depth as u32) < target {
+            depth += 1;
+        }
+        VocabParams { depth, ..p }
+    }
 }
 
 impl Default for VocabParams {

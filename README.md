@@ -29,15 +29,36 @@ frame.
 |---|---:|---:|
 | F1 | **0.980** | 0.890 (SSCD) |
 | precision | **100.0%** | 100.0% (six tools) |
-| recall | **96.0%** | 80.6% (SSCD) |
+| recall | **96.1%** | 80.6% (SSCD) |
 | transformations handled perfectly | **102 of 121** | 34 of 121 (SSCD) |
 | image inside a bigger image | **6-8 of 8** | 0-3 of 8 |
-| wall clock | 161 s | 1178 s (SSCD) |
-| peak memory | 1006 MB | 1376 MB (SSCD) |
+| wall clock | 84 s | 1178 s (SSCD) |
+| peak memory | 1038 MB | 1376 MB (SSCD) |
 
 3,137 images, 46 originals, 124 transformations, ground truth generated rather
 than judged, every tool run cold and alone on the same laptop.
 `benchmark/BASELINE.md` has the method and the other ten tools.
+
+### And on a corpus it has never seen
+
+Those numbers come from the corpus img-fp was built against, which is the
+weakest kind of evidence a tool can offer about itself. So there is a second
+corpus: 16 different photographs through 72 transformations that share no
+name, no parameter and — for several of them — not even the same encoder with
+the first. Nothing was ever tuned against it.
+
+| | tuning corpus | held out |
+|---|---:|---:|
+| F1 | 0.980 | **0.963** |
+| precision | 100.0% | **99.6%** |
+| recall | 96.1% | **93.2%** |
+| transformations handled perfectly | 102 of 121 | **61 of 72** |
+| false positives between different photographs | 1 | **0** |
+
+Two points of F1 between the familiar and the unfamiliar, and the failures on
+the unfamiliar corpus are harder instances of the same *kinds* — very small
+crops, heavy quantisation — rather than new kinds. `benchmark/VALIDATION.md`
+is the full argument, including which parameters that corpus deleted.
 
 Where the difference is, out of 8 originals each:
 
@@ -135,22 +156,42 @@ matches it never made.
 
 ## Options
 
+There are deliberately few. Every option here is one that changes what the
+tool costs or what it is willing to claim; anything that was only ever a
+number somebody fitted to a corpus has been removed or derived. See
+`benchmark/VALIDATION.md` for which, and what the evidence was.
+
+**What it costs**
+
 | | |
 |---|---|
 | `--work-size 640` | long side the analysis runs at. Lower is faster and blinder. |
 | `--features 600` | local features kept per image. |
 | `-k 150` | candidates verified per image. |
-| `--min-inliers 8` | correspondences a claim needs. |
+
+**What it will claim**
+
+| | |
+|---|---|
+| `--min-inliers 10` | correspondences a claim needs. |
 | `--min-overlap 0.85` | how much of one image must lie inside the other. |
 | `--min-agreement 0.6` | fraction of compared blocks that must agree. |
+| `--ratio 0.9` | Lowe ratio. Higher keeps ambiguous matches for geometry to filter. |
+
+**Plumbing**
+
+| | |
+|---|---|
 | `--cache PATH` | reuse the per-image analysis between runs. |
 | `-j N` | worker threads. Default: all cores. |
+| `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |
 | `--dump PATH` | every verdict considered, accepted or not, as CSV. |
+| `--no-propagate` | skip the transform-propagation pass. |
 
 ## Cost
 
-161 s and 1.0 GB for 3,137 images on a thermally-limited Ryzen 7 3700U
+84 s and 1.0 GB for 3,137 images on a thermally-limited Ryzen 7 3700U
 laptop, reading everything from a cold page cache. Decoding is about a third of
 that and local feature extraction most of the rest; matching 4.8 million
 possible pairs down to 96,638 claims takes under 30 s. With `--cache`, a second

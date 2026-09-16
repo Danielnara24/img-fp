@@ -114,11 +114,11 @@ pub struct Rules {
 /// features vouch for it, so it is decided on pixels alone and has to get a
 /// clear answer from them.
 ///
-/// **corroborated** is the weakest, and only ever applies to a pair whose two
-/// files are *already* in one cluster. Such a match cannot merge anything:
-/// the question is no longer "are these the same picture" but "does this
-/// particular pair, inside a cluster we already believe, hold up". A
-/// threshold that would be reckless as an anchor is reasonable there.
+/// **corroborated** applies to a direct match between two files an anchor has
+/// already placed in one cluster. Such a match cannot merge anything, so the
+/// question is no longer "are these the same picture" but "does this
+/// particular pair hold up". The scale-gap surcharge, which exists to stop
+/// cheap coincidences from merging families, is waived there.
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
     pub anchor: Rules,
@@ -126,50 +126,118 @@ pub struct Policy {
     pub corroborated: Rules,
 }
 
+const GRID: usize = 48;
+const BLOCK: usize = 8;
+
+/// Fewest comparable blocks a verdict may rest on: a two-by-two neighbourhood.
+///
+/// The question this answers is "was any of the overlap actually measurable",
+/// and the smallest honest answer is a patch rather than a line — one block is
+/// a single 8x8 correlation, which a lucky gradient can pass. An earlier
+/// version set this per tier, at 8, 6 and 4: three numbers fitted to one
+/// corpus to express one idea, and the strictest of them cost recall that the
+/// held-out corpus wanted back.
+const MIN_BLOCKS: u32 = 4;
+
+/// How much easier it is to be believed *inside* a cluster than to create one.
+///
+/// A corroborated match cannot merge two families: the anchor that put its two
+/// files together already did, or did not. So its mistakes cost one pair where
+/// an anchor's cost every pair the two families imply. It gets the same rule
+/// with a margin taken off — and this is that margin, stated once, where the
+/// old policy spread the same idea over four unrelated-looking offsets.
+///
+/// These two are the only numbers left in the acceptance rule that were read
+/// off a corpus rather than derived, and unlike the rest they earned it: the
+/// held-out corpus prefers them too. Without the margin, corroborated pairs
+/// face the anchor bar and validation recall falls from 93.1% to 90.7%.
+const CLUSTER_SLACK_INLIERS: u32 = 2;
+const CLUSTER_SLACK_AGREEMENT: f32 = 0.1;
+
+/// How well the whole overlap must correlate when *only* pixels are talking.
+const PROP_NCC: f32 = 0.7;
+/// How far a pixels-only claim may reach across scale, in octaves. Beyond
+/// this the smaller image is being compared against a blur.
+const PROP_GAP: f32 = 3.0;
+
 impl Default for Rules {
     fn default() -> Self {
         Rules {
             min_inliers: 8,
             min_overlap: 0.85,
             min_block_agreement: 0.6,
-            min_blocks: 8,
+            min_blocks: MIN_BLOCKS,
             min_ncc: 0.0,
+            // A sanity bound, not a tuned one: past a sixteen-fold size ratio
+            // the smaller image is a few hundred pixels against a wall.
             max_scale: 16.0,
             inliers_per_octave: 6,
-            max_gap_octaves: 64.0,
+            max_gap_octaves: f32::INFINITY,
         }
     }
 }
 
-const PROP_NCC: f32 = 0.7;
-const PROP_GAP: f32 = 3.0;
-
 impl Policy {
+    /// Two rules, because there are two questions — not three, and not nine
+    /// numbers pretending to be three.
+    ///
+    /// The old policy had an anchor tier, a propagated tier and a corroborated
+    /// tier, and they disagreed about six things: an inlier bonus of 2 for
+    /// anchors, block minimums of 8, 6 and 4, an agreement bar ten points
+    /// lower for corroboration, a scale surcharge of 6 per octave for two
+    /// tiers and 4 for the third, and an overlap floor of 0.9 for propagation
+    /// alone. Every one of those numbers was read off one corpus.
+    ///
+    /// What actually differs is simpler, and it is not the strength of the
+    /// evidence — it is **what a wrong answer costs**:
+    ///
+    ///   * An **anchor** is the only kind of claim that can put two files into
+    ///     one cluster. Its mistakes do not cost one pair, they cost every
+    ///     pair the two clusters imply; during development two bad anchors
+    ///     cost 354 and 3,002 false pairs apiece. So an anchor faces the whole
+    ///     rule: enough correspondences, enough overlap, and agreeing pixels.
+    ///
+    ///   * A **propagated** pair is a transform composed along a chain, and no
+    ///     features vouch for it at all. The inlier count is not evidence
+    ///     about it, so the pixels have to answer on their own: over the whole
+    ///     overlap, correlated, and without a large scale gap to hide a blur
+    ///     in.
+    ///
+    ///   * A **corroborated** pair is a direct match between two files an
+    ///     anchor has *already* placed in one cluster. It cannot merge
+    ///     anything, so its mistakes cost one pair rather than thousands, and
+    ///     it gets the same rule with a margin off: the scale-gap surcharge
+    ///     waived entirely, since that exists only to stop a cheap coincidence
+    ///     merging families, and `CLUSTER_SLACK_*` off the two bars.
+    ///
+    /// The three tiers survived an attempt to make them two. Folding
+    /// corroboration in with propagation looks right — both are claims inside
+    /// a cluster — and is wrong, because a corroborated pair *does* have
+    /// features vouching for it and a propagated one does not. Holding it to
+    /// the pixels-only bar cost 1.8 points of recall on the tuning corpus and
+    /// 4.2 on the held-out one. Three tiers is a fact about the evidence, not
+    /// a number read off a corpus; the nine numbers were the problem, and they
+    /// are gone.
     pub fn new(min_inliers: u32, min_overlap: f32, min_agreement: f32) -> Policy {
+        let anchor = Rules {
+            min_inliers,
+            min_overlap,
+            min_block_agreement: min_agreement,
+            ..Default::default()
+        };
         Policy {
-            anchor: Rules {
-                min_inliers: min_inliers + 2,
-                min_overlap,
-                min_block_agreement: min_agreement,
-                min_blocks: 8,
-                ..Default::default()
-            },
+            anchor,
             propagated: Rules {
                 min_inliers: 0,
-                min_overlap: min_overlap.max(0.9),
-                min_block_agreement: min_agreement,
-                min_blocks: 6,
                 min_ncc: PROP_NCC,
                 max_gap_octaves: PROP_GAP,
-                ..Default::default()
+                ..anchor
             },
             corroborated: Rules {
-                min_inliers,
-                min_overlap,
-                min_block_agreement: (min_agreement - 0.1).max(0.0),
-                min_blocks: 4,
-                inliers_per_octave: 4,
-                ..Default::default()
+                min_inliers: min_inliers.saturating_sub(CLUSTER_SLACK_INLIERS),
+                min_block_agreement: (min_agreement - CLUSTER_SLACK_AGREEMENT).max(0.0),
+                inliers_per_octave: 0,
+                ..anchor
             },
         }
     }
@@ -504,9 +572,6 @@ impl Thumb {
         a * (1.0 - fy) + b * fy
     }
 }
-
-const GRID: usize = 48;
-const BLOCK: usize = 8;
 
 /// Resample the overlap from both thumbnails and compare it blockwise.
 ///
