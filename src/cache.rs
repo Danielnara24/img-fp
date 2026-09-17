@@ -46,23 +46,31 @@ pub fn key_of(path: &Path) -> Option<Key> {
     Some(Key { len: md.len(), mtime })
 }
 
-struct Buf(Vec<u8>);
-impl Buf {
-    fn u32(&mut self, v: u32) {
-        self.0.extend_from_slice(&v.to_le_bytes());
+/// Writes the flat format straight to the file. The whole cache of a large
+/// corpus is hundreds of megabytes; assembling it in memory first doubles the
+/// run's peak for the length of one write.
+struct Buf<W: Write>(W);
+impl<W: Write> Buf<W> {
+    fn u32(&mut self, v: u32) -> Result<()> {
+        self.0.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
-    fn u64(&mut self, v: u64) {
-        self.0.extend_from_slice(&v.to_le_bytes());
+    fn u64(&mut self, v: u64) -> Result<()> {
+        self.0.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
-    fn i64(&mut self, v: i64) {
-        self.0.extend_from_slice(&v.to_le_bytes());
+    fn i64(&mut self, v: i64) -> Result<()> {
+        self.0.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
-    fn f32(&mut self, v: f32) {
-        self.0.extend_from_slice(&v.to_le_bytes());
+    fn f32(&mut self, v: f32) -> Result<()> {
+        self.0.write_all(&v.to_le_bytes())?;
+        Ok(())
     }
-    fn bytes(&mut self, v: &[u8]) {
-        self.u64(v.len() as u64);
-        self.0.extend_from_slice(v);
+    fn bytes(&mut self, v: &[u8]) -> Result<()> {
+        self.u64(v.len() as u64)?;
+        self.0.write_all(v)?;
+        Ok(())
     }
 }
 
@@ -136,39 +144,38 @@ fn read_all(data: &[u8], want: Settings, out: &mut HashMap<String, (Key, Record)
 }
 
 pub fn save(path: &Path, settings: Settings, entries: &[(&str, Key, &Features, &Thumb)]) -> Result<()> {
-    let mut b = Buf(Vec::with_capacity(1 << 20));
-    b.0.extend_from_slice(MAGIC);
-    b.u32(settings.work_size);
-    b.u32(settings.features);
-    b.u32(settings.thumb);
-    for (p, k, f, t) in entries {
-        b.bytes(p.as_bytes());
-        b.u64(k.len);
-        b.i64(k.mtime);
-        b.u32(f.w);
-        b.u32(f.h);
-        b.u32(f.kps.len() as u32);
-        for kp in f.kps.iter() {
-            b.f32(kp.x);
-            b.f32(kp.y);
-            b.f32(kp.sigma);
-            b.f32(kp.angle);
-            b.f32(kp.response);
-        }
-        b.0.extend_from_slice(&f.desc);
-        b.u32(t.w as u32);
-        b.u32(t.h as u32);
-        b.f32(t.scale);
-        b.0.extend_from_slice(&t.px);
-    }
     let tmp = path.with_extension("tmp");
     if let Some(d) = tmp.parent() {
         std::fs::create_dir_all(d).ok();
     }
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&b.0)?;
-    f.flush()?;
-    drop(f);
+    let file = std::fs::File::create(&tmp)?;
+    let mut b = Buf(std::io::BufWriter::with_capacity(1 << 20, file));
+    b.0.write_all(MAGIC)?;
+    b.u32(settings.work_size)?;
+    b.u32(settings.features)?;
+    b.u32(settings.thumb)?;
+    for (p, k, f, t) in entries {
+        b.bytes(p.as_bytes())?;
+        b.u64(k.len)?;
+        b.i64(k.mtime)?;
+        b.u32(f.w)?;
+        b.u32(f.h)?;
+        b.u32(f.kps.len() as u32)?;
+        for kp in f.kps.iter() {
+            b.f32(kp.x)?;
+            b.f32(kp.y)?;
+            b.f32(kp.sigma)?;
+            b.f32(kp.angle)?;
+            b.f32(kp.response)?;
+        }
+        b.0.write_all(&f.desc)?;
+        b.u32(t.w as u32)?;
+        b.u32(t.h as u32)?;
+        b.f32(t.scale)?;
+        b.0.write_all(&t.px)?;
+    }
+    b.0.flush()?;
+    drop(b);
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

@@ -175,6 +175,78 @@ fn box_factor(w: usize, h: usize, work: usize) -> usize {
 }
 
 pub fn reduce_to_gray(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, work: usize) -> Gray {
+    // The channel count is known to the caller and fixed for the whole image,
+    // but inside the loop it was a runtime stride and a runtime divisor, which
+    // is enough to stop the loop vectorising over a hundred megapixels a
+    // minute. Each shape gets its own copy; the arithmetic is unchanged.
+    let g = match (ch, alpha) {
+        (3, false) => reduce::<3, false>(w, h, data, work),
+        (4, true) => reduce::<4, true>(w, h, data, work),
+        (1, false) => reduce::<1, false>(w, h, data, work),
+        (2, true) => reduce::<2, true>(w, h, data, work),
+        (4, false) => reduce::<4, false>(w, h, data, work),
+        _ => return reduce_dyn(w, h, data, ch, alpha, work),
+    };
+    // Edge pixels lost to the floor division are ignored on purpose: at most
+    // k-1 rows/cols of a picture already 2x the working size.
+    fit_to(g, work)
+}
+
+/// One grey sample from one source pixel: the mean of the colour channels,
+/// alpha flattened onto mid-grey.
+#[inline(always)]
+fn grey_of<const CH: usize, const ALPHA: bool>(p: &[u8]) -> f32 {
+    let color_ch = if ALPHA { CH - 1 } else { CH };
+    let mut v = 0u32;
+    for c in 0..color_ch {
+        v += p[c] as u32;
+    }
+    let mut g = v as f32 / color_ch as f32;
+    if ALPHA {
+        let a = p[CH - 1] as f32 / 255.0;
+        g = g * a + 128.0 * (1.0 - a);
+    }
+    g
+}
+
+fn reduce<const CH: usize, const ALPHA: bool>(w: usize, h: usize, data: &[u8], work: usize) -> Gray {
+    let k = box_factor(w, h, work);
+    let ow = (w / k).max(1);
+    let oh = (h / k).max(1);
+    let inv = 1.0 / (255.0 * (k * k) as f32);
+    let mut px: Vec<f32> = Vec::with_capacity(ow * oh);
+    if k == 1 {
+        // No box reduction: every output pixel is one source pixel, so there
+        // is nothing to accumulate and nothing to zero first.
+        for y in 0..oh {
+            let line = &data[y * w * CH..(y + 1) * w * CH];
+            px.extend((0..ow).map(|x| grey_of::<CH, ALPHA>(&line[x * CH..x * CH + CH]) * inv));
+        }
+        return Gray { w: ow, h: oh, px };
+    }
+    let mut row = vec![0.0f32; ow];
+    for oy in 0..oh {
+        row.fill(0.0);
+        for sy in oy * k..(oy * k + k).min(h) {
+            let line = &data[sy * w * CH..(sy + 1) * w * CH];
+            for (ox, r) in row.iter_mut().enumerate() {
+                let mut acc = 0.0f32;
+                for sx in ox * k..(ox * k + k).min(w) {
+                    acc += grey_of::<CH, ALPHA>(&line[sx * CH..sx * CH + CH]);
+                }
+                *r += acc;
+            }
+        }
+        px.extend(row.iter().map(|v| v * inv));
+    }
+    Gray { w: ow, h: oh, px }
+}
+
+/// Any other channel layout, with the shape carried at run time. This is the
+/// reference: `reduce` is the same arithmetic with the shape known at compile
+/// time, and `specialised_reduction_matches_the_general_one` holds the two
+/// together.
+fn reduce_dyn(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, work: usize) -> Gray {
     let k = box_factor(w, h, work);
     let ow = (w / k).max(1);
     let oh = (h / k).max(1);
@@ -207,8 +279,6 @@ pub fn reduce_to_gray(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, w
             *v *= inv;
         }
     }
-    // Edge pixels lost to the floor division are ignored on purpose: at most
-    // k-1 rows/cols of a picture already 2x the working size.
     fit_to(out, work)
 }
 
@@ -238,18 +308,22 @@ pub fn resize_area(g: &Gray, tw: usize, th: usize) -> Gray {
     for y in 0..g.h {
         let src = &g.px[y * g.w..(y + 1) * g.w];
         let dst = &mut tmp[y * tw..(y + 1) * tw];
-        for (ox, (start, ws)) in xw.iter().enumerate() {
+        for (ox, d) in dst.iter_mut().enumerate() {
+            let start = xw.start[ox] as usize;
+            let (a, b) = (xw.at[ox] as usize, xw.at[ox + 1] as usize);
             let mut acc = 0.0;
-            for (i, wgt) in ws.iter().enumerate() {
+            for (i, wgt) in xw.w[a..b].iter().enumerate() {
                 acc += src[start + i] * wgt;
             }
-            dst[ox] = acc;
+            *d = acc;
         }
     }
     let mut out = Gray::new(tw, th);
-    for (oy, (start, ws)) in yw.iter().enumerate() {
+    for oy in 0..th {
+        let start = yw.start[oy] as usize;
+        let (a, b) = (yw.at[oy] as usize, yw.at[oy + 1] as usize);
         let dst = &mut out.px[oy * tw..(oy + 1) * tw];
-        for (i, wgt) in ws.iter().enumerate() {
+        for (i, wgt) in yw.w[a..b].iter().enumerate() {
             let src = &tmp[(start + i) * tw..(start + i + 1) * tw];
             for x in 0..tw {
                 dst[x] += src[x] * wgt;
@@ -259,33 +333,45 @@ pub fn resize_area(g: &Gray, tw: usize, th: usize) -> Gray {
     out
 }
 
-/// For each output index: (first source index, normalised weights) covering
-/// the source interval [o*s, (o+1)*s) where s = src/dst. Also correct when
-/// upscaling (weights become mostly a single 1.0, i.e. nearest-ish box).
-fn weights(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
+/// The source pixels each output pixel averages, flat: output `o` covers
+/// `w[at[o]..at[o + 1]]` starting at source index `start[o]`. One allocation
+/// for the lot rather than one per output pixel — a 640-wide resample was
+/// 640 of them, twice per image.
+struct Taps {
+    start: Vec<u32>,
+    at: Vec<u32>,
+    w: Vec<f32>,
+}
+
+/// For each output index: the first source index and the normalised weights
+/// covering the source interval [o*s, (o+1)*s) where s = src/dst. Also correct
+/// when upscaling (weights become mostly a single 1.0, i.e. nearest-ish box).
+fn weights(src: usize, dst: usize) -> Taps {
     let s = src as f64 / dst as f64;
-    (0..dst)
-        .map(|o| {
-            let a = o as f64 * s;
-            let b = ((o + 1) as f64 * s).min(src as f64);
-            let i0 = a.floor() as usize;
-            let i1 = (b.ceil() as usize).min(src).max(i0 + 1);
-            let mut ws = Vec::with_capacity(i1 - i0);
-            let mut total = 0.0;
-            for i in i0..i1 {
-                let lo = (i as f64).max(a);
-                let hi = ((i + 1) as f64).min(b);
-                let wgt = (hi - lo).max(0.0);
-                ws.push(wgt as f32);
-                total += wgt;
-            }
-            let inv = if total > 0.0 { (1.0 / total) as f32 } else { 0.0 };
-            for w in ws.iter_mut() {
-                *w *= inv;
-            }
-            (i0, ws)
-        })
-        .collect()
+    let mut t = Taps { start: Vec::with_capacity(dst), at: Vec::with_capacity(dst + 1), w: Vec::new() };
+    for o in 0..dst {
+        let a = o as f64 * s;
+        let b = ((o + 1) as f64 * s).min(src as f64);
+        let i0 = a.floor() as usize;
+        let i1 = (b.ceil() as usize).min(src).max(i0 + 1);
+        t.start.push(i0 as u32);
+        t.at.push(t.w.len() as u32);
+        let mut total = 0.0;
+        for i in i0..i1 {
+            let lo = (i as f64).max(a);
+            let hi = ((i + 1) as f64).min(b);
+            let wgt = (hi - lo).max(0.0);
+            t.w.push(wgt as f32);
+            total += wgt;
+        }
+        let inv = if total > 0.0 { (1.0 / total) as f32 } else { 0.0 };
+        let from = t.at[o] as usize;
+        for w in t.w[from..].iter_mut() {
+            *w *= inv;
+        }
+    }
+    t.at.push(t.w.len() as u32);
+    t
 }
 
 fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
@@ -354,6 +440,25 @@ mod tests {
         let r = resize_area(&g, 3, 2);
         let m2: f32 = r.px.iter().sum::<f32>() / r.px.len() as f32;
         assert!((mean - m2).abs() < 0.05, "{mean} vs {m2}");
+    }
+
+    /// The per-shape copies of the grey reduction exist only to let the
+    /// compiler see the stride and the divisor. They must agree with the
+    /// general version exactly — not nearly — for every shape a decoder hands
+    /// over, at a box factor of one and above.
+    #[test]
+    fn specialised_reduction_matches_the_general_one() {
+        for &(ch, alpha) in &[(1, false), (2, true), (3, false), (4, true), (4, false)] {
+            for &(w, h, work) in &[(37usize, 23usize, 64usize), (200, 150, 32), (64, 64, 0)] {
+                let data: Vec<u8> = (0..w * h * ch)
+                    .map(|i| ((i * 37 + i / 17 * 11) % 251) as u8)
+                    .collect();
+                let fast = reduce_to_gray(w, h, &data, ch, alpha, work);
+                let slow = reduce_dyn(w, h, &data, ch, alpha, work);
+                assert_eq!((fast.w, fast.h), (slow.w, slow.h), "{ch} {alpha} {w}x{h}@{work}");
+                assert_eq!(fast.px, slow.px, "{ch} {alpha} {w}x{h}@{work}");
+            }
+        }
     }
 
     #[test]

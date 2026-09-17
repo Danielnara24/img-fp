@@ -295,12 +295,26 @@ impl Verdict {
 
 // ------------------------------------------------------------ correspondence
 
+/// Squared distance between two descriptors.
+///
+/// Summed in sixteen independent lanes rather than one running total. The sum
+/// is over integers, so it is exact whatever order it is taken in, and the
+/// single total was a chain of 128 dependent adds — the loop could not use more
+/// than one of the machine's adders at a time. This is the innermost loop of
+/// the matcher: every candidate pair runs it once per shared word.
 #[inline]
 fn dist2(a: &[u8], b: &[u8]) -> u32 {
+    const LANES: usize = 16;
+    let mut acc = [0u32; LANES];
+    for (ca, cb) in a[..DESC_LEN].chunks_exact(LANES).zip(b[..DESC_LEN].chunks_exact(LANES)) {
+        for l in 0..LANES {
+            let d = ca[l] as i32 - cb[l] as i32;
+            acc[l] += (d * d) as u32;
+        }
+    }
     let mut s = 0u32;
-    for i in 0..DESC_LEN {
-        let d = a[i] as i32 - b[i] as i32;
-        s += (d * d) as u32;
+    for l in 0..LANES {
+        s += acc[l];
     }
     s
 }
@@ -449,63 +463,81 @@ pub fn compose(m1: &Affine, m2: &Affine) -> Affine {
 }
 
 /// Best transform explaining the correspondences, by inlier count.
-fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh: f32) -> Option<(Affine, Vec<bool>)> {
+fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh: f32, scratch: &mut Scratch) -> Option<(Affine, Vec<bool>)> {
     if pairs.len() < 3 {
         return None;
     }
     let tol = (0.03 * (bw * bw + bh * bh).sqrt()).max(3.0);
     let tol2 = tol * tol;
-    let mut mask = vec![false; pairs.len()];
+    let n = pairs.len();
+    // The inlier count is taken once per hypothesis and there is one hypothesis
+    // per correspondence, so these coordinates are read `n` times each. Reading
+    // them from four flat arrays rather than through two index indirections
+    // into a struct of five fields is the difference between a loop the
+    // compiler can vectorise and one it cannot; the arithmetic is unchanged.
+    let sc = &mut *scratch;
+    sc.ax.clear();
+    sc.ay.clear();
+    sc.bx.clear();
+    sc.by.clear();
+    for &(p, q) in pairs.iter() {
+        let ka = &a.kps[p as usize];
+        let kb = &b.kps[q as usize];
+        sc.ax.push(ka.x);
+        sc.ay.push(ka.y);
+        sc.bx.push(kb.x);
+        sc.by.push(kb.y);
+    }
+    let (ax, ay, bx, by) = (&sc.ax[..n], &sc.ay[..n], &sc.bx[..n], &sc.by[..n]);
+    sc.mask.clear();
+    sc.mask.resize(n, false);
+    sc.hit.clear();
+    sc.hit.resize(n, false);
     let mut best: Option<(usize, Affine)> = None;
     // Every correspondence is a hypothesis. On this scale that is cheaper and
     // more reliable than random sampling: no iteration count to tune, and a
     // single good match is enough to find the answer.
-    let cap = pairs.len().min(600);
-    let mut scratch = vec![false; pairs.len()];
+    let cap = n.min(600);
     for &(i, j) in pairs.iter().take(cap) {
         let m = from_single(&a.kps[i as usize], &b.kps[j as usize]);
-        let sc = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
-        if !(sc.is_finite() && sc > 1e-3 && sc < 1e3) {
+        let s = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
+        if !(s.is_finite() && s > 1e-3 && s < 1e3) {
             continue;
         }
-        let mut count = 0usize;
-        for (k, &(p, q)) in pairs.iter().enumerate() {
-            let ka = &a.kps[p as usize];
-            let kb = &b.kps[q as usize];
-            let (px, py) = apply(&m, ka.x, ka.y);
-            let (dx, dy) = (px - kb.x, py - kb.y);
-            let ok = dx * dx + dy * dy < tol2;
-            scratch[k] = ok;
-            count += ok as usize;
-        }
+        let count = count_inliers(&m, ax, ay, bx, by, tol2, &mut sc.hit);
         if count >= 3 && best.map_or(true, |(c, _)| count > c) {
             best = Some((count, m));
-            mask.copy_from_slice(&scratch);
+            sc.mask.copy_from_slice(&sc.hit);
         }
     }
     let (_, mut m) = best?;
     // Refine: least-squares affine on the inliers, recount, repeat while the
     // set does not shrink.
     for _ in 0..3 {
-        let Some(m2) = fit_affine(a, b, pairs, &mask) else { break };
-        let mut next = vec![false; pairs.len()];
-        let mut count = 0usize;
-        for (k, &(p, q)) in pairs.iter().enumerate() {
-            let ka = &a.kps[p as usize];
-            let kb = &b.kps[q as usize];
-            let (px, py) = apply(&m2, ka.x, ka.y);
-            let (dx, dy) = (px - kb.x, py - kb.y);
-            let ok = dx * dx + dy * dy < tol2;
-            next[k] = ok;
-            count += ok as usize;
-        }
-        if count < mask.iter().filter(|v| **v).count() {
+        let Some(m2) = fit_affine(a, b, pairs, &sc.mask) else { break };
+        let count = count_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit);
+        if count < sc.mask.iter().filter(|v| **v).count() {
             break;
         }
         m = m2;
-        mask = next;
+        sc.mask.copy_from_slice(&sc.hit);
     }
-    Some((m, mask))
+    Some((m, sc.mask.clone()))
+}
+
+/// Correspondences a transform explains, and which ones, at a fixed tolerance.
+#[inline]
+fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, hit: &mut [bool]) -> usize {
+    let mut count = 0usize;
+    for k in 0..ax.len() {
+        let px = m[0] * ax[k] + m[1] * ay[k] + m[2];
+        let py = m[3] * ax[k] + m[4] * ay[k] + m[5];
+        let (dx, dy) = (px - bx[k], py - by[k]);
+        let ok = dx * dx + dy * dy < tol2;
+        hit[k] = ok;
+        count += ok as usize;
+    }
+    count
 }
 
 /// Inliers counted once per distinct source position.
@@ -643,7 +675,19 @@ pub struct Thumb {
 
 impl Thumb {
     pub fn build(g: &Gray, long: usize) -> Thumb {
-        let t = crate::decode::fit_to(g.clone(), long);
+        // `fit_to` takes ownership, and the working image is wanted whole
+        // elsewhere; resampling from a borrow avoids copying it first.
+        let long_side = g.w.max(g.h);
+        let owned;
+        let t: &Gray = if long == 0 || long_side <= long {
+            g
+        } else {
+            let s = long as f32 / long_side as f32;
+            let tw = ((g.w as f32 * s).round() as usize).max(1);
+            let th = ((g.h as f32 * s).round() as usize).max(1);
+            owned = crate::decode::resize_area(g, tw, th);
+            &owned
+        };
         let scale = t.w as f32 / g.w as f32;
         Thumb::new(
             t.w as u16,
@@ -656,23 +700,25 @@ impl Thumb {
     /// Build a thumbnail and its pyramid. Used by `build` and by the cache,
     /// which stores only level zero.
     pub fn new(w: u16, h: u16, scale: f32, px: Vec<u8>) -> Thumb {
-        let mut mips = Vec::new();
+        let mut mips: Vec<(u16, u16, Vec<u8>)> = Vec::new();
         let (mut cw, mut ch) = (w as usize, h as usize);
-        let mut cur = px.clone();
         while cw >= 4 && ch >= 4 {
             let (nw, nh) = (cw / 2, ch / 2);
-            let mut next = vec![0u8; nw * nh];
+            let cur: &[u8] = match mips.last() {
+                None => &px,
+                Some((_, _, p)) => p,
+            };
+            let mut next = Vec::with_capacity(nw * nh);
             for y in 0..nh {
-                for x in 0..nw {
+                next.extend((0..nw).map(|x| {
                     let i = 2 * y * cw + 2 * x;
                     let s = cur[i] as u32
                         + cur[i + 1] as u32
                         + cur[i + cw] as u32
                         + cur[i + cw + 1] as u32;
-                    next[y * nw + x] = ((s + 2) / 4) as u8;
-                }
+                    ((s + 2) / 4) as u8
+                }));
             }
-            cur = next.clone();
             mips.push((nw as u16, nh as u16, next));
             cw = nw;
             ch = nh;
@@ -691,9 +737,20 @@ impl Thumb {
         let (x0, y0) = (x as usize, y as usize);
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
         let i = y0 * w + x0;
-        let a = px[i] as f32 * (1.0 - fx) + px[i + 1] as f32 * fx;
-        let b = px[i + w] as f32 * (1.0 - fx) + px[i + w + 1] as f32 * fx;
-        let _ = h;
+        // The clamps put x0 in 0..w-1 and y0 in 0..h-1, so the four taps are
+        // inside `px`, which is w*h long. This is the innermost read of the
+        // pixel check and runs a few thousand times per pair considered.
+        debug_assert!(i + w + 1 < px.len());
+        let (p00, p01, p10, p11) = unsafe {
+            (
+                *px.get_unchecked(i) as f32,
+                *px.get_unchecked(i + 1) as f32,
+                *px.get_unchecked(i + w) as f32,
+                *px.get_unchecked(i + w + 1) as f32,
+            )
+        };
+        let a = p00 * (1.0 - fx) + p01 * fx;
+        let b = p10 * (1.0 - fx) + p11 * fx;
         a * (1.0 - fy) + b * fy
     }
 
@@ -920,6 +977,18 @@ fn pixel_check(
 
 // ------------------------------------------------------------ entry points
 
+/// Reusable working buffers for one verification. Sized to the largest pair a
+/// worker has seen, so the geometry stage allocates nothing per pair.
+#[derive(Default)]
+pub struct Scratch {
+    ax: Vec<f32>,
+    ay: Vec<f32>,
+    bx: Vec<f32>,
+    by: Vec<f32>,
+    mask: Vec<bool>,
+    hit: Vec<bool>,
+}
+
 pub struct Pair<'a> {
     pub fa: &'a Features,
     pub fb: &'a Features,
@@ -928,13 +997,19 @@ pub struct Pair<'a> {
 }
 
 /// Full verification from a candidate correspondence list.
-pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, scratch: &mut Vec<(u32, u32)>) -> Verdict {
+/// Full verification from a candidate correspondence list.
+///
+/// `gate` is the weakest (inliers, overlap) any consumer of this verdict will
+/// accept. Below it the verdict is discarded whatever the pixels say, so the
+/// pixels are not read: the check is the most expensive thing in the pipeline
+/// and a third of the pairs reaching it have already lost on geometry.
+pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
     let mut v = Verdict { variant: var, ..Default::default() };
-    correspond(p.fa, p.fb, cands, ratio, scratch);
-    v.n_match = scratch.len() as u32;
+    correspond(p.fa, p.fb, cands, ratio, matches);
+    v.n_match = matches.len() as u32;
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
-    let Some((m, mask)) = best_transform(p.fa, p.fb, scratch, bw, bh) else { return v };
+    let Some((m, mask)) = best_transform(p.fa, p.fb, matches, bw, bh, scratch) else { return v };
     // `p.fa` is the query image already mirrored, so `m` maps mirrored-A
     // coordinates into B. Composing the mirror back in gives a transform from
     // A's own coordinates, which is what the rest of the tool stores, checks
@@ -945,14 +1020,14 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, scratch:
     let m_query = m;
     let m = if var.mirror { compose(&mirror_affine(aw), &m) } else { m };
     v.m = m;
-    v.n_in = distinct_inliers(p.fa, scratch, &mask);
-    v.centred = encloses_centre(p.fa, p.fb, &m_query, scratch, &mask);
+    v.n_in = distinct_inliers(p.fa, matches, &mask);
+    v.centred = encloses_centre(p.fa, p.fb, &m_query, matches, &mask);
     v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
     let (oa, ob) = overlap(&m, aw, ah, bw, bh);
     v.ov_a = oa;
     v.ov_b = ob;
-    if v.n_in >= 3 && v.ov_a.max(v.ov_b) > 0.2 {
+    if v.n_in >= gate.0.max(3) && v.ov_a.max(v.ov_b) >= gate.1 {
         let (blk, n, ncc) = pixel_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert);
         v.blk = blk;
         v.blk_n = n;
@@ -965,7 +1040,7 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, scratch:
 /// image — using pixels only. No descriptor matching, so it costs almost
 /// nothing, and it is still a real test of this pair rather than an assumption
 /// that matching is transitive.
-pub fn verify_transform(p: &Pair, m: &Affine, var: Variant) -> Verdict {
+pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verdict {
     let mut v = Verdict { m: *m, variant: var, ..Default::default() };
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
@@ -977,7 +1052,7 @@ pub fn verify_transform(p: &Pair, m: &Affine, var: Variant) -> Verdict {
     let (oa, ob) = overlap(m, aw, ah, bw, bh);
     v.ov_a = oa;
     v.ov_b = ob;
-    if v.ov_a.max(v.ov_b) > 0.2 {
+    if v.ov_a.max(v.ov_b) >= min_ov {
         let (blk, n, ncc) = pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert);
         v.blk = blk;
         v.blk_n = n;

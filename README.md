@@ -32,8 +32,8 @@ frame.
 | recall | **94.4%** | 64.8% (SSCD) |
 | transformations handled perfectly | **50 of 87** | 0 of 87 |
 | image inside a bigger image | **54-62 of 62** | 0-30 of 62 (SSCD) |
-| wall clock | **148 s** | 1,949 s (SSCD) |
-| peak memory | 1,743 MB | 1,479 MB (SSCD) |
+| wall clock | **131 s** | 1,949 s (SSCD) |
+| peak memory | **1,178 MB** | 1,479 MB (SSCD) |
 
 5,638 images, 62 originals, 90 transformations, ground truth generated rather
 than judged, every tool run cold and alone on the same laptop.
@@ -195,11 +195,11 @@ number somebody fitted to a corpus has been removed or derived. See
 
 ## Cost
 
-157 s and 1.7 GB for 5,638 images on a thermally-limited Ryzen 7 3700U
-laptop, reading everything from a cold page cache. Decoding is about a third of
-that and local feature extraction most of the rest; narrowing 15.9 million
-possible pairs down to 220,657 claims takes about 40 s. With `--cache`, a
-second run over the same directory is a little over a minute.
+131 s and 1.2 GB for 5,638 images on a thermally-limited Ryzen 7 3700U laptop,
+reading everything from a cold page cache. Decoding is about 30% of that and
+local feature extraction about half; narrowing 15.9 million possible pairs down
+to 220,657 claims takes the remaining fifth. With `--cache`, a second run over
+the same directory is a quarter of the time.
 
 For scale: the best-scoring competitor takes 1,949 s on the same corpus, and
 the fastest thing that finds anything at all beyond byte-identical copies

@@ -177,7 +177,6 @@ fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
 struct Item {
     feats: Features,
     thumb: Thumb,
-    words: WordList,
     ok: bool,
     err: Option<String>,
 }
@@ -203,7 +202,7 @@ fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
             let feats = sift::extract(&d.work, p);
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
             let thumb = Thumb::build(&d.work, THUMB_LONG);
-            Item { feats, thumb, words: WordList::default(), ok: true, err: None }
+            Item { feats, thumb, ok: true, err: None }
         }
         Err(e) => Item { err: Some(e.to_string()), ..Default::default() },
     }
@@ -353,7 +352,7 @@ fn main() -> Result<()> {
     if verbose && !cached.is_empty() {
         eprintln!("[{:6.1}s] cache: {} usable records", t_start.elapsed().as_secs_f64(), cached.len());
     }
-    let mut items: Vec<Item> = files
+    let items: Vec<Item> = files
         .par_iter()
         .map(|f| {
             let key = cache::key_of(f);
@@ -362,7 +361,6 @@ fn main() -> Result<()> {
                     return Item {
                         feats: rec.feats.clone(),
                         thumb: rec.thumb.clone(),
-                        words: WordList::default(),
                         ok: true,
                         err: None,
                     };
@@ -376,6 +374,9 @@ fn main() -> Result<()> {
             it
         })
         .collect();
+    // Every usable record has been copied into `items` by now, and the map
+    // holds a second copy of the analysis of every file that was cached.
+    drop(cached);
     if let Some(p) = &args.cache {
         let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
         let entries: Vec<(&str, cache::Key, &Features, &Thumb)> = (0..n)
@@ -394,6 +395,10 @@ fn main() -> Result<()> {
             T_SIFT.load(Ordering::Relaxed) as f64 / 1e6
         );
     }
+    // Nothing after this point extracts features, so the workers' blur scratch
+    // is dead weight from here on.
+    rayon::broadcast(|_| sift::release_scratch());
+    sift::release_scratch();
     let n_ok = items.iter().filter(|i| i.ok).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
@@ -417,13 +422,13 @@ fn main() -> Result<()> {
     drop(pool);
     stage!(t_start, "vocabulary: {} words from {} samples", vocab.n_words(), vp.sample.min(n_desc));
 
-    // Quantise.
-    items.par_iter_mut().for_each(|it| {
-        if it.ok {
-            it.words = quantise(&vocab, &it.feats);
-        }
-    });
-    let lists: Vec<WordList> = items.iter().map(|i| i.words.clone()).collect();
+    // Quantise. The word lists are built straight into the vector the inverted
+    // file and every later stage read from: holding a second copy per image
+    // costs as much again as the lists themselves.
+    let lists: Vec<WordList> = items
+        .par_iter()
+        .map(|it| if it.ok { quantise(&vocab, &it.feats) } else { WordList::default() })
+        .collect();
     stage!(t_start, "quantised");
 
     // Inverted file. A word present in a fifth of the corpus says nothing.
@@ -464,11 +469,18 @@ fn main() -> Result<()> {
     stage!(t_start, "candidates: {} pairs", cand_pairs.len());
 
     let dumping = args.dump.is_some();
+    // What a verdict must already have before its pixels are worth reading:
+    // the weakest bar any tier applies, or everything a dump would record.
+    let gate = if dumping {
+        (3, 0.2)
+    } else {
+        (policy.corroborated.min_inliers, policy.corroborated.min_overlap)
+    };
     let all_direct: Vec<Edge> = cand_pairs
         .par_iter()
         .map_init(
-            || (Vec::new(), Vec::new()),
-            |(cands, scratch), &(i, j)| {
+            || (Vec::new(), Vec::new(), verify::Scratch::default()),
+            |(cands, matches, scratch), &(i, j)| {
                 let (i, j) = (i as usize, j as usize);
                 index::shared(&lists[i], &lists[j], cands, 60_000);
                 if cands.len() < 3 {
@@ -480,7 +492,7 @@ fn main() -> Result<()> {
                     ta: &items[i].thumb,
                     tb: &items[j].thumb,
                 };
-                let v = verify::verify(&p, cands, Variant::default(), args.ratio, scratch);
+                let v = verify::verify(&p, cands, Variant::default(), args.ratio, gate, matches, scratch);
                 (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some((i, j, v.m, false, v))
             },
         )
@@ -521,8 +533,8 @@ fn main() -> Result<()> {
     let variant_edges: Vec<Edge> = lonely
         .par_iter()
         .map_init(
-            || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-            |(acc, touched, scored, cands, scratch), &i| {
+            || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default()),
+            |(acc, touched, scored, cands, matches, scratch), &i| {
                 let mut out: Vec<Edge> = Vec::new();
                 for var in [
                     Variant { mirror: true, invert: false },
@@ -547,7 +559,7 @@ fn main() -> Result<()> {
                             ta: &items[i].thumb,
                             tb: &items[j].thumb,
                         };
-                        let v = verify::verify(&p, cands, var, args.ratio, scratch);
+                        let v = verify::verify(&p, cands, var, args.ratio, gate, matches, scratch);
                         if v.accepted(&policy.anchor) {
                             let (lo, hi, mm) = if i < j {
                                 (i, j, v.m)
@@ -586,11 +598,20 @@ fn main() -> Result<()> {
     // that were only reachable the long way round. It converges in two or
     // three rounds.
     let mut propagated: Vec<Edge> = Vec::new();
+    // Every hypothesis a round considered, kept only for `--dump`. A round
+    // proposes every unmatched pair inside each component, which is quadratic
+    // in the component and an order of magnitude more than it accepts, so the
+    // rejected ones are dropped as soon as they have been judged unless
+    // something is going to read them.
     let mut all_propagated: Vec<Edge> = Vec::new();
+    let mut n_hypotheses = 0usize;
+    // A composed pair is kept only if it clears the propagated tier's own
+    // overlap floor; a dump wants every hypothesis the round considered.
+    let prop_min_ov = if dumping { 0.2 } else { policy.propagated.min_overlap };
     if !args.no_propagate {
         let mut pool: Vec<Edge> = all.clone();
         for round in 0..PROPAGATE_MAX_ROUNDS {
-            let mut round_all = propagate(&items, &pool, n);
+            let mut round_all = propagate(&items, &pool, n, prop_min_ov);
             let before = propagated.len();
             let seen: std::collections::HashSet<(usize, usize)> =
                 pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
@@ -599,7 +620,12 @@ fn main() -> Result<()> {
                 .filter(|(a, b, _, _, v)| !seen.contains(&(*a, *b)) && v.accepted(&policy.propagated))
                 .cloned()
                 .collect();
-            all_propagated.append(&mut round_all);
+            n_hypotheses += round_all.len();
+            if dumping {
+                all_propagated.append(&mut round_all);
+            } else {
+                drop(round_all);
+            }
             propagated.extend(fresh.iter().cloned());
             pool.extend(fresh);
             stage!(t_start, "  propagation round {}: +{} pairs", round + 1, propagated.len() - before);
@@ -608,7 +634,7 @@ fn main() -> Result<()> {
             }
         }
     }
-    stage!(t_start, "propagated: {} of {} composed hypotheses", propagated.len(), all_propagated.len());
+    stage!(t_start, "propagated: {} of {} composed hypotheses", propagated.len(), n_hypotheses);
 
     // Weaker matches, admitted only between files an anchor already put in the
     // same cluster. They cannot merge anything, so they cost recall to refuse
@@ -881,7 +907,7 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
 /// a crop of B and B is a crop of C, the A-C transform is known exactly and
 /// the only question is whether the pixels agree — which is cheap to answer
 /// and wrong to assume.
-fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n: usize) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n: usize, min_ov: f32) -> Vec<(usize, usize, Affine, bool, Verdict)> {
     let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); n];
     for (a, b, m, inv, v) in edges.iter() {
         adj[*a].push((*b, *m, *inv, v.n_in));
@@ -959,7 +985,7 @@ fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n:
                         ta: &items[a].thumb,
                         tb: &items[b].thumb,
                     };
-                    let v = verify::verify_transform(&p, &m, var);
+                    let v = verify::verify_transform(&p, &m, var, min_ov);
                     if v.ov_a.max(v.ov_b) > 0.5 {
                         out.push((a, b, m, var.invert, v));
                     }

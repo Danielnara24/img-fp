@@ -8,7 +8,7 @@ changing how anything is scored.
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
 every amount drawn per seed — F1 **0.969** at 99.6% precision and 94.4% recall,
-against SSCD's 0.762 / 92.6% / 64.8%, in 148 s against SSCD's 1,949 s.
+against SSCD's 0.762 / 92.6% / 64.8%, in 131 s against SSCD's 1,949 s.
 
 **50 of 87 transformations are handled perfectly** (all 62 seeds found across
 the whole range of the amount). Every other tool manages **zero**.
@@ -23,11 +23,12 @@ imply, so it grows with the corpus while a lone bad pair does not.
 `benchmark/VALIDATION.md` records the held-out experiment that shaped the
 parameter surface, `README.md` explains the design.
 
-What is left is not accuracy-critical: decode is 35% of the runtime and has no
-downscaled JPEG path (the vendored `zune-jpeg` exposes none), the mirrored and
-inverted query is asked only where the first pass came up short rather than
-being folded into the vocabulary, and nothing has been tested above a few
-thousand images.
+What is left is not accuracy-critical: decode is ~30% of the runtime and has no
+downscaled JPEG path (`zune-jpeg` exposes none, and the arithmetic for adding a
+second decoder is in *Speed and memory* below — it is worth about 4%), the
+mirrored and inverted query is asked only where the first pass came up short
+rather than being folded into the vocabulary, and nothing has been tested above
+a few thousand images.
 
 ## Layout
 
@@ -273,20 +274,114 @@ was a fixed 65,536 words at any corpus size, which made img-fp nearly useless
 on a small folder (one pair in twenty-eight, on eight images). Depth now
 follows the descriptor count.
 
+### Speed and memory, and what has already been tried
+
+The pipeline was gone over once with a profiler, for **byte-identical output**:
+the same 223,673 pairs and the same 68 groups, field for field. That constraint
+is what makes this list safe to trust — nothing here traded a pair for a
+second, and the check is one command (`-o a.json` before, `-o b.json` after,
+compare the `pairs` sets). Measured by `bench.py` with the old build re-run in
+the same session: **163 s and 1,739 MB to 131 s and 1,178 MB.**
+
+Where the time goes now: decode ~30%, feature extraction ~50%, everything
+after it ~20%. Within extraction the descriptor is the largest single item and
+is at its practical limit.
+
+What was worth doing, in order of what it returned:
+
+- **The vocabulary was mostly empty air.** A five-level tree has `16^5` leaves
+  at 512 bytes of centre each — 536 MB — and k-means handed back a full
+  sixteen-wide block from every one of the 65,536 parents of the deepest level,
+  which average two or three samples apiece. Storing only live centres took
+  that to 109 MB, and is most of the memory saving.
+- **Distances were measured one centre at a time.** Both quantisation and
+  k-means walked a descriptor against a node's sixteen children in turn, and
+  each of those is a chain of 128 dependent adds: one of the machine's several
+  adders busy. A parent's centres are now stored dimension-major, so all
+  sixteen sums run at once. Each sum is still taken over the dimensions in
+  order, so every distance is the same float to the bit. Quantisation went from
+  24 s to 7 s.
+- **The geometric fit read keypoints through two indirections.** Every
+  correspondence proposes a transform and every transform is scored against
+  every correspondence, so those four coordinates are read `n` times each.
+  Copying them into four flat arrays first is 4x on that stage (107 CPU-s to
+  27).
+- **The pixel check ran on verdicts that had already lost.** It is the most
+  expensive thing done per pair, and a third of the pairs reaching it had
+  already failed on inliers or overlap. It now runs only when some tier could
+  still accept the pair: 405k checks became 265k.
+- **The descriptor swept a square four times the area it can use.** Its search
+  window is 7.07 hist-widths across; the rotated grid that can actually receive
+  a sample is 4. Solving the same inequalities for the row's span instead of
+  testing every pixel keeps the identical set of samples in the identical
+  order.
+- **Describing did not stop when the ranking was already decided.** Candidates
+  arrive in response order and `retain_best` keeps the highest `max_features`
+  responses, so once that many descriptors exist and the next candidate is
+  weaker than the weakest of them, nothing later can displace one. A textured
+  image was describing three keypoints for every one it kept.
+- **Buffers allocated zeroed and then completely overwritten** — the blur's
+  intermediate and output, `halve`, `upsample`, the grey reduction.
+  `reduce_to_gray` also had a runtime channel stride and a runtime divisor in
+  its innermost loop, which is enough to stop it vectorising over a hundred
+  megapixels a minute.
+- Smaller: the word lists were held twice over, the inverted file was a `Vec`
+  per word (a million allocations for a million words), the cache file was
+  assembled in memory before being written, propagation kept every rejected
+  hypothesis for a `--dump` nobody asked for, and the release profile had
+  neither LTO nor a single codegen unit.
+
+**Tried and rejected. Do not retry without new evidence.** Each was measured by
+alternating the two builds on the same corpus, which is the only protocol that
+works on this laptop:
+
+- *A per-thread pool for the scale-space planes*, to stop the churn of
+  megabyte buffers per image. No measurable change in time, and 70 MB more
+  peak. The allocator was already handling it.
+- *A branchless extremum test* — all 26 neighbour comparisons for eight pixels
+  at a time rather than the early-exiting scalar one. **24% slower overall.**
+  The early exits predict well, and 26 comparisons cost more than the branch
+  they save.
+- *Rewriting the blur's horizontal pass* as one whole-row pass per kernel tap:
+  60% slower than the eight-column register blocking already there. The same
+  blocking applied to the *vertical* pass: 25% slower than the plain row loop.
+  Both directions were tried; what is in the file won both times.
+- *Filling the gradient planes row by row* to avoid allocating them zeroed:
+  2.5x slower. An indexed write loop vectorises and a `push` loop does not.
+- *`malloc_trim` at the phase boundary.* Hands back ~430 MB at that moment and
+  moves the reported peak by nothing, because the peak is not there.
+- *A DCT-scaled JPEG path* (decode at 1/2 or 1/4 and skip the box reduction).
+  Not attempted, and the arithmetic is why: two thirds of the corpus's JPEG
+  pixels could come from a half-scale decode, but entropy decoding is
+  unaffected and is most of the cost, so the ceiling is about 4% of the run —
+  against a second JPEG implementation to maintain and pixels that would no
+  longer be bit-identical, which is the property that makes everything else
+  here checkable.
+
+**How to measure any of this.** Wall time and CPU seconds on this laptop swing
+25% with the die temperature, and `time` does not report the clock. Build both
+versions, run them alternately with a cooldown between, and compare the pairs;
+a single before/after is worthless. So is `cpu_seconds x MHz` as a
+clock-independent "work" figure — it looks principled and the thermal governor
+makes it non-linear enough to reverse a result. The subset
+`derived/Desktop` (636 files, ~13 s) is enough to compare extraction changes,
+and `--cache` isolates everything after it.
+
 ### Tuning discipline
 
 `--dump` writes every verdict considered, accepted or not, as CSV. Fit
 thresholds against that offline instead of re-running the tool per guess. Use
-`--cache` while tuning the matching stages: a cold run is ~86 s, a cached one
-~30 s, and the cache is keyed on the extraction settings so changing
-`--work-size` or `--features` invalidates it correctly.
+`--cache` while tuning the matching stages: on the 5,638-image corpus a cold
+run is ~130 s and a cached one ~30 s, and the cache is keyed on the extraction
+settings so changing `--work-size` or `--features` invalidates it correctly.
 
 Note that timings taken this way are warm-cache and run about 40% faster than
 `bench.py`'s cold-cache figures. Compare tuning runs with each other, never
 with `BASELINE.md`.
 
-Measured trade-offs, so they need not be rediscovered: `--work-size` 448 gives
-F1 0.975 at 80 s, 640 gives 0.980 at 86 s, 768 gives 0.976 at 147 s.
+Measured trade-offs, so they need not be rediscovered (the seconds are from the
+old corpus and the pre-optimisation build, so read them as ratios): `--work-size`
+448 gives F1 0.975 at 80 s, 640 gives 0.980 at 86 s, 768 gives 0.976 at 147 s.
 `--features` 900 is *worse* than 600. Candidate breadth (`-k`) is on a plateau,
 not a peak — 200 gives byte-for-byte the same F1, precision and false-positive
 count as 150 on both corpora — so 150 is safely past the knee rather than

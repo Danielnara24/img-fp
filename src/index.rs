@@ -88,18 +88,37 @@ impl Default for VocabParams {
     }
 }
 
-/// Hierarchical k-means tree. Nodes are stored breadth-first per level;
-/// `centres[l]` holds every node of level `l`, `DESC_LEN` floats each.
+/// Hierarchical k-means tree. Nodes are numbered breadth-first per level, so a
+/// node's children are `branching` consecutive numbers and a word is just the
+/// node number of a leaf.
+///
+/// Only *live* nodes carry a centre. That distinction is not cosmetic at the
+/// sizes this reaches: the tree is sized so that its leaves outnumber the
+/// descriptors sampled to train it, and a level of `16^5` nodes would hold
+/// 536 MB of centres of which at most a sixth can ever be reached. `slot` maps
+/// a node number to its centre, or to `DEAD` for the nodes k-means never
+/// populated.
 pub struct Vocabulary {
     pub branching: usize,
     pub depth: usize,
+    /// `levels[l]` holds the centres of the live nodes of level `l`,
+    /// `DESC_LEN` floats each, in node order.
     levels: Vec<Vec<f32>>,
-    /// Number of nodes at each level (`branching^(l+1)` minus pruned ones,
-    /// stored dense with empty nodes marked by `live`).
-    live: Vec<Vec<bool>>,
+    /// Dense per level: node number -> index into `levels[l]`, or `DEAD`.
+    slot: Vec<Vec<u32>>,
     max_paths: usize,
     path_ratio: f32,
 }
+
+const DEAD: u32 = u32::MAX;
+
+/// Upper bound on the descent frontier, `max_paths * branching`. Asserted at
+/// build time so the descent can keep its frontiers in arrays.
+const FRONTIER: usize = 64;
+
+/// Upper bound on `branching`, likewise, so the descent's accumulators are an
+/// array the compiler can keep in registers.
+const MAX_BRANCH: usize = 16;
 
 #[inline]
 fn d2(a: &[f32], b: &[f32]) -> f32 {
@@ -133,6 +152,8 @@ impl Vocabulary {
     }
 
     pub fn build(descriptors: &[u8], p: &VocabParams) -> Vocabulary {
+        assert!(p.max_paths * p.branching <= FRONTIER, "vocabulary frontier too small");
+        assert!(p.branching <= MAX_BRANCH, "branching wider than the descent's accumulators");
         let n = descriptors.len() / DESC_LEN;
         let mut rng = Rng(p.seed);
         // Sample without replacement, deterministically.
@@ -152,15 +173,15 @@ impl Vocabulary {
             .collect();
 
         let mut levels: Vec<Vec<f32>> = Vec::with_capacity(p.depth);
-        let mut live: Vec<Vec<bool>> = Vec::with_capacity(p.depth);
+        let mut slots: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
         // Which sample belongs to which node of the previous level.
         let mut assign: Vec<u32> = vec![0; take];
         let mut parents = 1usize;
 
         for _level in 0..p.depth {
             let nodes = parents * p.branching;
-            let mut centres = vec![0f32; nodes * DESC_LEN];
-            let mut alive = vec![false; nodes];
+            let mut centres: Vec<f32> = Vec::new();
+            let mut slot = vec![DEAD; nodes];
             // Group sample indices by parent.
             let mut groups: Vec<Vec<u32>> = vec![Vec::new(); parents];
             for (i, &a) in assign.iter().enumerate() {
@@ -176,27 +197,46 @@ impl Vocabulary {
                 .collect();
             for (g, c, l, a) in results {
                 let base = g * p.branching;
-                centres[base * DESC_LEN..(base + p.branching) * DESC_LEN].copy_from_slice(&c);
-                alive[base..base + p.branching].copy_from_slice(&l);
+                // One parent's live children go down together, transposed:
+                // dimension-major, so that the descent walks all of them in
+                // step. See `quantise`.
+                let live: Vec<usize> = (0..p.branching).filter(|&c| l[c]).collect();
+                let first = (centres.len() / DESC_LEN) as u32;
+                for (k, &child) in live.iter().enumerate() {
+                    slot[base + child] = first + k as u32;
+                }
+                // `c` holds the live centres only, in child order.
+                centres.reserve(live.len() * DESC_LEN);
+                for i in 0..DESC_LEN {
+                    for k in 0..live.len() {
+                        centres.push(c[k * DESC_LEN + i]);
+                    }
+                }
                 for (i, child) in a {
                     assign[i as usize] = (base + child as usize) as u32;
                 }
             }
+            centres.shrink_to_fit();
             levels.push(centres);
-            live.push(alive);
+            slots.push(slot);
             parents = nodes;
         }
         Vocabulary {
             branching: p.branching,
             depth: p.depth,
             levels,
-            live,
+            slot: slots,
             max_paths: p.max_paths,
             path_ratio: p.path_ratio,
         }
     }
 
     /// Quantise one descriptor to up to `max_paths` words, best first.
+    ///
+    /// The frontier never exceeds `max_paths * branching` entries and the
+    /// descent runs once per descriptor in the corpus, so both frontiers live
+    /// in fixed-size arrays: two heap allocations per descriptor is two per
+    /// descriptor too many.
     pub fn quantise(&self, desc: &[u8], out: &mut Vec<u32>) {
         out.clear();
         let mut q = [0f32; DESC_LEN];
@@ -204,35 +244,75 @@ impl Vocabulary {
             q[i] = desc[i] as f32;
         }
         // Frontier of (node index at this level, distance).
-        let mut cur: Vec<(u32, f32)> = vec![(0, 0.0)];
-        let mut next: Vec<(u32, f32)> = Vec::with_capacity(self.max_paths * self.branching);
+        let mut cur = [(0u32, 0f32); FRONTIER];
+        let mut next = [(0u32, 0f32); FRONTIER];
+        let mut n_cur = 1usize;
         for l in 0..self.depth {
-            next.clear();
+            let mut n_next = 0usize;
             let centres = &self.levels[l];
-            let alive = &self.live[l];
-            for &(parent, _) in cur.iter() {
+            let slot = &self.slot[l];
+            for &(parent, _) in cur[..n_cur].iter() {
                 let base = parent as usize * self.branching;
-                for c in 0..self.branching {
-                    let node = base + c;
-                    if !alive[node] {
+                let kids = &slot[base..base + self.branching];
+                let first = match kids.iter().find(|&&s| s != DEAD) {
+                    None => continue,
+                    Some(&s) => s as usize,
+                };
+                let n_live = kids.iter().filter(|&&s| s != DEAD).count();
+                // All of this parent's children at once. Each child's sum is
+                // still taken over the dimensions in order, so it is the same
+                // float to the bit as summing the children one at a time — but
+                // sixteen independent sums keep the machine's adders busy
+                // where one chain of 128 dependent adds could not. This is the
+                // innermost loop of quantisation: it runs `depth * branching`
+                // times for every descriptor in the corpus.
+                let blk = &centres[first * DESC_LEN..(first + n_live) * DESC_LEN];
+                let mut acc = [0f32; MAX_BRANCH];
+                if n_live == MAX_BRANCH {
+                    for (i, &qi) in q.iter().enumerate() {
+                        let row = &blk[i * MAX_BRANCH..(i + 1) * MAX_BRANCH];
+                        for k in 0..MAX_BRANCH {
+                            let d = qi - row[k];
+                            acc[k] += d * d;
+                        }
+                    }
+                } else {
+                    for (i, &qi) in q.iter().enumerate() {
+                        let row = &blk[i * n_live..(i + 1) * n_live];
+                        for (k, &c) in row.iter().enumerate() {
+                            let d = qi - c;
+                            acc[k] += d * d;
+                        }
+                    }
+                }
+                let mut k = 0usize;
+                for (c, &s) in kids.iter().enumerate() {
+                    if s == DEAD {
                         continue;
                     }
-                    next.push((node as u32, d2(&q, &centres[node * DESC_LEN..(node + 1) * DESC_LEN])));
+                    if n_next == FRONTIER {
+                        break;
+                    }
+                    next[n_next] = ((base + c) as u32, acc[k]);
+                    n_next += 1;
+                    k += 1;
                 }
             }
-            if next.is_empty() {
+            if n_next == 0 {
                 break;
             }
-            next.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            let best = next[0].1;
+            let nx = &mut next[..n_next];
+            nx.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let best = nx[0].1;
             let cut = best * self.path_ratio * self.path_ratio + 1.0;
-            next.truncate(self.max_paths);
-            while next.len() > 1 && next.last().unwrap().1 > cut {
-                next.pop();
+            n_next = n_next.min(self.max_paths);
+            while n_next > 1 && next[n_next - 1].1 > cut {
+                n_next -= 1;
             }
             std::mem::swap(&mut cur, &mut next);
+            n_cur = n_next;
         }
-        for &(node, _) in cur.iter() {
+        for &(node, _) in cur[..n_cur].iter() {
             out.push(node);
         }
     }
@@ -242,27 +322,28 @@ impl Vocabulary {
 /// dead rather than re-seeded: a vocabulary with fewer live nodes is correct,
 /// one with a centre nobody uses is noise.
 fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (Vec<f32>, Vec<bool>, Vec<(u32, u32)>) {
-    let mut centres = vec![0f32; k * DESC_LEN];
+    assert!(k <= MAX_BRANCH);
     let mut live = vec![false; k];
     let mut assign: Vec<(u32, u32)> = Vec::with_capacity(members.len());
     if members.is_empty() {
-        return (centres, live, assign);
+        return (Vec::new(), live, assign);
     }
     if members.len() <= k {
+        let mut centres = Vec::with_capacity(members.len() * DESC_LEN);
         for (c, &m) in members.iter().enumerate() {
-            centres[c * DESC_LEN..(c + 1) * DESC_LEN]
-                .copy_from_slice(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]);
+            centres.extend_from_slice(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]);
             live[c] = true;
             assign.push((m, c as u32));
         }
         return (centres, live, assign);
     }
+    let mut centres = vec![0f32; k * DESC_LEN];
     let mut rng = Rng(seed | 1);
     // k-means++
     let mut chosen: Vec<u32> = Vec::with_capacity(k);
     chosen.push(members[rng.below(members.len())]);
     let mut best_d: Vec<f32> = members
-        .iter()
+        .par_iter()
         .map(|&m| {
             d2(
                 &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN],
@@ -286,13 +367,20 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
         }
         let c = members[pick];
         chosen.push(c);
+        // Every member's distance to the new centre is independent of every
+        // other's. The first level of the tree has one k-means over the whole
+        // sample, so this is the one place in the build with no parallelism of
+        // its own to fall back on.
         let cd = &data[c as usize * DESC_LEN..(c as usize + 1) * DESC_LEN];
-        for (i, &m) in members.iter().enumerate() {
-            let d = d2(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN], cd);
-            if d < best_d[i] {
-                best_d[i] = d;
-            }
-        }
+        best_d
+            .par_iter_mut()
+            .zip(members.par_iter())
+            .for_each(|(b, &m)| {
+                let d = d2(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN], cd);
+                if d < *b {
+                    *b = d;
+                }
+            });
     }
     let kk = chosen.len();
     for (c, &m) in chosen.iter().enumerate() {
@@ -300,23 +388,53 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
             .copy_from_slice(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]);
     }
     let mut owner = vec![0u32; members.len()];
+    let mut tc = vec![0f32; kk * DESC_LEN];
     for it in 0..iters {
-        let mut moved = false;
-        for (i, &m) in members.iter().enumerate() {
-            let dv = &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN];
-            let mut best = (f32::MAX, 0u32);
-            for c in 0..kk {
-                let d = d2(dv, &centres[c * DESC_LEN..(c + 1) * DESC_LEN]);
-                if d < best.0 {
-                    best = (d, c as u32);
-                }
+        // Centres transposed, dimension-major, so one pass over a descriptor
+        // measures it against all `kk` of them at once. Each centre's sum is
+        // still taken dimension by dimension in order, so every distance is
+        // the same float it was when they were measured one at a time — but
+        // `kk` sums run at once instead of one chain of 128 dependent adds.
+        for c in 0..kk {
+            for i in 0..DESC_LEN {
+                tc[i * kk + c] = centres[c * DESC_LEN + i];
             }
-            if owner[i] != best.1 || it == 0 {
-                moved = true;
-            }
-            owner[i] = best.1;
         }
-        if !moved {
+        let changed: usize = owner
+            .par_iter_mut()
+            .zip(members.par_iter())
+            .map(|(own, &m)| {
+                let dv = &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN];
+                let mut acc = [0f32; MAX_BRANCH];
+                if kk == MAX_BRANCH {
+                    for (i, &qi) in dv.iter().enumerate() {
+                        let row = &tc[i * MAX_BRANCH..(i + 1) * MAX_BRANCH];
+                        for c in 0..MAX_BRANCH {
+                            let d = qi - row[c];
+                            acc[c] += d * d;
+                        }
+                    }
+                } else {
+                    for (i, &qi) in dv.iter().enumerate() {
+                        let row = &tc[i * kk..(i + 1) * kk];
+                        for (c, &cv) in row.iter().enumerate() {
+                            let d = qi - cv;
+                            acc[c] += d * d;
+                        }
+                    }
+                }
+                let mut best = (f32::MAX, 0u32);
+                for c in 0..kk {
+                    if acc[c] < best.0 {
+                        best = (acc[c], c as u32);
+                    }
+                }
+                let same = *own == best.1;
+                *own = best.1;
+                !same as usize
+            })
+            .sum();
+        if changed == 0 && it > 0 {
             break;
         }
         let mut sums = vec![0f64; kk * DESC_LEN];
@@ -349,6 +467,20 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
     }
     for (i, &m) in members.iter().enumerate() {
         assign.push((m, owner[i]));
+    }
+    // Only the live centres travel back. The deepest level of the tree has one
+    // call per node of the level above — sixty-five thousand of them, averaging
+    // two or three samples each — and returning a full k-wide block from every
+    // one of those was half a gigabyte of mostly-empty centres held at once.
+    let n_live = live.iter().filter(|&&l| l).count();
+    if n_live < k {
+        let mut compact = Vec::with_capacity(n_live * DESC_LEN);
+        for c in 0..kk {
+            if live[c] {
+                compact.extend_from_slice(&centres[c * DESC_LEN..(c + 1) * DESC_LEN]);
+            }
+        }
+        centres = compact;
     }
     (centres, live, assign)
 }
@@ -392,39 +524,62 @@ impl Iterator for Runs<'_> {
     }
 }
 
+/// Postings in one flat run per word (`data[off[w]..off[w + 1]]`), rather than
+/// a `Vec` per word. A vocabulary has as many words as the corpus has
+/// descriptors over `DESC_PER_WORD`, most of them with a posting or two, so a
+/// separate allocation each costs more in headers and allocator slack than in
+/// postings — and the query walks one contiguous run instead of chasing a
+/// pointer per word.
 pub struct InvertedFile {
-    /// For each word: the images containing it, and how many descriptors.
-    pub postings: Vec<Vec<(u32, u32)>>,
+    off: Vec<u32>,
+    data: Vec<(u32, u32)>,
     /// log(N / df), per word.
-    pub idf: Vec<f32>,
+    idf: Vec<f32>,
 }
 
 impl InvertedFile {
     pub fn build(lists: &[WordList], n_words: usize, max_posting: usize) -> InvertedFile {
         let n = lists.len();
-        let mut postings: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_words];
-        for (img, wl) in lists.iter().enumerate() {
-            for (w, c) in wl.runs() {
-                postings[w as usize].push((img as u32, c));
+        let mut df = vec![0u32; n_words];
+        for wl in lists.iter() {
+            for (w, _) in wl.runs() {
+                df[w as usize] += 1;
             }
         }
         let mut idf = vec![0f32; n_words];
-        for (w, p) in postings.iter_mut().enumerate() {
-            let df = p.len();
-            if df == 0 {
-                continue;
-            }
+        let mut off: Vec<u32> = Vec::with_capacity(n_words + 1);
+        let mut total = 0u32;
+        for w in 0..n_words {
+            off.push(total);
+            let d = df[w] as usize;
             // A word in a large fraction of the corpus carries no information
             // and costs the most to traverse; dropping it is both faster and
             // more accurate.
-            if df > max_posting {
-                p.clear();
-                p.shrink_to_fit();
+            if d == 0 || d > max_posting {
                 continue;
             }
-            idf[w] = (n as f32 / df as f32).ln();
+            idf[w] = (n as f32 / d as f32).ln();
+            total += df[w];
         }
-        InvertedFile { postings, idf }
+        off.push(total);
+        let mut data = vec![(0u32, 0u32); total as usize];
+        // The document counts become write cursors, so the images of a word
+        // land in the order they are visited: increasing image index, as
+        // before.
+        let mut cursor = df;
+        cursor.copy_from_slice(&off[..n_words]);
+        for (img, wl) in lists.iter().enumerate() {
+            for (w, c) in wl.runs() {
+                let w = w as usize;
+                if off[w + 1] == off[w] {
+                    continue;
+                }
+                let at = cursor[w] as usize;
+                data[at] = (img as u32, c);
+                cursor[w] = at as u32 + 1;
+            }
+        }
+        InvertedFile { off, data, idf }
     }
 
     /// The idf-weighted fraction of the query's words that also occur in each
@@ -452,7 +607,7 @@ impl InvertedFile {
         let mut qmass = 0f32;
         for (w, c) in wl.runs() {
             let w = w as usize;
-            let post = &self.postings[w];
+            let post = &self.data[self.off[w] as usize..self.off[w + 1] as usize];
             if post.is_empty() {
                 continue;
             }
@@ -518,4 +673,73 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
     }
     out.sort_unstable();
     out.dedup();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn byte(&mut self) -> u8 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u8
+        }
+    }
+
+    /// The descent measures a node's children all at once, out of a block
+    /// stored dimension-major, which is an indexing trick over an obvious
+    /// loop. The check is not that the indices look right — it is that the
+    /// tree still does its job. Descriptors are built in sixteen groups that
+    /// sit ~1,100 apart in L2, each group holding sixteen tight modes ~160
+    /// apart; a vocabulary that measures distances correctly never gives two
+    /// groups the same word, and does subdivide inside a group. Confuse a
+    /// centre's dimensions with its siblings' and every distance is noise.
+    #[test]
+    fn a_two_level_vocabulary_separates_what_is_separable() {
+        const GROUPS: usize = 16;
+        const SUBS: usize = 16;
+        const EACH: usize = 10;
+        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+        let mut desc: Vec<u8> = Vec::with_capacity(GROUPS * SUBS * EACH * DESC_LEN);
+        for _ in 0..GROUPS {
+            let centre: Vec<i32> = (0..DESC_LEN).map(|_| (rng.byte() / 2) as i32).collect();
+            for sub in 0..SUBS {
+                let mut mode = centre.clone();
+                for d in 0..8 {
+                    mode[(sub * 8 + d) % DESC_LEN] += 40;
+                }
+                for _ in 0..EACH {
+                    for &m in mode.iter() {
+                        desc.push((m + (rng.byte() % 3) as i32 - 1).clamp(0, 255) as u8);
+                    }
+                }
+            }
+        }
+        let p = VocabParams { depth: 2, ..Default::default() };
+        let v = Vocabulary::build(&desc, &p);
+
+        let mut words: Vec<Vec<u32>> = Vec::new();
+        let mut out = Vec::new();
+        for (i, d) in desc.chunks_exact(DESC_LEN).enumerate() {
+            v.quantise(d, &mut out);
+            assert!(!out.is_empty(), "descriptor {i} quantised to nothing");
+            assert!(out.iter().all(|&w| (w as usize) < v.n_words()));
+            words.push(out.clone());
+        }
+        for (i, wi) in words.iter().enumerate() {
+            for (j, wj) in words.iter().enumerate().skip(i + 1) {
+                if i / (SUBS * EACH) != j / (SUBS * EACH) {
+                    assert!(
+                        wi.iter().all(|w| !wj.contains(w)),
+                        "descriptors {i} and {j} are from different groups and share a word"
+                    );
+                }
+            }
+        }
+        let mut firsts: Vec<u32> = words.iter().map(|w| w[0]).collect();
+        firsts.sort_unstable();
+        firsts.dedup();
+        assert!(firsts.len() > GROUPS, "the second level separated nothing");
+    }
 }
