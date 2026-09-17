@@ -312,6 +312,7 @@ struct Output {
 fn main() -> Result<()> {
     let args = Args::parse();
     let t_start = Instant::now();
+    few_arenas();
     if args.jobs > 0 {
         rayon::ThreadPoolBuilder::new().num_threads(args.jobs).build_global()?;
     }
@@ -352,9 +353,26 @@ fn main() -> Result<()> {
     if verbose && !cached.is_empty() {
         eprintln!("[{:6.1}s] cache: {} usable records", t_start.elapsed().as_secs_f64(), cached.len());
     }
-    let items: Vec<Item> = files
+    // The exact pass has already grouped the files whose bytes hash the same,
+    // and the analysis depends on nothing but those bytes. Describing the
+    // second copy of a file is not a cheaper way to reach the same answer, it
+    // is the same work done twice: each group elects its first member and the
+    // rest are copied from it. Those groups are already claimed as duplicates
+    // in the output, so sharing one analysis between them asserts nothing the
+    // run does not assert anyway.
+    let mut twin_of: Vec<usize> = (0..n).collect();
+    for g in exact.iter() {
+        for &i in g[1..].iter() {
+            twin_of[i] = g[0];
+        }
+    }
+    let mut items: Vec<Item> = files
         .par_iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(i, f)| {
+            if twin_of[i] != i {
+                return Item::default();
+            }
             let key = cache::key_of(f);
             if let (Some(k), Some((ck, rec))) = (&key, cached.get(&f.display().to_string())) {
                 if ck.len == k.len && ck.mtime == k.mtime {
@@ -374,6 +392,19 @@ fn main() -> Result<()> {
             it
         })
         .collect();
+    for i in 0..n {
+        let r = twin_of[i];
+        if r == i {
+            continue;
+        }
+        // A copy whose original could not be read is described on its own, so
+        // that the failure is reported against the path that failed.
+        items[i] = if items[r].ok {
+            Item { feats: items[r].feats.clone(), thumb: items[r].thumb.clone(), ok: true, err: None }
+        } else {
+            analyse(&files[i], args.work_size, &sp)
+        };
+    }
     // Every usable record has been copied into `items` by now, and the map
     // holds a second copy of the analysis of every file that was cached.
     drop(cached);
@@ -399,6 +430,15 @@ fn main() -> Result<()> {
     // is dead weight from here on.
     rayon::broadcast(|_| sift::release_scratch());
     sift::release_scratch();
+    // The analysis phase churns through buffers far larger than anything that
+    // follows — a full-resolution decode, then a scale space per worker — and
+    // the allocator keeps those pages against a demand that never comes,
+    // because it has watched this process ask for them over and over. Handing
+    // them back is worth several hundred megabytes for the rest of the run.
+    // (This was measured once before and judged worthless, and it was: the
+    // peak then stood in the middle of this very phase. With the decode
+    // budget holding that down, what is left is the plateau this releases.)
+    release_memory();
     let n_ok = items.iter().filter(|i| i.ok).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
@@ -579,6 +619,22 @@ fn main() -> Result<()> {
         .flatten()
         .collect();
     stage!(t_start, "variants: {} more pairs from {} unmatched images", variant_edges.len(), lonely.len());
+
+    // Nothing after this point matches a descriptor against another. What is
+    // left — propagation, corroboration, assembly — works from thumbnails,
+    // frame sizes and verdicts already taken, so the vocabulary, the inverted
+    // file, the word lists and every descriptor in the corpus are dead weight
+    // from here. Together they are the largest thing the run holds, and they
+    // were being held to the end.
+    drop(inv);
+    drop(vocab);
+    drop(lists);
+    for it in items.iter_mut() {
+        it.feats.kps = Vec::new();
+        it.feats.desc = Vec::new();
+    }
+    release_memory();
+    stage!(t_start, "released the index and the descriptors");
 
     let mut all: Vec<Edge> = edges;
     all.extend(variant_edges.iter().cloned());
@@ -764,7 +820,7 @@ fn main() -> Result<()> {
         files_analysed: n_ok,
         failures,
         runtime_seconds: (runtime * 1000.0).round() / 1000.0,
-        groups: groups.clone(),
+        groups,
         pairs: out_pairs,
     };
 
@@ -795,6 +851,52 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Keep the allocator's arenas few.
+///
+/// glibc gives a process up to eight arenas per core and lets each hold on to
+/// what it has freed. That suits a program allocating small blocks in tight
+/// loops on many threads; this one does the opposite, taking a handful of very
+/// large buffers per image on one worker per core. Spread over sixty-four
+/// arenas, a freed decode buffer or scale space is held apart from the next
+/// worker that could have used it, and apart from the descriptors it was
+/// interleaved with — some two hundred megabytes of holes on this corpus,
+/// measured as the gap between what the run holds and what it is using. A
+/// couple of arenas keep the same pages in circulation instead. The small,
+/// frequent allocations that might contend for them are served out of each
+/// thread's own cache without taking the arena lock at all.
+fn few_arenas() {
+    #[cfg(target_env = "gnu")]
+    {
+        const M_ARENA_MAX: i32 = -8;
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        unsafe {
+            mallopt(M_ARENA_MAX, 2);
+        }
+    }
+}
+
+/// Return free heap pages to the operating system.
+///
+/// glibc raises its own mmap threshold as a program repeatedly allocates and
+/// frees large blocks, so buffers that started as their own mappings — and
+/// would have been unmapped on free — end up held in the heap instead. The
+/// pages are free, but they are the process's, and `ru_maxrss` counts them.
+/// This is called at the two points where the shape of the run changes and a
+/// phase's worth of large buffers has just died.
+fn release_memory() {
+    #[cfg(target_env = "gnu")]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }
 
 fn round3(v: f32) -> f32 {

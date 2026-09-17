@@ -121,46 +121,54 @@ pub fn fast_atan2_deg(y: f32, x: f32) -> f32 {
     const P3: f32 = -0.325_808_4 * (180.0 / std::f32::consts::PI);
     const P5: f32 = 0.155_578_65 * (180.0 / std::f32::consts::PI);
     const P7: f32 = -0.044_326_555 * (180.0 / std::f32::consts::PI);
+    // Written as selects over one polynomial rather than as two branches over
+    // two. Both arms always divided the smaller magnitude by the larger and
+    // evaluated the same series on it; saying so directly lets the compiler
+    // run a whole row of gradients at once, where a branch on every pixel
+    // stopped it. The arithmetic is unchanged, term for term.
     let ax = x.abs();
     let ay = y.abs();
-    let a = if ax >= ay {
-        let c = ay / (ax + f32::EPSILON);
-        let c2 = c * c;
-        (((P7 * c2 + P5) * c2 + P3) * c2 + P1) * c
-    } else {
-        let c = ax / (ay + f32::EPSILON);
-        let c2 = c * c;
-        90.0 - (((P7 * c2 + P5) * c2 + P3) * c2 + P1) * c
-    };
+    let steep = ax < ay;
+    let num = if steep { ax } else { ay };
+    let den = if steep { ay } else { ax };
+    let c = num / (den + f32::EPSILON);
+    let c2 = c * c;
+    let a = (((P7 * c2 + P5) * c2 + P3) * c2 + P1) * c;
+    let a = if steep { 90.0 - a } else { a };
     let a = if x < 0.0 { 180.0 - a } else { a };
     if y < 0.0 { 360.0 - a } else { a }
 }
 
 /// Gradient magnitude and orientation (degrees) of a layer, computed once and
 /// shared by every keypoint that lands on it.
+///
+/// The two are interleaved, a pair per pixel, because every reader wants both
+/// halves of the same pixel: the orientation histogram and the descriptor each
+/// walk a run of pixels taking `[mag, ori]` from each. Two parallel planes made
+/// that two streams a page apart — twice the cache lines and twice the prefetch
+/// streams for data that is never used singly.
 struct Grad {
     w: usize,
-    mag: Vec<f32>,
-    ori: Vec<f32>,
+    /// `[magnitude, orientation]` per pixel, row-major.
+    px: Vec<[f32; 2]>,
 }
 
 impl Grad {
     fn of(l: &Layer) -> Grad {
         let (w, h) = (l.w, l.h);
-        let mut mag = vec![0.0f32; w * h];
-        let mut ori = vec![0.0f32; w * h];
+        let mut px = vec![[0.0f32; 2]; w * h];
         for y in 1..h.saturating_sub(1) {
             let up = &l.px[(y - 1) * w..y * w];
             let row = &l.px[y * w..(y + 1) * w];
             let dn = &l.px[(y + 1) * w..(y + 2) * w];
+            let out = &mut px[y * w..(y + 1) * w];
             for x in 1..w - 1 {
                 let dx = row[x + 1] - row[x - 1];
                 let dy = up[x] - dn[x];
-                mag[y * w + x] = (dx * dx + dy * dy).sqrt();
-                ori[y * w + x] = fast_atan2_deg(dy, dx);
+                out[x] = [(dx * dx + dy * dy).sqrt(), fast_atan2_deg(dy, dx)];
             }
         }
-        Grad { w, mag, ori }
+        Grad { w, px }
     }
 }
 
@@ -197,21 +205,23 @@ fn gaussian_kernel(sigma: f32) -> Vec<f32> {
 
 /// Per-thread working buffers for the separable blur.
 ///
-/// The intermediate of a separable pass and the padded row are pure scratch:
-/// every element is written before it is read, so they are reused across calls
-/// and across images rather than allocated and zeroed each time. A blur on a
-/// 640x480 layer allocates 2.4 MB, and the pyramid runs twenty of them per
-/// image; the zeroing alone was tens of gigabytes of memory traffic over a
-/// corpus, all of it overwritten immediately.
+/// All three are pure scratch: every element is written before it is read, so
+/// they are reused across calls and across images rather than allocated and
+/// zeroed each time. A blur on a 640x480 layer allocated 2.4 MB, and the
+/// pyramid runs twenty of them per image; the zeroing alone was tens of
+/// gigabytes of memory traffic over a corpus, all of it overwritten
+/// immediately.
 struct BlurScratch {
-    tmp: Vec<f32>,
+    /// The last `2 * radius + 1` horizontally filtered rows, by row modulo
+    /// that count. See `blur_into`.
+    ring: Vec<f32>,
     padded: Vec<f32>,
     row: Vec<f32>,
 }
 
 thread_local! {
     static BLUR_SCRATCH: std::cell::RefCell<BlurScratch> =
-        const { std::cell::RefCell::new(BlurScratch { tmp: Vec::new(), padded: Vec::new(), row: Vec::new() }) };
+        const { std::cell::RefCell::new(BlurScratch { ring: Vec::new(), padded: Vec::new(), row: Vec::new() }) };
 }
 
 /// Drop this thread's blur scratch. Called once the analysis phase is over,
@@ -219,7 +229,7 @@ thread_local! {
 pub fn release_scratch() {
     let _ = BLUR_SCRATCH.try_with(|s| {
         let mut s = s.borrow_mut();
-        s.tmp = Vec::new();
+        s.ring = Vec::new();
         s.padded = Vec::new();
         s.row = Vec::new();
     });
@@ -227,19 +237,82 @@ pub fn release_scratch() {
 
 /// Separable Gaussian blur with reflect-101 borders.
 fn blur(src: &Layer, sigma: f32) -> Layer {
-    BLUR_SCRATCH.with(|s| blur_into(src, sigma, &mut s.borrow_mut()))
+    BLUR_SCRATCH.with(|s| blur_into(src, sigma, &mut s.borrow_mut(), false).0)
 }
 
-fn blur_into(src: &Layer, sigma: f32, s: &mut BlurScratch) -> Layer {
+/// Blur, and the difference-of-Gaussians it forms with the layer it blurred.
+///
+/// The difference used to be a pass of its own: read the two Gaussian layers,
+/// write a third. But the blur's own last act is to hold a finished output row
+/// in registers, and the row it was made from was read a few rows ago and is
+/// still in cache — so the subtraction costs one store and the two reads it
+/// used to make are gone. Same two floats, same subtraction, same order.
+fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
+    let (g, d) = BLUR_SCRATCH.with(|s| blur_into(src, sigma, &mut s.borrow_mut(), true));
+    // The `true` above is what makes the difference exist.
+    (g, d.unwrap())
+}
+
+/// One row of the horizontal pass: symmetric kernel, eight outputs at a time
+/// so the tap loop stays in registers.
+#[inline]
+fn blur_row(row: &[f32], padded: &mut [f32], out: &mut [f32], kc: f32, ks: &[f32], r: usize, w: usize) {
+    for i in 0..r {
+        padded[i] = row[reflect101(i as i32 - r as i32, w)];
+        padded[w + r + i] = row[reflect101((w + i) as i32, w)];
+    }
+    padded[r..r + w].copy_from_slice(row);
+    let mut x = 0;
+    while x + 8 <= w {
+        let mut acc = [0f32; 8];
+        let c = &padded[x + r..x + r + 8];
+        for i in 0..8 {
+            acc[i] = c[i] * kc;
+        }
+        for (t, &kv) in ks.iter().enumerate() {
+            let l = &padded[x + r - t - 1..x + r - t - 1 + 8];
+            let rr = &padded[x + r + t + 1..x + r + t + 1 + 8];
+            for i in 0..8 {
+                acc[i] += (l[i] + rr[i]) * kv;
+            }
+        }
+        out[x..x + 8].copy_from_slice(&acc);
+        x += 8;
+    }
+    while x < w {
+        let mut acc = padded[x + r] * kc;
+        for (t, &kv) in ks.iter().enumerate() {
+            acc += (padded[x + r - t - 1] + padded[x + r + t + 1]) * kv;
+        }
+        out[x] = acc;
+        x += 1;
+    }
+}
+
+fn blur_into(src: &Layer, sigma: f32, s: &mut BlurScratch, want_dog: bool) -> (Layer, Option<Layer>) {
     let k = gaussian_kernel(sigma);
     let r = k.len() / 2;
     let (w, h) = (src.w, src.h);
     let kc = k[r];
     let ks: &[f32] = &k[r + 1..];
-    // Grown, never cleared: the passes below write every element they go on
-    // to read.
-    if s.tmp.len() < w * h {
-        s.tmp.resize(w * h, 0.0);
+    // The two passes are interleaved through a ring of the last `2r + 1`
+    // filtered rows, rather than run one after the other through a whole
+    // intermediate plane.
+    //
+    // The vertical pass of row `y` reads filtered rows `y-r ..= y+r` and
+    // nothing else — reflection at the edges maps a tap back inside that
+    // window, never outside it — so those rows are all that ever needs to
+    // exist. A plane held them instead: a megabyte and a half written out to
+    // memory and read back for every blur, twenty times an image, when
+    // fifty kilobytes would stay in cache. It is the same arithmetic on the
+    // same values in the same order; only the storage between the passes is
+    // gone.
+    //
+    // Rows live at `row % ring_rows`, and the window is exactly `ring_rows`
+    // wide, so a row is overwritten only once it can no longer be read.
+    let ring_rows = (2 * r + 1).min(h);
+    if s.ring.len() < ring_rows * w {
+        s.ring.resize(ring_rows * w, 0.0);
     }
     if s.padded.len() < w + 2 * r {
         s.padded.resize(w + 2 * r, 0.0);
@@ -247,66 +320,49 @@ fn blur_into(src: &Layer, sigma: f32, s: &mut BlurScratch) -> Layer {
     if s.row.len() < w {
         s.row.resize(w, 0.0);
     }
-    let tmp = &mut s.tmp[..w * h];
+    let ring = &mut s.ring[..ring_rows * w];
     let padded = &mut s.padded[..w + 2 * r];
-    // horizontal: symmetric kernel, 8 outputs at a time so the tap loop
-    // stays in registers.
-    for y in 0..h {
-        let row = &src.px[y * w..(y + 1) * w];
-        for i in 0..r {
-            padded[i] = row[reflect101(i as i32 - r as i32, w)];
-            padded[w + r + i] = row[reflect101((w + i) as i32, w)];
-        }
-        padded[r..r + w].copy_from_slice(row);
-        let out = &mut tmp[y * w..(y + 1) * w];
-        let mut x = 0;
-        while x + 8 <= w {
-            let mut acc = [0f32; 8];
-            let c = &padded[x + r..x + r + 8];
-            for i in 0..8 {
-                acc[i] = c[i] * kc;
-            }
-            for (t, &kv) in ks.iter().enumerate() {
-                let l = &padded[x + r - t - 1..x + r - t - 1 + 8];
-                let rr = &padded[x + r + t + 1..x + r + t + 1 + 8];
-                for i in 0..8 {
-                    acc[i] += (l[i] + rr[i]) * kv;
-                }
-            }
-            out[x..x + 8].copy_from_slice(&acc);
-            x += 8;
-        }
-        while x < w {
-            let mut acc = padded[x + r] * kc;
-            for (t, &kv) in ks.iter().enumerate() {
-                acc += (padded[x + r - t - 1] + padded[x + r + t + 1]) * kv;
-            }
-            out[x] = acc;
-            x += 1;
-        }
-    }
-    // vertical: symmetric pairs of rows, accumulated in a row-sized buffer and
-    // appended, so the destination is written exactly once and never zeroed
-    // first.
     let acc = &mut s.row[..w];
     let mut dst: Vec<f32> = Vec::with_capacity(w * h);
+    let mut dog: Vec<f32> = Vec::with_capacity(if want_dog { w * h } else { 0 });
+    let mut filtered = 0usize; // rows of `src` already through the horizontal pass
     for y in 0..h {
-        let c = &tmp[y * w..(y + 1) * w];
+        let want = (y + r).min(h - 1);
+        while filtered <= want {
+            let slot = filtered % ring_rows;
+            blur_row(
+                &src.px[filtered * w..(filtered + 1) * w],
+                padded,
+                &mut ring[slot * w..(slot + 1) * w],
+                kc,
+                ks,
+                r,
+                w,
+            );
+            filtered += 1;
+        }
+        let c = &ring[(y % ring_rows) * w..(y % ring_rows + 1) * w];
         for x in 0..w {
             acc[x] = c[x] * kc;
         }
         for (t, &kv) in ks.iter().enumerate() {
-            let ya = reflect101(y as i32 - t as i32 - 1, h);
-            let yb = reflect101(y as i32 + t as i32 + 1, h);
-            let a = &tmp[ya * w..(ya + 1) * w];
-            let b = &tmp[yb * w..(yb + 1) * w];
+            let ya = reflect101(y as i32 - t as i32 - 1, h) % ring_rows;
+            let yb = reflect101(y as i32 + t as i32 + 1, h) % ring_rows;
+            let a = &ring[ya * w..(ya + 1) * w];
+            let b = &ring[yb * w..(yb + 1) * w];
             for x in 0..w {
                 acc[x] += (a[x] + b[x]) * kv;
             }
         }
+        if want_dog {
+            let below = &src.px[y * w..(y + 1) * w];
+            dog.extend(acc.iter().zip(below).map(|(a, b)| a - b));
+        }
         dst.extend_from_slice(acc);
     }
-    Layer { w, h, px: dst }
+    let g = Layer { w, h, px: dst };
+    let d = want_dog.then(|| Layer { w, h, px: dog });
+    (g, d)
 }
 
 #[inline]
@@ -417,18 +473,17 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
     for o in 0..n_octaves {
         let mut gauss: Vec<Layer> = Vec::with_capacity(s + 3);
         gauss.push(std::mem::replace(&mut octave_base, Layer { w: 0, h: 0, px: vec![] }));
+        let mut dog: Vec<Layer> = Vec::with_capacity(s + 2);
         for i in 1..s + 3 {
-            let l = blur(&gauss[i - 1], sig[i]);
+            let (l, d) = blur_dog(&gauss[i - 1], sig[i]);
             gauss.push(l);
+            dog.push(d);
         }
-        let dog: Vec<Layer> = (0..s + 2)
-            .map(|i| {
-                let a = &gauss[i + 1];
-                let b = &gauss[i];
-                Layer { w: a.w, h: a.h, px: a.px.iter().zip(&b.px).map(|(x, y)| x - y).collect() }
-            })
-            .collect();
         find_extrema(&dog, o, p, thr_pre, coord_scale, &mut cands);
+        // The differences have said all they have to say; the gradients below
+        // need only the Gaussians, and this is the largest thing a worker
+        // holds after the decode.
+        drop(dog);
         heights.push(gauss[0].h);
         grads.push(
             (0..s + 3)
@@ -522,17 +577,10 @@ fn rows3(l: &Layer, y: usize, w: usize) -> (&[f32], &[f32], &[f32]) {
     (&l.px[(y - 1) * w..y * w], &l.px[y * w..(y + 1) * w], &l.px[(y + 1) * w..(y + 2) * w])
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The neighbours on the two adjacent scales: the half of the 3x3x3
+/// neighbourhood the row sweep has not already ruled on.
 #[inline]
-fn is_extreme(
-    v: f32,
-    x: usize,
-    c0: &[f32], c2: &[f32],
-    p0: &[f32], p1: &[f32], p2: &[f32],
-    n0: &[f32], n1: &[f32], n2: &[f32],
-    max: bool,
-) -> bool {
-    let rows = [c0, c2, p0, p1, p2, n0, n1, n2];
+fn is_extreme(v: f32, x: usize, rows: [&[f32]; 6], max: bool) -> bool {
     if max {
         for r in rows {
             if v < r[x - 1] || v < r[x] || v < r[x + 1] {
@@ -569,40 +617,53 @@ fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_sc
         return;
     }
     let oct_scale = (1u32 << octave) as f32 * coord_scale;
+    let wu = w as usize;
+    let (lo, hi) = (IMG_BORDER as usize, (w - IMG_BORDER) as usize);
+    let span = hi - lo;
+    // Which pixels of the row are still in the running, decided without a
+    // branch. Almost two thirds of a layer clears the contrast threshold and
+    // barely a tenth of that survives its own row, so the test that used to
+    // stand at the top of the sweep was a coin-toss branch taken once per
+    // pixel of the pyramid — hundreds of millions of mispredictions over a
+    // corpus. Settling the whole row of nine comparisons as arithmetic and
+    // then walking the survivors leaves one branch that is almost always not
+    // taken, and the comparisons themselves run eight to an instruction.
+    let mut alive = vec![false; span];
     for layer in 1..=s {
         let cur = &dog[layer];
         let prv = &dog[layer - 1];
         let nxt = &dog[layer + 1];
-        let wu = w as usize;
         for y in IMG_BORDER..h - IMG_BORDER {
             let yu = y as usize;
             let (c0, c1, c2) = rows3(cur, yu, wu);
             let (p0, p1, p2) = rows3(prv, yu, wu);
             let (n0, n1, n2) = rows3(nxt, yu, wu);
-            for x in IMG_BORDER..w - IMG_BORDER {
-                let xu = x as usize;
+            // Equal-length windows of the three rows of this scale, so the
+            // sweep below indexes nothing it has to check.
+            let (vc, cl, cr) = (&c1[lo..hi], &c1[lo - 1..hi - 1], &c1[lo + 1..hi + 1]);
+            let (ul, um, ur) = (&c0[lo - 1..hi - 1], &c0[lo..hi], &c0[lo + 1..hi + 1]);
+            let (dl, dm, dr) = (&c2[lo - 1..hi - 1], &c2[lo..hi], &c2[lo + 1..hi + 1]);
+            for i in 0..span {
+                let v = vc[i];
+                let ge = (v >= cl[i]) & (v >= cr[i]) & (v >= ul[i]) & (v >= um[i]) & (v >= ur[i])
+                    & (v >= dl[i]) & (v >= dm[i]) & (v >= dr[i]);
+                let le = (v <= cl[i]) & (v <= cr[i]) & (v <= ul[i]) & (v <= um[i]) & (v <= ur[i])
+                    & (v <= dl[i]) & (v <= dm[i]) & (v <= dr[i]);
+                alive[i] = ((v > thr_pre) & ge) | ((v < -thr_pre) & le);
+            }
+            for i in 0..span {
+                if !alive[i] {
+                    continue;
+                }
+                let xu = lo + i;
                 let v = c1[xu];
-                if v.abs() <= thr_pre {
-                    continue;
-                }
-                // The two horizontal neighbours reject most candidates, and
-                // they are already in cache, so they are tested before the
-                // other twenty-four.
                 let positive = v > 0.0;
-                if positive {
-                    if v < c1[xu - 1] || v < c1[xu + 1] {
-                        continue;
-                    }
-                } else if v > c1[xu - 1] || v > c1[xu + 1] {
+                // This scale's own 3x3 is settled; the two neighbouring
+                // scales are not.
+                if !is_extreme(v, xu, [p0, p1, p2, n0, n1, n2], positive) {
                     continue;
                 }
-                // The current row's own x-1 and x+1 are already done above;
-                // `is_extreme` covers the other twenty-four.
-                let ok = is_extreme(v, xu, c0, c2, p0, p1, p2, n0, n1, n2, positive);
-                if !ok {
-                    continue;
-                }
-                if let Some((kp, lay)) = adjust(dog, octave, layer, x, y, p, oct_scale) {
+                if let Some((kp, lay)) = adjust(dog, octave, layer, xu as i32, y, p, oct_scale) {
                     out.push(Cand { kp, octave, layer: lay });
                 }
             }
@@ -736,10 +797,16 @@ fn orientation_hist(g: &Grad, h: usize, px: f32, py: f32, radius: i32, sigma: f3
         // The same bound on x, hoisted out of the row: 1 <= x < w - 1.
         let j0 = (-radius).max(1 - cx);
         let j1 = radius.min(w - 2 - cx);
+        // The row's useful span, taken once: the bounds were settled above, so
+        // the samples come out of a slice rather than out of an index whose
+        // range has to be re-proved on every one of them.
+        if j1 < j0 {
+            continue;
+        }
         let row = y as usize * g.w;
-        for j in j0..=j1 {
-            let x = cx + j;
-            let (mag, ori) = (g.mag[row + x as usize], g.ori[row + x as usize]);
+        let span = &g.px[row + (cx + j0) as usize..row + (cx + j1) as usize + 1];
+        for (n, &[mag, ori]) in span.iter().enumerate() {
+            let j = j0 + n as i32;
             let t = (i * i + j * j) as f32 * neg_scale;
             let wgt = if t >= EXP_RANGE { 0.0 } else { tbl.0[(t * (EXP_N as f32 / EXP_RANGE)) as usize] };
             let mut bin = (ori * ORI_BINS as f32 / 360.0).round() as i32;
@@ -826,16 +893,18 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
         // `j0`/`j1` already hold the sample inside the image, and `r` was
         // checked above, so the row's pixels are exactly the ones the original
         // bounds test admitted.
-        let mag_row = &g.mag[r as usize * g.w..r as usize * g.w + g.w];
-        let ori_row = &g.ori[r as usize * g.w..r as usize * g.w + g.w];
-        for j in j0..=j1 {
+        if j1 < j0 {
+            continue;
+        }
+        let row = r as usize * g.w;
+        let span = &g.px[row + (pt_x + j0) as usize..row + (pt_x + j1) as usize + 1];
+        for (n, &[m, o]) in span.iter().enumerate() {
+            let j = j0 + n as i32;
             let c_rot = j as f32 * cos_t - i as f32 * sin_t;
             let r_rot = j as f32 * sin_t + i as f32 * cos_t;
             let rbin = r_rot + (D / 2) as f32 - 0.5;
             let cbin = c_rot + (D / 2) as f32 - 0.5;
-            let c = pt_x + j;
             if rbin > -1.0 && rbin < D as f32 && cbin > -1.0 && cbin < D as f32 {
-                let (m, o) = (mag_row[c as usize], ori_row[c as usize]);
                 let t = (c_rot * c_rot + r_rot * r_rot) * neg_exp_scale;
                 let wgt = if t >= EXP_RANGE { 0.0 } else { tbl.0[(t * (EXP_N as f32 / EXP_RANGE)) as usize] };
                 let mag = m * wgt;
@@ -874,14 +943,26 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
                 let idx = idx as usize;
                 let stride_c = N + 2;
                 let stride_r = (D + 2) * (N + 2);
-                hist[idx] += v_rco000;
-                hist[idx + 1] += v_rco001;
-                hist[idx + stride_c] += v_rco010;
-                hist[idx + stride_c + 1] += v_rco011;
-                hist[idx + stride_r] += v_rco100;
-                hist[idx + stride_r + 1] += v_rco101;
-                hist[idx + stride_r + stride_c] += v_rco110;
-                hist[idx + stride_r + stride_c + 1] += v_rco111;
+                // The eight corners of one sample's trilinear spread, written
+                // without eight bounds checks. `rbin` and `cbin` are inside
+                // (-1, D) — the test above says so — and `o0i` has just been
+                // folded into 0..N, so the largest index touched is
+                // (D * (D + 2) + D) * (N + 2) + (N - 1) + stride_r + stride_c
+                // + 1, which is 358 of the 360 bins. This is the innermost
+                // loop of the whole extractor: it runs some hundreds of times
+                // for every descriptor of every image.
+                debug_assert!(idx + stride_r + stride_c + 1 < hist.len());
+                unsafe {
+                    let h = hist.as_mut_ptr().add(idx);
+                    *h += v_rco000;
+                    *h.add(1) += v_rco001;
+                    *h.add(stride_c) += v_rco010;
+                    *h.add(stride_c + 1) += v_rco011;
+                    *h.add(stride_r) += v_rco100;
+                    *h.add(stride_r + 1) += v_rco101;
+                    *h.add(stride_r + stride_c) += v_rco110;
+                    *h.add(stride_r + stride_c + 1) += v_rco111;
+                }
             }
         }
     }

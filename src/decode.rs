@@ -114,6 +114,93 @@ pub fn sniff(b: &[u8]) -> Kind {
     Kind::Unknown
 }
 
+// ---------------------------------------------------------------- decode budget
+
+/// How much decoded image the workers may hold between them.
+///
+/// A decoder's output is much the largest thing this program allocates: a
+/// 44-megapixel photograph is 133 MB of RGB against the 1.2 MB of working
+/// image the analysis keeps of it, and the buffer lives only long enough to be
+/// reduced. With one worker per thread all reaching for one at once, the peak
+/// of a run was decided by how many large files happened to be adjacent in
+/// directory order — an accident of the corpus's layout rather than anything
+/// about the corpus.
+///
+/// So the decoders share a budget and a decode waits for room in it. This
+/// bounds a transient; it does not limit the work. A file too large for the
+/// whole budget still decodes, alone, and no file is skipped, resized or
+/// treated differently for it — the output of a run cannot depend on this.
+/// The figure is a fraction of what the machine reports free, because how much
+/// scratch it is reasonable to hold is a fact about the machine and not about
+/// the pictures.
+fn decode_budget() -> usize {
+    let available = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
+        let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
+        line.split_whitespace().nth(1)?.parse::<usize>().ok()
+    });
+    match available {
+        Some(kb) => (kb / 8 * 1024).max(64 << 20),
+        // No /proc to ask: enough for several large photographs at once.
+        None => 256 << 20,
+    }
+}
+
+/// Claims are served in the order they are made, so that a large one cannot be
+/// starved by a stream of small ones slipping past it. Without that, a worker
+/// holding a forty-megapixel photograph could wait indefinitely on a machine
+/// whose budget is tight, while its seven neighbours took turns.
+struct Budget {
+    state: std::sync::Mutex<Queue>,
+    room: std::sync::Condvar,
+    limit: usize,
+}
+
+struct Queue {
+    held: usize,
+    issued: u64,
+    serving: u64,
+}
+
+static BUDGET: std::sync::LazyLock<Budget> = std::sync::LazyLock::new(|| Budget {
+    state: std::sync::Mutex::new(Queue { held: 0, issued: 0, serving: 0 }),
+    room: std::sync::Condvar::new(),
+    limit: decode_budget(),
+});
+
+/// A claim on the decode budget, given back when the buffers it covers die.
+struct Permit(usize);
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut q = BUDGET.state.lock().unwrap_or_else(|e| e.into_inner());
+        q.held -= self.0;
+        drop(q);
+        BUDGET.room.notify_all();
+    }
+}
+
+/// Wait for room for `bytes` of decoded image. A request larger than the whole
+/// budget waits for the workers to empty and then proceeds: the alternative is
+/// refusing to read a file for being big.
+fn reserve(bytes: u64) -> Permit {
+    let want = bytes.min(isize::MAX as u64) as usize;
+    let mut q = BUDGET.state.lock().unwrap_or_else(|e| e.into_inner());
+    let ticket = q.issued;
+    q.issued += 1;
+    loop {
+        if q.serving == ticket && (q.held == 0 || q.held + want <= BUDGET.limit) {
+            q.held += want;
+            q.serving += 1;
+            break;
+        }
+        q = BUDGET.room.wait(q).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(q);
+    // The next in line may now fit in what is left.
+    BUDGET.room.notify_all();
+    Permit(want)
+}
+
 /// Decode a file to a working-resolution gray image.
 pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
@@ -139,6 +226,26 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
     let reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    // The header already says how large the pixels will be. A rotation holds
+    // two of them for a moment, since it cannot be done in place, and a
+    // channel layout the reduction has no specialisation for is converted to
+    // RGBA8 first, which holds another.
+    let rotates = !matches!(
+        orientation,
+        image::metadata::Orientation::NoTransforms
+            | image::metadata::Orientation::FlipHorizontal
+            | image::metadata::Orientation::FlipVertical
+            | image::metadata::Orientation::Rotate180
+    );
+    let converts = !matches!(
+        decoder.color_type(),
+        image::ColorType::Rgb8 | image::ColorType::Rgba8 | image::ColorType::L8 | image::ColorType::La8
+    );
+    let (dw, dh) = decoder.dimensions();
+    let _permit = reserve(
+        decoder.total_bytes().saturating_mul(1 + rotates as u64)
+            + if converts { dw as u64 * dh as u64 * 4 } else { 0 },
+    );
     let mut img = DynamicImage::from_decoder(decoder)?;
     if orientation != image::metadata::Orientation::NoTransforms {
         img.apply_orientation(orientation);
@@ -192,6 +299,26 @@ pub fn reduce_to_gray(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, w
     fit_to(g, work)
 }
 
+/// `sum / 3.0` for every sum three bytes can make, with room to spare so the
+/// index needs no bounds check.
+///
+/// Dividing the channel sum by three is the only division in the reduction's
+/// innermost loop, and it runs once per source pixel — seven and a half
+/// billion times over this corpus. A float division is an order of magnitude
+/// dearer than a load and, unlike almost everything else in that loop, cannot
+/// be pipelined away. The table is not an approximation of the division: the
+/// entry *is* the division, taken once at compile time, so every grey value is
+/// the same float it was.
+static MEAN3: [f32; 1024] = {
+    let mut t = [0.0f32; 1024];
+    let mut i = 0;
+    while i < 1024 {
+        t[i] = i as f32 / 3.0;
+        i += 1;
+    }
+    t
+};
+
 /// One grey sample from one source pixel: the mean of the colour channels,
 /// alpha flattened onto mid-grey.
 #[inline(always)]
@@ -201,10 +328,24 @@ fn grey_of<const CH: usize, const ALPHA: bool>(p: &[u8]) -> f32 {
     for c in 0..color_ch {
         v += p[c] as u32;
     }
-    let mut g = v as f32 / color_ch as f32;
+    // Three colour channels covers every RGB and RGBA image, one covers every
+    // greyscale, and those are the only shapes a decoder hands over. Both
+    // avoid the divide exactly rather than nearly: the table holds the same
+    // quotient, and dividing by one is the identity.
+    let mut g = match color_ch {
+        3 => MEAN3[v as usize & 1023],
+        1 => v as f32,
+        _ => v as f32 / color_ch as f32,
+    };
     if ALPHA {
-        let a = p[CH - 1] as f32 / 255.0;
-        g = g * a + 128.0 * (1.0 - a);
+        // An opaque pixel is the overwhelmingly common case and the blend is
+        // then the identity — `g * 1.0 + 128.0 * 0.0` — so it is skipped
+        // rather than computed.
+        let a8 = p[CH - 1];
+        if a8 != 255 {
+            let a = a8 as f32 / 255.0;
+            g = g * a + 128.0 * (1.0 - a);
+        }
     }
     g
 }
@@ -303,20 +444,20 @@ pub fn resize_area(g: &Gray, tw: usize, th: usize) -> Gray {
     }
     let xw = weights(g.w, tw);
     let yw = weights(g.h, th);
-    // horizontal pass
-    let mut tmp = vec![0.0f32; tw * g.h];
+    // Horizontal pass. Written once, never zeroed first: every element of it
+    // is produced below before anything reads it.
+    let mut tmp: Vec<f32> = Vec::with_capacity(tw * g.h);
     for y in 0..g.h {
         let src = &g.px[y * g.w..(y + 1) * g.w];
-        let dst = &mut tmp[y * tw..(y + 1) * tw];
-        for (ox, d) in dst.iter_mut().enumerate() {
+        tmp.extend((0..tw).map(|ox| {
             let start = xw.start[ox] as usize;
             let (a, b) = (xw.at[ox] as usize, xw.at[ox + 1] as usize);
             let mut acc = 0.0;
             for (i, wgt) in xw.w[a..b].iter().enumerate() {
                 acc += src[start + i] * wgt;
             }
-            *d = acc;
-        }
+            acc
+        }));
     }
     let mut out = Gray::new(tw, th);
     for oy in 0..th {
@@ -378,6 +519,12 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let image = jxl_oxide::JxlImage::builder()
         .read(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("jxl: {e}"))?;
+    // The rendered frame, the float buffer it is streamed into and the bytes
+    // packed out of that: four bytes a sample twice over, then one. Claimed
+    // from the header, before the render that allocates the first of them.
+    let header = image.image_header();
+    let nch = if header.metadata.grayscale() { 1 } else { 3 } + header.metadata.alpha().is_some() as u64;
+    let _permit = reserve((image.width() as u64) * (image.height() as u64) * nch * 9);
     let render = image
         .render_frame(0)
         .map_err(|e| anyhow::anyhow!("jxl render: {e}"))?;
@@ -409,6 +556,10 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
     let has_alpha = handle.has_alpha_channel();
     let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
+    // The decoded interleaved plane, and the copy packed out of it.
+    let _permit = reserve(
+        (handle.width() as u64) * (handle.height() as u64) * if has_alpha { 8 } else { 6 },
+    );
     let img = lib
         .decode(&handle, ColorSpace::Rgb(chroma), None)
         .map_err(|e| anyhow::anyhow!("heif decode: {e}"))?;

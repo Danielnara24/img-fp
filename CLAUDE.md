@@ -8,7 +8,7 @@ changing how anything is scored.
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
 every amount drawn per seed — F1 **0.969** at 99.6% precision and 94.4% recall,
-against SSCD's 0.762 / 92.6% / 64.8%, in 131 s against SSCD's 1,949 s.
+against SSCD's 0.762 / 92.6% / 64.8%, in 105 s against SSCD's 1,949 s.
 
 **50 of 87 transformations are handled perfectly** (all 62 seeds found across
 the whole range of the amount). Every other tool manages **zero**.
@@ -276,18 +276,120 @@ follows the descriptor count.
 
 ### Speed and memory, and what has already been tried
 
-The pipeline was gone over once with a profiler, for **byte-identical output**:
-the same 223,673 pairs and the same 68 groups, field for field. That constraint
-is what makes this list safe to trust — nothing here traded a pair for a
-second, and the check is one command (`-o a.json` before, `-o b.json` after,
-compare the `pairs` sets). Measured by `bench.py` with the old build re-run in
-the same session: **163 s and 1,739 MB to 131 s and 1,178 MB.**
+The pipeline has been gone over twice with a profiler, both times for
+**byte-identical output**: the same 223,673 pairs and the same 68 groups, field
+for field. That constraint is what makes this list safe to trust — nothing here
+traded a pair for a second, and the check is one command (`-o a.json` before,
+`-o b.json` after, compare the `pairs` sets). Measured by `bench.py` with the
+old build re-run in the same session: **163 s and 1,739 MB, then 131 s and
+1,178 MB, now 105 s and 875 MB.**
+
+Read that clock figure with the MHz column beside it, as `BASELINE.md` insists.
+Three alternating pairs on the full corpus gave 131.4 s to 107.8 s, 137.2 s to
+120.2 s and 136.2 s to 105.5 s; only the middle pair had the two builds at the
+same mean clock (2199 against 2245 MHz), and it is the smallest of the three at
+12%. The controlled measurement is the 636-file subset, four alternating pairs
+with the die cooled to idle + 3 C before each: **12.41 s to 11.13 s of wall and
+80.3 s to 72.1 s of CPU**, about 10%. The full corpus gains more than that
+because finishing sooner also means running cooler for longer — real on this
+laptop, and not a claim about the work removed. Peak memory needs no such
+caveat: 1,178 MB to 875 MB, and the new figure is steady across runs (866-886)
+where the old one wandered between 1,114 and 1,516 MB depending on which large
+files happened to decode together.
+
+**What this machine is limited by, which decides what is worth trying at all.**
+One busy core boosts to 3.2 GHz; eight run at 1.27 GHz, and the extraction
+phase is only 2.9x faster on eight threads than on one. Under a power cap wall
+time follows *energy*, not cycles, and the two respond to different changes.
+Removing a **stall** — a float divide, a mispredicted branch, a cache miss the
+other hyperthread was glad of — is worth a clean 5% at `-j 1` and *nothing* at
+`-j 8`, where the sibling thread simply takes the slot. What moves the
+eight-thread clock is removing **work**: bytes not moved, instructions not
+issued. So measure a change at `-j 1` to learn whether it is faster, and at
+`-j 8` to learn whether it matters; several of the entries below were worth
+half of what the single-threaded number promised, and the ones that survived
+are the ones that move less memory.
 
 Where the time goes now: decode ~30%, feature extraction ~50%, everything
 after it ~20%. Within extraction the descriptor is the largest single item and
 is at its practical limit.
 
-What was worth doing, in order of what it returned:
+What was worth doing in the **second** pass, in order of what it returned. The
+two largest move fewer bytes rather than fewer instructions, which is what the
+paragraph above predicts:
+
+- **The blur wrote its intermediate plane to memory and read it back.** A
+  separable blur filters rows and then columns, and the filtered rows were a
+  plane of their own: 1.2 MB out to memory and back for each of the twenty
+  blurs an image costs. But the column pass of row `y` reads filtered rows
+  `y-r ..= y+r` and nothing else — reflection at an edge maps a tap back inside
+  that window, never outside it — so a ring of `2r+1` rows, fifty kilobytes
+  that stay in cache, holds everything that is ever read. Same taps, same
+  order, same floats; the plane is simply gone. With the difference below it,
+  7% of the run at eight threads.
+- **The difference-of-Gaussians was a pass of its own**, reading two Gaussian
+  layers and writing a third. It is taken inside the blur that produces the
+  upper layer now, where the output row is still in registers and the lower
+  one was read a few rows ago and is still in cache.
+- **The extremum sweep branched on every pixel of the pyramid.** Two thirds of
+  a difference layer clears the contrast threshold and about a tenth of that
+  survives its own row, so the test at the top of the sweep was a coin toss
+  taken hundreds of millions of times per corpus. The row's nine comparisons
+  are settled as arithmetic now, eight pixels to an instruction, and only the
+  survivors take a branch.
+- **The grey reduction divided by three once per source pixel** — seven and a
+  half billion float divisions over this corpus, for a quantity with 766
+  possible values. The table is not an approximation of the division: the entry
+  *is* the division, taken once at compile time.
+- **Byte-identical files were decoded and described twice.** The exact pass has
+  already grouped the files whose bytes hash the same, and the analysis depends
+  on nothing else; 298 of these 5,638 files are a copy of another. Each group
+  elects one member and the rest are copied from it — which asserts nothing the
+  run does not assert anyway, since those files are already claimed as
+  duplicates of each other.
+- **Gradient magnitude and orientation were two planes a page apart**, and
+  every reader wants both halves of the same pixel. Interleaved, they are one
+  stream instead of two.
+- **`fastAtan2` branched twice per pixel**, which stopped the gradient loop
+  vectorising. Both arms always divided the smaller magnitude by the larger and
+  ran the same series on it; written as selects over one polynomial, the loop
+  does eight pixels at a time, term for term identical.
+- **The descriptor proved its bounds eight times per sample.** The trilinear
+  spread writes eight corners, and `rbin`, `cbin` and `o0i` have just been
+  tested into ranges that put every one of them inside the histogram. The
+  argument is in the code beside the `unsafe`.
+
+And for peak memory, which was set by an accident of directory order:
+
+- **The decoders share a budget.** A 44-megapixel photograph is 133 MB of RGB
+  and the analysis keeps 1.2 MB of it, so with eight workers reaching for one
+  at once the peak of a run depended on how many large files happened to be
+  adjacent in the walk. Claims are served in the order they are made, so a
+  large one cannot be starved by small ones slipping past, and a file larger
+  than the whole budget still decodes — alone. Nothing about the output can
+  depend on it.
+- **Two allocator arenas instead of sixty-four.** glibc gives a process eight
+  arenas per core and lets each keep what it has freed, which suits a program
+  allocating small blocks in tight loops. This one takes a handful of very
+  large buffers per image, and spread over sixty-four arenas the freed decode
+  buffers and scale spaces were held apart from each other and from the
+  descriptors they were interleaved with — 220 MB of holes, measured as the
+  gap between what the run held and what it was using. The small allocations
+  that might contend for two arenas are served from each thread's own cache
+  and never take the lock; the verification stage, which allocates per pair,
+  measures the same either way.
+- **The heap is trimmed at the two phase boundaries**, where a phase's worth of
+  very large buffers has just died. (This was measured once before and judged
+  worthless, and it was: the peak then stood in the middle of the analysis
+  phase. With the decode budget holding that down, what is left is the plateau
+  this releases.)
+- **The vocabulary, the inverted file, the word lists and every descriptor are
+  dropped once the last match has been made.** Propagation, corroboration and
+  assembly work from thumbnails, frame sizes and verdicts already taken, and
+  the descriptors are the largest thing the run holds. They were being held to
+  the end.
+
+What was worth doing in the **first** pass, in order of what it returned:
 
 - **The vocabulary was mostly empty air.** A five-level tree has `16^5` leaves
   at 512 bytes of centre each — 536 MB — and k-means handed back a full
@@ -357,6 +459,27 @@ works on this laptop:
   against a second JPEG implementation to maintain and pixels that would no
   longer be bit-identical, which is the property that makes everything else
   here checkable.
+- *Pinning glibc's mmap threshold* just above the working image, so that every
+  decode buffer is its own mapping and goes back to the kernel when it is
+  freed. It works — peak 754 MB to 379 MB on the `Desktop` subset — and costs
+  5-10% of the clock, because the kernel zeroes every page it hands back and
+  that is 22 GB of zeroing over this corpus. Returning pages and reusing pages
+  is a real trade, not an oversight; the arena limit takes most of the memory
+  without the syscalls.
+- *Quantising the corpus level by level* rather than descriptor by descriptor:
+  the whole batch's frontier sorted by node, so a block of centres is read once
+  for the seventy descriptors that reach it instead of once each. The
+  arithmetic says 60 GB of memory traffic; the clock says nothing changed. Two
+  reasons, and both are worth knowing before trying it again: one image's
+  descriptors land on a few hundred nodes rather than thousands, so a
+  per-image descent already gets most of that reuse out of cache — and
+  batching reads each descriptor fifteen times where the one-at-a-time descent
+  reads it once and keeps it in L1.
+- *Abandoning a descriptor distance once it cannot beat the runner-up*, which
+  half a descriptor usually settles, and a descriptor is two cache lines. No
+  measurable change: most query keypoints have too few candidates for a
+  runner-up to exist at all, and the two images' descriptor blocks are 76 KB
+  apiece and already in L2 by the second pair that uses them.
 
 **How to measure any of this.** Wall time and CPU seconds on this laptop swing
 25% with the die temperature, and `time` does not report the clock. Build both
