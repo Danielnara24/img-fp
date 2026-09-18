@@ -14,7 +14,7 @@
 //! come to several times the wall clock.
 #![allow(dead_code)]
 
-pub const N: usize = 28;
+pub const N: usize = 29;
 
 #[rustfmt::skip]
 pub static NAMES: [&str; N] = [
@@ -29,6 +29,9 @@ pub static NAMES: [&str; N] = [
     // decode, by format: each of these *contains* `decode:codec`
     "decode:jpeg", "decode:png", "decode:webp", "decode:tiff", "decode:jxl",
     "decode:heif",
+    // assembly. Appended rather than filed with the matcher above, because
+    // the decode-format slots are addressed by number from `decode.rs`.
+    "group",
 ];
 
 pub static ACC: [std::sync::atomic::AtomicU64; N] =

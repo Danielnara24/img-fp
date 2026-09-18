@@ -11,11 +11,14 @@
 //!
 //! The claim a run makes is a *pair*: two files that are the same picture,
 //! each backed by a geometric transform that was checked against the pixels.
-//! Groups are the closure of those pairs and are emitted for convenience;
-//! the pairs are what the tool actually asserts.
+//! A group is a *representative and everything that matched it* — so every
+//! file in a group was checked against the file at its head, and a group
+//! asserts only pairs the run really made. See `group.rs` for why that is
+//! neither the transitive closure nor a clique, and why groups overlap.
 
 mod cache;
 mod decode;
+mod group;
 mod index;
 mod prof;
 mod sift;
@@ -303,6 +306,17 @@ struct OutPair {
     propagated: bool,
 }
 
+/// One group: the file everything in it was verified against, and the files.
+///
+/// `files` includes the representative, and is the key `score.py` and the
+/// other consumers read, so the group is still a plain list of paths to
+/// anything that does not care which one is the head.
+#[derive(Serialize)]
+struct OutGroup {
+    representative: String,
+    files: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct Output {
     tool: &'static str,
@@ -311,7 +325,10 @@ struct Output {
     files_analysed: usize,
     failures: Vec<serde_json::Value>,
     runtime_seconds: f64,
-    groups: Vec<Vec<String>>,
+    /// Largest first. Each is a representative and the files that matched it
+    /// directly. These overlap: a file that is a duplicate of two files that
+    /// are not duplicates of each other appears under both.
+    groups: Vec<OutGroup>,
     pairs: Vec<OutPair>,
 }
 
@@ -743,15 +760,19 @@ fn main() -> Result<()> {
     }
 
     // ---- assemble
-    let mut dsu = Dsu::new(n);
+    //
+    // The pairs are the claim; the groups are the maximal cliques of them.
+    // Every pair emitted here is an edge of that graph, so a group never
+    // contains two files this run did not check against each other.
     let mut out_pairs: Vec<OutPair> = Vec::new();
+    let mut graph: Vec<(usize, usize)> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
     for g in exact.iter() {
         for w in 0..g.len() {
             for x in w + 1..g.len() {
                 let (a, b) = (g[w], g[x]);
-                dsu.union(a, b);
                 if seen.insert((a, b)) {
+                    graph.push((a, b));
                     out_pairs.push(OutPair {
                         a: files[a].display().to_string(),
                         b: files[b].display().to_string(),
@@ -769,10 +790,10 @@ fn main() -> Result<()> {
     }
     for (a, b, _, inv_flag, v) in all.iter().chain(propagated.iter()).chain(corroborated.iter()) {
         let (a, b) = (*a, *b);
-        dsu.union(a, b);
         if !seen.insert((a, b)) {
             continue;
         }
+        graph.push((a, b));
         out_pairs.push(OutPair {
             a: files[a].display().to_string(),
             b: files[b].display().to_string(),
@@ -787,21 +808,29 @@ fn main() -> Result<()> {
     }
     out_pairs.sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
 
-    let mut comps: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..n {
-        if items[i].ok || exact.iter().any(|g| g.contains(&i)) {
-            comps.entry(dsu.find(i)).or_default().push(i);
-        }
-    }
-    let mut groups: Vec<Vec<String>> = comps
-        .into_values()
-        .filter(|g| g.len() > 1)
-        .map(|mut g| {
-            g.sort_unstable();
-            g.into_iter().map(|i| files[i].display().to_string()).collect()
+    let grouping = timed!(28, group::find(n, &graph));
+    let membership = group::membership(&grouping);
+    stage!(
+        t_start,
+        "groups: {} representatives over {} files, {} of them in more than one group",
+        grouping.len(),
+        membership.len(),
+        membership.values().filter(|gs| gs.len() > 1).count()
+    );
+    // Largest first, ties by comparing member paths in order. Paths are
+    // unique and no two representatives can hold the same members — the
+    // second would have had nothing left to account for — so the order is
+    // total and the output is reproducible.
+    let mut groups: Vec<OutGroup> = grouping
+        .iter()
+        .map(|g| OutGroup {
+            representative: files[g.representative].display().to_string(),
+            files: g.members.iter().map(|&i| files[i].display().to_string()).collect(),
         })
         .collect();
-    groups.sort();
+    groups.sort_by(|a, b| {
+        b.files.len().cmp(&a.files.len()).then_with(|| a.files.cmp(&b.files))
+    });
 
     let failures: Vec<serde_json::Value> = items
         .iter()
@@ -848,8 +877,11 @@ fn main() -> Result<()> {
         None => {
             let stdout = std::io::stdout();
             let mut w = std::io::BufWriter::new(stdout.lock());
+            // Representative first in each block: it is the file the rest
+            // were compared against, and the one to keep.
             for g in out.groups.iter() {
-                for f in g {
+                writeln!(w, "{}", g.representative)?;
+                for f in g.files.iter().filter(|f| **f != g.representative) {
                     writeln!(w, "{f}")?;
                 }
                 writeln!(w)?;

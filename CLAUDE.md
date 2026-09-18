@@ -53,6 +53,7 @@ src/
   sift.rs             scale-invariant local features
   index.rs            vocabulary tree, inverted file, containment scoring
   verify.rs           correspondence, geometry, pixel agreement, the policy
+  group.rs            pairs -> groups, around a representative
   cache.rs            on-disk cache of the per-image analysis
 benchmark/
   BASELINE.md         the competition's numbers. The bar to clear.
@@ -235,6 +236,55 @@ Each derived file records `region` (rectangle of the original that survives),
   is more than one file is dropped, full stop. Holding strong bridges to a
   higher bar instead, which is what three fitted constants used to do, is worth
   0.2 points of tuning-corpus recall and nothing at all on the held-out one.
+- **A group is a representative and everything that matched it** (`group.rs`),
+  not a connected component and not a maximal clique. Matching is not
+  transitive and this tool manufactures the counterexamples by design:
+  retrieval scores *containment*, so a photograph matches both the slide and
+  the poster it appears in while those two match nothing of each other, and a
+  left crop and a right crop are both matches for the whole and disjoint from
+  each other. (The corpus does not exercise the host case — `collage_cell` and
+  `contact_sheet` fill their other cells with synthetic patterns, so every edge
+  measured here is inside one seed's family.) So every file in a group was
+  verified against the file at its head, and nothing else is claimed. The
+  representative is chosen greedily — the file still accounting for the most
+  ungrouped files, ties to the lowest index — which is a statement rather than
+  a threshold, and it is the file to keep.
+
+  **The measurements that chose it**, all by re-grouping `out/v9`'s pairs:
+
+  | rule | groups | untested pairs claimed | of those, wrong | one bad edge costs |
+  |---|---|---|---|---|
+  | connected components | 68 | 13,773 | 10,208 | ~7,400 |
+  | maximal cliques | 6,991 | 0 | 0 | ~0 |
+  | **representative (shipped)** | **122** | **0** | **0** | **58** |
+
+  A closure is fragile — a single wrong pair between two families merges them
+  entirely — and it invents an order of magnitude more false pairs than the
+  tool itself makes, because a family is not a clique: `crop_strip_top` and
+  `crop_strip_bottom` are both matches for the original and are DIFFERENT to
+  each other. Cliques fix that and are what the sibling `vid-fp` uses
+  (`src/clustering.rs` there is the fuller argument), but a video library is
+  sparse and a photograph with ninety transformations is not: 6,991 cliques for
+  62 families, one file in 577 of them, and enumeration that needs a probe
+  budget and an abandonment path because `3^(n/3)` is reachable. A star keeps
+  the clique's honesty at the component's group count, is `O(E log V)` with no
+  worst case to defend, and takes 11 ms against the clique search's 43.
+
+  Two things follow. Groups **overlap** — a file matched by two representatives
+  is under both, which is how a file only one of them reached gets reported at
+  all (4,374 of 5,512 files here). And a group is **not an all-pairs claim**:
+  two members that both matched the representative were never compared with
+  each other.
+
+  Measured alternatives that were tried and are worse, should this come up
+  again: 2-edge-connected and biconnected components survive exactly *one*
+  false edge and collapse at two (the bridge test's own limitation, already in
+  the notes below); a k-truss — every link corroborated by k-2 files that
+  matched both ends — is immune at k=4 even to twelve clustered false edges and
+  costs nothing on this corpus, but it needs density to work at all and is
+  useless where a group is two or three files, so it would not transfer to
+  vid-fp. A partition (each file under one representative only) strands the
+  leftovers: 15 files dropped, and a tail of scraps rather than families.
 - **The vocabulary is sized from the corpus** (`VocabParams::for_corpus`), not
   fixed. Leaf occupancy is what is held constant, because that also fixes the
   average document frequency of a word, which is what idf and the posting-list
@@ -383,7 +433,7 @@ the 4,425 extra pairs it finds, which propagation and corroboration then have
 to carry. Do not read a real difference into it either way; the spread is why.)
 
 The pipeline has been gone over three times with a profiler, every time for
-**byte-identical output**: the same 223,673 pairs and the same 68 groups, field
+**byte-identical output**: the same 223,673 pairs and the same groups, field
 for field. That constraint is what makes this list safe to trust — nothing here
 traded a pair for a second, and the check is one command (`-o a.json` before,
 `-o b.json` after, compare the `pairs` sets). Run it against the **whole**
@@ -853,12 +903,26 @@ balanced on it.
  "pairs":  [{"a": "/path/a", "b": "/path/b"}, ...]}
 ```
 
-**`pairs` wins over `groups` wherever both exist.** Groups are the union-find
-closure of the pairs; expanding a closure back into pairs credits a tool with
-every match its chains imply rather than the ones it made. This inflated SSCD
-from 9,172 claims to 238,771 once, and roughly 7,000 of a 16,267-pair labelling
-queue were artifacts of it. Any new consumer of these files must follow the
-same rule.
+**`pairs` wins over `groups` wherever both exist.** For every competitor,
+groups are the union-find closure of the pairs; expanding a closure back into
+pairs credits a tool with every match its chains imply rather than the ones it
+made. This inflated SSCD from 9,172 claims to 238,771 once, and roughly 7,000
+of a 16,267-pair labelling queue were artifacts of it. Any new consumer of
+these files must follow the same rule.
+
+img-fp's own `groups` are **not** a closure — each is a representative plus the
+files that matched it, and it names the representative (see `src/group.rs`):
+
+```json
+"groups": [{"representative": "/path/a", "files": ["/path/a", "/path/b"]}]
+```
+
+`files` is the key every consumer reads, and `score.py` already handles that
+shape. The rule still holds for img-fp too, for a different reason than for the
+others: a group's members were each tested against the representative but not
+against each other, and files in several groups would be counted once per
+group. `score.py` prefers `pairs`, which is why the F1 figures above are
+unaffected by how grouping works.
 
 **Two venvs.** `vendor/venv` is the general one. `vendor/venv-imagededup` has
 torch, so **SSCD and imagededup must run under it**; it also now has

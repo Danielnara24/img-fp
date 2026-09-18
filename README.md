@@ -6,7 +6,7 @@ cropped, rotated, recoloured, or pasted into something else.
 Linux, CLI only.
 
 ```
-img-fp ~/Pictures                       # print groups, one per blank-line block
+img-fp ~/Pictures                       # one group per blank-line block, keeper first
 img-fp ~/Pictures -o dupes.json         # full results with transforms and evidence
 img-fp ~/Pictures --cache ~/.cache/imgfp.bin   # reuse analysis between runs
 ```
@@ -160,13 +160,45 @@ With `-o`, JSON carrying what each claim rests on:
 {"tool": "img-fp",
  "pairs": [{"a": "...", "b": "...", "inliers": 214, "overlap": 1.0,
             "agreement": 1.0, "scale": 0.25}],
- "groups": [["...", "..."]]}
+ "groups": [{"representative": "...", "files": ["...", "..."]}]}
 ```
 
 `pairs` is what the tool asserts; each entry is a pair it actually tested.
-`groups` is their transitive closure, for convenience. The two are not
-interchangeable — expanding a group back into pairs credits the tool with
-matches it never made.
+
+A **group is a representative and every file that matched it directly**. The
+representative is the best-connected file — usually the original or a clean
+re-encode — and it comes first in the human-readable output. Every other member
+was verified against *it*, by the same pixel check as any other claim, so a
+group is a set of pairs the run really made. It is the file to keep, and the
+one every file you would delete on the strength of the group was compared with.
+
+It is deliberately neither of the two obvious things:
+
+- Not the **transitive closure**, because matching is not transitive. A
+  photograph inside a slide and the same photograph on a poster are each a
+  match for the photograph and not for each other; a left half and a right half
+  are both crops of the whole and share nothing. The closure merges those and
+  then asserts, of pairs nobody checked, that they are the same picture — on
+  the benchmark corpus, 13,773 untested pairs of which 10,208 are wrong. It is
+  also fragile: one bad pair between two families merges them entirely, which
+  measured at ~7,400 false pairs from a single edge.
+- Not **maximal cliques** (which is what the sibling `vid-fp` uses), because a
+  family of a photograph and its ninety transformations is not a complete
+  graph. The same corpus gives 6,991 cliques for 62 families, one file
+  appearing in 577 of them.
+
+Measured: **122 groups covering all 5,512 matched files, 9,713 claims, none of
+them untested**, in 11 ms.
+
+Two consequences, both deliberate:
+
+- **Groups overlap.** A file that is a duplicate of two representatives is
+  reported under both — that is how a file only one of them reached gets
+  reported at all. The output is a list of relationships, not a partition.
+- **A group is not an all-pairs claim.** Two members that both matched the
+  representative have not been compared with each other, so expanding a group
+  into pairs asserts more than the run did. Read `pairs` for the claims
+  themselves.
 
 ## Options
 
