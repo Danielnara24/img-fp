@@ -104,10 +104,28 @@ pub struct Vocabulary {
     /// `levels[l]` holds the centres of the live nodes of level `l`,
     /// `DESC_LEN` floats each, in node order.
     levels: Vec<Vec<f32>>,
-    /// Dense per level: node number -> index into `levels[l]`, or `DEAD`.
-    slot: Vec<Vec<u32>>,
+    /// Per level, indexed by *parent* node number: where that parent's live
+    /// children start in `levels[l]`, and how many there are.
+    ///
+    /// The descent used to read a dense node-to-centre table and scan a
+    /// parent's sixteen slots twice — once to find the first live child, once
+    /// to count them — before it could look at a single centre. Both answers
+    /// are properties of the tree, settled when it was built; asking them
+    /// again for every descriptor in the corpus is the same work several
+    /// million times over.
+    head: Vec<Vec<Kids>>,
+    /// Per level, indexed by centre slot: the node number that centre belongs
+    /// to. This is what the dense table was really being consulted for.
+    node_of: Vec<Vec<u32>>,
     max_paths: usize,
     path_ratio: f32,
+}
+
+/// Where a parent's live children live, and how many.
+#[derive(Clone, Copy, Default)]
+struct Kids {
+    first: u32,
+    n: u32,
 }
 
 const DEAD: u32 = u32::MAX;
@@ -173,7 +191,8 @@ impl Vocabulary {
             .collect();
 
         let mut levels: Vec<Vec<f32>> = Vec::with_capacity(p.depth);
-        let mut slots: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
+        let mut heads: Vec<Vec<Kids>> = Vec::with_capacity(p.depth);
+        let mut node_ofs: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
         // Which sample belongs to which node of the previous level.
         let mut assign: Vec<u32> = vec![0; take];
         let mut parents = 1usize;
@@ -217,15 +236,39 @@ impl Vocabulary {
                 }
             }
             centres.shrink_to_fit();
+            // The descent's view of this level: one entry per parent saying
+            // where its live children start and how many there are, and one
+            // entry per centre saying which node it is. Same tree, asked once.
+            let mut head = vec![Kids::default(); parents];
+            let mut node_of = vec![0u32; centres.len() / DESC_LEN];
+            for parent in 0..parents {
+                let base = parent * p.branching;
+                let mut first = u32::MAX;
+                let mut n = 0u32;
+                for c in 0..p.branching {
+                    let sl = slot[base + c];
+                    if sl == DEAD {
+                        continue;
+                    }
+                    if first == u32::MAX {
+                        first = sl;
+                    }
+                    node_of[sl as usize] = (base + c) as u32;
+                    n += 1;
+                }
+                head[parent] = Kids { first: if first == u32::MAX { 0 } else { first }, n };
+            }
             levels.push(centres);
-            slots.push(slot);
+            heads.push(head);
+            node_ofs.push(node_of);
             parents = nodes;
         }
         Vocabulary {
             branching: p.branching,
             depth: p.depth,
             levels,
-            slot: slots,
+            head: heads,
+            node_of: node_ofs,
             max_paths: p.max_paths,
             path_ratio: p.path_ratio,
         }
@@ -250,15 +293,15 @@ impl Vocabulary {
         for l in 0..self.depth {
             let mut n_next = 0usize;
             let centres = &self.levels[l];
-            let slot = &self.slot[l];
+            let head = &self.head[l];
+            let node_of = &self.node_of[l];
             for &(parent, _) in cur[..n_cur].iter() {
-                let base = parent as usize * self.branching;
-                let kids = &slot[base..base + self.branching];
-                let first = match kids.iter().find(|&&s| s != DEAD) {
-                    None => continue,
-                    Some(&s) => s as usize,
-                };
-                let n_live = kids.iter().filter(|&&s| s != DEAD).count();
+                let kids = head[parent as usize];
+                let n_live = kids.n as usize;
+                if n_live == 0 {
+                    continue;
+                }
+                let first = kids.first as usize;
                 // All of this parent's children at once. Each child's sum is
                 // still taken over the dimensions in order, so it is the same
                 // float to the bit as summing the children one at a time — but
@@ -285,32 +328,67 @@ impl Vocabulary {
                         }
                     }
                 }
-                let mut k = 0usize;
-                for (c, &s) in kids.iter().enumerate() {
-                    if s == DEAD {
-                        continue;
-                    }
-                    if n_next == FRONTIER {
-                        break;
-                    }
-                    next[n_next] = ((base + c) as u32, acc[k]);
+                for k in 0..n_live.min(FRONTIER - n_next) {
+                    next[n_next] = (node_of[first + k], acc[k]);
                     n_next += 1;
-                    k += 1;
                 }
             }
             if n_next == 0 {
                 break;
             }
-            let nx = &mut next[..n_next];
-            nx.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            let best = nx[0].1;
-            let cut = best * self.path_ratio * self.path_ratio + 1.0;
-            n_next = n_next.min(self.max_paths);
-            while n_next > 1 && next[n_next - 1].1 > cut {
-                n_next -= 1;
+            // Only the closest `max_paths` children are descended, and only
+            // their distances are looked at afterwards. Ordering the whole
+            // frontier — up to forty-eight entries, once per level for every
+            // descriptor in the corpus — decided the order of forty-five nodes
+            // about to be discarded, so the three that survive are picked out
+            // by a scan instead.
+            //
+            // The scan gives the sorted order of the smallest three whenever
+            // those three, and the boundary between kept and dropped, are
+            // unambiguous. When two distances are exactly equal across that
+            // boundary the answer is not determined by the distances at all,
+            // and which node the tree descends then depends on the sorting
+            // algorithm; rather than change that by accident, such a frontier
+            // is handed to the same sort as before. It is a rarity — a tie has
+            // to be exact, in floats summed over 128 dimensions — and the
+            // check that spots one is a pass of comparisons against a sort.
+            let keep = self.max_paths.min(n_next);
+            let mut held = 0usize;
+            for i in 0..n_next {
+                let e = next[i];
+                if held == keep && !(e.1 < cur[held - 1].1) {
+                    continue;
+                }
+                let mut j = held.min(keep - 1);
+                while j > 0 && e.1 < cur[j - 1].1 {
+                    cur[j] = cur[j - 1];
+                    j -= 1;
+                }
+                cur[j] = e;
+                held += (held < keep) as usize;
             }
-            std::mem::swap(&mut cur, &mut next);
-            n_cur = n_next;
+            let mut ambiguous = false;
+            for j in 1..held {
+                ambiguous |= cur[j].1 == cur[j - 1].1;
+            }
+            if held < n_next {
+                let bound = cur[held - 1].1;
+                let mut n_eq = 0usize;
+                for i in 0..n_next {
+                    n_eq += (next[i].1 == bound) as usize;
+                }
+                ambiguous |= n_eq > 1;
+            }
+            if ambiguous {
+                let nx = &mut next[..n_next];
+                nx.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                cur[..held].copy_from_slice(&next[..held]);
+            }
+            let cut = cur[0].1 * self.path_ratio * self.path_ratio + 1.0;
+            n_cur = held;
+            while n_cur > 1 && cur[n_cur - 1].1 > cut {
+                n_cur -= 1;
+            }
         }
         for &(node, _) in cur[..n_cur].iter() {
             out.push(node);
@@ -741,5 +819,42 @@ mod tests {
         firsts.sort_unstable();
         firsts.dedup();
         assert!(firsts.len() > GROUPS, "the second level separated nothing");
+    }
+}
+
+// ---------------------------------------------------------------- kernel timings
+
+/// `cargo test --release -- --ignored --nocapture quantise_timings`
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn byte(&mut self) -> u8 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u8
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn quantise_timings() {
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        let n = 60_000;
+        let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
+        let p = VocabParams { depth: 4, sample: 40_000, ..Default::default() };
+        let v = Vocabulary::build(&desc, &p);
+        let mut out = Vec::new();
+        let mut best = f64::MAX;
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            for d in desc.chunks_exact(DESC_LEN) {
+                v.quantise(d, &mut out);
+                std::hint::black_box(&out);
+            }
+            best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+        }
+        println!("quantise: {best:8.1} ns/descriptor  ({} words)", v.n_words());
     }
 }

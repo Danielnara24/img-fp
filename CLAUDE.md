@@ -7,23 +7,37 @@ changing how anything is scored.
 
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
-every amount drawn per seed — F1 **0.969** at 99.6% precision and 94.4% recall,
-against SSCD's 0.762 / 92.6% / 64.8%, in 105 s against SSCD's 1,949 s.
+every amount drawn per seed — F1 **0.978** at 99.5% precision and 96.1% recall,
+against SSCD's 0.762 / 92.6% / 64.8%, and roughly two minutes against SSCD's
+1,949 s.
 
-**50 of 87 transformations are handled perfectly** (all 62 seeds found across
+(**The cost figures are the soft ones here, and the accuracy figures are not.**
+Accuracy is a property of the build: F1 0.978 is `out/v9`, reproducible to the
+pair. Wall clock is a property of the session — this laptop's idle temperature
+alone moves it 25% — and the three numbers people want to compare were taken in
+three different sessions: the eleven competitors in `out/v5`, img-fp's previous
+build at 105 s in `out/v8`, this build at 122 s in `out/v9` on a die that
+started 12 C hotter. The only like-for-like reading of the last two is six
+alternating runs of each, which puts them level. So quote "about two minutes,
+against SSCD's half hour" and do not put weight on the third significant
+figure. See *Speed and memory*.)
+
+**59 of 87 transformations are handled perfectly** (all 62 seeds found across
 the whole range of the amount). Every other tool manages **zero**.
 
-Precision holds where it matters: of 832 false pairs, 830 are the deliberate
-rearrangement traps, leaving **2 wrong pairs in 220,657 proposals** against
-15.65 million chances to be wrong. Those two are two wrong cluster merges,
-which is the number to watch: a merge's cost is every pair the two families
-imply, so it grows with the corpus while a lone bad pair does not.
+Precision holds where it matters: of 1,088 false pairs, **all 1,088 are the
+deliberate rearrangement traps**, leaving **no wrong pair at all** in 224,779
+proposals against 15.65 million chances to be wrong — and so no wrong cluster
+merge. That is the number to watch: a merge's cost is every pair the two
+families imply, so it grows with the corpus while a lone bad pair does not.
+The previous rule left two of them, and the count is small enough either way
+that zero should be read as "none survived", not as a guarantee.
 
 `benchmark/BASELINE.md` holds the competition's numbers,
 `benchmark/VALIDATION.md` records the held-out experiment that shaped the
 parameter surface, `README.md` explains the design.
 
-What is left is not accuracy-critical: decode is ~30% of the runtime and has no
+What is left is not accuracy-critical: decode is ~35% of the runtime and has no
 downscaled JPEG path (`zune-jpeg` exposes none, and the arithmetic for adding a
 second decoder is in *Speed and memory* below — it is worth about 4%), the
 mirrored and inverted query is asked only where the first pass came up short
@@ -53,7 +67,11 @@ benchmark/
     README.md         how the corpus and its ground truth are built
     transforms.py     CATALOGUE: 90 transforms, every amount drawn per seed
     make_variants.py  the generator
-  out/v4/             the baseline run: metrics.json, baseline.json, *.json
+  out/v5/             the competitors' run: eleven tools, one session
+  out/v8/             img-fp's published cost row (see BASELINE.md)
+  out/v9/             img-fp after the parameter pass
+                      (out/v5/DAMAGED.md records a file overwritten there;
+                       give bench.py a fresh --out, it merges into the old one)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -164,6 +182,12 @@ Each derived file records `region` (rectangle of the original that survives),
 - **Flat blocks abstain** in the pixel check, neither agreeing nor
   disagreeing. Counting them as agreement let a thumbnail matched into a tenth
   of a large image — where the large side is a smear — score 0.9.
+- **The blocks that do not abstain are averaged, not counted.** `blk` is the
+  mean of |r| over them. It used to be the *fraction* of them whose |r| cleared
+  0.5, which takes two numbers to say one thing and throws away the difference
+  between a block that just missed and one that matched nothing. Averaging
+  removed the 0.5 and is worth 0.5 points of recall on its own, and it is what
+  made `PROP_NCC` redundant — see *Parameters*.
 - **The pixel check reads both sides through a mip pyramid** (`Thumb::lod`),
   each at the footprint one comparison sample covers in *that* thumbnail. It
   used to take a plain bilinear tap from both, which samples whichever side is
@@ -196,7 +220,12 @@ Each derived file records `region` (rectangle of the original that survives),
 - **Three acceptance tests** (`verify::Policy`): `anchor` decides clustering,
   `propagated` judges composed transforms on pixels alone, `corroborated`
   applies only inside an existing cluster. Collapsing them into one threshold
-  costs either 5 points of recall or 3% of precision.
+  costs either 5 points of recall or 3% of precision. The three now differ
+  only in *which* of the shared bars apply, not in their values: `propagated`
+  is the anchor rule without the inlier count (no features vouch for it) and
+  without the enclosure test (it claims nothing new); `corroborated` is the
+  anchor rule with `CLUSTER_SLACK_*` off it. The two numbers that were the
+  propagated tier's own — `PROP_NCC` and `PROP_GAP` — are gone.
 - **Weak bridges are dropped** (`drop_weak_bridges`). A single match that is
   the only link between two clusters is responsible for every pair they imply.
   Two separate family merges during development cost 354 and 3,002 false pairs
@@ -214,21 +243,22 @@ Each derived file records `region` (rectangle of the original that survives),
 
 ### What still misses
 
-13,055 pairs. The worst rows, out of 62 seeds: `crop_micro` 40 (a twentieth of
-the frame), `contact_sheet` 54, `embed_tiny` 54, `halftone` 56, `crop_strip_top`
-57, `wave_vertical` 57, `barrel_distort` 58, `picture_in_picture` 58. The
-pattern is what it has always been — very small crops, heavy downscales, and
-warps that break a fitted affine model — though the warps are much less of it
-than they were, because the pixel check no longer aliases across a scale gap.
+9,189 pairs. The worst rows, out of 62 seeds: `crop_micro` 41 (a twentieth of
+the frame), `embed_tiny` 55, `contact_sheet` 55, `halftone` 56, `crop_strip_top`
+57, `scale_small` 58, `tiled_watermark` 59, `wave_vertical` 59. The pattern is
+what it has always been — very small crops, heavy downscales, and warps that
+break a fitted affine model — though the warps are much less of it than they
+were, because the pixel check no longer aliases across a scale gap.
 
-Two rows where a competitor still leads: PDQ takes `halftone` 58/62 against 56,
-and SSCD `rot180` 61 against 60. `rot180` is a cost of the anchor's
-enclosure test and is worth revisiting if it grows. img-fp no longer trails on
-the warps — `perspective_top` and `keystone_side` are 61/62, level with SSCD,
-and it leads on `barrel_distort` 58 against 48 and `wave_vertical` 57 against
-49.
+**One row where a competitor still leads**, down from two: PDQ takes `halftone`
+58/62 against 56. `rot180` was the other, and is now 62/62 against SSCD's 61 —
+it had been a cost of the anchor's enclosure test, and the mean-correlation
+block score pays it back. img-fp now leads on every warp row, `perspective_top`
+and `keystone_side` included at 62 against SSCD's 61, having been level before;
+`barrel_distort` is 61 against 48 and `wave_vertical` 59 against 49.
 
-A note on the traps, since they dominate both FP counts and will keep doing so:
+A note on the traps, since they are now the *whole* FP count and will keep
+growing as recall does:
 `column_roll_37` slides an image sideways and wraps, leaving 63% of it a rigid
 translation of the original, so a crop landing inside that 63% genuinely *is*
 present in both files. The corpus calls such pairs DIFFERENT on the scramble
@@ -246,28 +276,95 @@ and with no second corpus nothing will catch that. `benchmark/VALIDATION.md`
 records how the parameter surface was cut and what the held-out corpus proved
 while it existed; read it before adding a knob back.
 
-Applying that rule took the CLI from 13 result-changing options to 8, the
+Applying that rule took the CLI from 13 result-changing options to 7, the
 acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
-at equal F1 on the corpus the numbers came from and better F1 on one they had
-never seen. Removing a parameter is the cheap experiment; run it before adding
-one.
+at equal or better F1 every time. Removing a parameter is the cheap experiment;
+run it before adding one.
 
-The acceptance policy is now down to **zero** fitted numbers beyond the CLI's
-own defaults and `CLUSTER_SLACK_*`: `MIN_BLOCKS` and `inliers_per_octave` were
-both deleted once the pixel check stopped aliasing, each verified by deleting
-it and measuring. Neither cost anything; the surcharge's removal was worth
-0.4 points of recall on its own. What replaced them is not a threshold —
-`encloses_centre` asks about position, not degree, so it has no magnitude to
-fit.
+**How to tell whether a number is fitted, with no held-out corpus.** Two
+measurements, and they answer different questions. *Sweep it and look at the
+shape*: a value sitting on a plateau is not carrying corpus-specific
+information, one balanced on a peak is. *Score the same runs on two disjoint
+halves of the seeds* (`pair_relation` is per-seed, so a half is exactly the
+corpus you would have had with only those seeds) and check that the shape
+reproduces. Every knob swept this way reproduced its shape on both halves under
+two different splits — so the parameter surface is not balanced on these 62
+photographs, which is the thing that was worth knowing.
 
-Two things that did *not* survive deletion, and why they stay — both measured
-against the held-out corpus while it still existed:
+It also says what the sweeps are *not* evidence for. A value chosen because it
+topped the F1 column is still fitted, plateau or no, and the halves cannot
+catch that: both halves prefer the same over-fitted value. That is why the
+thresholds below moved only where something other than F1 moved with them.
+
+**What a threshold sweep hides: the cliff.** F1 is a poor guide here because
+every acceptance threshold is monotone in it over the usable range — looser is
+always better — right up to the point where two families merge and thousands of
+false pairs arrive at once. So sweep for the *cliff*, not the peak, and quote
+the distance to it. Measured on this corpus: `--min-inliers` is clean at 8 and
+catastrophic at 7 (8,148 cross-family pairs, 9 merges); `--min-agreement` is
+clean at 0.45 and merges at 0.40. The shipped values keep the same margin the
+previous build had, which is why neither of them moved to the value that
+scored best.
+
+**The fourth pass, and what it removed.** Five numbers, all verified by
+deleting each and measuring, then by re-measuring the survivors in the deleted
+ones' absence:
+
+- **The Lowe ratio test** (`--ratio 0.9`) and its CLI option. Swept 0.70 to
+  1.0 — the whole usable range — it moved F1 by 0.001 and false pairs by single
+  digits, on both halves independently. Nothing here decides anything on a
+  descriptor distance: an ambiguous correspondence is one vote for a transform
+  that must then explain hundreds of others and survive the pixels.
+- **`PROP_NCC` (0.7)**, the propagated tier's whole-overlap correlation bar.
+  Made redundant by the mean-correlation block score, which says the same thing
+  better: with the old counting score, deleting it cost 2 merges and 92
+  cross-family pairs; with the new one, deleting it is worth **0.8 points of
+  recall and costs nothing at all**.
+- **`PROP_GAP` (3.0)**, the octave-gap bar. Inert: identical output at 4, at 6
+  and at infinity, and slightly *better* than at 3.
+- **The per-block agreement cut (0.5)**, subsumed by averaging |r| instead of
+  counting blocks over a bar.
+- **The block-coverage fraction (4/5)**, replaced by "the block is wholly
+  inside the overlap" — same output, no fraction.
+
+And one value re-derived rather than removed: the geometric inlier tolerance,
+**0.03 of the frame diagonal to 0.015**. Every value from 0.010 to 0.025 is
+within 0.001 of the same F1 *and* leaves zero cross-family pairs, so the choice
+is made on a plateau; 0.03 is off the end of it, and under the new rule it is
+not merely worse but **unsafe — 2 wrong merges and 98 cross-family pairs**.
+That is the one threshold here whose old value the new rule made dangerous, and
+the reason to re-measure every surviving number after a removal rather than
+only the removed ones.
+
+**One that looked removable and is not, which is why combinations must be
+re-tested.** `max_scale` (16.0) is inert on its own — deleting it changes
+nothing measurable. Deleted *together with* the ratio test it costs 15
+cross-family pairs, because it is what catches a wrong transform at an extreme
+scale ratio once nothing filters ambiguous correspondences. A single-knob sweep
+cannot see this. Every removal above was therefore re-measured stacked, not
+just alone.
+
+Three things that did *not* survive deletion, and why they stay:
 
 - **Three acceptance tiers.** Folding corroboration in with propagation looks
   right and is wrong: a corroborated pair has features vouching for it, a
-  propagated one does not. Two tiers cost 4.2 points of held-out recall.
+  propagated one does not. Two tiers cost 4.2 points of held-out recall. This
+  one was **not** re-measured in the v9 pass — it is the older evidence, and
+  the tiers now differ only in which bars apply, so re-testing it is the
+  obvious next experiment rather than a settled result.
 - **The cluster margin** (`CLUSTER_SLACK_*`). Without it, corroborated pairs
-  face the anchor bar and held-out recall falls from 93.2% to 90.7%.
+  face the anchor bar and held-out recall falls from 93.2% to 90.7%; under the
+  new rule, dropping it still costs 0.4 points of this corpus's recall.
+- **`encloses_centre` and the bridge test**, neither of which is a number.
+  Both were re-measured against the shipped build, and both now matter far
+  more than they did: without the enclosure test, **36 wrong merges and 18,334
+  cross-family pairs**; without the bridge test, **4 and 3,683**. Under the old
+  rule the same two deletions cost 20/384 and 2/50. That is the honest shape of
+  this pass — the numbers it removed were doing less work than they looked, and
+  what is left standing between the tool and a bad merge is two rules that have
+  no magnitude to fit. Raising the bridge test's far-side bound from 2 to 3
+  changes nothing (0 cross-family pairs either way), which is what "more than
+  one file" being a statement rather than a threshold looks like.
 
 Things that generalise badly and were fixed rather than tuned: the vocabulary
 was a fixed 65,536 words at any corpus size, which made img-fp nearly useless
@@ -276,26 +373,74 @@ follows the descriptor count.
 
 ### Speed and memory, and what has already been tried
 
-The pipeline has been gone over twice with a profiler, both times for
+(The fourth pass over the parameters, above, is **level on the clock**: six
+alternating pairs on the full corpus, cooled to a common ceiling before each
+run, at 769 s of CPU against 781 s. The median is **-0.7%** and four of the six
+are at or below zero; the +1.6% mean is carried entirely by one +14% pair whose
+baseline run was the fastest of the twelve. The pass removes the ratio test's
+runner-up bookkeeping and two per-pair acceptance checks, and spends that on
+the 4,425 extra pairs it finds, which propagation and corroboration then have
+to carry. Do not read a real difference into it either way; the spread is why.)
+
+The pipeline has been gone over three times with a profiler, every time for
 **byte-identical output**: the same 223,673 pairs and the same 68 groups, field
 for field. That constraint is what makes this list safe to trust — nothing here
 traded a pair for a second, and the check is one command (`-o a.json` before,
-`-o b.json` after, compare the `pairs` sets). Measured by `bench.py` with the
-old build re-run in the same session: **163 s and 1,739 MB, then 131 s and
-1,178 MB, now 105 s and 875 MB.**
+`-o b.json` after, compare the `pairs` sets). Run it against the **whole**
+corpus, not a subset: the third pass had two changes that were identical on the
+636-file subset and moved 126 pairs on the full one, and one of the two was a
+float multiplication reassociated by accident, which is not a thing careful
+reading finds.
 
-Read that clock figure with the MHz column beside it, as `BASELINE.md` insists.
-Three alternating pairs on the full corpus gave 131.4 s to 107.8 s, 137.2 s to
-120.2 s and 136.2 s to 105.5 s; only the middle pair had the two builds at the
-same mean clock (2199 against 2245 MHz), and it is the smallest of the three at
-12%. The controlled measurement is the 636-file subset, four alternating pairs
-with the die cooled to idle + 3 C before each: **12.41 s to 11.13 s of wall and
-80.3 s to 72.1 s of CPU**, about 10%. The full corpus gains more than that
-because finishing sooner also means running cooler for longer — real on this
-laptop, and not a claim about the work removed. Peak memory needs no such
-caveat: 1,178 MB to 875 MB, and the new figure is steady across runs (866-886)
-where the old one wandered between 1,114 and 1,516 MB depending on which large
-files happened to decode together.
+The third pass is worth **about 9% of the CPU and 7% of the wall clock**. Six
+alternating pairs on the full corpus, die cooled to the same ceiling before
+each run, three of them against the build as it finally stands and three
+against the same build without its last change:
+
+```
+   wall  129.4 -> 118.2   137.8 -> 127.6   137.2 -> 124.2
+    cpu    862 ->   781     892 ->   825     891 ->   792
+   wall  114.8 -> 124.8   130.8 -> 121.6   128.8 -> 116.5
+    cpu    816 ->   821     877 ->   800     864 ->   772
+```
+
+Five of the six pairs are 7-11% of CPU. The sixth is level, and its baseline
+run is the fastest of the nine baseline runs taken that day — 114.8 s against
+a spread of 115 to 138 s for the same binary on the same corpus. That spread
+is what the protocol exists for, and it is also why the pairs are quoted
+rather than averaged into one number. CPU seconds are the steadier of the two
+columns: over all nine runs of each build, 863 s against 788 s.
+
+Under `bench.py`'s own protocol — cold page cache, one run each — the two
+builds came out at 96.2 s and 95.1 s, at 2,647 and 2,571 MHz respectively and
+with two gigabytes of cold reads in both. Worth remembering before quoting
+either number: the *same* binary measured 96 s under `bench.py` and 129-138 s
+in the alternating runs an hour later, on a warmer machine.
+
+The two passes before it were measured the same way and came to **163 s and
+1,739 MB, then 131 s and 1,178 MB, then 105 s and 875 MB**, each figure from
+`bench.py` with the old build re-run in the same session.
+
+**Peak memory is not a property of the build alone**, and those absolute
+figures should be read with that in mind. It is the steady state — a few
+hundred kilobytes of descriptors and a thumbnail per image, about 650 MB here —
+plus however much decoded picture the workers happen to be holding, and that
+second term is bounded by `decode_budget`, which is a fraction of what the
+machine reports *free*. The same baseline binary on the same corpus measured
+875 MB in one session and 1,050 MB in another, because `MemAvailable` differed.
+Within a session it still wanders: 861, 925, 947, 989, 1,008, 1,027 and
+1,050 MB on seven runs of the same binary, set by which large files happen to
+decode together. So a memory change worth
+less than 10% cannot be seen at `-j 8` at all, and the only deterministic
+reading is `-j 1`, where there is one decode in flight and the walk order
+decides everything. Measured there, the third pass is **785 MB to 770 MB**
+(803,596 and 804,668 KB against 787,192 and 790,208 KB, two runs each) — the
+shared analyses and the three Gaussian planes, and about as much as those two
+are worth. At `-j 8` the six runs of each average 977 MB against 914 MB, which
+points the same way and proves nothing, given the spread above.
+
+The two figures together are the shape of the thing: what the program *holds*
+went down by 15 MB, and what it *peaks at* on eight threads is mostly not that.
 
 **What this machine is limited by, which decides what is worth trying at all.**
 One busy core boosts to 3.2 GHz; eight run at 1.27 GHz, and the extraction
@@ -310,9 +455,103 @@ issued. So measure a change at `-j 1` to learn whether it is faster, and at
 half of what the single-threaded number promised, and the ones that survived
 are the ones that move less memory.
 
-Where the time goes now: decode ~30%, feature extraction ~50%, everything
-after it ~20%. Within extraction the descriptor is the largest single item and
-is at its practical limit.
+Where the time goes now: decode ~35%, feature extraction ~45%, everything
+after it ~20%. Within extraction the descriptor is the largest single item, and
+within decode it is JPEG — `--features prof` prints the whole table at the end
+of a run, which is how the third pass below was aimed.
+
+That table also settles a question worth not re-asking: the corpus's five
+exotic formats are *not* where the decode time is. WebP, TIFF, JXL and the
+libheif formats together are 431 of 5,638 files and about 80 CPU-seconds
+against JPEG's 171 — four times the cost per file and a twelfth of the total.
+A faster HEIC path would be worth 3% of the run, and there is no faster JPEG
+path to reach for; see the DCT-scaled entry under *Tried and rejected*.
+
+What was worth doing in the **third** pass. Every entry here removes
+instructions from a loop that was already vectorised or already tight, which
+is why they are small individually and worth 10% of the CPU together. The four
+that were tried and thrown away are at the end of *Tried and rejected*, and
+three of the four are restructurings that looked obviously better:
+
+- **The descriptor turned three floats into integers the expensive way.**
+  `rbin`, `cbin` and `obin` have just been tested into ranges a few units
+  wide, and the orientation bin is then folded into 0..8 by two branches. Rust
+  spells `as i32` as a *saturating* conversion — a compare and a conditional
+  move around the truncation — and the fold was six instructions where masking
+  off the low three bits is one and gives the same answer for every input the
+  bin can hold. That is seventeen instructions per sample, and the extractor
+  takes some five billion samples over this corpus. With the same treatment of
+  the Gaussian weight table's index and a float column counter in place of an
+  integer one converted per sample, the descriptor is **18% faster** — the
+  largest single item in the run, and it had looked finished.
+- **And its row sweep was two jobs in one loop.** Working out where a sample
+  falls in the grid and how much gradient it carries there is a short chain of
+  multiplies, the same for every sample and nothing a compiler cannot run
+  eight at a time; adding those contributions into the histogram is a scatter
+  and has to go one sample after another. Interleaved, the scatter held the
+  arithmetic to one sample at a time as well. Sweeping sixteen samples for the
+  first and then sixteen for the second is another **11%**, and the weight is
+  now taken for samples that fall outside the grid too — cheaper than the
+  branch that skipped them.
+- **The extremum sweep compared each pixel against eight neighbours twice.**
+  "At least as large as all eight" is "at least as large as the largest of
+  them": seven comparisons instead of eight tests and their seven
+  conjunctions, and the same again for the minimum. A difference of two finite
+  blurs is finite, so the two forms have no NaN to disagree about.
+- **The pixel check located every grid sample from scratch.** The comparison
+  grid is walked in A's own frame, so a sample's column in A's thumbnail
+  depends only on `ix` and its row only on `iy`: ninety-six clamps and
+  truncations per pyramid level rather than two thousand three hundred pairs
+  of them. What is left per sample is the four reads and three interpolations
+  that actually look at the picture. Watch the associativity when doing this —
+  `(x * scale) * f` is not `x * (scale * f)`, and folding the two factors
+  moved 126 pairs.
+- **The grey reduction's lookup table was costing more than the division it
+  saved.** Dividing a three-byte channel sum by three was replaced, in the
+  second pass, by a table of the 766 quotients — right for one divide, wrong
+  here, because a table lookup is a *gather* and it was the one thing in that
+  loop the compiler could not vectorise around. Eight lanes dividing at once
+  beat eight lanes waiting on eight scattered loads; the quotient is the same
+  float either way, since the table held nothing but this division taken at
+  compile time. The alpha blend went the same way: skipping it for opaque
+  pixels is a branch per pixel, and the branch cost more than the blend.
+- **The geometry stage finished hypotheses that had already lost.** Every
+  correspondence proposes a transform and every transform is scored against
+  every correspondence, but a wrong transform explains two or three of them
+  out of hundreds. Once the correspondences still to be tested cannot carry
+  the running total past the best count so far, nothing the rest of them say
+  can change what the caller does.
+- **The vocabulary descent asked the tree the same question for every
+  descriptor.** Which of a node's sixteen children are live, and where their
+  centres start, are facts settled when the tree was built; the descent was
+  scanning a sixteen-wide slot table twice to rediscover them. And the
+  frontier — up to forty-eight entries — was fully sorted to choose the three
+  that survive, which is ordering forty-five nodes about to be discarded. A
+  scan takes the three instead, and falls back to the sort in the rare case
+  where an exact tie across the boundary means the distances do not decide the
+  answer at all.
+- **The area resampler proved a bounds four times per output pixel** to do two
+  multiply-adds, and zeroed its output plane before overwriting every element
+  of it.
+
+And for memory:
+
+- **Byte-identical files held a second copy of an analysis they share.** The
+  exact pass elects one member of each group and the rest are copied from it —
+  and a copy is a megabyte-scale buffer for bytes that are the same bytes.
+  They share it now.
+- **Gaussian layers were held after the last thing that reads them.** Three of
+  the `s + 3` are dead the moment the differences are taken: the octave's own
+  base, and the two that exist only to make the top two differences. That was
+  eleven full-size planes per worker at the widest point of the pyramid, on
+  eight workers at once, for three planes nothing would read again.
+- **The working image was copied to become the base of the pyramid**, when the
+  blur that makes the base could read it where it lies.
+- **A decode's claim on the shared budget did not cover everything the decode
+  holds** — not the file's own bytes, and not the float plane the reduction
+  writes while the decoder's buffer is still alive, which for a picture
+  already near the working size is four bytes a pixel against the decoder's
+  three. A budget that under-counts is not a budget.
 
 What was worth doing in the **second** pass, in order of what it returned. The
 two largest move fewer bytes rather than fewer instructions, which is what the
@@ -480,6 +719,45 @@ works on this laptop:
   measurable change: most query keypoints have too few candidates for a
   runner-up to exist at all, and the two images' descriptor blocks are 76 KB
   apiece and already in L2 by the second pair that uses them.
+- *Filtering the blur in vertical strips*, so that the ring of filtered rows —
+  fifty kilobytes at full width, which is larger than any L1 data cache, and
+  read whole for every output row — would fit in one. **29% slower.** The
+  strips re-read the source plane once each and write the output in columns,
+  and that costs more than the second-level hits it saves. This is the third
+  time the blur has been asked to work on part of a row at a time and the
+  third time the answer has been no; the plain full-width row loop wins.
+- *Folding four kernel taps into one pass over the blur's accumulator row*, so
+  that the running total is loaded and stored once per group rather than once
+  per tap. Byte-identical and free, and worth nothing: what the column pass
+  waits on is the ring, not the accumulator, which was in L1 all along.
+- *Writing the descriptor's eight histogram corners as four two-wide
+  read-modify-writes.* The corners are four adjacent pairs, so this looks like
+  half the stores for nothing — but the compiler had already paired them, and
+  saying so by hand with unaligned two-element reads and writes was slightly
+  worse.
+- *Sixteen and thirty-two outputs at a time in the blur's horizontal pass*
+  rather than eight, for more independent accumulators per tap loop. Both
+  lose: 6.4 ms for the five blurs of an octave at eight, 7.0 at sixteen, 7.1
+  at thirty-two. Eight floats is one vector register and the tap loop wants
+  the rest of them for the taps.
+- *Handing the area resample the grey values a row at a time*, so that the
+  full-resolution float plane between the two — twelve megabytes for a
+  four-megapixel photograph, written once and read once — never exists. **25%
+  slower on RGB**, and this is the surprise: the resample reads that plane
+  strictly sequentially, which the prefetcher serves for nothing, so the
+  "saved" traffic was never being waited on, while a loop boundary per row of
+  the source is real. It *is* faster for greyscale, where the conversion is
+  trivial and the plane is all there is — which is not what a corpus of
+  photographs looks like.
+- *Measuring a frontier's parents together in the vocabulary descent.* Each
+  child's distance is a chain of 128 dependent additions, so three parents'
+  chains ought to interleave and fill the adder's latency. **2.6x slower** —
+  three sets of sixteen running sums is forty-eight floats of accumulator and
+  the register file gives out. Merely gathering the three parents' blocks into
+  an array of slices first, without changing the arithmetic at all, was
+  already **2x slower** than reading each parent's block where it is. The
+  measurement is `cargo test --release -- --ignored --nocapture quantise`,
+  which runs the descent alone on one core in a few seconds.
 
 **How to measure any of this.** Wall time and CPU seconds on this laptop swing
 25% with the die temperature, and `time` does not report the clock. Build both
@@ -489,6 +767,38 @@ clock-independent "work" figure — it looks principled and the thermal governor
 makes it non-linear enough to reverse a result. The subset
 `derived/Desktop` (636 files, ~13 s) is enough to compare extraction changes,
 and `--cache` isolates everything after it.
+
+Three tools, in increasing isolation, and it is worth reaching for the most
+isolated one that can answer the question:
+
+- **`--features prof`** adds a per-stage CPU-second table to the end of a run:
+  decode by format, each phase of the extractor, each phase of the matcher.
+  Zero-cost without the feature — the `timed!` macro expands to its argument —
+  and it is what says *where* to look. Stages nest where the code nests, so
+  `decode:jpeg` contains `decode:codec` and `decode:reduce` contains
+  `decode:fit`; do not add the column up.
+- **`cargo test --release -- --ignored --nocapture`** runs three benchmarks of
+  the inner loops on synthetic data, on one core, in a few seconds each:
+  `kernel_timings` (blur, extract, descriptor, orientation histogram,
+  gradient), `reduce_timings` (the grey reduction at each channel layout and
+  box factor, and the area resampler) and `quantise_timings` (the vocabulary
+  descent). They report the *fastest* of nine runs, because the slow ones
+  belong to the machine. Use these to decide whether a change is worth a
+  corpus run at all — three of the four rejections above were settled here in
+  a minute apiece.
+- **`objdump -d`** on the release binary, after an `#[inline(never)]`, when
+  the question is "did that actually vectorise". `perf` does not work on this
+  box (`perf_event_paranoid` is 4) and neither does attaching a profiler
+  (`ptrace_scope` is 1), so the instruction mix in the listing is the only
+  direct evidence available.
+
+**Peak memory cannot be measured in one run at `-j 8`** — see the paragraph on
+it above. Use `-j 1`, which is deterministic, to see whether a change reduced
+what the program holds, and take several `-j 8` runs to see whether it matters.
+Note also that making *extraction* faster raises the eight-thread peak on its
+own, because each worker then spends a larger fraction of its time holding a
+decode buffer; that is what the decode budget is for, and why its claims have
+to cover everything a decode holds.
 
 ### Tuning discipline
 
@@ -501,6 +811,29 @@ settings so changing `--work-size` or `--features` invalidates it correctly.
 Note that timings taken this way are warm-cache and run about 40% faster than
 `bench.py`'s cold-cache figures. Compare tuning runs with each other, never
 with `BASELINE.md`.
+
+**Sweeping an internal constant without a rebuild per value.** The fourth pass
+swept some thirty of them. A rebuild is 70 s against a cached run's 30 s, so
+temporarily reading each constant from an environment variable — defaulting to
+the value in the file — makes the sweep three times cheaper and keeps one
+binary across the whole grid. Hard-code the conclusion and delete the
+scaffolding afterwards; then **re-measure the final build**, because an
+environment override is not always exactly what deleting the code does.
+(`--ratio 1.0` and a deleted ratio test differ on exact-distance ties. They
+agreed here, and that was worth confirming rather than assuming.)
+
+**Two things every candidate must face before it is believed**, both cheap and
+both of which caught something real in this pass:
+
+- **Score it on two disjoint halves of the seeds**, not just the whole corpus.
+  A pair belongs to a half when both its files descend from a seed in that
+  half, which makes the half exactly the corpus those seeds would have given.
+  It needs no extra runs — it re-scores the JSON already written.
+- **Split its false pairs into traps and cross-family errors.** They are not
+  the same mistake and the totals hide the difference: the change shipped here
+  *raised* the false-pair count from 832 to 1,088 while taking cross-family
+  errors from 2 to 0, because every one of the new ones is a `column_roll`
+  trap. A rule that only watches total FP would have rejected it.
 
 Measured trade-offs, so they need not be rediscovered (the seconds are from the
 old corpus and the pre-optimisation build, so read them as ratios): `--work-size`

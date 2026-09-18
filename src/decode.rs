@@ -10,6 +10,7 @@
 //! a channel-swapped copy of an image yields the same working image.
 
 use anyhow::{bail, Context, Result};
+use crate::timed;
 use image::{DynamicImage, ImageDecoder, ImageFormat};
 use std::io::Cursor;
 use std::path::Path;
@@ -145,6 +146,19 @@ fn decode_budget() -> usize {
     }
 }
 
+/// The float plane the box reduction writes while the decoder's buffer is
+/// still alive, so that a claim covers what the decode path actually holds.
+///
+/// It is not a rounding error: a picture already near the working size is not
+/// reduced at all, and its grey plane is then four bytes a pixel against the
+/// decoder's three. Leaving it out, and the file's own bytes with it, made
+/// every claim smaller than the memory it stood for, which is the one thing a
+/// budget must not be.
+fn working_bytes(w: usize, h: usize, work: usize) -> u64 {
+    let k = box_factor(w, h, work);
+    ((w / k).max(1) as u64) * ((h / k).max(1) as u64) * 4
+}
+
 /// Claims are served in the order they are made, so that a large one cannot be
 /// starved by a stream of small ones slipping past it. Without that, a worker
 /// holding a forty-megapixel photograph could wait indefinitely on a machine
@@ -203,12 +217,18 @@ fn reserve(bytes: u64) -> Permit {
 
 /// Decode a file to a working-resolution gray image.
 pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = timed!(0, std::fs::read(path).with_context(|| format!("read {}", path.display()))?);
     let kind = sniff(&bytes);
     let (w, h, gray) = match kind {
+        // The two formats that are almost all of a real corpus get their own
+        // line in the profile; everything else shares `decode:codec`.
+        Kind::Image(ImageFormat::Jpeg) => timed!(22, decode_image_crate(&bytes, ImageFormat::Jpeg, work_size)?),
+        Kind::Image(ImageFormat::Png) => timed!(23, decode_image_crate(&bytes, ImageFormat::Png, work_size)?),
+        Kind::Image(ImageFormat::WebP) => timed!(24, decode_image_crate(&bytes, ImageFormat::WebP, work_size)?),
+        Kind::Image(ImageFormat::Tiff) => timed!(25, decode_image_crate(&bytes, ImageFormat::Tiff, work_size)?),
         Kind::Image(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
-        Kind::Jxl => decode_jxl(&bytes, work_size)?,
-        Kind::Heif => decode_heif(&bytes, work_size)?,
+        Kind::Jxl => timed!(26, decode_jxl(&bytes, work_size)?),
+        Kind::Heif => timed!(27, decode_heif(&bytes, work_size)?),
         Kind::Unknown => {
             // Last resort: let the image crate guess (covers TGA/DDS, which
             // have no magic), then give up.
@@ -243,15 +263,17 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
     );
     let (dw, dh) = decoder.dimensions();
     let _permit = reserve(
-        decoder.total_bytes().saturating_mul(1 + rotates as u64)
-            + if converts { dw as u64 * dh as u64 * 4 } else { 0 },
+        bytes.len() as u64
+            + decoder.total_bytes().saturating_mul(1 + rotates as u64)
+            + if converts { dw as u64 * dh as u64 * 4 } else { 0 }
+            + working_bytes(dw as usize, dh as usize, work),
     );
-    let mut img = DynamicImage::from_decoder(decoder)?;
+    let mut img = timed!(1, DynamicImage::from_decoder(decoder)?);
     if orientation != image::metadata::Orientation::NoTransforms {
         img.apply_orientation(orientation);
     }
     let (w, h) = (img.width(), img.height());
-    let gray = dynamic_to_gray(&img, work);
+    let gray = timed!(2, dynamic_to_gray(&img, work));
     Ok((w, h, gray))
 }
 
@@ -296,28 +318,8 @@ pub fn reduce_to_gray(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, w
     };
     // Edge pixels lost to the floor division are ignored on purpose: at most
     // k-1 rows/cols of a picture already 2x the working size.
-    fit_to(g, work)
+    timed!(3, fit_to(g, work))
 }
-
-/// `sum / 3.0` for every sum three bytes can make, with room to spare so the
-/// index needs no bounds check.
-///
-/// Dividing the channel sum by three is the only division in the reduction's
-/// innermost loop, and it runs once per source pixel — seven and a half
-/// billion times over this corpus. A float division is an order of magnitude
-/// dearer than a load and, unlike almost everything else in that loop, cannot
-/// be pipelined away. The table is not an approximation of the division: the
-/// entry *is* the division, taken once at compile time, so every grey value is
-/// the same float it was.
-static MEAN3: [f32; 1024] = {
-    let mut t = [0.0f32; 1024];
-    let mut i = 0;
-    while i < 1024 {
-        t[i] = i as f32 / 3.0;
-        i += 1;
-    }
-    t
-};
 
 /// One grey sample from one source pixel: the mean of the colour channels,
 /// alpha flattened onto mid-grey.
@@ -328,24 +330,32 @@ fn grey_of<const CH: usize, const ALPHA: bool>(p: &[u8]) -> f32 {
     for c in 0..color_ch {
         v += p[c] as u32;
     }
-    // Three colour channels covers every RGB and RGBA image, one covers every
-    // greyscale, and those are the only shapes a decoder hands over. Both
-    // avoid the divide exactly rather than nearly: the table holds the same
-    // quotient, and dividing by one is the identity.
-    let mut g = match color_ch {
-        3 => MEAN3[v as usize & 1023],
-        1 => v as f32,
-        _ => v as f32 / color_ch as f32,
-    };
+    // Dividing by one is the identity and is skipped; three and anything else
+    // divide.
+    //
+    // The division used to be a table of the 766 quotients three bytes can
+    // make, on the grounds that a float divide is an order of magnitude dearer
+    // than a load. That is true of *one* divide. It is the wrong trade here,
+    // because the load is a gather: a table lookup per pixel is the one thing
+    // in this loop the compiler cannot vectorise around, and it was holding the
+    // whole reduction to a pixel at a time. Eight lanes dividing at once beat
+    // eight lanes waiting on eight scattered loads, and the quotient is the
+    // same float either way — the table held nothing but this division, taken
+    // at compile time.
+    let mut g = if color_ch == 1 { v as f32 } else { v as f32 / color_ch as f32 };
     if ALPHA {
-        // An opaque pixel is the overwhelmingly common case and the blend is
-        // then the identity — `g * 1.0 + 128.0 * 0.0` — so it is skipped
-        // rather than computed.
-        let a8 = p[CH - 1];
-        if a8 != 255 {
-            let a = a8 as f32 / 255.0;
-            g = g * a + 128.0 * (1.0 - a);
-        }
+        // The blend is taken for every pixel, opaque or not.
+        //
+        // An opaque pixel is the overwhelmingly common case and its blend is
+        // the identity — `g * 1.0 + 128.0 * 0.0` — so it used to be skipped.
+        // But skipping it means a branch per pixel, and a branch per pixel is
+        // what keeps the compiler from running a whole row of them at once;
+        // the eight-lane blend costs less than the eight tests it replaces
+        // even when all eight are opaque. Adding a positive zero to a
+        // non-negative grey is that grey, so the pixels that used to skip it
+        // get the value they always got.
+        let a = p[CH - 1] as f32 / 255.0;
+        g = g * a + 128.0 * (1.0 - a);
     }
     g
 }
@@ -359,6 +369,13 @@ fn reduce<const CH: usize, const ALPHA: bool>(w: usize, h: usize, data: &[u8], w
     if k == 1 {
         // No box reduction: every output pixel is one source pixel, so there
         // is nothing to accumulate and nothing to zero first.
+        //
+        // The plane this writes is read straight back by the area resample
+        // below, and handing that resample a row at a time instead — so the
+        // grey values never leave the first-level cache — is slower, not
+        // faster: the resample reads the plane sequentially, which the
+        // prefetcher serves for nothing, and a row at a time costs a loop
+        // boundary per row of the picture. Measured at +25% on RGB.
         for y in 0..oh {
             let line = &data[y * w * CH..(y + 1) * w * CH];
             px.extend((0..ow).map(|x| grey_of::<CH, ALPHA>(&line[x * CH..x * CH + CH]) * inv));
@@ -446,32 +463,48 @@ pub fn resize_area(g: &Gray, tw: usize, th: usize) -> Gray {
     let yw = weights(g.h, th);
     // Horizontal pass. Written once, never zeroed first: every element of it
     // is produced below before anything reads it.
+    //
+    // An output pixel averages two or three source pixels, so the work per
+    // output is a couple of multiply-adds — and around them stood four index
+    // bounds to prove, one of them per tap. Taking the taps and the source
+    // pixels they read as two slices of equal length proves the lot once. The
+    // taps are the same taps, read in the same order.
     let mut tmp: Vec<f32> = Vec::with_capacity(tw * g.h);
     for y in 0..g.h {
         let src = &g.px[y * g.w..(y + 1) * g.w];
         tmp.extend((0..tw).map(|ox| {
             let start = xw.start[ox] as usize;
             let (a, b) = (xw.at[ox] as usize, xw.at[ox + 1] as usize);
+            let ws = &xw.w[a..b];
+            let ss = &src[start..start + ws.len()];
             let mut acc = 0.0;
-            for (i, wgt) in xw.w[a..b].iter().enumerate() {
-                acc += src[start + i] * wgt;
+            for (sv, wgt) in ss.iter().zip(ws) {
+                acc += sv * wgt;
             }
             acc
         }));
     }
-    let mut out = Gray::new(tw, th);
+    // Vertical pass. The first tap writes the row instead of adding to a row
+    // of zeros, so the output plane is never zeroed — a megabyte an image that
+    // was overwritten immediately. Adding a non-negative product to zero is
+    // the product, so the rows that come out are the rows that came out.
+    let mut px: Vec<f32> = Vec::with_capacity(tw * th);
     for oy in 0..th {
         let start = yw.start[oy] as usize;
         let (a, b) = (yw.at[oy] as usize, yw.at[oy + 1] as usize);
-        let dst = &mut out.px[oy * tw..(oy + 1) * tw];
-        for (i, wgt) in yw.w[a..b].iter().enumerate() {
-            let src = &tmp[(start + i) * tw..(start + i + 1) * tw];
+        let base = px.len();
+        let w0 = yw.w[a];
+        let s0 = &tmp[start * tw..(start + 1) * tw];
+        px.extend(s0.iter().map(|v| v * w0));
+        let dst = &mut px[base..base + tw];
+        for (i, wgt) in yw.w[a + 1..b].iter().enumerate() {
+            let src = &tmp[(start + i + 1) * tw..(start + i + 2) * tw];
             for x in 0..tw {
                 dst[x] += src[x] * wgt;
             }
         }
     }
-    out
+    Gray { w: tw, h: th, px }
 }
 
 /// The source pixels each output pixel averages, flat: output `o` covers
@@ -524,7 +557,11 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     // from the header, before the render that allocates the first of them.
     let header = image.image_header();
     let nch = if header.metadata.grayscale() { 1 } else { 3 } + header.metadata.alpha().is_some() as u64;
-    let _permit = reserve((image.width() as u64) * (image.height() as u64) * nch * 9);
+    let _permit = reserve(
+        bytes.len() as u64
+            + (image.width() as u64) * (image.height() as u64) * nch * 9
+            + working_bytes(image.width() as usize, image.height() as usize, work),
+    );
     let render = image
         .render_frame(0)
         .map_err(|e| anyhow::anyhow!("jxl render: {e}"))?;
@@ -558,7 +595,9 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
     // The decoded interleaved plane, and the copy packed out of it.
     let _permit = reserve(
-        (handle.width() as u64) * (handle.height() as u64) * if has_alpha { 8 } else { 6 },
+        bytes.len() as u64
+            + (handle.width() as u64) * (handle.height() as u64) * if has_alpha { 8 } else { 6 }
+            + working_bytes(handle.width() as usize, handle.height() as usize, work),
     );
     let img = lib
         .decode(&handle, ColorSpace::Rgb(chroma), None)
@@ -600,7 +639,13 @@ mod tests {
     #[test]
     fn specialised_reduction_matches_the_general_one() {
         for &(ch, alpha) in &[(1, false), (2, true), (3, false), (4, true), (4, false)] {
-            for &(w, h, work) in &[(37usize, 23usize, 64usize), (200, 150, 32), (64, 64, 0)] {
+            // The last two shapes matter most: a picture inside twice the
+            // working size takes the fused path, where the grey values never
+            // become a plane, and it has to agree with the reference that
+            // builds one.
+            for &(w, h, work) in
+                &[(37usize, 23usize, 64usize), (200, 150, 32), (64, 64, 0), (100, 80, 64), (121, 97, 64)]
+            {
                 let data: Vec<u8> = (0..w * h * ch)
                     .map(|i| ((i * 37 + i / 17 * 11) % 251) as u8)
                     .collect();
@@ -617,5 +662,49 @@ mod tests {
         assert_eq!(sniff(b"\xFF\xD8\xFF\xE0\0\x10JFIF\0\x01\x01"), Kind::Image(ImageFormat::Jpeg));
         assert_eq!(sniff(b"\0\0\0\x18ftypavif\0\0\0\0"), Kind::Heif);
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Kind::Image(ImageFormat::WebP));
+    }
+}
+
+// ---------------------------------------------------------------- kernel timings
+
+/// Single-threaded timings of the decode-side inner loops.
+/// `cargo test --release -- --ignored --nocapture reduce_timings`
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// The fastest of several runs: the slow ones are the machine's, not the
+    /// code's.
+    fn ms(f: impl Fn()) -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..9 {
+            let t = std::time::Instant::now();
+            f();
+            best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore]
+    fn reduce_timings() {
+        for &(w, h) in &[(1200usize, 900usize), (4000, 3000)] {
+            for &(ch, alpha, name) in &[(3usize, false, "rgb8"), (4, true, "rgba8"), (1, false, "l8")] {
+                let data: Vec<u8> = (0..w * h * ch).map(|i| ((i * 37 + i / 101 * 7) % 251) as u8).collect();
+                let t = ms(|| {
+                    std::hint::black_box(reduce_to_gray(w, h, &data, ch, alpha, 640));
+                });
+                let k = box_factor(w, h, 640);
+                println!("reduce {name} {w}x{h} (k={k}): {t:8.3} ms  -> {:5.1} Mpx/s", (w * h) as f64 / t / 1000.0);
+            }
+        }
+        let mut g = Gray::new(1280, 960);
+        for (i, v) in g.px.iter_mut().enumerate() {
+            *v = ((i * 37) % 251) as f32 / 251.0;
+        }
+        let t = ms(|| {
+            std::hint::black_box(resize_area(&g, 640, 480));
+        });
+        println!("resize_area 1280x960 -> 640x480: {t:8.3} ms");
     }
 }

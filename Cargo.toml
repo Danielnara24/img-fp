@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -20,3 +20,10 @@ walkdir = "2.5.0"
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# `--features prof` adds a per-stage CPU-second table to the end of a run. It
+# is what a change to a hot loop is aimed with; see `src/prof.rs`. Without it
+# the `timed!` macro expands to its own argument, so the shipped binary pays
+# nothing for it.
+[features]
+prof = []

@@ -15,6 +15,7 @@
 //!     those hypotheses cost no extra extraction.
 
 use crate::decode::Gray;
+use crate::timed;
 
 pub const DESC_LEN: usize = 128;
 const D: usize = 4; // descriptor grid
@@ -113,6 +114,28 @@ static EXP_TABLE: std::sync::LazyLock<ExpTable> = std::sync::LazyLock::new(|| {
     }
     ExpTable(t)
 });
+
+impl ExpTable {
+    /// The sampled `exp(-t)`, for a `t` the caller knows to be non-negative.
+    ///
+    /// The index is the same one the lookup always computed. What is gone is
+    /// the saturating float-to-integer conversion Rust puts behind `as usize`
+    /// — a compare and a conditional move — and the slice bounds check, both
+    /// of which are answered by the range test that is already here. Every
+    /// Gaussian weight in the extractor comes through this, once per sample of
+    /// every orientation histogram and every descriptor.
+    #[inline(always)]
+    fn at(&self, t: f32) -> f32 {
+        if t >= EXP_RANGE {
+            return 0.0;
+        }
+        let f = t * (EXP_N as f32 / EXP_RANGE);
+        // `t` is in [0, EXP_RANGE) and finite, so `f` is in [0, EXP_N).
+        let i = unsafe { f.to_int_unchecked::<u32>() as usize };
+        debug_assert!(i < EXP_N);
+        unsafe { *self.0.get_unchecked(i) }
+    }
+}
 
 /// OpenCV's fastAtan2: degrees in 0..360, max error ~0.3 degrees.
 #[inline]
@@ -237,7 +260,13 @@ pub fn release_scratch() {
 
 /// Separable Gaussian blur with reflect-101 borders.
 fn blur(src: &Layer, sigma: f32) -> Layer {
-    BLUR_SCRATCH.with(|s| blur_into(src, sigma, &mut s.borrow_mut(), false).0)
+    blur_plane(src.w, src.h, &src.px, sigma)
+}
+
+/// The same, over a plane that is not a `Layer` — the working image itself,
+/// which the pyramid's base is a blur of.
+fn blur_plane(w: usize, h: usize, px: &[f32], sigma: f32) -> Layer {
+    BLUR_SCRATCH.with(|s| blur_into(w, h, px, sigma, &mut s.borrow_mut(), false).0)
 }
 
 /// Blur, and the difference-of-Gaussians it forms with the layer it blurred.
@@ -248,7 +277,7 @@ fn blur(src: &Layer, sigma: f32) -> Layer {
 /// still in cache — so the subtraction costs one store and the two reads it
 /// used to make are gone. Same two floats, same subtraction, same order.
 fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
-    let (g, d) = BLUR_SCRATCH.with(|s| blur_into(src, sigma, &mut s.borrow_mut(), true));
+    let (g, d) = BLUR_SCRATCH.with(|s| blur_into(src.w, src.h, &src.px, sigma, &mut s.borrow_mut(), true));
     // The `true` above is what makes the difference exist.
     (g, d.unwrap())
 }
@@ -289,10 +318,9 @@ fn blur_row(row: &[f32], padded: &mut [f32], out: &mut [f32], kc: f32, ks: &[f32
     }
 }
 
-fn blur_into(src: &Layer, sigma: f32, s: &mut BlurScratch, want_dog: bool) -> (Layer, Option<Layer>) {
+fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, want_dog: bool) -> (Layer, Option<Layer>) {
     let k = gaussian_kernel(sigma);
     let r = k.len() / 2;
-    let (w, h) = (src.w, src.h);
     let kc = k[r];
     let ks: &[f32] = &k[r + 1..];
     // The two passes are interleaved through a ring of the last `2r + 1`
@@ -331,7 +359,7 @@ fn blur_into(src: &Layer, sigma: f32, s: &mut BlurScratch, want_dog: bool) -> (L
         while filtered <= want {
             let slot = filtered % ring_rows;
             blur_row(
-                &src.px[filtered * w..(filtered + 1) * w],
+                &src[filtered * w..(filtered + 1) * w],
                 padded,
                 &mut ring[slot * w..(slot + 1) * w],
                 kc,
@@ -355,7 +383,7 @@ fn blur_into(src: &Layer, sigma: f32, s: &mut BlurScratch, want_dog: bool) -> (L
             }
         }
         if want_dog {
-            let below = &src.px[y * w..(y + 1) * w];
+            let below = &src[y * w..(y + 1) * w];
             dog.extend(acc.iter().zip(below).map(|(a, b)| a - b));
         }
         dst.extend_from_slice(acc);
@@ -433,13 +461,20 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
     while g.w.max(g.h) * factor * 2 <= p.upsample_below.max(2) {
         factor *= 2;
     }
-    let (base, init_sigma, coord_scale) = if factor > 1 {
-        (upsample(g, factor), 0.5 * factor as f32, 1.0 / factor as f32)
-    } else {
-        (Layer { w: g.w, h: g.h, px: g.px.clone() }, 0.5f32, 1.0f32)
-    };
+    // The base of the pyramid is the working image blurred up to `sigma`, or
+    // an enlargement of it when the picture is small. Where no enlargement is
+    // wanted the blur reads the working image where it lies: copying it first
+    // held a second megabyte per worker and moved it for nothing, since the
+    // blur's output is a new plane either way.
+    let (init_sigma, coord_scale) = if factor > 1 { (0.5 * factor as f32, 1.0 / factor as f32) } else { (0.5f32, 1.0f32) };
     let sig_diff = (p.sigma * p.sigma - init_sigma * init_sigma).max(0.01).sqrt();
-    let base = blur(&base, sig_diff);
+    let base = timed!(5, {
+        if factor > 1 {
+            blur(&upsample(g, factor), sig_diff)
+        } else {
+            blur_plane(g.w, g.h, &g.px, sig_diff)
+        }
+    });
 
     let min_side = base.w.min(base.h) as f32;
     let n_octaves = ((min_side.ln() / 2f32.ln()).round() as i32 - 2).max(1) as usize;
@@ -471,28 +506,46 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
 
     let mut octave_base = base;
     for o in 0..n_octaves {
-        let mut gauss: Vec<Layer> = Vec::with_capacity(s + 3);
-        gauss.push(std::mem::replace(&mut octave_base, Layer { w: 0, h: 0, px: vec![] }));
+        // A Gaussian layer is kept only as long as something still reads it.
+        //
+        // Three of the `s + 3` are dead the moment the differences are taken:
+        // layer 0 is the octave's own base, layers `s+1` and `s+2` exist only
+        // to make the top two differences, and none of the three carries a
+        // gradient. Holding all of them alongside all `s + 2` differences was
+        // eleven full-size planes per worker at the widest point of the
+        // pyramid, on eight workers at once, for three planes nothing would
+        // read again. `None` in their place says so.
+        let height = octave_base.h;
+        let mut gauss: Vec<Option<Layer>> = Vec::with_capacity(s + 3);
+        gauss.push(Some(std::mem::replace(&mut octave_base, Layer { w: 0, h: 0, px: vec![] })));
         let mut dog: Vec<Layer> = Vec::with_capacity(s + 2);
         for i in 1..s + 3 {
-            let (l, d) = blur_dog(&gauss[i - 1], sig[i]);
-            gauss.push(l);
+            let (l, d) = timed!(6, blur_dog(gauss[i - 1].as_ref().unwrap(), sig[i]));
+            gauss.push(Some(l));
             dog.push(d);
+            // `gauss[i - 1]` has produced its difference. It is read again
+            // only if a gradient is taken from it, or if the next octave
+            // starts from it.
+            if !(1..=s).contains(&(i - 1)) {
+                gauss[i - 1] = None;
+            }
         }
-        find_extrema(&dog, o, p, thr_pre, coord_scale, &mut cands);
+        // The top layer made the last difference and carries no gradient.
+        gauss[s + 2] = None;
+        timed!(7, find_extrema(&dog, o, p, thr_pre, coord_scale, &mut cands));
         // The differences have said all they have to say; the gradients below
         // need only the Gaussians, and this is the largest thing a worker
         // holds after the decode.
         drop(dog);
-        heights.push(gauss[0].h);
-        grads.push(
-            (0..s + 3)
-                .map(|i| if (1..=s).contains(&i) { Some(Grad::of(&gauss[i])) } else { None })
-                .collect(),
-        );
+        heights.push(height);
         if o + 1 < n_octaves {
-            octave_base = halve(&gauss[s]);
+            octave_base = halve(gauss[s].as_ref().unwrap());
         }
+        grads.push(timed!(8,
+            (0..s + 3)
+                .map(|i| gauss[i].take().filter(|_| (1..=s).contains(&i)).map(|l| Grad::of(&l)))
+                .collect::<Vec<_>>()
+        ));
     }
 
     // Drop repeats of one extremum found from two adjacent scales *within* an
@@ -530,45 +583,60 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
     // a textured image was describing three keypoints for every one it kept.
     const KEEP_MARGIN: usize = 8;
     let stop_at = p.max_features + KEEP_MARGIN;
-    for c in cands.iter() {
-        if feats.kps.len() >= stop_at && c.kp.response < feats.kps[stop_at - 1].response {
-            break;
-        }
-        let oct_scale = (1u32 << c.octave) as f32 * coord_scale;
-        let grad = grads[c.octave][c.layer].as_ref().unwrap();
-        let h = heights[c.octave];
-        let scl_octv = c.kp.sigma / oct_scale;
-        let px = c.kp.x / oct_scale;
-        let py = c.kp.y / oct_scale;
-        let mut hist = [0f32; ORI_BINS];
-        let radius = (ORI_RADIUS * scl_octv).round() as i32;
-        let omax = orientation_hist(grad, h, px, py, radius, ORI_SIG_FCTR * scl_octv, &mut hist);
-        let mag_thr = omax * ORI_PEAK_RATIO;
-        for j in 0..ORI_BINS {
-            let l = if j > 0 { j - 1 } else { ORI_BINS - 1 };
-            let r2 = if j < ORI_BINS - 1 { j + 1 } else { 0 };
-            if hist[j] > hist[l] && hist[j] > hist[r2] && hist[j] >= mag_thr {
-                let mut bin = j as f32 + 0.5 * (hist[l] - hist[r2]) / (hist[l] - 2.0 * hist[j] + hist[r2]);
-                if bin < 0.0 {
-                    bin += ORI_BINS as f32;
-                } else if bin >= ORI_BINS as f32 {
-                    bin -= ORI_BINS as f32;
+    timed!(9, {
+        for c in cands.iter() {
+            if feats.kps.len() >= stop_at && c.kp.response < feats.kps[stop_at - 1].response {
+                break;
+            }
+            let oct_scale = (1u32 << c.octave) as f32 * coord_scale;
+            let grad = grads[c.octave][c.layer].as_ref().unwrap();
+            let h = heights[c.octave];
+            let scl_octv = c.kp.sigma / oct_scale;
+            let px = c.kp.x / oct_scale;
+            let py = c.kp.y / oct_scale;
+            let mut hist = [0f32; ORI_BINS];
+            let radius = (ORI_RADIUS * scl_octv).round() as i32;
+            let omax = orientation_hist(grad, h, px, py, radius, ORI_SIG_FCTR * scl_octv, &mut hist);
+            let mag_thr = omax * ORI_PEAK_RATIO;
+            for j in 0..ORI_BINS {
+                let l = if j > 0 { j - 1 } else { ORI_BINS - 1 };
+                let r2 = if j < ORI_BINS - 1 { j + 1 } else { 0 };
+                if hist[j] > hist[l] && hist[j] > hist[r2] && hist[j] >= mag_thr {
+                    let mut bin = j as f32 + 0.5 * (hist[l] - hist[r2]) / (hist[l] - 2.0 * hist[j] + hist[r2]);
+                    if bin < 0.0 {
+                        bin += ORI_BINS as f32;
+                    } else if bin >= ORI_BINS as f32 {
+                        bin -= ORI_BINS as f32;
+                    }
+                    let mut angle = 360.0 - (360.0 / ORI_BINS as f32) * bin;
+                    if (angle - 360.0).abs() < 1e-5 {
+                        angle = 0.0;
+                    }
+                    let mut kp = c.kp;
+                    kp.angle = angle;
+                    let mut d = [0u8; DESC_LEN];
+                    descriptor(grad, h, px, py, angle, scl_octv, &mut d);
+                    feats.kps.push(kp);
+                    feats.desc.extend_from_slice(&d);
                 }
-                let mut angle = 360.0 - (360.0 / ORI_BINS as f32) * bin;
-                if (angle - 360.0).abs() < 1e-5 {
-                    angle = 0.0;
-                }
-                let mut kp = c.kp;
-                kp.angle = angle;
-                let mut d = [0u8; DESC_LEN];
-                descriptor(grad, h, px, py, angle, scl_octv, &mut d);
-                feats.kps.push(kp);
-                feats.desc.extend_from_slice(&d);
             }
         }
-    }
-    retain_best(&mut feats, p.max_features);
+    });
+    timed!(10, retain_best(&mut feats, p.max_features));
     feats
+}
+
+/// Larger of two, written as the comparison it is so that the compiler emits
+/// one instruction. `f32::max` carries NaN rules the scale space cannot
+/// produce and pays for them in every lane.
+#[inline(always)]
+fn fmax(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+#[inline(always)]
+fn fmin(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
 }
 
 /// The three rows of a layer centred on `y`.
@@ -645,11 +713,22 @@ fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_sc
             let (dl, dm, dr) = (&c2[lo - 1..hi - 1], &c2[lo..hi], &c2[lo + 1..hi + 1]);
             for i in 0..span {
                 let v = vc[i];
-                let ge = (v >= cl[i]) & (v >= cr[i]) & (v >= ul[i]) & (v >= um[i]) & (v >= ur[i])
-                    & (v >= dl[i]) & (v >= dm[i]) & (v >= dr[i]);
-                let le = (v <= cl[i]) & (v <= cr[i]) & (v <= ul[i]) & (v <= um[i]) & (v <= ur[i])
-                    & (v <= dl[i]) & (v <= dm[i]) & (v <= dr[i]);
-                alive[i] = ((v > thr_pre) & ge) | ((v < -thr_pre) & le);
+                // "At least as large as all eight neighbours" is "at least as
+                // large as the largest of them", and the largest of eight is
+                // seven comparisons where eight separate tests and their seven
+                // conjunctions are fifteen. Same answer for every input the
+                // pyramid can hold — a difference of two finite blurs is
+                // finite, so there is no NaN for the two forms to disagree
+                // about — over half the instructions.
+                let biggest = fmax(
+                    fmax(fmax(cl[i], cr[i]), fmax(ul[i], um[i])),
+                    fmax(fmax(ur[i], dl[i]), fmax(dm[i], dr[i])),
+                );
+                let smallest = fmin(
+                    fmin(fmin(cl[i], cr[i]), fmin(ul[i], um[i])),
+                    fmin(fmin(ur[i], dl[i]), fmin(dm[i], dr[i])),
+                );
+                alive[i] = ((v > thr_pre) & (v >= biggest)) | ((v < -thr_pre) & (v <= smallest));
             }
             for i in 0..span {
                 if !alive[i] {
@@ -808,15 +887,18 @@ fn orientation_hist(g: &Grad, h: usize, px: f32, py: f32, radius: i32, sigma: f3
         for (n, &[mag, ori]) in span.iter().enumerate() {
             let j = j0 + n as i32;
             let t = (i * i + j * j) as f32 * neg_scale;
-            let wgt = if t >= EXP_RANGE { 0.0 } else { tbl.0[(t * (EXP_N as f32 / EXP_RANGE)) as usize] };
-            let mut bin = (ori * ORI_BINS as f32 / 360.0).round() as i32;
-            if bin >= ORI_BINS as i32 {
-                bin -= ORI_BINS as i32;
+            let wgt = tbl.at(t);
+            // `ori` came out of `fast_atan2_deg` in 0..=360, so the rounded
+            // bin is in 0..=ORI_BINS: the conversion cannot saturate, the
+            // wrap can only ever fire at the top end, and the result indexes
+            // the histogram. The test for a negative bin that used to stand
+            // here could not fire at all.
+            let mut bin = unsafe { (ori * ORI_BINS as f32 / 360.0).round().to_int_unchecked::<u32>() as usize };
+            if bin >= ORI_BINS {
+                bin -= ORI_BINS;
             }
-            if bin < 0 {
-                bin += ORI_BINS as i32;
-            }
-            temphist[bin as usize] += wgt * mag;
+            debug_assert!(bin < ORI_BINS);
+            unsafe { *temphist.get_unchecked_mut(bin) += wgt * mag };
         }
     }
     let n = ORI_BINS;
@@ -865,6 +947,16 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
     debug_assert_eq!(hlen, hist.len());
 
     let tbl = &*EXP_TABLE;
+    // How many of a row's samples are worked out before any of them is added
+    // in. Sixteen is two vectors' worth on any machine this runs on and a
+    // quarter of a kilobyte of stack: wide enough that the first sweep is
+    // worth vectorising, narrow enough to stay in the first-level cache.
+    const SWEEP: usize = 16;
+    let mut sw_mag = [0f32; SWEEP];
+    let mut sw_ori = [0f32; SWEEP];
+    let mut sw_rb = [0f32; SWEEP];
+    let mut sw_cb = [0f32; SWEEP];
+    let mut sw_in = [false; SWEEP];
     for i in -radius..=radius {
         let r = pt_y + i;
         if r <= 0 || r >= rows - 1 {
@@ -898,32 +990,69 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
         }
         let row = r as usize * g.w;
         let span = &g.px[row + (pt_x + j0) as usize..row + (pt_x + j1) as usize + 1];
-        for (n, &[m, o]) in span.iter().enumerate() {
-            let j = j0 + n as i32;
-            let c_rot = j as f32 * cos_t - i as f32 * sin_t;
-            let r_rot = j as f32 * sin_t + i as f32 * cos_t;
-            let rbin = r_rot + (D / 2) as f32 - 0.5;
-            let cbin = c_rot + (D / 2) as f32 - 0.5;
-            if rbin > -1.0 && rbin < D as f32 && cbin > -1.0 && cbin < D as f32 {
+        // The row is swept twice.
+        //
+        // The first sweep works out what each of its samples contributes:
+        // where the sample falls in the descriptor's grid, and how much of the
+        // gradient it carries there. That is the same short chain of multiplies
+        // for every sample and nothing a compiler cannot run eight at a time.
+        // The second adds those contributions into the histogram, which is a
+        // scatter and has to go one sample after another. Interleaved, the
+        // scatter was holding the arithmetic to one sample at a time too.
+        //
+        // The column counter is carried as a float. It only ever grows by one
+        // and stays inside the search radius, so each value is exactly the
+        // integer it stands for — and the integer-to-float conversion that
+        // opened this loop, once for every sample of every descriptor in the
+        // corpus, is gone.
+        let mut jf = j0 as f32;
+        for block in span.chunks(SWEEP) {
+            for (u, &[m, o]) in block.iter().enumerate() {
+                let jj = jf + u as f32;
+                let c_rot = jj * cos_t - fi * sin_t;
+                let r_rot = jj * sin_t + fi * cos_t;
+                let rbin = r_rot + (D / 2) as f32 - 0.5;
+                let cbin = c_rot + (D / 2) as f32 - 0.5;
                 let t = (c_rot * c_rot + r_rot * r_rot) * neg_exp_scale;
-                let wgt = if t >= EXP_RANGE { 0.0 } else { tbl.0[(t * (EXP_N as f32 / EXP_RANGE)) as usize] };
-                let mag = m * wgt;
-                let obin = (o - ori) * bins_per_rad;
-                let r0 = rbin.floor();
+                // The weight is taken for every sample, inside the grid or
+                // not: `at` is defined for any non-negative `t` and a sample
+                // that falls outside is thrown away below, unweighed.
+                sw_mag[u] = m * tbl.at(t);
+                sw_ori[u] = (o - ori) * bins_per_rad;
+                sw_rb[u] = rbin;
+                sw_cb[u] = cbin;
+                sw_in[u] = rbin > -1.0 && rbin < D as f32 && cbin > -1.0 && cbin < D as f32;
+            }
+            jf += block.len() as f32;
+            for u in 0..block.len() {
+                if sw_in[u] {
+                    let (rbin, cbin) = (sw_rb[u], sw_cb[u]);
+                    let mag = sw_mag[u];
+                    let obin = sw_ori[u];
+                    let r0 = rbin.floor();
                 let c0 = cbin.floor();
                 let o0 = obin.floor();
                 let rb = rbin - r0;
                 let cb = cbin - c0;
                 let ob = obin - o0;
-                let mut o0i = o0 as i32;
-                if o0i < 0 {
-                    o0i += N as i32;
-                }
-                if o0i >= N as i32 {
-                    o0i -= N as i32;
-                }
-                let r0i = r0 as i32;
-                let c0i = c0 as i32;
+                // `rbin` and `cbin` are inside (-1, D) — the test above says
+                // so — and `obin` is inside (-N, N], since it is an angle
+                // difference scaled into bins. So all three floors are small
+                // integers and the conversions cannot saturate; saying so
+                // replaces five instructions apiece with one, three times for
+                // every sample of every descriptor.
+                let (r0i, c0i, o0i) = unsafe {
+                    (
+                        r0.to_int_unchecked::<i32>(),
+                        c0.to_int_unchecked::<i32>(),
+                        o0.to_int_unchecked::<i32>(),
+                    )
+                };
+                // Folding the orientation bin back into 0..N. It is in
+                // -N..=N, where masking off the low bits is the same two
+                // adjustments the two branches made — and N is eight.
+                debug_assert!((-(N as i32)..=N as i32).contains(&o0i));
+                let o0i = o0i & (N as i32 - 1);
                 // trilinear
                 let v_r1 = mag * rb;
                 let v_r0 = mag - v_r1;
@@ -962,6 +1091,7 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
                     *h.add(stride_r + 1) += v_rco101;
                     *h.add(stride_r + stride_c) += v_rco110;
                     *h.add(stride_r + stride_c + 1) += v_rco111;
+                }
                 }
             }
         }
@@ -1063,5 +1193,94 @@ pub fn invert_perm() -> [u8; DESC_LEN] {
 pub fn permute(desc: &[u8], perm: &[u8; DESC_LEN], out: &mut [u8]) {
     for i in 0..DESC_LEN {
         out[i] = desc[perm[i] as usize];
+    }
+}
+// ---------------------------------------------------------------- kernel timings
+
+/// Single-threaded timings of the extractor's inner loops, for comparing two
+/// builds without the thermal and power-cap noise a whole-corpus run carries.
+/// `cargo test --release -- --ignored --nocapture kernel_timings`
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    fn synthetic(w: usize, h: usize) -> Layer {
+        let mut px = vec![0f32; w * h];
+        let mut s = 0x1234_5678u32;
+        for v in px.iter_mut() {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = ((s >> 16) & 0xff) as f32 / 255.0;
+        }
+        // Some structure, so the extremum sweep and the descriptor behave.
+        for y in 0..h {
+            for x in 0..w {
+                px[y * w + x] = px[y * w + x] * 0.3
+                    + (((x / 17 + y / 13) % 5) as f32) * 0.15
+                    + ((x as f32 * 0.05).sin() * (y as f32 * 0.03).cos()) * 0.2;
+            }
+        }
+        Layer { w, h, px }
+    }
+
+    /// The fastest of several runs: the slow ones are the machine's, not the
+    /// code's.
+    fn ms(f: impl Fn()) -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..9 {
+            let t = std::time::Instant::now();
+            f();
+            best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore]
+    fn kernel_timings() {
+        let base = synthetic(640, 480);
+        for sigma in [1.226f32, 1.545, 1.946, 2.452, 3.089] {
+            let t = ms(|| {
+                std::hint::black_box(blur_dog(&base, sigma));
+            });
+            println!("blur_dog sigma {sigma:.3} (r={}): {t:8.3} ms", gaussian_kernel(sigma).len() / 2);
+        }
+        let g = crate::decode::Gray { w: 640, h: 480, px: base.px.clone() };
+        let p = Params::default();
+        let t = ms(|| {
+            std::hint::black_box(extract(&g, &p));
+        });
+        println!("extract 640x480: {t:8.3} ms ({} features)", extract(&g, &p).len());
+
+        // Describe alone: one octave's gradients, every candidate described.
+        let gauss = blur(&base, 1.0);
+        let grad = Grad::of(&gauss);
+        let t = ms(|| {
+            let mut d = [0u8; DESC_LEN];
+            let mut acc = 0f32;
+            for i in 0..2000 {
+                let x = 60.0 + ((i * 37) % 500) as f32;
+                let y = 60.0 + ((i * 53) % 340) as f32;
+                descriptor(&grad, 480, x, y, (i % 360) as f32, 1.6 + (i % 5) as f32 * 0.3, &mut d);
+                acc += d[0] as f32;
+            }
+            std::hint::black_box(acc);
+        });
+        println!("2000 descriptors: {t:8.3} ms");
+        let t = ms(|| {
+            let mut hist = [0f32; ORI_BINS];
+            let mut acc = 0f32;
+            for i in 0..2000 {
+                let x = 60.0 + ((i * 37) % 500) as f32;
+                let y = 60.0 + ((i * 53) % 340) as f32;
+                let scl = 1.6 + (i % 5) as f32 * 0.3;
+                acc += orientation_hist(&grad, 480, x, y, (ORI_RADIUS * scl).round() as i32, ORI_SIG_FCTR * scl, &mut hist);
+            }
+            std::hint::black_box(acc);
+        });
+        println!("2000 orientation hists: {t:8.3} ms");
+        let t = ms(|| {
+            std::hint::black_box(Grad::of(&gauss));
+        });
+        println!("Grad::of 640x480: {t:8.3} ms");
     }
 }

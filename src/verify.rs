@@ -10,8 +10,8 @@
 //!
 //! Three tests, in increasing cost:
 //!
-//! 1. **Correspondences.** Descriptors that match across the two images,
-//!    filtered by Lowe's ratio test.
+//! 1. **Correspondences.** For each descriptor of one image, the nearest
+//!    descriptor of the other among those sharing a vocabulary word.
 //! 2. **Geometry.** A similarity transform is proposed by every single
 //!    correspondence (a SIFT keypoint carries its own scale and orientation,
 //!    so one match is enough), the best is kept by inlier count, then refined
@@ -23,6 +23,7 @@
 
 use crate::decode::Gray;
 use crate::sift::{Features, Keypoint, DESC_LEN};
+use crate::timed;
 
 /// 2x3 row-major affine: b = M * (a, 1).
 pub type Affine = [f32; 6];
@@ -63,7 +64,7 @@ pub struct Verdict {
     pub ov_b: f32,
     pub scale: f32,
     pub rot_deg: f32,
-    /// Fraction of comparable blocks whose content agrees.
+    /// Mean correlation over the blocks of the overlap that carry detail.
     pub blk: f32,
     pub blk_n: u32,
     pub ncc: f32,
@@ -96,10 +97,7 @@ pub struct Rules {
     pub min_inliers: u32,
     pub min_overlap: f32,
     pub min_block_agreement: f32,
-    pub min_ncc: f32,
     pub max_scale: f32,
-    /// Largest scale gap, in octaves, a claim may rest on.
-    pub max_gap_octaves: f32,
     /// Whether the match's own correspondences must enclose the centre of the
     /// overlap it claims.
     ///
@@ -158,23 +156,15 @@ const BLOCK: usize = 8;
 const CLUSTER_SLACK_INLIERS: u32 = 2;
 const CLUSTER_SLACK_AGREEMENT: f32 = 0.1;
 
-/// How well the whole overlap must correlate when *only* pixels are talking.
-const PROP_NCC: f32 = 0.7;
-/// How far a pixels-only claim may reach across scale, in octaves. Beyond
-/// this the smaller image is being compared against a blur.
-const PROP_GAP: f32 = 3.0;
-
 impl Default for Rules {
     fn default() -> Self {
         Rules {
             min_inliers: 8,
             min_overlap: 0.85,
             min_block_agreement: 0.6,
-            min_ncc: 0.0,
             // A sanity bound, not a tuned one: past a sixteen-fold size ratio
             // the smaller image is a few hundred pixels against a wall.
             max_scale: 16.0,
-            max_gap_octaves: f32::INFINITY,
             centred_evidence: false,
         }
     }
@@ -238,8 +228,6 @@ impl Policy {
             anchor,
             propagated: Rules {
                 min_inliers: 0,
-                min_ncc: PROP_NCC,
-                max_gap_octaves: PROP_GAP,
                 centred_evidence: false,
                 ..anchor
             },
@@ -254,11 +242,6 @@ impl Policy {
 }
 
 impl Verdict {
-    /// Size difference between the two views, in octaves.
-    pub fn gap_octaves(&self) -> f32 {
-        self.scale.max(1.0 / self.scale.max(1e-9)).max(1.0).log2()
-    }
-
     /// How much of the better-covered image this match actually accounts for.
     ///
     /// `ov_a`/`ov_b` are pure geometry: the fraction of one frame that lands
@@ -284,12 +267,10 @@ impl Verdict {
         self.scale.is_finite()
             && self.scale >= 1.0 / r.max_scale
             && self.scale <= r.max_scale
-            && self.gap_octaves() <= r.max_gap_octaves
             && self.n_in >= r.min_inliers
             && (!r.centred_evidence || self.centred)
             && self.ov_a.max(self.ov_b) >= r.min_overlap
             && self.blk >= r.min_block_agreement
-            && self.ncc.abs() >= r.min_ncc
     }
 }
 
@@ -319,50 +300,47 @@ fn dist2(a: &[u8], b: &[u8]) -> u32 {
     s
 }
 
-/// Lowe's ratio test over a restricted candidate set.
+/// Nearest neighbour in B for each keypoint of A, over a restricted candidate
+/// set.
 ///
 /// `cands` holds, for each keypoint of A, the keypoints of B worth comparing
-/// against (from the shared-word index). The second-nearest neighbour is taken
-/// from the same set, which is what makes this cheap: the ratio test needs a
-/// competitor, not the true second nearest over all of B.
+/// against (from the shared-word index).
+///
+/// There is no ratio test here. There was: Lowe's, at 0.9, comparing the best
+/// match against the runner-up from the same candidate set and dropping the
+/// ambiguous ones. It was doing nothing. Swept from 0.7 to 1.0 — which is the
+/// whole usable range, 1.0 being no test at all — it moved F1 by 0.001 and the
+/// count of false pairs by single digits, on both halves of the corpus
+/// independently. The reason is that this tool does not decide anything on a
+/// descriptor distance: an ambiguous match is one vote for a transform that
+/// then has to explain hundreds of other correspondences and survive a pixel
+/// comparison, and a wrong vote loses there. The code already said as much,
+/// in the comment excusing single-candidate keypoints from the test it no
+/// longer has.
 pub fn correspond(
     a: &Features,
     b: &Features,
     cands: &[(u32, u32)],
-    ratio: f32,
     out: &mut Vec<(u32, u32)>,
 ) {
     out.clear();
     if cands.is_empty() {
         return;
     }
-    let thr = ratio * ratio;
     let mut i = 0;
     while i < cands.len() {
         let qi = cands[i].0;
         let mut best = (u32::MAX, 0u32);
-        let mut second = u32::MAX;
         let da = a.d(qi as usize);
-        let start = i;
         while i < cands.len() && cands[i].0 == qi {
             let tj = cands[i].1;
             let d = dist2(da, b.d(tj as usize));
             if d < best.0 {
-                second = best.0;
                 best = (d, tj);
-            } else if d < second {
-                second = d;
             }
             i += 1;
         }
-        let n = i - start;
-        if best.0 == u32::MAX {
-            continue;
-        }
-        // With a single candidate there is no competitor, so the ratio test
-        // cannot run. Such a match is kept: the geometric stage is the real
-        // filter, and discarding them costs recall on sparse images.
-        if n == 1 || (best.0 as f32) < thr * second as f32 {
+        if best.0 != u32::MAX {
             out.push((qi, best.1));
         }
     }
@@ -467,7 +445,7 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     if pairs.len() < 3 {
         return None;
     }
-    let tol = (0.03 * (bw * bw + bh * bh).sqrt()).max(3.0);
+    let tol = (0.015 * (bw * bw + bh * bh).sqrt()).max(3.0);
     let tol2 = tol * tol;
     let n = pairs.len();
     // The inlier count is taken once per hypothesis and there is one hypothesis
@@ -504,8 +482,13 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
         if !(s.is_finite() && s > 1e-3 && s < 1e3) {
             continue;
         }
-        let count = count_inliers(&m, ax, ay, bx, by, tol2, &mut sc.hit);
-        if count >= 3 && best.map_or(true, |(c, _)| count > c) {
+        // What this hypothesis would have to reach to be kept at all. Almost
+        // none of them get near it — a wrong transform explains two or three
+        // correspondences out of hundreds — and a hypothesis that cannot win
+        // is not worth finishing. See `count_inliers`.
+        let need = best.map_or(3, |(c, _)| c + 1);
+        let count = count_inliers(&m, ax, ay, bx, by, tol2, &mut sc.hit, need);
+        if count >= need {
             best = Some((count, m));
             sc.mask.copy_from_slice(&sc.hit);
         }
@@ -514,9 +497,10 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     // Refine: least-squares affine on the inliers, recount, repeat while the
     // set does not shrink.
     for _ in 0..3 {
+        let held = sc.mask.iter().filter(|v| **v).count();
         let Some(m2) = fit_affine(a, b, pairs, &sc.mask) else { break };
-        let count = count_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit);
-        if count < sc.mask.iter().filter(|v| **v).count() {
+        let count = count_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit, held);
+        if count < held {
             break;
         }
         m = m2;
@@ -526,16 +510,38 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
 }
 
 /// Correspondences a transform explains, and which ones, at a fixed tolerance.
+///
+/// `need` is the count below which the caller discards the answer. Once the
+/// correspondences still to be tested cannot carry the running total that far,
+/// the rest of them cannot change what the caller does, and the sweep stops.
+/// The returned count is then short of the truth — and short of `need`, which
+/// is all the caller reads it for — and `hit` is left half-written, which is
+/// safe because the caller only copies it out of a verdict it has kept.
+///
+/// This is where the geometry stage spends itself: one hypothesis per
+/// correspondence, each scored against every correspondence. Almost all of
+/// them are wrong and explain a handful of points, so almost all of them are
+/// settled in the first chunk.
 #[inline]
-fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, hit: &mut [bool]) -> usize {
+fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, hit: &mut [bool], need: usize) -> usize {
+    const CHUNK: usize = 64;
+    let n = ax.len();
     let mut count = 0usize;
-    for k in 0..ax.len() {
-        let px = m[0] * ax[k] + m[1] * ay[k] + m[2];
-        let py = m[3] * ax[k] + m[4] * ay[k] + m[5];
-        let (dx, dy) = (px - bx[k], py - by[k]);
-        let ok = dx * dx + dy * dy < tol2;
-        hit[k] = ok;
-        count += ok as usize;
+    let mut k = 0usize;
+    while k < n {
+        let end = (k + CHUNK).min(n);
+        for t in k..end {
+            let px = m[0] * ax[t] + m[1] * ay[t] + m[2];
+            let py = m[3] * ax[t] + m[4] * ay[t] + m[5];
+            let (dx, dy) = (px - bx[t], py - by[t]);
+            let ok = dx * dx + dy * dy < tol2;
+            hit[t] = ok;
+            count += ok as usize;
+        }
+        k = end;
+        if count + (n - k) < need {
+            return count;
+        }
     }
     count
 }
@@ -726,20 +732,35 @@ impl Thumb {
         Thumb { w, h, scale, px, mips }
     }
 
-    /// Bilinear tap into one level of the pyramid.
+    /// Where a coordinate lands in a level: the pixel below it and the
+    /// fraction past it, with the clamp the tap used to carry.
+    ///
+    /// Written as comparisons rather than `clamp` so that the result is a
+    /// number even when the input is not — `clamp` propagates a NaN, and the
+    /// integer conversion below is only sound on a value known to be in range.
+    /// For every finite input it is the same clamp and the same split.
     #[inline]
-    fn tap(px: &[u8], w: usize, h: usize, x: f32, y: f32) -> f32 {
-        if w < 2 || h < 2 {
-            return px.first().copied().unwrap_or(0) as f32;
-        }
-        let x = x.clamp(0.0, w as f32 - 1.001);
-        let y = y.clamp(0.0, h as f32 - 1.001);
-        let (x0, y0) = (x as usize, y as usize);
-        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-        let i = y0 * w + x0;
-        // The clamps put x0 in 0..w-1 and y0 in 0..h-1, so the four taps are
-        // inside `px`, which is w*h long. This is the innermost read of the
-        // pixel check and runs a few thousand times per pair considered.
+    fn split(v: f32, n: usize) -> (usize, f32) {
+        let hi = n as f32 - 1.001;
+        let v = if v > 0.0 {
+            if v < hi { v } else { hi }
+        } else {
+            0.0
+        };
+        // `v` is now in [0, n - 1.001] and finite, so the truncation cannot
+        // saturate. Saying so drops the range check and the conditional move
+        // that a plain `as usize` carries — this runs four times for every one
+        // of the two thousand grid samples of every pair considered.
+        let i = unsafe { v.to_int_unchecked::<usize>() };
+        (i, v - i as f32)
+    }
+
+    /// Bilinear tap from a row pair already located: the four reads and the
+    /// three interpolations, and nothing else.
+    #[inline]
+    fn lerp(px: &[u8], w: usize, i: usize, fx: f32, fy: f32) -> f32 {
+        // The caller's `split` put the row and column inside the level, so the
+        // four taps are inside `px`, which is w*h long.
         debug_assert!(i + w + 1 < px.len());
         let (p00, p01, p10, p11) = unsafe {
             (
@@ -752,6 +773,17 @@ impl Thumb {
         let a = p00 * (1.0 - fx) + p01 * fx;
         let b = p10 * (1.0 - fx) + p11 * fx;
         a * (1.0 - fy) + b * fy
+    }
+
+    /// Bilinear tap into one level of the pyramid.
+    #[inline]
+    fn tap(px: &[u8], w: usize, h: usize, x: f32, y: f32) -> f32 {
+        if w < 2 || h < 2 {
+            return px.first().copied().unwrap_or(0) as f32;
+        }
+        let (x0, fx) = Thumb::split(x, w);
+        let (y0, fy) = Thumb::split(y, h);
+        Thumb::lerp(px, w, y0 * w + x0, fx, fy)
     }
 
     /// Pick the pyramid levels to read for a given sample footprint.
@@ -809,6 +841,99 @@ impl Lod<'_> {
                 let b = Thumb::tap(p, w, h, x * f, y * f);
                 a + (b - a) * self.t
             }
+        }
+    }
+}
+
+/// Where the comparison grid lands in one thumbnail, one axis at a time.
+///
+/// The grid is walked in A's own frame, so a sample's column in A's thumbnail
+/// depends only on `ix` and its row only on `iy`. Locating a sample — clamping
+/// it into the level, truncating to a pixel, taking the fraction past it — is
+/// therefore ninety-six pieces of arithmetic per level, not two thousand three
+/// hundred; what is left per sample is the four reads and the three
+/// interpolations that actually look at the picture. The B side has a rotation
+/// in it and gets no such reduction.
+struct AxisTaps {
+    i: [u32; GRID],
+    f: [f32; GRID],
+}
+
+impl AxisTaps {
+    /// Sample `k` sits at `((start + span * k / (GRID - 1)) * scale) * f`.
+    ///
+    /// Spelled in exactly that order, and with the thumbnail's scale and the
+    /// level's kept apart, because multiplication of floats is not
+    /// associative: folding the two into one factor moves the last bit of some
+    /// sample positions, and a sample that lands a bit either side of a pixel
+    /// boundary is read from a different pair of pixels. That is a different
+    /// answer, not a rounder one.
+    fn of(start: f32, span: f32, scale: f32, f: f32, n: usize) -> AxisTaps {
+        let mut t = AxisTaps { i: [0; GRID], f: [0.0; GRID] };
+        for k in 0..GRID {
+            let p = (start + span * k as f32 / (GRID - 1) as f32) * scale * f;
+            let (i, fr) = Thumb::split(p, n);
+            t.i[k] = i as u32;
+            t.f[k] = fr;
+        }
+        t
+    }
+}
+
+/// One pyramid level's grid taps, or a note that the level is too small to
+/// interpolate in — where `Thumb::tap` returns the single pixel it has.
+enum LevelTaps {
+    Degenerate(f32),
+    Grid { x: AxisTaps, y: AxisTaps },
+}
+
+impl LevelTaps {
+    fn of(lvl: (&[u8], usize, usize, f32), gx: (f32, f32), gy: (f32, f32), scale: f32) -> LevelTaps {
+        let (px, w, h, f) = lvl;
+        if w < 2 || h < 2 {
+            return LevelTaps::Degenerate(px.first().copied().unwrap_or(0) as f32);
+        }
+        LevelTaps::Grid {
+            x: AxisTaps::of(gx.0, gx.1, scale, f, w),
+            y: AxisTaps::of(gy.0, gy.1, scale, f, h),
+        }
+    }
+
+    #[inline]
+    fn at(&self, px: &[u8], w: usize, ix: usize, iy: usize) -> f32 {
+        match self {
+            LevelTaps::Degenerate(v) => *v,
+            LevelTaps::Grid { x, y } => {
+                let i = y.i[iy] as usize * w + x.i[ix] as usize;
+                Thumb::lerp(px, w, i, x.f[ix], y.f[iy])
+            }
+        }
+    }
+}
+
+/// Both levels of one `Lod`, with the grid resolved against each.
+struct GridTaps {
+    lo: LevelTaps,
+    hi: Option<LevelTaps>,
+}
+
+impl GridTaps {
+    fn of(l: &Lod, gx: (f32, f32), gy: (f32, f32), scale: f32) -> GridTaps {
+        GridTaps {
+            lo: LevelTaps::of(l.lo, gx, gy, scale),
+            hi: l.hi.map(|h| LevelTaps::of(h, gx, gy, scale)),
+        }
+    }
+
+    #[inline]
+    fn at(&self, l: &Lod, ix: usize, iy: usize) -> f32 {
+        let a = self.lo.at(l.lo.0, l.lo.1, ix, iy);
+        match (&self.hi, l.hi) {
+            (Some(t), Some(h)) => {
+                let b = t.at(h.0, h.1, ix, iy);
+                a + (b - a) * l.t
+            }
+            _ => a,
         }
     }
 }
@@ -874,6 +999,8 @@ fn pixel_check(
     let lod_a = ta.lod(raw_a);
     let lod_b = tb.lod(raw_b);
 
+    let grid_a = GridTaps::of(&lod_a, (x0, x1 - x0), (y0, y1 - y0), ta.scale);
+
     for iy in 0..GRID {
         let y = y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32;
         for ix in 0..GRID {
@@ -883,7 +1010,7 @@ fn pixel_check(
                 continue;
             }
             let k = iy * GRID + ix;
-            let s = lod_a.at(x * ta.scale, y * ta.scale);
+            let s = grid_a.at(&lod_a, ix, iy);
             // An inverted match is compared against the inverse of A rather
             // than by keeping a second copy of every thumbnail.
             va[k] = if invert { 255.0 - s } else { s };
@@ -891,7 +1018,7 @@ fn pixel_check(
             ok[k] = true;
         }
     }
-    let mut agree = 0u32;
+    let mut agree = 0f32;
     let mut total = 0u32;
     for by in (0..GRID).step_by(BLOCK) {
         for bx in (0..GRID).step_by(BLOCK) {
@@ -912,7 +1039,7 @@ fn pixel_check(
                     sab += p * q;
                 }
             }
-            if n < BLOCK * BLOCK * 4 / 5 {
+            if n < BLOCK * BLOCK {
                 continue;
             }
             let nf = n as f64;
@@ -931,20 +1058,12 @@ fn pixel_check(
             }
             total += 1;
             let cov = sab - sa * sb / nf;
-            let r = (cov / (vara * varb).sqrt()).abs() as f32;
-            // What this block is worth as evidence: the contrast of whichever
-            // side shows less of it, in grey levels. Counting blocks equally
-            // makes a square of body text weigh the same as a square of
-            // photograph, and a page of furniture then outvotes the picture it
-            // frames — which is exactly how two different photographs laid out
-            // on the same template come to look like one image. An occlusion
-            // is the same shape of evidence in reverse: a caption bar or a
-            // redaction blocks out a low-detail rectangle while the
-            // photograph around it agrees, and weighting by detail keeps that
-            // match rather than charging it for the bar.
-            if r > 0.5 {
-                agree += 1;
-            }
+            // How well this block agrees, not whether it does. Scoring each
+            // block against a cut and then counting the blocks that cleared it
+            // takes two numbers to say one thing, and throws away the
+            // difference between a block that just failed and one that matched
+            // nothing at all. The mean keeps it, and needs no cut.
+            agree += (cov / (vara * varb).sqrt()).abs() as f32;
         }
     }
     // Whole-overlap correlation, for reporting.
@@ -972,7 +1091,7 @@ fn pixel_check(
     } else {
         0.0
     };
-    (if total > 0 { agree as f32 / total as f32 } else { 0.0 }, total, ncc)
+    (if total > 0 { agree / total as f32 } else { 0.0 }, total, ncc)
 }
 
 // ------------------------------------------------------------ entry points
@@ -1003,13 +1122,13 @@ pub struct Pair<'a> {
 /// accept. Below it the verdict is discarded whatever the pixels say, so the
 /// pixels are not read: the check is the most expensive thing in the pipeline
 /// and a third of the pairs reaching it have already lost on geometry.
-pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
+pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
     let mut v = Verdict { variant: var, ..Default::default() };
-    correspond(p.fa, p.fb, cands, ratio, matches);
+    timed!(16, correspond(p.fa, p.fb, cands, matches));
     v.n_match = matches.len() as u32;
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
-    let Some((m, mask)) = best_transform(p.fa, p.fb, matches, bw, bh, scratch) else { return v };
+    let Some((m, mask)) = timed!(17, best_transform(p.fa, p.fb, matches, bw, bh, scratch)) else { return v };
     // `p.fa` is the query image already mirrored, so `m` maps mirrored-A
     // coordinates into B. Composing the mirror back in gives a transform from
     // A's own coordinates, which is what the rest of the tool stores, checks
@@ -1021,14 +1140,14 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, ratio: f32, gate: (u
     let m = if var.mirror { compose(&mirror_affine(aw), &m) } else { m };
     v.m = m;
     v.n_in = distinct_inliers(p.fa, matches, &mask);
-    v.centred = encloses_centre(p.fa, p.fb, &m_query, matches, &mask);
+    v.centred = timed!(18, encloses_centre(p.fa, p.fb, &m_query, matches, &mask));
     v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
-    let (oa, ob) = overlap(&m, aw, ah, bw, bh);
+    let (oa, ob) = timed!(19, overlap(&m, aw, ah, bw, bh));
     v.ov_a = oa;
     v.ov_b = ob;
     if v.n_in >= gate.0.max(3) && v.ov_a.max(v.ov_b) >= gate.1 {
-        let (blk, n, ncc) = pixel_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert);
+        let (blk, n, ncc) = timed!(20, pixel_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert));
         v.blk = blk;
         v.blk_n = n;
         v.ncc = ncc;
@@ -1053,7 +1172,7 @@ pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verd
     v.ov_a = oa;
     v.ov_b = ob;
     if v.ov_a.max(v.ov_b) >= min_ov {
-        let (blk, n, ncc) = pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert);
+        let (blk, n, ncc) = timed!(20, pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert));
         v.blk = blk;
         v.blk_n = n;
         v.ncc = ncc;

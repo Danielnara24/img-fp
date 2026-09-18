@@ -17,6 +17,7 @@
 mod cache;
 mod decode;
 mod index;
+mod prof;
 mod sift;
 mod verify;
 
@@ -72,14 +73,14 @@ struct Args {
     #[arg(long, default_value_t = 0.85)]
     min_overlap: f32,
 
-    /// Fraction of compared blocks that must agree, 0..1.
-    #[arg(long, default_value_t = 0.6)]
+    /// How well the overlap must correlate, 0..1.
+    ///
+    /// The mean of |r| over the blocks of the overlap that carry detail. Half
+    /// is the midpoint of what the statistic can report, not a value read off
+    /// a corpus; the measured cliff, where wrong families start merging, is at
+    /// 0.40.
+    #[arg(long, default_value_t = 0.5)]
     min_agreement: f32,
-
-    /// Lowe ratio test threshold. Higher keeps more ambiguous matches, which
-    /// repetitive content (text, UI, tiling) needs and geometry can filter.
-    #[arg(long, default_value_t = 0.9)]
-    ratio: f32,
 
     /// Skip the transform-propagation pass.
     #[arg(long)]
@@ -173,10 +174,17 @@ fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
 
 // ---------------------------------------------------------------- per image
 
+/// One image's analysis.
+///
+/// The features and the thumbnail are shared rather than owned, because
+/// byte-identical files share an analysis: the exact pass has already found
+/// them, one member of each group is described and the rest point at it.
+/// Copying instead meant a second megabyte-scale buffer per duplicate — three
+/// hundred of them on this corpus — for bytes that are the same bytes.
 #[derive(Default)]
 struct Item {
-    feats: Features,
-    thumb: Thumb,
+    feats: std::sync::Arc<Features>,
+    thumb: std::sync::Arc<Thumb>,
     ok: bool,
     err: Option<String>,
 }
@@ -201,8 +209,8 @@ fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
             let t1 = Instant::now();
             let feats = sift::extract(&d.work, p);
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
-            let thumb = Thumb::build(&d.work, THUMB_LONG);
-            Item { feats, thumb, ok: true, err: None }
+            let thumb = timed!(4, Thumb::build(&d.work, THUMB_LONG));
+            Item { feats: feats.into(), thumb: thumb.into(), ok: true, err: None }
         }
         Err(e) => Item { err: Some(e.to_string()), ..Default::default() },
     }
@@ -377,8 +385,8 @@ fn main() -> Result<()> {
             if let (Some(k), Some((ck, rec))) = (&key, cached.get(&f.display().to_string())) {
                 if ck.len == k.len && ck.mtime == k.mtime {
                     return Item {
-                        feats: rec.feats.clone(),
-                        thumb: rec.thumb.clone(),
+                        feats: rec.feats.clone().into(),
+                        thumb: rec.thumb.clone().into(),
                         ok: true,
                         err: None,
                     };
@@ -412,7 +420,7 @@ fn main() -> Result<()> {
         let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
         let entries: Vec<(&str, cache::Key, &Features, &Thumb)> = (0..n)
             .filter(|&i| items[i].ok)
-            .filter_map(|i| cache::key_of(&files[i]).map(|k| (names[i].as_str(), k, &items[i].feats, &items[i].thumb)))
+            .filter_map(|i| cache::key_of(&files[i]).map(|k| (names[i].as_str(), k, &*items[i].feats, &*items[i].thumb)))
             .collect();
         if let Err(e) = cache::save(p, settings, &entries) {
             eprintln!("warning: could not write cache: {e}");
@@ -458,7 +466,7 @@ fn main() -> Result<()> {
             }
         }
     }
-    let vocab = Vocabulary::build(&pool, &vp);
+    let vocab = timed!(12, Vocabulary::build(&pool, &vp));
     drop(pool);
     stage!(t_start, "vocabulary: {} words from {} samples", vocab.n_words(), vp.sample.min(n_desc));
 
@@ -467,13 +475,13 @@ fn main() -> Result<()> {
     // costs as much again as the lists themselves.
     let lists: Vec<WordList> = items
         .par_iter()
-        .map(|it| if it.ok { quantise(&vocab, &it.feats) } else { WordList::default() })
+        .map(|it| if it.ok { timed!(11, quantise(&vocab, &it.feats)) } else { WordList::default() })
         .collect();
     stage!(t_start, "quantised");
 
     // Inverted file. A word present in a fifth of the corpus says nothing.
     let max_posting = (n_ok / 5).max(32);
-    let inv = InvertedFile::build(&lists, vocab.n_words(), max_posting);
+    let inv = timed!(13, InvertedFile::build(&lists, vocab.n_words(), max_posting));
     stage!(t_start, "inverted file");
 
     let policy = verify::Policy::new(args.min_inliers, args.min_overlap, args.min_agreement);
@@ -492,7 +500,7 @@ fn main() -> Result<()> {
         .map_init(
             || (vec![0f32; n], Vec::new(), Vec::new()),
             |(acc, touched, scored), i| {
-                inv.query(&lists[i], i as u32, acc, touched, scored);
+                timed!(14, inv.query(&lists[i], i as u32, acc, touched, scored));
                 scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
                 scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
                 scored.truncate(args.candidates);
@@ -522,7 +530,7 @@ fn main() -> Result<()> {
             || (Vec::new(), Vec::new(), verify::Scratch::default()),
             |(cands, matches, scratch), &(i, j)| {
                 let (i, j) = (i as usize, j as usize);
-                index::shared(&lists[i], &lists[j], cands, 60_000);
+                timed!(15, index::shared(&lists[i], &lists[j], cands, 60_000));
                 if cands.len() < 3 {
                     return None;
                 }
@@ -532,7 +540,7 @@ fn main() -> Result<()> {
                     ta: &items[i].thumb,
                     tb: &items[j].thumb,
                 };
-                let v = verify::verify(&p, cands, Variant::default(), args.ratio, gate, matches, scratch);
+                let v = verify::verify(&p, cands, Variant::default(), gate, matches, scratch);
                 (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some((i, j, v.m, false, v))
             },
         )
@@ -599,7 +607,7 @@ fn main() -> Result<()> {
                             ta: &items[i].thumb,
                             tb: &items[j].thumb,
                         };
-                        let v = verify::verify(&p, cands, var, args.ratio, gate, matches, scratch);
+                        let v = verify::verify(&p, cands, var, gate, matches, scratch);
                         if v.accepted(&policy.anchor) {
                             let (lo, hi, mm) = if i < j {
                                 (i, j, v.m)
@@ -630,8 +638,9 @@ fn main() -> Result<()> {
     drop(vocab);
     drop(lists);
     for it in items.iter_mut() {
-        it.feats.kps = Vec::new();
-        it.feats.desc = Vec::new();
+        // The frame size stays: propagation and corroboration still ask how
+        // large each picture was. Only the keypoints and descriptors go.
+        it.feats = std::sync::Arc::new(Features { w: it.feats.w, h: it.feats.h, ..Default::default() });
     }
     release_memory();
     stage!(t_start, "released the index and the descriptors");
@@ -667,7 +676,7 @@ fn main() -> Result<()> {
     if !args.no_propagate {
         let mut pool: Vec<Edge> = all.clone();
         for round in 0..PROPAGATE_MAX_ROUNDS {
-            let mut round_all = propagate(&items, &pool, n, prop_min_ov);
+            let mut round_all = timed!(21, propagate(&items, &pool, n, prop_min_ov));
             let before = propagated.len();
             let seen: std::collections::HashSet<(usize, usize)> =
                 pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
@@ -813,7 +822,6 @@ fn main() -> Result<()> {
             "min_overlap": args.min_overlap,
             "min_agreement": args.min_agreement,
             "stages": "anchor, propagate, corroborate",
-            "ratio": args.ratio,
             "propagated": !args.no_propagate,
         }),
         files_enumerated: files.len(),
@@ -850,6 +858,7 @@ fn main() -> Result<()> {
             eprintln!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
         }
     }
+    prof::report();
     Ok(())
 }
 

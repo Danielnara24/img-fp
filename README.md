@@ -27,32 +27,38 @@ frame.
 
 | | img-fp | best of eleven others |
 |---|---:|---:|
-| F1 | **0.969** | 0.762 (SSCD) |
-| precision | 99.6% | 100.0% (three tools, at 25% recall) |
-| recall | **94.4%** | 64.8% (SSCD) |
-| transformations handled perfectly | **50 of 87** | 0 of 87 |
-| image inside a bigger image | **54-62 of 62** | 0-30 of 62 (SSCD) |
+| F1 | **0.978** | 0.762 (SSCD) |
+| precision | 99.5% | 100.0% (three tools, at 25% recall) |
+| recall | **96.1%** | 64.8% (SSCD) |
+| transformations handled perfectly | **59 of 87** | 0 of 87 |
+| image inside a bigger image | **55-62 of 62** | 0-30 of 62 (SSCD) |
 | wall clock | **105 s** | 1,949 s (SSCD) |
 | peak memory | **875 MB** | 1,479 MB (SSCD) |
 
 5,638 images, 62 originals, 90 transformations, ground truth generated rather
 than judged, every tool run cold and alone on the same laptop.
-`benchmark/BASELINE.md` has the method and the other eleven tools.
+`benchmark/BASELINE.md` has the method and the other eleven tools. The two
+timing rows are from that one session, where every tool faced the same
+temperature and the same cold page cache, and they are left as measured: a
+figure from a different session is not comparable with the ones beside it.
+img-fp has since had an optimisation pass worth ~9% of its CPU seconds for
+identical output, and a parameter pass — which is what moved the accuracy rows
+— that was level on the clock.
 
 No transformation is a single fixed point: each draws its amount per seed, so
 `scale_small` runs from 0.09 to 0.27 and `jpeg_low` from quality 7 to 26. A
 transformation counts as *handled perfectly* only when all 62 seeds are found,
-across that whole range. img-fp clears 50 of them. **No other tool clears one.**
+across that whole range. img-fp clears 59 of them. **No other tool clears one.**
 
 Where the difference is, out of 62 originals each:
 
 | | img-fp | SSCD | imagededup-CNN | czkawka | PDQ |
 |---|---:|---:|---:|---:|---:|
-| `collage_cell` | **61/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `magazine_spread` | **59/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `contact_sheet` | **54/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `picture_in_picture` | **58/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `embed_tiny` | **54/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `collage_cell` | **62/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `magazine_spread` | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `contact_sheet` | **55/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `picture_in_picture` | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `embed_tiny` | **55/62** | 0/62 | 0/62 | 0/62 | 0/62 |
 | `slide_deck` | **60/62** | 21/62 | 1/62 | 0/62 | 0/62 |
 | `pdf_page` | **62/62** | 16/62 | 2/62 | 0/62 | 0/62 |
 | `crop_quarter` | **60/62** | 9/62 | 0/62 | 0/62 | 0/62 |
@@ -61,19 +67,22 @@ Where the difference is, out of 62 originals each:
 
 Where it does *not* lead: PDQ takes `halftone` 58/62 against 56, and SSCD
 `rot180` 61 against 60. Non-affine warping used to be on this list and no
-longer is — `perspective_top` and `keystone_side` are level with SSCD at 61/62
-each, and img-fp leads `barrel_distort` (58 v 48) and `wave_vertical` (57 v
-49). Every perceptual hash is at zero on all four warps.
+longer is — img-fp takes `perspective_top` and `keystone_side` 62/62 each
+against SSCD's 61, and leads `barrel_distort` (61 v 48) and `wave_vertical`
+(59 v 49). Every perceptual hash is at zero on all four warps.
 
-Precision is not traded for any of it. Of 832 false pairs, 830 are the
+Precision is not traded for any of it. All 1,088 of its false pairs are the
 deliberate rearrangement traps — `column_roll` slides the frame sideways and
 wraps, so a crop landing in the unbroken 63% really is present in both files.
-Outside the traps: **2 wrong pairs in 220,657 proposals**, against 15.65
+Outside the traps: **no wrong pair at all in 224,779 proposals**, against 15.65
 million chances to be wrong. SSCD takes the traps 11,237 times.
 
-Those two are two wrong cluster merges, and that is the number worth watching
-rather than the pair count: a bad merge costs every pair the two families
-imply, so its price grows with the corpus while a lone bad pair's does not.
+What that count really tracks is wrong *cluster merges*, and it is the number
+worth watching rather than the pair total: a bad merge costs every pair the two
+families imply, so its price grows with the corpus while a lone bad pair's does
+not. There are none here, where the previous rule left two — but two and zero
+are both small numbers, and nothing has been tested above a few thousand
+images.
 
 ## How it works
 
@@ -111,10 +120,11 @@ compared blockwise. Both sides are read through a mip pyramid at the scale the
 comparison actually samples them, so that a 4000-pixel original and its
 160-pixel thumbnail are compared at a resolution both of them have rather than
 one being aliased against the other. Blocks with no detail on either side
-abstain rather than agreeing for free. A pair is claimed only when a single
-transform explains the match and the pixels along it agree, which is why a
-tile-shuffled image — every pixel of the original, in the wrong places — is
-rejected.
+abstain rather than agreeing for free, and the rest are averaged: *how well*
+the overlap agrees, not how many of its blocks cleared a bar. A pair is claimed
+only when a single transform explains the match and the pixels along it agree,
+which is why a tile-shuffled image — every pixel of the original, in the wrong
+places — is rejected.
 
 **Transforms compose, so matching is transitive but claims are not.** If A is a
 crop of B and B is a crop of C, the A-to-C transform is known exactly. img-fp
@@ -160,10 +170,13 @@ matches it never made.
 
 ## Options
 
-There are deliberately few. Every option here is one that changes what the
-tool costs or what it is willing to claim; anything that was only ever a
-number somebody fitted to a corpus has been removed or derived. See
-`benchmark/VALIDATION.md` for which, and what the evidence was.
+There are deliberately few, and each pass over the tool has removed more than
+it added: thirteen options once changed the result, and seven do. Every one left
+changes what the tool costs or what it is willing to claim; anything that was
+only ever a number somebody fitted to a corpus has been removed or derived —
+most recently the Lowe ratio test, which turned out to move F1 by 0.001 across
+its entire usable range. See `benchmark/VALIDATION.md` for the rule, and
+`benchmark/BASELINE.md` for what each removal was measured to cost.
 
 **What it costs**
 
@@ -179,8 +192,7 @@ number somebody fitted to a corpus has been removed or derived. See
 |---|---|
 | `--min-inliers 10` | correspondences a claim needs. |
 | `--min-overlap 0.85` | how much of one image must lie inside the other. |
-| `--min-agreement 0.6` | fraction of compared blocks that must agree. |
-| `--ratio 0.9` | Lowe ratio. Higher keeps ambiguous matches for geometry to filter. |
+| `--min-agreement 0.5` | how well the overlap must correlate, averaged over the blocks that carry detail. |
 
 **Plumbing**
 
@@ -195,18 +207,23 @@ number somebody fitted to a corpus has been removed or derived. See
 
 ## Cost
 
-105 s and 875 MB for 5,638 images on a thermally-limited Ryzen 7 3700U laptop,
-reading everything from a cold page cache. Decoding is about 30% of that and
-local feature extraction about half; narrowing 15.9 million possible pairs down
-to 220,657 claims takes the remaining fifth. With `--cache`, a second run over
+About 95 s for 5,638 images on a thermally-limited Ryzen 7 3700U laptop,
+reading everything from a cold page cache. Decoding is about 35% of that and
+local feature extraction about 45%; narrowing 15.9 million possible pairs down
+to 224,779 claims takes the remaining fifth. With `--cache`, a second run over
 the same directory is a quarter of the time.
 
-The peak is mostly the analysis itself — a few hundred kilobytes of descriptors
-and one thumbnail per image, which is what the matching stages read. Decoding a
-photograph costs far more than keeping it (a 44-megapixel file is 133 MB of RGB
-and reduces to 1.2 MB), so the workers share a budget for decoded pictures and
-wait for room in it rather than letting the peak be decided by how many large
-files happen to sit next to each other in the directory.
+Peak memory is two things added together. The steady part is the analysis
+itself — a few hundred kilobytes of descriptors and one thumbnail per image,
+which is what the matching stages read — and comes to about 650 MB on this
+corpus. The rest is decoded picture in flight: decoding a photograph costs far
+more than keeping it (a 44-megapixel file is 133 MB of RGB and reduces to
+1.2 MB), so the workers share a budget and wait for room in it rather than
+letting the peak be decided by how many large files happen to sit next to each
+other in the directory. That budget is a fraction of what the machine reports
+free, so the total lands between 850 MB and 1,050 MB depending on how much
+memory the machine had to spare — and a run that reports a bigger number is
+not necessarily doing anything differently.
 
 For scale: the best-scoring competitor takes 1,949 s on the same corpus, and
 the fastest thing that finds anything at all beyond byte-identical copies
