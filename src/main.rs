@@ -56,10 +56,6 @@ struct Args {
     #[arg(long, default_value_t = 640)]
     work_size: usize,
 
-    /// Local features kept per image.
-    #[arg(long, default_value_t = 600)]
-    features: usize,
-
     /// Candidates verified per image.
     #[arg(short = 'k', long, default_value_t = 150)]
     candidates: usize,
@@ -193,6 +189,22 @@ struct Item {
 }
 
 const THUMB_LONG: usize = 128;
+
+/// Local features described per image.
+///
+/// Not an option, because it has no usable range. Measured over 300 to 900 at
+/// a fixed vocabulary, it moves F1 by 0.007 and never changes a verdict that
+/// matters: 0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977. Above 600 it buys
+/// nothing and costs 11% of the run; below it, nothing either, until the point
+/// where it stops being about features at all.
+///
+/// It used to look load-bearing — 400 features merged seven pairs of families
+/// on the benchmark corpus — and that was the vocabulary. Both this and
+/// `--work-size` move the descriptor count, the descriptor count sized the
+/// tree, and the tree could only be sized to a factor of sixteen. With
+/// `VocabParams::for_corpus` holding occupancy instead, the cliff is gone and
+/// what is left is a plateau, which is not a thing to put on a command line.
+const FEATURES: usize = 600;
 
 /// A ceiling, not a setting. Each round re-routes composed transforms through
 /// the pairs the last one accepted, and the loop stops as soon as a round adds
@@ -361,14 +373,14 @@ fn main() -> Result<()> {
 
     // Decode and describe.
     let sp = sift::Params {
-        max_features: args.features,
+        max_features: FEATURES,
         ..Default::default()
     };
     let done = AtomicUsize::new(0);
     let n = files.len();
     let settings = cache::Settings {
         work_size: args.work_size as u32,
-        features: args.features as u32,
+        features: FEATURES as u32,
         thumb: THUMB_LONG as u32,
     };
     let cached = match &args.cache {
@@ -845,7 +857,7 @@ fn main() -> Result<()> {
         tool: "img-fp",
         config: serde_json::json!({
             "work_size": args.work_size,
-            "features": args.features,
+            "features": FEATURES,
             "candidates": args.candidates,
             "min_inliers": args.min_inliers,
             "min_overlap": args.min_overlap,
@@ -1145,24 +1157,39 @@ mod tests {
     /// that a single-corpus benchmark could never have shown: with a fixed
     /// 65,536 words, a folder of eight images put every descriptor in a word
     /// of its own and img-fp found one pair out of twenty-eight.
+    ///
+    /// Scaling the *depth* alone fixed that end and left a worse one in the
+    /// middle. A tree of `16^depth` leaves can only be sized to within a
+    /// factor of sixteen, so the occupancy the rule claims to hold constant
+    /// swung from 2 descriptors per word just above a step to 32 just below
+    /// one — and the coarse end merges families. It was reachable by being an
+    /// ordinary size: 3,965 files landed at 26 descriptors per word and
+    /// merged three of them. What the tree is sized by now is the branching
+    /// as well, which is why these two assertions are about occupancy rather
+    /// than about word counts.
     #[test]
-    fn vocabulary_depth_follows_corpus_size() {
+    fn vocabulary_occupancy_holds_at_every_corpus_size() {
         use crate::index::VocabParams;
         let words = |n| {
             let p = VocabParams::for_corpus(n);
             p.branching.pow(p.depth as u32)
         };
-        // A handful of files: a tree small enough that twins share a word.
-        assert_eq!(words(2_571), 256);
-        // A folder: deeper, but nothing like the full tree.
-        assert_eq!(words(36_500), 4_096);
-        // Both benchmark corpora land on the four-level tree the fixed
-        // vocabulary used, so this changes nothing at the size it was tuned.
-        assert_eq!(words(542_660), 65_536);
-        assert_eq!(words(1_340_021), 65_536);
-        // And the rule is insensitive where it matters: a sixteen-fold change
-        // in the target has to happen before the depth moves at all.
-        assert_eq!(words(1_340_021 / 4), words(1_340_021));
+        // The benchmark corpus keeps the tree every published number was
+        // measured on: 2,404,926 descriptors into 16^5 words.
+        assert_eq!(words(2_404_926), 1_048_576);
+        // A handful of files still gets a tree small enough that twins share
+        // a word, which is the failure the rule was written for.
+        assert!(words(3_200) < 2_048);
+        // From a folder to a drive, the tree lands near the target instead of
+        // wherever the next power of sixteen falls. Three is the target; the
+        // band is what the old rule could not hold.
+        for n in [1_200usize, 3_200, 36_500, 542_660, 1_340_021, 1_701_218, 2_404_926, 8_000_000] {
+            let occupancy = n as f64 / words(n) as f64;
+            assert!(occupancy > 1.5 && occupancy <= 3.0, "n={n} gives {occupancy} per word");
+        }
+        // And the step itself is gone. These two corpora differ by 5% and
+        // used to differ by a factor of sixteen in vocabulary size.
+        assert!((words(2_100_000) as f64 / words(2_000_000) as f64) < 2.0);
     }
 
     use super::*;

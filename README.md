@@ -203,19 +203,20 @@ Two consequences, both deliberate:
 ## Options
 
 There are deliberately few, and each pass over the tool has removed more than
-it added: thirteen options once changed the result, and seven do. Every one left
+it added: thirteen options once changed the result, and six do. Every one left
 changes what the tool costs or what it is willing to claim; anything that was
 only ever a number somebody fitted to a corpus has been removed or derived —
-most recently the Lowe ratio test, which turned out to move F1 by 0.001 across
-its entire usable range. See `benchmark/VALIDATION.md` for the rule, and
-`benchmark/BASELINE.md` for what each removal was measured to cost.
+most recently `--features`, which looked load-bearing (starving it merged
+families) and turned out to be moving the *vocabulary* rather than the
+detector. With the vocabulary sized properly it moves F1 by 0.007 across its
+whole range, so it is a constant now. See `benchmark/VALIDATION.md` for the
+rule, and `benchmark/BASELINE.md` for what each removal was measured to cost.
 
 **What it costs**
 
 | | |
 |---|---|
 | `--work-size 640` | long side the analysis runs at. Lower is faster and blinder. |
-| `--features 600` | local features kept per image. |
 | `-k 150` | candidates verified per image. |
 
 **What it will claim**

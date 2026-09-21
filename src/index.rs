@@ -24,6 +24,11 @@ use crate::sift::DESC_LEN;
 use rayon::prelude::*;
 
 pub struct VocabParams {
+    /// Children per node. Also derived: `for_corpus` starts from the default,
+    /// which is the widest the descent's accumulators allow (`MAX_BRANCH`),
+    /// and narrows it until the tree is no larger than the corpus needs. Depth
+    /// alone can only size a tree to within a factor of itself, and that
+    /// factor is sixteen.
     pub branching: usize,
     /// Levels of the tree. Not a constant: `for_corpus` derives it, so that a
     /// folder of eighty photographs and a drive of eighty thousand both get a
@@ -45,32 +50,55 @@ pub struct VocabParams {
 /// per word also fixes the average document frequency of a word — which is the
 /// quantity idf weighting and the posting-list cap are both written against.
 ///
-/// The value is also close to unfittable, which is the point. The tree has
-/// `16^depth` leaves, so the depth only moves when the target crosses a factor
-/// of sixteen: on the benchmark corpus every value from 21 to 327 descriptors
-/// per word gives the same four-level tree, and on the validation corpus every
-/// value from 9 to 132 does. What the rule does
-/// change is the small end, where the old fixed 65,536 words failed outright —
-/// a folder of eight images put every descriptor in a word of its own, and the
-/// tool found one pair out of twenty-eight.
-const DESC_PER_WORD: usize = 32;
+/// The value is not fitted: it is the occupancy the measured build already
+/// runs at. The benchmark corpus describes 2,404,926 descriptors into
+/// 1,048,576 words, which is 2.29 of them per word, and every configuration
+/// that reaches 99.5% precision sits between 2.0 and 2.9.
+///
+/// It used to be 32, and the tree could not honour it. With `branching` pinned
+/// at 16 the only reachable sizes were `16^depth`, so the *achieved* occupancy
+/// swung by a factor of sixteen — from 2 just above a step to 32 just below
+/// one — and the rule's own target was the far end of that swing. Measured,
+/// the far end merges families: at 21 to 30 descriptors per word the tool
+/// matches two different beaches through the furniture they share. A corpus
+/// reached it by being ordinary — 3,965 files landed at 26 and merged three
+/// families — which is why `for_corpus` now narrows the branching instead of
+/// rounding the depth up and living with whatever occupancy that lands on.
+const DESC_PER_WORD: usize = 3;
 
 impl VocabParams {
-    /// Shallowest tree with at least `n_desc/DESC_PER_WORD` leaves.
+    /// The smallest tree that still holds `n_desc/DESC_PER_WORD` leaves.
     ///
-    /// Rounded up rather than to the nearest, because the two directions are
-    /// not symmetric: too many words splits a true match across two of them,
-    /// which multi-path descent already exists to survive, while too few makes
-    /// every image share words with every other and the score stops meaning
-    /// anything.
+    /// Two steps, and the second is the one that matters. The depth is the
+    /// shallowest that reaches the target at the widest branching the descent
+    /// allows — as before. Then the branching is narrowed to the smallest that
+    /// still reaches it at that depth, which is what lets the tree land near
+    /// the target instead of wherever the next power of sixteen happens to be.
+    ///
+    /// Rounding up rather than to the nearest is deliberate and unchanged: too
+    /// many words splits a true match across two of them, which multi-path
+    /// descent already exists to survive, while too few makes every image
+    /// share words with every other and the score stops meaning anything. The
+    /// difference is that overshooting now costs at most a factor of two
+    /// rather than a factor of sixteen, so "round up" no longer means "accept
+    /// any occupancy between 2 and 32".
+    ///
+    /// The depth is still capped at six levels, so above roughly fifty million
+    /// descriptors — something like a hundred thousand images — the tree stops
+    /// growing and occupancy climbs again. Nothing here has been run at that
+    /// size; if it ever is, this is the first thing to measure.
     pub fn for_corpus(n_desc: usize) -> VocabParams {
         let p = VocabParams::default();
-        let target = (n_desc / DESC_PER_WORD).max(p.branching);
+        let target = (n_desc / DESC_PER_WORD).max(2);
         let mut depth = 1usize;
         while depth < 6 && p.branching.pow(depth as u32) < target {
             depth += 1;
         }
-        VocabParams { depth, ..p }
+        let mut branching = 2usize;
+        while branching < p.branching && branching.pow(depth as u32) < target {
+            branching += 1;
+        }
+        VocabParams { depth, branching, ..p }
     }
 }
 

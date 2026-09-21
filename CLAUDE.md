@@ -291,6 +291,39 @@ Each derived file records `region` (rectangle of the original that survives),
   cap are written against. A fixed 65,536 words made img-fp nearly useless on
   small folders; do not put it back.
 
+  **And occupancy has to be held by the branching, not only by the depth.**
+  This was a real defect and it stood for three versions. With `branching`
+  pinned at 16 the only reachable sizes are `16^depth`, so the occupancy the
+  rule claims to hold constant actually swung by a factor of sixteen — 2
+  descriptors per word just above a step, 32 just below one — and the rule's
+  own target, 32, was the far end of that swing. The coarse end merges
+  families: two photographs of different beaches match along what they share,
+  and several such edges arrive together, so the bridge test cannot drop them.
+  Measured on the benchmark corpus by forcing the depth, with nothing else
+  changed: the shipped configuration at 2.3 descriptors per word makes **no**
+  cross-family pair, and at 26 it makes **2,738** and merges `4.jpeg` with
+  `galaxy.jpeg`.
+
+  The trap was reachable by being an ordinary size, which is what makes it
+  worth this much text. The step sits at 2,097,152 descriptors — about 4,930
+  images at stock settings — and this corpus has 5,638, some 15% the safe side
+  of it. A folder of 3,965 files, every flag at its default, landed at
+  occupancy 26 and merged three families: 1,751 cross-family pairs, precision
+  97.97% against the usual 99.5%. `for_corpus` now picks the depth as before
+  and then *narrows the branching* to the smallest tree of that depth that
+  still holds the target, which keeps occupancy in [2.2, 2.9] from a thousand
+  descriptors to eight million where the old rule ranged over [2.0, 30.5].
+
+  What that is worth, all at stock flags: the benchmark corpus is **pair-for-
+  pair identical**, verdict fields included (it already had 16^5 words, which
+  is what the new rule picks for it); the 3,965-file folder goes to **0
+  cross-family pairs and 99.54% precision**; 91 files improve (F1 0.988 to
+  0.991); 8 files and 455 files are unchanged. The target of 3 is not a fitted
+  number — it is the occupancy the measured build already runs at, 2,404,926
+  descriptors into 1,048,576 words. Swept on the 3,965-file folder, 3 and 6 are
+  both clean and 12 merges two families, so the shipped value sits a factor of
+  four from the cliff. Do not raise it because 6 scores a hair better.
+
 ### What still misses
 
 9,189 pairs. The worst rows, out of 62 seeds: `crop_micro` 41 (a twentieth of
@@ -326,7 +359,7 @@ and with no second corpus nothing will catch that. `benchmark/VALIDATION.md`
 records how the parameter surface was cut and what the held-out corpus proved
 while it existed; read it before adding a knob back.
 
-Applying that rule took the CLI from 13 result-changing options to 7, the
+Applying that rule took the CLI from 13 result-changing options to 6, the
 acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
 at equal or better F1 every time. Removing a parameter is the cheap experiment;
 run it before adding one.
@@ -419,7 +452,9 @@ Three things that did *not* survive deletion, and why they stay:
 Things that generalise badly and were fixed rather than tuned: the vocabulary
 was a fixed 65,536 words at any corpus size, which made img-fp nearly useless
 on a small folder (one pair in twenty-eight, on eight images). Depth now
-follows the descriptor count.
+follows the descriptor count — and so does the branching, because depth alone
+could only size the tree to within a factor of sixteen and the coarse end of
+that merges families at ordinary corpus sizes. See *How img-fp works*.
 
 ### Speed and memory, and what has already been tried
 
@@ -856,7 +891,7 @@ to cover everything a decode holds.
 thresholds against that offline instead of re-running the tool per guess. Use
 `--cache` while tuning the matching stages: on the 5,638-image corpus a cold
 run is ~130 s and a cached one ~30 s, and the cache is keyed on the extraction
-settings so changing `--work-size` or `--features` invalidates it correctly.
+settings so changing `--work-size` invalidates it correctly.
 
 Note that timings taken this way are warm-cache and run about 40% faster than
 `bench.py`'s cold-cache figures. Compare tuning runs with each other, never
@@ -888,7 +923,11 @@ both of which caught something real in this pass:
 Measured trade-offs, so they need not be rediscovered (the seconds are from the
 old corpus and the pre-optimisation build, so read them as ratios): `--work-size`
 448 gives F1 0.975 at 80 s, 640 gives 0.980 at 86 s, 768 gives 0.976 at 147 s.
-`--features` 900 is *worse* than 600. Candidate breadth (`-k`) is on a plateau,
+`--features` is gone: measured over 300 to 900 at a fixed vocabulary it moves
+F1 by 0.007 (0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977) and 900 costs 11%
+of the run for nothing, so 600 is a constant in `main.rs`. It had looked
+load-bearing, and that was the vocabulary step above, not the detector.
+Candidate breadth (`-k`) is on a plateau,
 not a peak — 200 gives byte-for-byte the same F1, precision and false-positive
 count as 150 on both corpora — so 150 is safely past the knee rather than
 balanced on it.
