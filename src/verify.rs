@@ -242,27 +242,39 @@ impl Policy {
 }
 
 impl Verdict {
-    /// How much of the better-covered image this match actually accounts for.
+    /// Every bar this verdict has to clear, under one tier's rules.
     ///
-    /// `ov_a`/`ov_b` are pure geometry: the fraction of one frame that lands
-    /// inside the other. That is what a transform *claims*. It is not what the
-    /// transform has *shown*, and the gap between the two is where a shared
-    /// container gets in — two different photographs laid out on the same page
-    /// furniture map onto each other perfectly, so the claim is the whole
-    /// page, while the part that disagrees is the part that carries the
-    /// picture.
+    /// Two of these are the CLI's `--min-overlap` and `--min-agreement`, they
+    /// sit one line apart, and reading them as two strengths of the same bar
+    /// is the mistake this comment exists to prevent. `ov_a`/`ov_b` are pure
+    /// geometry — the fraction of one frame that lands inside the other, with
+    /// no pixel read — so the overlap floor asks what the transform *claims*.
+    /// `blk` is the mean of |r| over the blocks of that overlap carrying
+    /// detail, so the agreement bar asks whether the claim is *true*. They are
+    /// the only defence against two failure modes that do not overlap at all,
+    /// and each is blind to the other's:
     ///
-    /// Subtracting the largest connected clump of disagreeing blocks closes
-    /// that gap. It is deliberately the largest *connected* clump and not the
-    /// total disagreement: a genuine match that has been through JPEG, a
-    /// rescale and a warp disagrees in scattered blocks all over, and charging
-    /// it for those would reject it for being a copy rather than for being a
-    /// different picture. One solid region of disagreement is the thing that
-    /// says "a picture-sized part of this frame is not the same picture", and
-    /// a match cannot claim to explain what it does not explain.
+    ///   * Two different photographs on the same page furniture — the corpus's
+    ///     two Excel screenshots — map onto each other perfectly. Measured
+    ///     over their 29 candidate verdicts: median overlap **1.000**, 93% of
+    ///     them past the 0.85 floor. Geometry cannot say no to those. Their
+    ///     median `blk` is **0.000**, and only 3% reach 0.50 — but 14% reach
+    ///     0.40, which is exactly why the agreement bar merges that family one
+    ///     step below where it ships.
     ///
-    /// No new constant: this feeds the overlap floor the tool already has,
-    /// and sharpens what that floor means.
+    ///   * A `column_roll` against a crop of its own original agrees on pixels
+    ///     almost perfectly, because it *is* the same pixels in the wrong
+    ///     place. Over 9,641 such same-seed negatives: median `blk` **0.971**,
+    ///     99% past 0.50. Agreement cannot say no to those either. Their
+    ///     median overlap is **0.562** and only 8% reach 0.85, because the
+    ///     fitted transform explains the rigid fraction and carries the rest
+    ///     of the frame outside B.
+    ///
+    /// So the overlap floor is what insists a transform account for a whole
+    /// frame rather than a fragment of one, and the agreement bar is the only
+    /// thing standing between the tool and a wrong family merge. Loosening the
+    /// first costs traps and merges nothing; loosening the second merges
+    /// families and costs almost no traps. The sweeps are in `CLAUDE.md`.
     pub fn accepted(&self, r: &Rules) -> bool {
         self.scale.is_finite()
             && self.scale >= 1.0 / r.max_scale

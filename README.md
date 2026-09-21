@@ -203,29 +203,30 @@ Two consequences, both deliberate:
 ## Options
 
 There are deliberately few, and each pass over the tool has removed more than
-it added: thirteen options once changed the result, and six do. Every one left
-changes what the tool costs or what it is willing to claim; anything that was
-only ever a number somebody fitted to a corpus has been removed or derived —
-most recently `--features`, which looked load-bearing (starving it merged
-families) and turned out to be moving the *vocabulary* rather than the
-detector. With the vocabulary sized properly it moves F1 by 0.007 across its
-whole range, so it is a constant now. See `benchmark/VALIDATION.md` for the
-rule, and `benchmark/BASELINE.md` for what each removal was measured to cost.
+it added: thirteen options once changed the result, and six do. Anything that
+was only ever a number somebody fitted to a corpus has been removed or derived.
+See `benchmark/VALIDATION.md` for the rule and `CLAUDE.md` for every sweep.
 
 **What it costs**
 
 | | |
 |---|---|
-| `--work-size 640` | long side the analysis runs at. Lower is faster and blinder. |
-| `-k 150` | candidates verified per image. |
+| `--work-size 640` | long side the analysis runs at, Higher = Slower. Usable 448-896. |
+| `-k 150` | candidates verified per image, Higher = Slower. Usable 100-300. |
 
 **What it will claim**
 
 | | |
 |---|---|
-| `--min-inliers 10` | correspondences a claim needs. |
-| `--min-overlap 0.85` | how much of one image must lie inside the other. |
-| `--min-agreement 0.5` | how well the overlap must correlate, averaged over the blocks that carry detail. |
+| `--min-inliers 10` | correspondences a claim needs, Higher = Stricter. Usable 8-20. |
+| `--min-overlap 0.85` | how much of one image must lie inside the other, Higher = Stricter. Usable 0.60-0.95. |
+| `--min-agreement 0.5` | how well the overlap must correlate, averaged over the blocks that carry detail, Higher = Stricter. Usable 0.45-0.70. |
+| `--no-propagate` | skip the transform-propagation pass, On = Stricter. Costs 7.1 points of F1. |
+
+Stricter is not safer. Below the bottom of each range unrelated photographs
+start merging into one family, and above the top the tool simply stops finding
+things; the defaults sit where they do to keep a margin from the first, not to
+win the second.
 
 **Plumbing**
 
@@ -236,7 +237,8 @@ rule, and `benchmark/BASELINE.md` for what each removal was measured to cost.
 | `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |
 | `--dump PATH` | every verdict considered, accepted or not, as CSV. |
-| `--no-propagate` | skip the transform-propagation pass. |
+
+Nothing in that last table changes a pair.
 
 ## Cost
 

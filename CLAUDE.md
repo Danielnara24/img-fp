@@ -214,10 +214,34 @@ Each derived file records `region` (rectangle of the original that survives),
   on either, since a photograph inside a slide legitimately has all its
   evidence in one corner of the slide.
 - **Propagation composes transforms and re-checks them.** It is not closure
-  expansion: every propagated pair is tested against the pixels. It is worth
-  about 1.5 points of F1 and costs under a second. The tree is breadth-first
-  from the best-connected member; growing it best-edge-first was tried and is
-  worse, because short paths matter more than strong links.
+  expansion: every propagated pair is tested against the pixels. The tree is
+  breadth-first from the best-connected member; growing it best-edge-first was
+  tried and is worse, because short paths matter more than strong links.
+
+  **It is worth 7.1 points of F1**, which is more than every threshold in the
+  tool put together, and the figure of "about 1.5 points" that stood here until
+  now predates both the single catalogue and the mip-pyramid pixel check.
+  Re-measured on the shipped build by running with and without the flag:
+
+  | | F1 | precision | recall | pairs | FP | groups |
+  |---|---|---|---|---|---|---|
+  | **shipped** | **0.9775** | **99.52%** | **96.05%** | **224,779** | **1,088** | **122** |
+  | `--no-propagate` | 0.9061 | 99.60% | **83.11%** | 194,330 | 780 | 199 |
+
+  All of it is recall — **13 points** of it — and precision is a rounding error
+  either way: the 308 false pairs propagation adds are all `column_roll` traps,
+  not one of them crossing a family. Without it a family fragments into more
+  representatives than it has (199 groups for 62 seeds) and corroboration takes
+  over some of the work, 5,106 pairs against the usual 598, which is why the
+  loss is 13 points of recall rather than the 30 the pair count suggests.
+
+  It costs **7-11 CPU-seconds**, some 6-8% of a cached run, and 0-2 s of wall.
+  Three alternating pairs with a 45 s cooldown, cached, `-j 8`: CPU 139.5 /
+  127.9 / 127.6 against 121.3 / 120.5 / 120.9, wall 23.3 / 20.6 / 19.7 against
+  18.7 / 19.0 / 19.9. The median pair is -7.5 CPU-s; the first pair's -18.2 is
+  the day's hottest run and is why these are quoted as pairs. So the exchange
+  rate is seven points of F1 for six percent of the clock, and nothing else in
+  the tool is close.
 - **Three acceptance tests** (`verify::Policy`): `anchor` decides clustering,
   `propagated` judges composed transforms on pixels alone, `corroborated`
   applies only inside an existing cluster. Collapsing them into one threshold
@@ -388,6 +412,157 @@ catastrophic at 7 (8,148 cross-family pairs, 9 merges); `--min-agreement` is
 clean at 0.45 and merges at 0.40. The shipped values keep the same margin the
 previous build had, which is why neither of them moved to the value that
 scored best.
+
+**`--min-overlap` and `--min-agreement` are not two strengths of one bar.**
+They sit one line apart in `Verdict::accepted`, which is why they read like a
+loose and a tight version of the same idea, and they are not: each is the only
+defence against a failure mode the other cannot see at any setting. The note on
+that function carries the per-mode numbers — the two Excel screenshots match at
+median overlap **1.000** and median agreement **0.000**, a `column_roll` against
+a crop of its own original at median overlap **0.562** and median agreement
+**0.971**. Swept on the full corpus, everything else at stock, false pairs split
+into rearrangement traps and cross-family errors:
+
+| `--min-overlap` | F1 | precision | recall | FP | trap | cross | merges |
+|---|---|---|---|---|---|---|---|
+| 0.50 | 0.9638 | 95.91% | 96.85% | 9,626 | 9,625 | **1** | 1 |
+| 0.60 | 0.9724 | 97.72% | 96.76% | 5,261 | 5,261 | 0 | 0 |
+| 0.70 | 0.9763 | 98.84% | 96.44% | 2,626 | 2,626 | 0 | 0 |
+| 0.75 | 0.9763 | 98.88% | 96.40% | 2,535 | 2,535 | 0 | 0 |
+| 0.80 | 0.9777 | 99.39% | 96.20% | 1,368 | 1,368 | 0 | 0 |
+| **0.85** | **0.9775** | **99.52%** | **96.05%** | **1,088** | **1,088** | **0** | **0** |
+| 0.90 | 0.9741 | 99.61% | 95.31% | 871 | 871 | 0 | 0 |
+| 0.95 | 0.9642 | 99.65% | 93.40% | 770 | 770 | 0 | 0 |
+
+| `--min-agreement` | F1 | precision | recall | FP | trap | cross | merges |
+|---|---|---|---|---|---|---|---|
+| 0.30 | 0.8945 | 83.39% | 96.45% | 44,725 | 1,185 | **43,540** | 12 |
+| 0.35 | 0.9683 | 97.23% | 96.42% | 6,387 | 1,158 | **5,229** | 2 |
+| 0.40 | 0.9732 | 98.30% | 96.36% | 3,879 | 1,129 | **2,750** | 1 |
+| 0.45 | 0.9785 | 99.49% | 96.26% | 1,146 | 1,146 | 0 | 0 |
+| **0.50** | **0.9775** | **99.52%** | **96.05%** | **1,088** | **1,088** | **0** | **0** |
+| 0.55 | 0.9758 | 99.54% | 95.70% | 1,020 | 1,020 | 0 | 0 |
+| 0.60 | 0.9729 | 99.59% | 95.09% | 920 | 920 | 0 | 0 |
+| 0.70 | 0.9600 | 99.61% | 92.64% | 849 | 849 | 0 | 0 |
+
+Four things to read off those, and the first is why the pair is worth this much
+text. **Loosening overlap merges nothing and adds traps; loosening agreement
+merges families and adds almost no traps.** Of the 2,847 pairs that are false at
+agreement 0.40 and were not at 0.50, **2,750 are a single family merge** — the
+two Excel screenshots. Of the 1,544 that are false at overlap 0.70 and were not
+at 0.85, the transforms naming them are led by `column_roll` and `tile_shuffle`,
+and **none of them crosses a family at all**.
+**Their margins are not comparable**: agreement's cliff is one step below
+shipped, where overlap has none in the usable range and 0.35 of clear air below
+it. **Both score best one step loose** — overlap 0.80 by 0.0002, agreement 0.45
+by 0.0010 — and neither should move, because that is buying F1 with the distance
+to a cliff, which is the whole of the rule above. And **the seed halves cannot
+see this cliff**: they track each other everywhere on the safe side, but at
+agreement 0.30 half A is 0.8990 against half B's 0.9785, because the merges all
+land in one half. Halves test whether a *shape* generalises, not whether a value
+is safe.
+
+**Neither of them is a cost knob, and the one cost effect runs backwards.**
+`--min-overlap` looks like one: it gates `pixel_check`, the most expensive thing
+done per pair, at `verify.rs:1149` and again on propagation. It saves almost
+nothing, because the quantity it gates is bimodal — of 210,133 direct verdicts
+eligible on inliers, **189,439 (90.2%) already have an overlap of 0.9 or more**,
+so the floor turns away 193,430 checks at 0.85 against 196,462 at 0.70 and
+183,653 at 0.95. Measured with `--no-propagate --features prof`, direct
+`pixel_check` is flat at 26.7-32.3 CPU-seconds across every setting of *either*
+knob. What does move is propagation, and it moves the wrong way: a round
+proposes every **unmatched** pair inside a component, so *tightening* a bar
+leaves more of them and makes more work. Composed hypotheses go 70,887 ->
+**75,986** -> 147,876 as agreement goes 0.35 -> 0.50 -> 0.70, and 57,562 ->
+**75,986** -> 131,989 as overlap goes 0.70 -> 0.85 -> 0.95. Agreement at 0.70
+doubles them and costs 8-10 CPU-seconds of `pixel_check` (42.4 and 43.6 against
+the shipped 35.3 and 32.8, two reps each) — the only cost signal either knob
+produced that cleared this machine's noise floor. The overlap points did not:
+the same configuration measured 41.4 s and 33.1 s on two reps, which is the 25%
+swing *Speed and memory* warns about. Set both for what the tool should claim,
+never for what it costs.
+
+**`--min-inliers` is the third bar in that `if`, and the only one propagation
+can overrule.** `Policy::new` gives the propagated tier `min_inliers: 0`
+(`verify.rs:228`) — no features vouch for a composed transform, so the count is
+not evidence about it — while overlap and agreement are inherited by all three
+tiers. A pair the inlier bar rejects can therefore come back through
+propagation; a pair the other two reject is gone. That asymmetry is most of why
+this knob behaves differently from the other two at the tight end.
+
+| `--min-inliers` | F1 | precision | recall | FP | trap | cross | merges | wall |
+|---|---|---|---|---|---|---|---|---|
+| 5 | 0.9535 | 93.19% | 97.61% | 16,620 | 1,263 | **15,357** | 55 | 69.2 s |
+| 6 | 0.9668 | 96.02% | 97.34% | 9,390 | 1,232 | **8,158** | 13 | 49.8 s |
+| 7 | 0.9654 | 96.02% | 97.07% | 9,361 | 1,213 | **8,148** | 10 | 32.1 s |
+| 8 | **0.9809** | 99.48% | 96.74% | 1,181 | 1,181 | 0 | 0 | 23.2 s |
+| 9 | 0.9795 | 99.51% | 96.44% | 1,101 | 1,101 | 0 | 0 | 21.5 s |
+| **10** | **0.9775** | **99.52%** | **96.05%** | **1,088** | **1,088** | **0** | **0** | ~25 s |
+| 11 | 0.9745 | 99.52% | 95.46% | 1,077 | 1,077 | 0 | 0 | 27.8 s |
+| 12 | 0.9714 | 99.55% | 94.84% | 1,002 | 1,002 | 0 | 0 | 20.3 s |
+| 13 | 0.9680 | 99.55% | 94.19% | 990 | 990 | 0 | 0 | 33.5 s |
+| 14 | 0.9655 | 99.55% | 93.71% | 983 | 983 | 0 | 0 | 20.2 s |
+| 15 | 0.9642 | 99.56% | 93.48% | 973 | 973 | 0 | 0 | 27.2 s |
+| 16 | 0.9623 | 99.56% | 93.11% | 968 | 968 | 0 | 0 | 20.4 s |
+| 17 | 0.9591 | 99.56% | 92.52% | 954 | 954 | 0 | 0 | 27.1 s |
+| 18 | 0.9563 | 99.56% | 92.01% | 945 | 945 | 0 | 0 | 25.1 s |
+| 20 | 0.9514 | 99.57% | 91.08% | 908 | 908 | 0 | 0 | 31.0 s |
+
+The cliff above reproduces to the pair — 8,148 cross-family pairs at 7 — and so
+does the reason not to move: **8 scores 0.0034 better than shipped with nothing
+cross-family**, and sits one step from catastrophe where 10 sits three. Unlike
+agreement, whose cliff arrives one family at a time (1, then 2, then 12), this
+one arrives whole. (Above the cliff the wall column is thermal noise; below it,
+it is the merge tax, and it scales with how bad the merge is.)
+
+**Cliff or plateau depends on which column you read, and that is the point.**
+Recall is a pure **ramp** — strictly monotone across all fifteen points, no knee,
+about 0.47 points per unit. Precision is a **step**: 7 -> 8 jumps 3.46 points,
+and then 8 -> 20 moves **0.09 points across twelve units**, a dead-flat plateau.
+F1 is the product of the two, so it inherits the cliff below 8 and the ramp
+above it: strictly monotone decreasing at every one of the twelve steps above
+the cliff, with its only inversion at 6 -> 7, inside the catastrophe where the
+ordering is meaningless.
+
+So **there is no F1 plateau anywhere in the safe range**, and the plateau test
+from the rule above returns an unambiguous verdict: 10 is not sitting on a
+plateau, it is sitting on a slope, and F1 says to move it to 8. Compare the
+geometric inlier tolerance, where every value from 0.010 to 0.025 is within
+0.001 of the same F1 — that is what a plateau looks like, and this knob has
+nothing resembling one. Two things make the answer *keep it at 10* anyway.
+**The F1-optimal safe value and the cliff edge are the same value**, so
+following F1 leaves not a thin margin but none at all. And above the cliff the
+knob buys nothing to begin with: 8 -> 20 removes 273 false pairs, **every one of
+them a trap**, for 0.09 points of precision and 5.66 points of recall. Whatever
+`--min-inliers` does for precision, it does entirely in the single step from 7
+to 8.
+
+The halves behave the way they did for agreement: identical to four places at 13
+and close everywhere above the cliff, wildly apart below it (at 5, half A is
+0.9855 against half B's 0.9422). They confirm the shape and cannot see the
+edge.
+
+**Its cost is the merge tax, not the gate.** As a gate it is the weakest of the
+three: `n_in` is even more skewed than overlap — 156,016 of 236,549 direct
+verdicts carry 50 inliers or more — so the shipped value turns away 193,430
+checks against 204,254 at 6 and 177,283 at 20, a band of ±6%. But it is the only
+one of the three whose *clock* moves, and it moves at the loose end only,
+because that is where the families merge: a merged component is enormous and a
+propagation round proposes every unmatched pair inside one.
+
+| `--min-inliers` | composed hypotheses | `pixel_check` CPU-s, 2 reps | with `--no-propagate` |
+|---|---|---|---|
+| 6 | **340,008** | 57.0 / 44.9 | 44.2 / 29.4 |
+| **10** | **75,986** | **37.1 / 33.6** | **28.1 / 27.3** |
+| 20 | 81,742 | 31.8 / 34.0 | 25.3 / 26.2 |
+
+At 6 the hypothesis count is **4.5x** the shipped one and the sweep's run took
+49.8 s of wall against the usual ~25 s. At 20 it is +7.6% and the clock is level
+or better — which is where the propagated tier's `min_inliers: 0` shows up, since
+the pairs a tight inlier bar rejects are exactly the ones propagation gets back.
+Tightening `--min-agreement` to 0.70 doubles the hypotheses because nothing gets
+them back. So the rule for all three holds, with this one for a different
+reason: a setting that costs real time is telling you it has merged something.
 
 **The fourth pass, and what it removed.** Five numbers, all verified by
 deleting each and measuring, then by re-measuring the survivors in the deleted
@@ -920,17 +1095,50 @@ both of which caught something real in this pass:
   errors from 2 to 0, because every one of the new ones is a `column_roll`
   trap. A rule that only watches total FP would have rejected it.
 
-Measured trade-offs, so they need not be rediscovered (the seconds are from the
-old corpus and the pre-optimisation build, so read them as ratios): `--work-size`
-448 gives F1 0.975 at 80 s, 640 gives 0.980 at 86 s, 768 gives 0.976 at 147 s.
+Measured trade-offs, so they need not be rediscovered. **`--work-size` is a
+knee, not a peak**, re-swept on this corpus and this build — the figures that
+stood here before (448 at F1 0.975, 640 at 0.980, 768 at 0.976, and 768 costing
+1.7x the clock of 640) were the old corpus and the pre-optimisation build, and
+they got the shape wrong in both columns: 448 is much worse than they say, 768
+is very slightly *better* than 640 rather than worse, and the cost above 640 is
+nothing like as steep. Cold runs, one warmup first so every run faced the same
+warm page cache, 60 s cooldown between:
+
+| `--work-size` | F1 | precision | recall | wall | CPU | peak RSS |
+|---|---|---|---|---|---|---|
+| 384 | 0.9553 | 99.60% | 91.78% | 55.7 s | 378 s | 792 MB |
+| 448 | 0.9652 | 99.59% | 93.63% | 65.3 s | 447 s | 766 MB |
+| 512 | 0.9724 | 99.55% | 95.04% | 75.3 s | 531 s | 759 MB |
+| **640** | **0.9775** | **99.52%** | **96.05%** | **95.1 s** | **665 s** | **1,104 MB** |
+| 768 | 0.9782 | 99.55% | 96.15% | 99.4 s | 706 s | 1,106 MB |
+| 896 | 0.9775 | 99.48% | 96.08% | 111.3 s | 805 s | 990 MB |
+
+Cost is near enough linear in the long side while F1 climbs steeply to 640 and
+then stops: 640 -> 768 buys **0.0007** for 6% of the clock, and 640 -> 896 buys
+**nothing** for 17% of the wall and 21% of the CPU. Downwards it is expensive
+fast — 512 costs 0.005, 448 costs 0.012, 384 costs 0.022, all of it recall. So
+640 is the knee and the plateau above it is real, which is the one thing the old
+numbers hid by showing 768 as a decline.
+
+**No cliff, and this is where one could have been.** `--work-size` sets the
+descriptor count, which sizes the vocabulary, and the occupancy trap in *How
+img-fp works* is reachable by exactly that route. It did not fire: **zero
+cross-family pairs at every size**, 384 to 896, and precision never leaves
+99.48-99.60%. Worth re-checking after any change to `VocabParams::for_corpus`,
+since that is the rule keeping it from firing.
+
 `--features` is gone: measured over 300 to 900 at a fixed vocabulary it moves
 F1 by 0.007 (0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977) and 900 costs 11%
 of the run for nothing, so 600 is a constant in `main.rs`. It had looked
 load-bearing, and that was the vocabulary step above, not the detector.
-Candidate breadth (`-k`) is on a plateau,
-not a peak — 200 gives byte-for-byte the same F1, precision and false-positive
-count as 150 on both corpora — so 150 is safely past the knee rather than
-balanced on it.
+Candidate breadth (`-k`) is on a plateau, not a peak, and swept the whole way
+it is the flattest surface in the tool — F1 0.9765, 0.9767, 0.9775, 0.9775,
+0.9775, 0.9775 at 25, 50, 100, 150, 200 and 300, with the top four differing by
+three pairs out of 224,779 and not one cross-family pair anywhere in the range.
+The knee is below 100, so the shipped 150 is not merely past it but half the
+range clear of it, and even starving the thing to 25 costs 0.001. Worth
+remembering before reaching for `-k` to fix anything: on this corpus it is not
+connected to a result.
 
 ## Conventions
 
