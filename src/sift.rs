@@ -539,7 +539,7 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
         drop(dog);
         heights.push(height);
         if o + 1 < n_octaves {
-            octave_base = halve(gauss[s].as_ref().unwrap());
+            octave_base = timed!(32, halve(gauss[s].as_ref().unwrap()));
         }
         grads.push(timed!(8,
             (0..s + 3)
@@ -596,7 +596,7 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
             let py = c.kp.y / oct_scale;
             let mut hist = [0f32; ORI_BINS];
             let radius = (ORI_RADIUS * scl_octv).round() as i32;
-            let omax = orientation_hist(grad, h, px, py, radius, ORI_SIG_FCTR * scl_octv, &mut hist);
+            let omax = timed!(30, orientation_hist(grad, h, px, py, radius, ORI_SIG_FCTR * scl_octv, &mut hist));
             let mag_thr = omax * ORI_PEAK_RATIO;
             for j in 0..ORI_BINS {
                 let l = if j > 0 { j - 1 } else { ORI_BINS - 1 };
@@ -615,7 +615,7 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
                     let mut kp = c.kp;
                     kp.angle = angle;
                     let mut d = [0u8; DESC_LEN];
-                    descriptor(grad, h, px, py, angle, scl_octv, &mut d);
+                    timed!(31, descriptor(grad, h, px, py, angle, scl_octv, &mut d));
                     feats.kps.push(kp);
                     feats.desc.extend_from_slice(&d);
                 }

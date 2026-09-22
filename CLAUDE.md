@@ -858,6 +858,94 @@ against JPEG's 171 — four times the cost per file and a twelfth of the total.
 A faster HEIC path would be worth 3% of the run, and there is no faster JPEG
 path to reach for; see the DCT-scaled entry under *Tried and rejected*.
 
+**Those proportions are this corpus's, and a found one is not like it.** The
+same table over 9,285 photographs a camera roll might hold — 224x224 JPEGs,
+almost none of them duplicates — reads decode **1.3%**, extraction **37%**,
+everything after it **62%**, of which the mirrored and inverted second look
+alone is **46%**. Two things make the difference and neither is the pixels.
+The second look runs on files the first pass did not anchor twice, which is
+349 of 5,638 here and **8,769 of 9,285** there, so its cost scales with how
+many files have *no* duplicate — the normal case. And a small image is
+enlarged before it is analysed (`upsample_below`), so those 224-pixel files
+are described at 448 and cost four times the scale space: priced by turning
+the enlargement off, the run goes 292 s to 94 s and the pairs go 4,581 to
+2,179, which makes it the largest speed/accuracy knob there is on a corpus of
+small images and not a defect.
+
+Priced by deletion, the second look is **117 s of wall and 832 CPU-seconds for
+633 pairs** on that corpus, against **14 thread-seconds for 5,774 pairs** on
+this one. Before reaching for it, read *What the second look costs* below: the
+three obvious ways to make it cheaper were measured and all three are worse
+than they look.
+
+What was worth doing in the **matcher pass**, which is the first one aimed at
+the retrieval and verification half rather than at the pixels. All three are
+byte-identical — the same 227,838 pairs and 122 groups on this corpus, the
+same 4,581 pairs and 874 groups on the found one, checked over six alternating
+runs of each build.
+
+- **The candidate ranking sorted the whole corpus to keep a hundred and fifty
+  of it.** A query touches nearly every file that shares a word with it, so
+  `scored` arrives holding thousands of entries, and it was fully sorted
+  before being truncated to `-k`. The comparator is a total order — scores tie,
+  image indices cannot — so the `k` that survive and the order they survive in
+  are settled by the comparator alone, and `select_nth_unstable_by` before
+  sorting the survivors gives the same answer. Measured at **2.2 ms a query**,
+  which was more than the retrieval it ranked; on the found corpus the stage
+  went **77.2 CPU-seconds to 10.5**, and it is paid once per image in the first
+  pass and three times more for every image the second look re-asks.
+- **The vocabulary descent's wide path was dead code on nearly every corpus.**
+  The innermost loop had a specialisation for a node with `MAX_BRANCH` live
+  children and a runtime-width loop for everything else — and since
+  `for_corpus` narrows the branching to the smallest tree that holds the target
+  occupancy, the only corpora reaching sixteen are those whose descriptor count
+  sits just above a power of it. Everything else ran a loop whose trip count
+  the compiler could not see, which neither unrolls nor vectorises. Measured on
+  the descent alone at depth 4: width 15 cost **9,461 ns/descriptor against
+  width 16's 5,431**, for less arithmetic. Dispatching on the width as a
+  constant puts every width on one curve — 8 is **2.2x** faster, 12 **1.65x**,
+  11 **1.20x**, 15 **1.13x** — and the arithmetic is unchanged, each centre's
+  sum still taken over the dimensions in order. `cargo test --release --
+  --ignored --nocapture quantise_branching` is the measurement.
+- **The word-list intersection walked both lists.** Two images' lists hold
+  about 1,300 entries each over a million-odd words and share some tens, so
+  the merge spent one three-way comparison per entry of both lists on data
+  that gives the predictor nothing. Galloping to the next candidate instead of
+  walking to it is the same intersection in the same order. It is the smallest
+  of the three — about **4%** of that function — because the function turns out
+  not to be bound by its loop; see below.
+
+### What the second look costs, and three ways not to fix it
+
+It is **46% of a found corpus's run** and 1.8% of this one's. Of that, the
+re-quantisation of the permuted descriptors is about half, the word-list
+intersections a fifth, and retrieval and geometry the rest. Three cuts were
+measured and all three are worse than the cost:
+
+- **Narrowing its descent.** The second look's query does not need the same
+  breadth as the index it queries, since the index side already multi-assigns
+  — or so it seemed. Swept, `max_paths` 3 -> 2 -> 1 takes the found corpus's
+  mirror anchors from **467 to 283 to 151** while the benchmark corpus barely
+  notices (5,774 -> 5,726 -> 5,410). Those matches are marginal and they need
+  every path there is.
+- **Dropping a variant.** The two corpora disagree completely on which one
+  pays: **all 467** of the found corpus's anchors come from `mirror`, and
+  `invert` and `mirror+invert` yield **zero**; on this corpus `invert` yields
+  **4,915 of 5,774** and mirror 276. Neither can go, and a corpus that
+  measured only one of them would have concluded otherwise.
+- **Cutting its candidate list.** On the found corpus only **40 of 467**
+  anchors sit beyond rank 25, so `-k 25` would cost almost nothing there. On
+  this one **3,678 of 5,774** do, at a median rank of 40 — because an inverted
+  file matches its whole family and the deep ranks are the rest of the family.
+
+**And the descent is bandwidth-bound, which is why the obvious kernel fix
+fails.** A child-distance costs **19 ns against a tree that fits in cache and
+31 ns against one of 40 MB** (`quantise_depth`), so roughly two fifths of it is
+waiting for centres. Storing the centres as bytes rather than floats is a
+quarter of the traffic and was tried: the u8-to-i32 widening made the
+arithmetic **70% slower** — the in-cache cost went 19 ns to 33 — and the two
+cancelled, leaving 2%. Whatever cuts those bytes has to keep the floats.
+
 What was worth doing in the **third** pass. Every entry here removes
 instructions from a loop that was already vectorised or already tight, which
 is why they are small individually and worth 10% of the CPU together. The four
@@ -1067,6 +1155,11 @@ What was worth doing in the **first** pass, in order of what it returned:
 alternating the two builds on the same corpus, which is the only protocol that
 works on this laptop:
 
+- *Byte centres in the vocabulary descent*, *narrowing the second look's
+  descent*, *dropping one of its three variants* and *cutting its candidate
+  list* — all four measured, all four worse than they look. The numbers are
+  under *What the second look costs* above, with the accuracy each would have
+  cost.
 - *A per-thread pool for the scale-space planes*, to stop the churn of
   megabyte buffers per image. No measurable change in time, and 70 MB more
   peak. The allocator was already handling it.

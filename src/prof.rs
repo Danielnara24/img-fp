@@ -14,7 +14,7 @@
 //! come to several times the wall clock.
 #![allow(dead_code)]
 
-pub const N: usize = 29;
+pub const N: usize = 44;
 
 #[rustfmt::skip]
 pub static NAMES: [&str; N] = [
@@ -32,6 +32,22 @@ pub static NAMES: [&str; N] = [
     // assembly. Appended rather than filed with the matcher above, because
     // the decode-format slots are addressed by number from `decode.rs`.
     "group",
+    // A second, finer pass (slots 29..): the budget queue, the two halves of
+    // description, and the stages outside any worker pool.
+    "decode:permit", "sift:ori", "sift:desc", "sift:halve",
+    "main:exact", "main:pool", "main:candsort", "main:output", "main:release",
+    // A third pass (slots 38..), splitting the two retrieval passes apart.
+    // `variant:pass` contains the four slots after it *and* `query`,
+    // `shared`, `correspond`, `best_transform`, `encloses`, `overlap` and
+    // `pixel_check`; `verify:direct` contains the same seven for the direct
+    // pass. The two together are what the matcher spends.
+    "variant:pass", "variant:quantise", "variant:mkfeats", "cand:rank",
+    "verify:direct",
+    // `pixel_check` reached through `verify_transform` — propagation and
+    // corroboration — so that the direct pass's share of slot 20 is its own.
+    // Note that `propagate` is timed outside its own `par_iter`, so that slot
+    // is one thread's wall clock and not a sum over the workers.
+    "pixel_check:prop",
 ];
 
 pub static ACC: [std::sync::atomic::AtomicU64; N] =

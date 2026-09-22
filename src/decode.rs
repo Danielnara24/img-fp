@@ -197,6 +197,10 @@ impl Drop for Permit {
 /// budget waits for the workers to empty and then proceeds: the alternative is
 /// refusing to read a file for being big.
 fn reserve(bytes: u64) -> Permit {
+    timed!(29, reserve_inner(bytes))
+}
+
+fn reserve_inner(bytes: u64) -> Permit {
     let want = bytes.min(isize::MAX as u64) as usize;
     let mut q = BUDGET.state.lock().unwrap_or_else(|e| e.into_inner());
     let ticket = q.issued;

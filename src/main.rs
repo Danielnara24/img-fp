@@ -233,6 +233,31 @@ fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
     }
 }
 
+/// The `k` best-scoring candidates a query returned, best first, ties to the
+/// lowest index.
+///
+/// The ordering is a total order — the scores may tie but the image indices
+/// cannot — so the `k` that come out and the order they come out in are
+/// settled by the comparator alone, and selecting before sorting gives the
+/// same answer as sorting the lot. It is not the same cost: a query on a
+/// corpus of any size touches most of it, so this was sorting some nine
+/// thousand candidates to keep a hundred and fifty of them, once per query
+/// and three times more for every image the second look re-asks. Measured on
+/// a nine-thousand-image corpus it was 2.2 ms a query, which is more than the
+/// retrieval it ranks.
+fn rank_best(scored: &mut Vec<(u32, f32)>, k: usize) {
+    let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0));
+    if k == 0 {
+        scored.clear();
+        return;
+    }
+    if scored.len() > k {
+        scored.select_nth_unstable_by(k - 1, cmp);
+        scored.truncate(k);
+    }
+    scored.sort_unstable_by(cmp);
+}
+
 /// Quantise every descriptor of an image into the sorted word list the
 /// inverted file speaks.
 fn quantise(vocab: &Vocabulary, f: &Features) -> WordList {
@@ -370,7 +395,7 @@ fn main() -> Result<()> {
     }
 
     // Byte-identical copies, before anything is decoded.
-    let exact = exact_groups(&files);
+    let exact = timed!(33, exact_groups(&files));
     stage!(t_start, "exact duplicates: {} groups", exact.len());
 
     // Decode and describe.
@@ -477,7 +502,7 @@ fn main() -> Result<()> {
     // (This was measured once before and judged worthless, and it was: the
     // peak then stood in the middle of this very phase. With the decode
     // budget holding that down, what is left is the plateau this releases.)
-    release_memory();
+    timed!(37, release_memory());
     let n_ok = items.iter().filter(|i| i.ok).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
@@ -485,7 +510,7 @@ fn main() -> Result<()> {
     // Vocabulary from the corpus itself, at a depth the corpus chooses.
     let vp = index::VocabParams::for_corpus(n_desc);
     let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc) * DESC_LEN);
-    {
+    timed!(34, {
         // Even sampling across images, so one feature-rich image cannot own
         // the vocabulary.
         let per = (vp.sample / n_ok.max(1)).max(8);
@@ -496,7 +521,7 @@ fn main() -> Result<()> {
                 pool.extend_from_slice(it.feats.d(i));
             }
         }
-    }
+    });
     let vocab = timed!(12, Vocabulary::build(&pool, &vp));
     drop(pool);
     stage!(t_start, "vocabulary: {} words from {} samples", vocab.n_words(), vp.sample.min(n_desc));
@@ -532,19 +557,22 @@ fn main() -> Result<()> {
             || (vec![0f32; n], Vec::new(), Vec::new()),
             |(acc, touched, scored), i| {
                 timed!(14, inv.query(&lists[i], i as u32, acc, touched, scored));
-                scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
-                scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
-                scored.truncate(args.candidates);
-                scored
-                    .iter()
-                    .map(|&(j, _)| if (j as usize) < i { (j, i as u32) } else { (i as u32, j) })
-                    .collect::<Vec<_>>()
+                timed!(41, {
+                    scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
+                    rank_best(scored, args.candidates);
+                    scored
+                        .iter()
+                        .map(|&(j, _)| if (j as usize) < i { (j, i as u32) } else { (i as u32, j) })
+                        .collect::<Vec<_>>()
+                })
             },
         )
         .flatten()
         .collect();
-    cand_pairs.par_sort_unstable();
-    cand_pairs.dedup();
+    timed!(35, {
+        cand_pairs.par_sort_unstable();
+        cand_pairs.dedup();
+    });
     stage!(t_start, "candidates: {} pairs", cand_pairs.len());
 
     let dumping = args.dump.is_some();
@@ -559,7 +587,7 @@ fn main() -> Result<()> {
         .par_iter()
         .map_init(
             || (Vec::new(), Vec::new(), verify::Scratch::default()),
-            |(cands, matches, scratch), &(i, j)| {
+            |(cands, matches, scratch), &(i, j)| timed!(42, {
                 let (i, j) = (i as usize, j as usize);
                 timed!(15, index::shared(&lists[i], &lists[j], cands, 60_000));
                 if cands.len() < 3 {
@@ -573,7 +601,7 @@ fn main() -> Result<()> {
                 };
                 let v = verify::verify(&p, cands, Variant::default(), gate, matches, scratch);
                 (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some((i, j, v.m, false, v))
-            },
+            }),
         )
         .flatten()
         .collect();
@@ -613,22 +641,20 @@ fn main() -> Result<()> {
         .par_iter()
         .map_init(
             || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default()),
-            |(acc, touched, scored, cands, matches, scratch), &i| {
+            |(acc, touched, scored, cands, matches, scratch), &i| timed!(38, {
                 let mut out: Vec<Edge> = Vec::new();
                 for var in [
                     Variant { mirror: true, invert: false },
                     Variant { mirror: false, invert: true },
                     Variant { mirror: true, invert: true },
                 ] {
-                    let vf = variant_features(&items[i].feats, var);
-                    let wl = quantise(&vocab, &vf);
-                    inv.query(&wl, i as u32, acc, touched, scored);
-                    scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
-                    scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
-                    scored.truncate(args.candidates);
+                    let vf = timed!(40, variant_features(&items[i].feats, var));
+                    let wl = timed!(39, quantise(&vocab, &vf));
+                    timed!(14, inv.query(&wl, i as u32, acc, touched, scored));
+                    timed!(41, rank_best(scored, args.candidates));
                     for &(j, _) in scored.iter() {
                         let j = j as usize;
-                        index::shared(&wl, &lists[j], cands, 60_000);
+                        timed!(15, index::shared(&wl, &lists[j], cands, 60_000));
                         if cands.len() < 3 {
                             continue;
                         }
@@ -653,7 +679,7 @@ fn main() -> Result<()> {
                     }
                 }
                 out
-            },
+            }),
         )
         .flatten()
         .collect();
@@ -673,7 +699,7 @@ fn main() -> Result<()> {
         // large each picture was. Only the keypoints and descriptors go.
         it.feats = std::sync::Arc::new(Features { w: it.feats.w, h: it.feats.h, ..Default::default() });
     }
-    release_memory();
+    timed!(37, release_memory());
     stage!(t_start, "released the index and the descriptors");
 
     let mut all: Vec<Edge> = edges;
@@ -881,7 +907,7 @@ fn main() -> Result<()> {
     match args.output {
         Some(path) => {
             let f = std::fs::File::create(&path)?;
-            serde_json::to_writer(std::io::BufWriter::new(f), &out)?;
+            timed!(36, serde_json::to_writer(std::io::BufWriter::new(f), &out))?;
             eprintln!(
                 "{} groups, {} pairs over {} images in {:.1}s -> {}",
                 out.groups.len(),

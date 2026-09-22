@@ -330,32 +330,14 @@ impl Vocabulary {
                     continue;
                 }
                 let first = kids.first as usize;
-                // All of this parent's children at once. Each child's sum is
-                // still taken over the dimensions in order, so it is the same
-                // float to the bit as summing the children one at a time — but
-                // sixteen independent sums keep the machine's adders busy
-                // where one chain of 128 dependent adds could not. This is the
-                // innermost loop of quantisation: it runs `depth * branching`
-                // times for every descriptor in the corpus.
+                // All of this parent's children at once — see `child_dists`.
+                // This is the innermost loop of quantisation: it runs
+                // `depth * max_paths` times for every descriptor in the
+                // corpus, and on a corpus of any size it is most of the
+                // retrieval stage.
                 let blk = &centres[first * DESC_LEN..(first + n_live) * DESC_LEN];
                 let mut acc = [0f32; MAX_BRANCH];
-                if n_live == MAX_BRANCH {
-                    for (i, &qi) in q.iter().enumerate() {
-                        let row = &blk[i * MAX_BRANCH..(i + 1) * MAX_BRANCH];
-                        for k in 0..MAX_BRANCH {
-                            let d = qi - row[k];
-                            acc[k] += d * d;
-                        }
-                    }
-                } else {
-                    for (i, &qi) in q.iter().enumerate() {
-                        let row = &blk[i * n_live..(i + 1) * n_live];
-                        for (k, &c) in row.iter().enumerate() {
-                            let d = qi - c;
-                            acc[k] += d * d;
-                        }
-                    }
-                }
+                child_dists(n_live, &q, blk, &mut acc);
                 for k in 0..n_live.min(FRONTIER - n_next) {
                     next[n_next] = (node_of[first + k], acc[k]);
                     n_next += 1;
@@ -420,6 +402,62 @@ impl Vocabulary {
         }
         for &(node, _) in cur[..n_cur].iter() {
             out.push(node);
+        }
+    }
+}
+
+/// Squared distance from `q` to each of `k` centres held dimension-major in
+/// `blk`, into the first `k` lanes of `acc`. Each centre's sum is taken over
+/// the dimensions in order, so every distance is the same float it would be if
+/// the centres were measured one at a time — but `k` sums run at once instead
+/// of one chain of 128 dependent adds.
+///
+/// **The width reaches the loop as a constant**, which is the whole point of
+/// the dispatch below. It is a property of the tree, settled when it was
+/// built, and it is almost never `MAX_BRANCH`: `for_corpus` narrows the
+/// branching to the smallest tree that still holds the target occupancy, so
+/// the only corpora that land on sixteen are the ones whose descriptor count
+/// sits just above a power of it. Everything else ran down a loop whose trip
+/// count the compiler could not see, which neither unrolls nor vectorises.
+/// Measured on the descent alone, at depth 4 over 60,000 descriptors, the
+/// runtime-width loop cost 9,461 ns/descriptor at width 15 against 5,431 at
+/// width 16 — three quarters more, for less arithmetic. Held constant, every
+/// width is on the same curve.
+#[inline(always)]
+fn child_dists(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
+    macro_rules! widths {
+        ($($w:literal)*) => {
+            match k {
+                $($w => {
+                    let mut a = [0f32; $w];
+                    dists::<$w>(q, blk, &mut a);
+                    acc[..$w].copy_from_slice(&a);
+                })*
+                // `MAX_BRANCH` is the widest a node can be — asserted where
+                // the tree is built — so nothing reaches this. It is here so
+                // that the match is total without a panic in a hot loop.
+                _ => dists_dyn(k, q, blk, acc),
+            }
+        };
+    }
+    widths!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16);
+}
+
+#[inline(always)]
+fn dists<const K: usize>(q: &[f32], blk: &[f32], acc: &mut [f32; K]) {
+    for (&qi, row) in q.iter().zip(blk.chunks_exact(K)) {
+        for (a, &c) in acc.iter_mut().zip(row.iter()) {
+            let d = qi - c;
+            *a += d * d;
+        }
+    }
+}
+
+fn dists_dyn(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
+    for (&qi, row) in q.iter().zip(blk.chunks_exact(k)) {
+        for (a, &c) in acc[..k].iter_mut().zip(row.iter()) {
+            let d = qi - c;
+            *a += d * d;
         }
     }
 }
@@ -512,23 +550,7 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
             .map(|(own, &m)| {
                 let dv = &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN];
                 let mut acc = [0f32; MAX_BRANCH];
-                if kk == MAX_BRANCH {
-                    for (i, &qi) in dv.iter().enumerate() {
-                        let row = &tc[i * MAX_BRANCH..(i + 1) * MAX_BRANCH];
-                        for c in 0..MAX_BRANCH {
-                            let d = qi - row[c];
-                            acc[c] += d * d;
-                        }
-                    }
-                } else {
-                    for (i, &qi) in dv.iter().enumerate() {
-                        let row = &tc[i * kk..(i + 1) * kk];
-                        for (c, &cv) in row.iter().enumerate() {
-                            let d = qi - cv;
-                            acc[c] += d * d;
-                        }
-                    }
-                }
+                child_dists(kk, dv, &tc, &mut acc);
                 let mut best = (f32::MAX, 0u32);
                 for c in 0..kk {
                     if acc[c] < best.0 {
@@ -742,14 +764,45 @@ impl InvertedFile {
     }
 }
 
+/// Index of the first element of `s` that is not below `key`.
+///
+/// `s[0] < key` is the caller's precondition, so the answer is at least one
+/// and the walk always makes progress. Exponential search first, then binary
+/// over the bracket it lands in: the step doubles, so a key one place along
+/// costs one comparison and a key a thousand places along costs twenty rather
+/// than a thousand.
+#[inline]
+fn gallop(s: &[u32], key: u32) -> usize {
+    debug_assert!(!s.is_empty() && s[0] < key);
+    let mut lo = 0usize;
+    let mut step = 1usize;
+    while lo + step < s.len() && s[lo + step] < key {
+        lo += step;
+        step *= 2;
+    }
+    let hi = (lo + step).min(s.len());
+    lo + s[lo..hi].partition_point(|&v| v < key)
+}
+
 /// Candidate descriptor pairs for two images: keypoints that share a word.
+///
+/// The two lists are walked as a galloping intersection rather than a plain
+/// merge, because the intersection is *sparse*: a few hundred images' word
+/// lists hold about 1,300 entries each over a vocabulary of a million-odd
+/// words, and two of them share some tens. A plain merge takes one step per
+/// entry of both lists, and each step is a three-way comparison on data that
+/// gives the predictor nothing — measured, it was 43 microseconds a pair
+/// against 6 for the sort at the end of the same function, and it was called
+/// five million times in one run of a nine-thousand-image corpus. Skipping to
+/// the next candidate instead of walking to it is the same intersection in the
+/// same order, so the pairs that come out are unchanged.
 pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
     out.clear();
     let (mut i, mut j) = (0usize, 0usize);
     while i < a.word.len() && j < b.word.len() {
         match a.word[i].cmp(&b.word[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Less => i += gallop(&a.word[i..], b.word[j]),
+            std::cmp::Ordering::Greater => j += gallop(&b.word[j..], a.word[i]),
             std::cmp::Ordering::Equal => {
                 let w = a.word[i];
                 let i0 = i;
@@ -884,5 +937,116 @@ mod bench {
             best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
         }
         println!("quantise: {best:8.1} ns/descriptor  ({} words)", v.n_words());
+    }
+
+    /// `cargo test --release -- --ignored --nocapture shared_timings`
+    ///
+    /// The word-list intersection, on one core, at the shape a real corpus
+    /// produces: `L` entries per list over `V` words, both sorted.
+    #[test]
+    #[ignore]
+    fn shared_timings() {
+        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+        let mut w32 = || {
+            let a = rng.byte() as u32;
+            let b = rng.byte() as u32;
+            let c = rng.byte() as u32;
+            (a << 16) | (b << 8) | c
+        };
+        for (l, v) in [(1300usize, 1_771_561u32), (1070, 1_048_576), (1300, 262_144)] {
+            // A pool of lists, so that each call reads a different one and the
+            // measurement is not a single pair sitting in L1.
+            let lists: Vec<WordList> = (0..64)
+                .map(|_| {
+                    let mut pairs: Vec<(u32, u32)> =
+                        (0..l).map(|k| (w32() % v, (k / 3) as u32)).collect();
+                    pairs.sort_unstable();
+                    WordList {
+                        word: pairs.iter().map(|p| p.0).collect(),
+                        kp: pairs.iter().map(|p| p.1).collect(),
+                    }
+                })
+                .collect();
+            let mut out = Vec::new();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                let mut n = 0usize;
+                for a in lists.iter() {
+                    for b in lists.iter() {
+                        shared(a, b, &mut out, 60_000);
+                        std::hint::black_box(&out);
+                        n += 1;
+                    }
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            println!("shared: {best:9.0} ns/call  (len {l}, {v} words)");
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture quantise_depth`
+    ///
+    /// Cost per child-distance against the size of the tree, at a fixed
+    /// branching. A shallow tree fits in cache and a deep one does not, so
+    /// this says whether the descent is waiting on the centres or on the
+    /// arithmetic — which decides whether to shrink the centres or to
+    /// vectorise harder.
+    #[test]
+    #[ignore]
+    fn quantise_depth() {
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        let n = 60_000;
+        let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
+        for depth in 1..=5usize {
+            let p = VocabParams { depth, branching: 16, sample: 40_000, ..Default::default() };
+            let v = Vocabulary::build(&desc, &p);
+            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum();
+            let mut out = Vec::new();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                for d in desc.chunks_exact(DESC_LEN) {
+                    v.quantise(d, &mut out);
+                    std::hint::black_box(&out);
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            // Distances actually evaluated: every level but the first has up
+            // to `max_paths` parents.
+            let dists = 16 + (depth - 1) * 3 * 16;
+            println!(
+                "depth {depth}: {best:8.1} ns/descriptor  {:5.2} ns/child-distance  ({live} live centres, {:.1} MB)",
+                best / dists as f64,
+                live as f64 * DESC_LEN as f64 * 4.0 / 1e6
+            );
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture quantise_branching`
+    ///
+    /// The descent's cost against the branching `for_corpus` picked, which is
+    /// almost never `MAX_BRANCH`.
+    #[test]
+    #[ignore]
+    fn quantise_branching() {
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        let n = 60_000;
+        let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
+        for branching in [8usize, 9, 10, 11, 12, 13, 14, 15, 16] {
+            let p = VocabParams { depth: 4, branching, sample: 40_000, ..Default::default() };
+            let v = Vocabulary::build(&desc, &p);
+            let mut out = Vec::new();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                for d in desc.chunks_exact(DESC_LEN) {
+                    v.quantise(d, &mut out);
+                    std::hint::black_box(&out);
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            println!("branching {branching:2}: {best:8.1} ns/descriptor  ({} words)", v.n_words());
+        }
     }
 }

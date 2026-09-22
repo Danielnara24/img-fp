@@ -1185,7 +1185,7 @@ pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verd
     v.ov_a = oa;
     v.ov_b = ob;
     if v.ov_a.max(v.ov_b) >= min_ov {
-        let (blk, n, ncc) = timed!(20, pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert));
+        let (blk, n, ncc) = timed!(43, pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert));
         v.blk = blk;
         v.blk_n = n;
         v.ncc = ncc;
