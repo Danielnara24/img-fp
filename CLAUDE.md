@@ -960,6 +960,92 @@ corpus the same three pairs are **-0.7, -1.8 and +0.3 per cent** — level,
 because 5,638 images size the vocabulary to 16^5 and sixteen is one of the two
 widths that keep the old loop.
 
+**A fourth pass over the extractor, aimed at the descriptor and the blur.**
+Together `sift:describe` and `sift:blur` are 314 of 727 CPU-seconds (43%) on
+this corpus and 505 of 1,525 (33%) on the found one, which is what is left of
+the pixels after three passes over them. Both changes are byte-identical over
+the whole of both corpora: the same 227,838 pairs and 122 groups here, the
+same 4,581 pairs and 874 groups there, representatives included.
+
+- **The descriptor's wide sweep was not wide.** The row is swept twice on
+  purpose — once to work out where each sample lands and how much gradient it
+  carries there, once to add those contributions in — because the first half
+  is the same short chain of multiplies for every sample and the second is a
+  scatter. The first half then compiled to one sample at a time anyway, and
+  the listing says why: the Gaussian weight is a table lookup, which is a
+  *gather*, and the sweep's own index is `u as f32` on a `usize`, which the
+  compiler does by pulling each lane out of the 64-bit counter. Either is
+  enough to stop a loop vectorising, and they sat in the middle of it.
+  Taking the table's **index** in the wide sweep and leaving only the read for
+  a sweep of its own, and spelling `0.0, 1.0, .. 15.0` as a constant table,
+  puts the rotation, the grid position, the three floors, the fractions and
+  the bin index into `vroundps`/`vcvttps2dq`/`vpmulld` eight samples at a
+  time. Every value is the same float it was, computed from the same terms in
+  the same order. The scatter is now the only scalar part, and it no longer
+  takes an unpredictable branch either: the middle sweep collects the samples
+  that landed inside the grid while it is there.
+- **And the sweep was sixteen samples wide where a row is sixty.** Sixteen
+  was chosen as "two vectors' worth"; what it actually does is decide how
+  often the three sweeps hand each other a block, and each handover is a
+  narrow load waiting on a wide store that has not retired. A descriptor's
+  search row is some sixty samples at the scales this runs at, so sixty-four
+  is usually the whole row and there is no handover at all. Paired on the
+  isolated descriptor, 8 / 16 / 32 / 48 / 64 cost **30.9 / 26.9 / 24.1 / 22.8
+  / 22.4 ms** for two thousand of them.
+- **The blur built each output row somewhere else and then copied it in.**
+  The vertical pass ran its `r + 1` tap passes over a scratch row and then
+  `extend_from_slice`d that row into the plane — a whole plane read and
+  written again for every blur, twenty times an image. It accumulates into
+  the plane itself now, through `spare_capacity_mut`, and the scratch row is
+  gone from `BlurScratch` with it.
+- **And it searched for each tap's row.** `reflect101` is a loop and
+  `% ring_rows` is a real division — `ring_rows` is `2r + 1` for whatever
+  sigma this blur is, not a constant — and the pair of them was taken twice
+  per tap per output row, twenty-two times a row at the widest. Away from the
+  two edges no tap reflects at all and a tap's slot follows from the row's by
+  one conditional wrap; only the first and last `r` rows still take the
+  search.
+
+What they are worth, and the measurement is worth as much as the numbers.
+Single-threaded, on the benchmarks: **two thousand descriptors 29.1 / 29.5 /
+29.1 / 29.4 ms against 23.4 / 23.4 / 23.3 / 23.0**, four alternating pairs
+cooled before each, and `extract 640x480` **30.8 / 30.7 / 30.5 / 30.2 against
+27.3 / 26.5 / 26.8 / 26.2** — 20% off the descriptor and 12% off the whole
+extractor.
+
+In place at eight threads it is less, and the honest way to see how much is
+**within a single run**, where a stage faces the same clock and the same
+contention as its siblings. Against `sift:ori`, which nothing here touched:
+`sift:desc` goes from 4.74 of it to 3.64 on this corpus and from 5.60 to 4.45
+on the found one — **−23% and −20%** — and `sift:blur` from 4.00 to 3.70 and
+from 3.24 to 3.16, which is **−7% and −2%**. That gap is the usual one: the
+descriptor's change removes instructions, and the blur's removes a copy that
+was living in the first-level cache, where at eight threads the sibling
+thread takes the slot anyway.
+
+End to end, **−2.5% of the CPU** on the 636-file subset (11 alternating
+pairs, both orderings, 70.63 s against 68.88 s in the mean). On the two full
+corpora the effect is inside this machine's drift and the pairs are quoted
+rather than averaged: the benchmark corpus at 670 -> 711, 720 -> 729, 819 <-
+759, 819 <- 783 CPU-seconds and the found one at 1,602 -> 1,589 and 1,661 <-
+1,563, where `<-` marks the pairs run in the other order. Over a session
+these runs drifted 22% on the *same* binary, and whichever build ran second
+in a pair measured about 5% slower, which is larger than what is being
+measured; reversing the order and averaging the two gives −1% and −3%. The
+per-stage figures above are the ones to believe.
+
+**What is left in the blur is the two planes it writes, not the filtering.**
+Worth knowing before anyone reaches for it again: at 640x480 with r=10 a
+`blur_dog` costs **5.31 ns a pixel and a `blur` without the difference costs
+3.75**, so the second plane is 29% of the call — and at 320x240, where both
+planes stay in cache, the two are **4.08 and 3.94**, which is to say the
+difference costs nothing at all. The filtering itself is 4x unrolled `ymm`
+and cannot use an FMA, since `acc + (a + b) * kv` in one rounding is not the
+float the two roundings give. So the remaining lever is the write-allocate
+traffic on `dst` and `dog`, which means non-temporal stores, which means
+alignment and `std::arch` — and the next blur reads `dst` straight back, so
+some of what a streaming store saves it would pay again.
+
 
 ### What the second look costs, and three ways not to fix it
 
@@ -1283,6 +1369,16 @@ works on this laptop:
   half the stores for nothing — but the compiler had already paired them, and
   saying so by hand with unaligned two-element reads and writes was slightly
   worse.
+- *And the trilinear weights that feed them, four at a time.* The eight
+  corners are a magnitude split between two rows, then two columns, then two
+  orientations, so the last two levels are a four-element multiply and a
+  four-element subtraction — written as arrays rather than as fourteen named
+  scalars, which is the same products and the same differences in the same
+  order and ought to let the compiler use one register for each level. Three
+  alternating pairs on the isolated descriptor: 22.44 / 23.63 / 24.46 ms
+  against 23.22 / 22.92 / 22.40. It wins one pair of three and the run was
+  heating; there is nothing there. The scatter is not bound by the arithmetic
+  that feeds it.
 - *Sixteen and thirty-two outputs at a time in the blur's horizontal pass*
   rather than eight, for more independent accumulators per tap loop. Both
   lose: 6.4 ms for the five blurs of an octave at eight, 7.0 at sixteen, 7.1

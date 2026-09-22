@@ -129,11 +129,30 @@ impl ExpTable {
         if t >= EXP_RANGE {
             return 0.0;
         }
+        self.at_index(unsafe { Self::index(t) })
+    }
+
+    /// The index `at` would look `t` up at, for a caller that has already
+    /// established `0 <= t < EXP_RANGE`.
+    ///
+    /// It is split out because it is arithmetic and the lookup beside it is a
+    /// gather: the descriptor takes the index for a whole row of samples at
+    /// once and then reads the table one sample at a time. See `descriptor`.
+    ///
+    /// # Safety
+    /// `t` must be finite and in `[0, EXP_RANGE)`.
+    #[inline(always)]
+    unsafe fn index(t: f32) -> u32 {
         let f = t * (EXP_N as f32 / EXP_RANGE);
         // `t` is in [0, EXP_RANGE) and finite, so `f` is in [0, EXP_N).
-        let i = unsafe { f.to_int_unchecked::<u32>() as usize };
-        debug_assert!(i < EXP_N);
-        unsafe { *self.0.get_unchecked(i) }
+        unsafe { f.to_int_unchecked::<u32>() }
+    }
+
+    /// The table entry at an index `index` produced.
+    #[inline(always)]
+    fn at_index(&self, i: u32) -> f32 {
+        debug_assert!((i as usize) < EXP_N);
+        unsafe { *self.0.get_unchecked(i as usize) }
     }
 }
 
@@ -228,7 +247,7 @@ fn gaussian_kernel(sigma: f32) -> Vec<f32> {
 
 /// Per-thread working buffers for the separable blur.
 ///
-/// All three are pure scratch: every element is written before it is read, so
+/// Both are pure scratch: every element is written before it is read, so
 /// they are reused across calls and across images rather than allocated and
 /// zeroed each time. A blur on a 640x480 layer allocated 2.4 MB, and the
 /// pyramid runs twenty of them per image; the zeroing alone was tens of
@@ -239,12 +258,11 @@ struct BlurScratch {
     /// that count. See `blur_into`.
     ring: Vec<f32>,
     padded: Vec<f32>,
-    row: Vec<f32>,
 }
 
 thread_local! {
     static BLUR_SCRATCH: std::cell::RefCell<BlurScratch> =
-        const { std::cell::RefCell::new(BlurScratch { ring: Vec::new(), padded: Vec::new(), row: Vec::new() }) };
+        const { std::cell::RefCell::new(BlurScratch { ring: Vec::new(), padded: Vec::new() }) };
 }
 
 /// Drop this thread's blur scratch. Called once the analysis phase is over,
@@ -254,7 +272,6 @@ pub fn release_scratch() {
         let mut s = s.borrow_mut();
         s.ring = Vec::new();
         s.padded = Vec::new();
-        s.row = Vec::new();
     });
 }
 
@@ -345,49 +362,79 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
     if s.padded.len() < w + 2 * r {
         s.padded.resize(w + 2 * r, 0.0);
     }
-    if s.row.len() < w {
-        s.row.resize(w, 0.0);
-    }
     let ring = &mut s.ring[..ring_rows * w];
     let padded = &mut s.padded[..w + 2 * r];
-    let acc = &mut s.row[..w];
     let mut dst: Vec<f32> = Vec::with_capacity(w * h);
     let mut dog: Vec<f32> = Vec::with_capacity(if want_dog { w * h } else { 0 });
     let mut filtered = 0usize; // rows of `src` already through the horizontal pass
-    for y in 0..h {
-        let want = (y + r).min(h - 1);
-        while filtered <= want {
-            let slot = filtered % ring_rows;
-            blur_row(
-                &src[filtered * w..(filtered + 1) * w],
-                padded,
-                &mut ring[slot * w..(slot + 1) * w],
-                kc,
-                ks,
-                r,
-                w,
-            );
-            filtered += 1;
-        }
-        let c = &ring[(y % ring_rows) * w..(y % ring_rows + 1) * w];
-        for x in 0..w {
-            acc[x] = c[x] * kc;
-        }
-        for (t, &kv) in ks.iter().enumerate() {
-            let ya = reflect101(y as i32 - t as i32 - 1, h) % ring_rows;
-            let yb = reflect101(y as i32 + t as i32 + 1, h) % ring_rows;
-            let a = &ring[ya * w..(ya + 1) * w];
-            let b = &ring[yb * w..(yb + 1) * w];
+    {
+        // The vertical pass accumulates into the output plane itself. It used
+        // to build each row in a scratch row and copy that into `dst`
+        // afterwards — a whole plane read and written again, on top of the
+        // `r + 1` passes the taps already make over it.
+        let spare = dst.spare_capacity_mut();
+        for y in 0..h {
+            let want = (y + r).min(h - 1);
+            while filtered <= want {
+                let slot = filtered % ring_rows;
+                blur_row(
+                    &src[filtered * w..(filtered + 1) * w],
+                    padded,
+                    &mut ring[slot * w..(slot + 1) * w],
+                    kc,
+                    ks,
+                    r,
+                    w,
+                );
+                filtered += 1;
+            }
+            let base = y % ring_rows;
+            let c = &ring[base * w..(base + 1) * w];
+            let urow = &mut spare[y * w..(y + 1) * w];
             for x in 0..w {
-                acc[x] += (a[x] + b[x]) * kv;
+                urow[x].write(c[x] * kc);
+            }
+            // Every element of the row was written just above.
+            let acc = unsafe { &mut *(urow as *mut [std::mem::MaybeUninit<f32>] as *mut [f32]) };
+            // Away from the two edges no tap reflects, and a tap's slot
+            // follows from this row's by one conditional wrap. That replaces
+            // two `reflect101` searches and two divisions by `ring_rows` —
+            // which is not a constant, so they are real divisions — for every
+            // tap of every row of every blur.
+            let interior = y >= r && y + r < h;
+            for (t, &kv) in ks.iter().enumerate() {
+                let (ya, yb) = if interior {
+                    let mut ya = base + ring_rows - t - 1;
+                    if ya >= ring_rows {
+                        ya -= ring_rows;
+                    }
+                    let mut yb = base + t + 1;
+                    if yb >= ring_rows {
+                        yb -= ring_rows;
+                    }
+                    (ya, yb)
+                } else {
+                    (
+                        reflect101(y as i32 - t as i32 - 1, h) % ring_rows,
+                        reflect101(y as i32 + t as i32 + 1, h) % ring_rows,
+                    )
+                };
+                debug_assert_eq!(ya, reflect101(y as i32 - t as i32 - 1, h) % ring_rows);
+                debug_assert_eq!(yb, reflect101(y as i32 + t as i32 + 1, h) % ring_rows);
+                let a = &ring[ya * w..(ya + 1) * w];
+                let b = &ring[yb * w..(yb + 1) * w];
+                for x in 0..w {
+                    acc[x] += (a[x] + b[x]) * kv;
+                }
+            }
+            if want_dog {
+                let below = &src[y * w..(y + 1) * w];
+                dog.extend(acc.iter().zip(below).map(|(a, b)| a - b));
             }
         }
-        if want_dog {
-            let below = &src[y * w..(y + 1) * w];
-            dog.extend(acc.iter().zip(below).map(|(a, b)| a - b));
-        }
-        dst.extend_from_slice(acc);
     }
+    // Every row of the plane was filled above.
+    unsafe { dst.set_len(w * h) };
     let g = Layer { w, h, px: dst };
     let d = want_dog.then(|| Layer { w, h, px: dog });
     (g, d)
@@ -948,15 +995,38 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
 
     let tbl = &*EXP_TABLE;
     // How many of a row's samples are worked out before any of them is added
-    // in. Sixteen is two vectors' worth on any machine this runs on and a
-    // quarter of a kilobyte of stack: wide enough that the first sweep is
-    // worth vectorising, narrow enough to stay in the first-level cache.
-    const SWEEP: usize = 16;
+    // in. A row of a descriptor's search window is sixty-odd samples at the
+    // scales this runs at, so sixty-four is usually the whole row: the three
+    // sweeps below hand each other one block and the narrow loads that follow
+    // the wide stores never wait on a store still in flight. Measured on the
+    // isolated descriptor, 8 / 16 / 32 / 48 / 64 cost 30.9 / 26.9 / 24.1 /
+    // 22.8 / 22.4 ms for two thousand of them; the seven arrays it sizes are
+    // under two kilobytes of stack at 64 and stay in the first-level cache.
+    const SWEEP: usize = 64;
+    /// `u as f32` for the sweep's own index. Spelled as a table because the
+    /// conversion is not: `u` is a `usize`, so the compiler pulls each lane
+    /// out of the 64-bit counter and converts it on its own — sixteen
+    /// instructions per vector, in the one loop that had just been made wide.
+    /// Every entry is exactly the integer it stands for, so the sum below is
+    /// the one the counter gave.
+    const RAMP: [f32; SWEEP] = [
+        0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,
+        8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+        16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0,
+        24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0,
+        32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0,
+        40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0,
+        48.0, 49.0, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0,
+        56.0, 57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0,
+    ];
+    let mut sw_w = [0u32; SWEEP];
     let mut sw_mag = [0f32; SWEEP];
-    let mut sw_ori = [0f32; SWEEP];
     let mut sw_rb = [0f32; SWEEP];
     let mut sw_cb = [0f32; SWEEP];
-    let mut sw_in = [false; SWEEP];
+    let mut sw_ob = [0f32; SWEEP];
+    let mut sw_idx = [0i32; SWEEP];
+    let mut sw_in = [0u32; SWEEP];
+    let mut sw_hit = [0u32; SWEEP];
     for i in -radius..=radius {
         let r = pt_y + i;
         if r <= 0 || r >= rows - 1 {
@@ -990,15 +1060,24 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
         }
         let row = r as usize * g.w;
         let span = &g.px[row + (pt_x + j0) as usize..row + (pt_x + j1) as usize + 1];
-        // The row is swept twice.
+        // The row is swept three times, and the split is what lets the first
+        // sweep be eight samples wide.
         //
-        // The first sweep works out what each of its samples contributes:
-        // where the sample falls in the descriptor's grid, and how much of the
-        // gradient it carries there. That is the same short chain of multiplies
-        // for every sample and nothing a compiler cannot run eight at a time.
-        // The second adds those contributions into the histogram, which is a
-        // scatter and has to go one sample after another. Interleaved, the
-        // scatter was holding the arithmetic to one sample at a time too.
+        // The first sweep is arithmetic and nothing else: where the sample
+        // falls in the descriptor's grid, which of the grid's bins that is,
+        // and how far into each it sits. Every step is the same short chain of
+        // multiplies for every sample, over values that lie next to each
+        // other, so the compiler runs it eight at a time.
+        //
+        // The second reads the Gaussian weight out of its table, which is a
+        // gather and the one thing in the arithmetic above that cannot be
+        // vectorised — it used to sit in the middle of that arithmetic and
+        // held the whole of it to one sample at a time. It also collects the
+        // samples that landed inside the grid, so the third sweep has no
+        // unpredictable branch left to take.
+        //
+        // The third adds the contributions in, which is a scatter and has to
+        // go one sample after another.
         //
         // The column counter is carried as a float. It only ever grows by one
         // and stays inside the search radius, so each value is exactly the
@@ -1007,40 +1086,42 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
         // corpus, is gone.
         let mut jf = j0 as f32;
         for block in span.chunks(SWEEP) {
-            for (u, &[m, o]) in block.iter().enumerate() {
-                let jj = jf + u as f32;
+            for (u, &[_, o]) in block.iter().enumerate() {
+                let jj = jf + RAMP[u];
                 let c_rot = jj * cos_t - fi * sin_t;
                 let r_rot = jj * sin_t + fi * cos_t;
                 let rbin = r_rot + (D / 2) as f32 - 0.5;
                 let cbin = c_rot + (D / 2) as f32 - 0.5;
+                // The Gaussian weight's argument, and the table index it
+                // resolves to. Both are taken for every sample, inside the
+                // grid or not: a sample that falls outside is thrown away
+                // below, unweighed.
+                //
+                // The index is worked out here, where the row is being
+                // handled eight samples at a time, and only the table read
+                // itself is left for the sweep below. `t` is at most
+                // `(radius * sqrt(2) / hist_width)^2 / 8`, and `radius` is at
+                // most `hist_width * sqrt(2) * 2.5`, so it cannot reach 7 —
+                // let alone `EXP_RANGE`, which is 40.
                 let t = (c_rot * c_rot + r_rot * r_rot) * neg_exp_scale;
-                // The weight is taken for every sample, inside the grid or
-                // not: `at` is defined for any non-negative `t` and a sample
-                // that falls outside is thrown away below, unweighed.
-                sw_mag[u] = m * tbl.at(t);
-                sw_ori[u] = (o - ori) * bins_per_rad;
-                sw_rb[u] = rbin;
-                sw_cb[u] = cbin;
-                sw_in[u] = rbin > -1.0 && rbin < D as f32 && cbin > -1.0 && cbin < D as f32;
-            }
-            jf += block.len() as f32;
-            for u in 0..block.len() {
-                if sw_in[u] {
-                    let (rbin, cbin) = (sw_rb[u], sw_cb[u]);
-                    let mag = sw_mag[u];
-                    let obin = sw_ori[u];
-                    let r0 = rbin.floor();
+                debug_assert!((0.0..EXP_RANGE).contains(&t));
+                sw_w[u] = unsafe { ExpTable::index(t) };
+                let obin = (o - ori) * bins_per_rad;
+                let r0 = rbin.floor();
                 let c0 = cbin.floor();
                 let o0 = obin.floor();
-                let rb = rbin - r0;
-                let cb = cbin - c0;
-                let ob = obin - o0;
-                // `rbin` and `cbin` are inside (-1, D) — the test above says
-                // so — and `obin` is inside (-N, N], since it is an angle
-                // difference scaled into bins. So all three floors are small
-                // integers and the conversions cannot saturate; saying so
-                // replaces five instructions apiece with one, three times for
-                // every sample of every descriptor.
+                sw_rb[u] = rbin - r0;
+                sw_cb[u] = cbin - c0;
+                sw_ob[u] = obin - o0;
+                // `rbin` and `cbin` are inside [-6.5, 6.5] for every sample
+                // this loop sees, in the grid or not: `|r_rot|` and `|c_rot|`
+                // are at most `radius * sqrt(2) / hist_width`, and `radius` is
+                // at most `hist_width * sqrt(2) * 2.5`. `obin` is inside
+                // (-N, N), being an angle difference scaled into bins. So all
+                // three floors are small integers and the conversions cannot
+                // saturate; saying so replaces five instructions apiece with
+                // one, three times for every sample of every descriptor.
+                debug_assert!(rbin.abs() < 7.0 && cbin.abs() < 7.0 && obin.abs() < N as f32);
                 let (r0i, c0i, o0i) = unsafe {
                     (
                         r0.to_int_unchecked::<i32>(),
@@ -1051,8 +1132,33 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
                 // Folding the orientation bin back into 0..N. It is in
                 // -N..=N, where masking off the low bits is the same two
                 // adjustments the two branches made — and N is eight.
-                debug_assert!((-(N as i32)..=N as i32).contains(&o0i));
                 let o0i = o0i & (N as i32 - 1);
+                sw_idx[u] = ((r0i + 1) * (D as i32 + 2) + c0i + 1) * (N as i32 + 2) + o0i;
+                sw_in[u] = (rbin > -1.0 && rbin < D as f32 && cbin > -1.0 && cbin < D as f32) as u32;
+            }
+            jf += block.len() as f32;
+            let mut n_hit = 0usize;
+            for u in 0..block.len() {
+                sw_mag[u] = block[u][0] * tbl.at_index(sw_w[u]);
+                // `n_hit` has been raised at most once per pass and so is at
+                // most `u`, which is inside the block.
+                debug_assert!(n_hit <= u && u < SWEEP);
+                unsafe { *sw_hit.get_unchecked_mut(n_hit) = u as u32 };
+                n_hit += (sw_in[u] != 0) as usize;
+            }
+            for &u in &sw_hit[..n_hit] {
+                // Every entry of `sw_hit` was written as a block index above.
+                let u = u as usize;
+                debug_assert!(u < SWEEP);
+                let (mag, rb, cb, ob, sidx) = unsafe {
+                    (
+                        *sw_mag.get_unchecked(u),
+                        *sw_rb.get_unchecked(u),
+                        *sw_cb.get_unchecked(u),
+                        *sw_ob.get_unchecked(u),
+                        *sw_idx.get_unchecked(u),
+                    )
+                };
                 // trilinear
                 let v_r1 = mag * rb;
                 let v_r0 = mag - v_r1;
@@ -1068,14 +1174,13 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
                 let v_rco010 = v_rc01 - v_rco011;
                 let v_rco001 = v_rc00 * ob;
                 let v_rco000 = v_rc00 - v_rco001;
-                let idx = ((r0i + 1) * (D as i32 + 2) + c0i + 1) * (N as i32 + 2) + o0i;
-                let idx = idx as usize;
+                let idx = sidx as usize;
                 let stride_c = N + 2;
                 let stride_r = (D + 2) * (N + 2);
                 // The eight corners of one sample's trilinear spread, written
                 // without eight bounds checks. `rbin` and `cbin` are inside
-                // (-1, D) — the test above says so — and `o0i` has just been
-                // folded into 0..N, so the largest index touched is
+                // (-1, D) — `sw_in` says so — and `o0i` was folded into 0..N,
+                // so the largest index touched is
                 // (D * (D + 2) + D) * (N + 2) + (N - 1) + stride_r + stride_c
                 // + 1, which is 358 of the 360 bins. This is the innermost
                 // loop of the whole extractor: it runs some hundreds of times
@@ -1091,7 +1196,6 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
                     *h.add(stride_r + 1) += v_rco101;
                     *h.add(stride_r + stride_c) += v_rco110;
                     *h.add(stride_r + stride_c + 1) += v_rco111;
-                }
                 }
             }
         }
