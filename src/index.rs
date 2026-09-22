@@ -166,6 +166,11 @@ const FRONTIER: usize = 64;
 /// array the compiler can keep in registers.
 const MAX_BRANCH: usize = 16;
 
+/// How many dimensions the distance loop is handed at a time, and the vector
+/// width it is handed them for. See `child_dists`.
+const SPAN: usize = 32;
+const LANES: usize = 8;
+
 #[inline]
 fn d2(a: &[f32], b: &[f32]) -> f32 {
     let mut s = 0.0;
@@ -323,8 +328,19 @@ impl Vocabulary {
             let centres = &self.levels[l];
             let head = &self.head[l];
             let node_of = &self.node_of[l];
-            for &(parent, _) in cur[..n_cur].iter() {
-                let kids = head[parent as usize];
+            // The frontier is rebuilt as the children are scored, so the
+            // parents come out of it first. They are at most `max_paths`.
+            let mut par = [0u32; FRONTIER];
+            for i in 0..n_cur {
+                par[i] = cur[i].0;
+            }
+            // `max_paths` rather than the old `min(max_paths, n_next)`: the
+            // two differ only when the level offers fewer children than that,
+            // and then the scan never fills up, so the bound is never read.
+            let keep = self.max_paths;
+            let mut held = 0usize;
+            for pi in 0..n_cur {
+                let kids = head[par[pi] as usize];
                 let n_live = kids.n as usize;
                 if n_live == 0 {
                     continue;
@@ -338,21 +354,33 @@ impl Vocabulary {
                 let blk = &centres[first * DESC_LEN..(first + n_live) * DESC_LEN];
                 let mut acc = [0f32; MAX_BRANCH];
                 child_dists(n_live, &q, blk, &mut acc);
+                // Only the closest `max_paths` children are descended, and
+                // only their distances are looked at afterwards. Ordering the
+                // whole frontier — up to forty-eight entries, once per level
+                // for every descriptor in the corpus — decided the order of
+                // forty-five nodes about to be discarded, so the survivors are
+                // picked out by this scan instead. It used to run over the
+                // finished frontier; run per child, it reads each distance
+                // where the distance already is.
                 for k in 0..n_live.min(FRONTIER - n_next) {
-                    next[n_next] = (node_of[first + k], acc[k]);
+                    let e = (node_of[first + k], acc[k]);
+                    next[n_next] = e;
                     n_next += 1;
+                    if held == keep && !(e.1 < cur[held - 1].1) {
+                        continue;
+                    }
+                    let mut j = held.min(keep - 1);
+                    while j > 0 && e.1 < cur[j - 1].1 {
+                        cur[j] = cur[j - 1];
+                        j -= 1;
+                    }
+                    cur[j] = e;
+                    held += (held < keep) as usize;
                 }
             }
             if n_next == 0 {
                 break;
             }
-            // Only the closest `max_paths` children are descended, and only
-            // their distances are looked at afterwards. Ordering the whole
-            // frontier — up to forty-eight entries, once per level for every
-            // descriptor in the corpus — decided the order of forty-five nodes
-            // about to be discarded, so the three that survive are picked out
-            // by a scan instead.
-            //
             // The scan gives the sorted order of the smallest three whenever
             // those three, and the boundary between kept and dropped, are
             // unambiguous. When two distances are exactly equal across that
@@ -362,21 +390,6 @@ impl Vocabulary {
             // is handed to the same sort as before. It is a rarity — a tie has
             // to be exact, in floats summed over 128 dimensions — and the
             // check that spots one is a pass of comparisons against a sort.
-            let keep = self.max_paths.min(n_next);
-            let mut held = 0usize;
-            for i in 0..n_next {
-                let e = next[i];
-                if held == keep && !(e.1 < cur[held - 1].1) {
-                    continue;
-                }
-                let mut j = held.min(keep - 1);
-                while j > 0 && e.1 < cur[j - 1].1 {
-                    cur[j] = cur[j - 1];
-                    j -= 1;
-                }
-                cur[j] = e;
-                held += (held < keep) as usize;
-            }
             let mut ambiguous = false;
             for j in 1..held {
                 ambiguous |= cur[j].1 == cur[j - 1].1;
@@ -423,6 +436,19 @@ impl Vocabulary {
 /// runtime-width loop cost 9,461 ns/descriptor at width 15 against 5,431 at
 /// width 16 — three quarters more, for less arithmetic. Held constant, every
 /// width is on the same curve.
+///
+/// **And the dimensions go in four spans of thirty-two, except where the
+/// width is a whole number of vector lanes.** The sum is the same sum — the
+/// terms are still added in dimension order, so a distance finished in four
+/// pieces is the same float to the bit — but handing the loop a short,
+/// fixed-length run of dimensions is worth 20 to 37 per cent of the descent at
+/// every width from 9 to 15, which is every width `for_corpus` picks except
+/// two. At 8 and 16 the `k` floats are exactly one or two vector registers,
+/// the whole-array loop was already compiling to the right thing, and the
+/// split costs 6 to 8 per cent; those two keep it. `cargo test --release --
+/// --ignored --nocapture quantise_branching` is the measurement, and it wants
+/// running against both forms, because which one wins is a fact about the
+/// compiler and not about the arithmetic.
 #[inline(always)]
 fn child_dists(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
     macro_rules! widths {
@@ -430,7 +456,14 @@ fn child_dists(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
             match k {
                 $($w => {
                     let mut a = [0f32; $w];
-                    dists::<$w>(q, blk, &mut a);
+                    if $w % LANES == 0 {
+                        dists::<$w>(q, blk, &mut a);
+                    } else {
+                        for c in 0..DESC_LEN / SPAN {
+                            let d0 = c * SPAN;
+                            dists::<$w>(&q[d0..d0 + SPAN], &blk[d0 * $w..(d0 + SPAN) * $w], &mut a);
+                        }
+                    }
                     acc[..$w].copy_from_slice(&a);
                 })*
                 // `MAX_BRANCH` is the widest a node can be — asserted where

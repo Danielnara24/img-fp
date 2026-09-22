@@ -915,6 +915,52 @@ runs of each build.
   of the three — about **4%** of that function — because the function turns out
   not to be bound by its loop; see below.
 
+**A second matcher pass, aimed at the vocabulary descent.** Re-profiled on the
+current build at eight threads, the descent — `quantise` plus the second
+look's `variant:quantise` — is **602 of 1,525 CPU-seconds (39%)** on the found
+corpus and 63 of 727 (9%) on this one, which makes it the largest single item
+across the two. Both changes below are byte-identical: the same 227,838 pairs
+and 122 groups here, the same 4,581 pairs and 874 groups there, over six
+alternating runs of each build on each corpus.
+
+- **The distance loop was handed all 128 dimensions at once, and would rather
+  have four spans of 32.** The sum does not change — the terms are still added
+  in dimension order, so a distance finished in four pieces is the same float
+  to the bit — but the shorter, fixed-length run compiles to something much
+  better at every width `for_corpus` picks but two. Paired on the isolated
+  descent, cooled before each: width 9 costs **2,639 ns/descriptor against
+  3,728**, 11 **3,799 against 5,357**, 13 **4,444 against 7,076**, 15 **5,296
+  against 8,442** — 20 to 37 per cent off, for arithmetic that is not merely
+  equivalent but identical. At 8 and 16 the width is a whole number of vector
+  lanes, the whole-array loop was already compiling to the right thing, and
+  the split costs 6 to 8 per cent; those two keep it. That last line is the
+  one part of this which is a fact about the compiler rather than about the
+  tree, so re-run `quantise_branching` against both forms after a toolchain
+  change rather than trusting the rule.
+- **The frontier selection ran after all of a level's distances were taken.**
+  It picks the best `max_paths` of up to forty-eight entries, and it was a
+  second pass over an array that had just been written. Run as each child's
+  distance arrives, it reads the distance where the distance already is —
+  worth about 4 per cent at width 16, where the split above does not apply. It
+  is why the parents are now copied out of the frontier before a level starts:
+  the frontier is being rebuilt while it is still being read. `keep` lost its
+  `min(max_paths, n_next)` in the process, which was never doing anything: the
+  two differ only when a level offers fewer children than `max_paths`, and
+  then the scan never fills up and never reads the bound.
+
+Together, on the found corpus, three alternating cold pairs: CPU **1,646.9 ->
+1,574.5**, **1,733.1 -> 1,633.7**, **1,712.8 -> 1,621.5**, with wall 241.3 ->
+233.5, 255.7 -> 243.1 and 251.7 -> 240.7. That is **-4.4, -5.7 and -5.3 per
+cent of the CPU** and -3.3 to -4.9 of the clock. Nothing else in the run
+changed, so the descent's 602 seconds became about 512 — **15 per cent in
+place against 29 in the bench**, which is the gap this machine always shows:
+eight threads reading a hundred-odd megabytes of tree at random are waiting for
+memory, and the bench measures the arithmetic they are waiting with. On this
+corpus the same three pairs are **-0.7, -1.8 and +0.3 per cent** — level,
+because 5,638 images size the vocabulary to 16^5 and sixteen is one of the two
+widths that keep the old loop.
+
+
 ### What the second look costs, and three ways not to fix it
 
 It is **46% of a found corpus's run** and 1.8% of this one's. Of that, the
@@ -1160,6 +1206,24 @@ works on this laptop:
   list* — all four measured, all four worse than they look. The numbers are
   under *What the second look costs* above, with the accuracy each would have
   cost.
+- *Pruning the descent against a partial distance.* The centre block is
+  dimension-major, so the first quarter of the dimensions is the first quarter
+  of the block, and scoring that quarter for all of a node's children gives a
+  lower bound on every one of them — exact, since the terms still to be added
+  are squares, so a node whose closest child already loses can be abandoned
+  unread. It works, it is byte-identical, and it buys nothing. The reason is
+  worth keeping: the bound is a *quarter* of a distance tested against a
+  *whole* one, so a node has to be four times worse to be dropped after the
+  first quarter and a third worse after the third, and nodes that bad are rare
+  — the multi-path descent exists precisely because the winner is often not
+  under the nearest parent. Measured on the isolated descent it was level at
+  some widths and **up to 12% slower** at others, the minimum-over-lanes
+  costing more than the blocks it saved. A bound that could pay would have to
+  be a whole distance taken from fewer bytes, which means a second, coarser
+  copy of every centre: 25% more memory to save at most 15% of the traffic,
+  on optimistic assumptions about how often a whole node loses. And node-level
+  is the only pruning this layout allows — the children's dimensions are
+  interleaved, so skipping one child skips no bytes.
 - *A per-thread pool for the scale-space planes*, to stop the churn of
   megabyte buffers per image. No measurable change in time, and 70 MB more
   peak. The allocator was already handling it.
