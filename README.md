@@ -211,8 +211,8 @@ See `benchmark/VALIDATION.md` for the rule and `CLAUDE.md` for every sweep.
 
 | | |
 |---|---|
-| `--work-size 640` | long side the analysis runs at, Higher = Slower. Usable 448-896. |
-| `-k 150` | candidates verified per image, Higher = Slower. Usable 100-300. |
+| `--work-size 640` | long side the analysis runs at, Lower = Stricter. |
+| `-k 150` | candidates verified per image, Higher = Slower. |
 
 `--work-size` is the only one of the two that is really connected to the clock:
 it scales decode and feature extraction, which are 80% of a run, so 384 costs
