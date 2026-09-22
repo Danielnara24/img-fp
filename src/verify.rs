@@ -94,9 +94,9 @@ impl Default for Verdict {
 /// the same everywhere: see `Policy`.
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
-    pub min_inliers: u32,
-    pub min_overlap: f32,
-    pub min_block_agreement: f32,
+    pub min_aligned_points: u32,
+    pub min_frame_overlap: f32,
+    pub min_pixel_correlation: f32,
     pub max_scale: f32,
     /// Whether the match's own correspondences must enclose the centre of the
     /// overlap it claims.
@@ -153,15 +153,15 @@ const BLOCK: usize = 8;
 /// off a corpus rather than derived, and unlike the rest they earned it: the
 /// held-out corpus prefers them too. Without the margin, corroborated pairs
 /// face the anchor bar and validation recall falls from 93.1% to 90.7%.
-const CLUSTER_SLACK_INLIERS: u32 = 2;
-const CLUSTER_SLACK_AGREEMENT: f32 = 0.1;
+const CLUSTER_SLACK_POINTS: u32 = 2;
+const CLUSTER_SLACK_CORRELATION: f32 = 0.1;
 
 impl Default for Rules {
     fn default() -> Self {
         Rules {
-            min_inliers: 8,
-            min_overlap: 0.85,
-            min_block_agreement: 0.6,
+            min_aligned_points: 8,
+            min_frame_overlap: 0.85,
+            min_pixel_correlation: 0.6,
             // A sanity bound, not a tuned one: past a sixteen-fold size ratio
             // the smaller image is a few hundred pixels against a wall.
             max_scale: 16.0,
@@ -216,24 +216,24 @@ impl Policy {
     /// 4.2 on the held-out one. Three tiers is a fact about the evidence, not
     /// a number read off a corpus; the nine numbers were the problem, and they
     /// are gone.
-    pub fn new(min_inliers: u32, min_overlap: f32, min_agreement: f32) -> Policy {
+    pub fn new(min_aligned_points: u32, min_frame_overlap: f32, min_pixel_correlation: f32) -> Policy {
         let anchor = Rules {
-            min_inliers,
-            min_overlap,
-            min_block_agreement: min_agreement,
+            min_aligned_points,
+            min_frame_overlap,
+            min_pixel_correlation,
             centred_evidence: true,
             ..Default::default()
         };
         Policy {
             anchor,
             propagated: Rules {
-                min_inliers: 0,
+                min_aligned_points: 0,
                 centred_evidence: false,
                 ..anchor
             },
             corroborated: Rules {
-                min_inliers: min_inliers.saturating_sub(CLUSTER_SLACK_INLIERS),
-                min_block_agreement: (min_agreement - CLUSTER_SLACK_AGREEMENT).max(0.0),
+                min_aligned_points: min_aligned_points.saturating_sub(CLUSTER_SLACK_POINTS),
+                min_pixel_correlation: (min_pixel_correlation - CLUSTER_SLACK_CORRELATION).max(0.0),
                 centred_evidence: false,
                 ..anchor
             },
@@ -244,15 +244,16 @@ impl Policy {
 impl Verdict {
     /// Every bar this verdict has to clear, under one tier's rules.
     ///
-    /// Two of these are the CLI's `--min-overlap` and `--min-agreement`, they
-    /// sit one line apart, and reading them as two strengths of the same bar
-    /// is the mistake this comment exists to prevent. `ov_a`/`ov_b` are pure
-    /// geometry — the fraction of one frame that lands inside the other, with
-    /// no pixel read — so the overlap floor asks what the transform *claims*.
-    /// `blk` is the mean of |r| over the blocks of that overlap carrying
-    /// detail, so the agreement bar asks whether the claim is *true*. They are
-    /// the only defence against two failure modes that do not overlap at all,
-    /// and each is blind to the other's:
+    /// Two of these are the CLI's `--min-frame-overlap` and
+    /// `--min-pixel-correlation`, and the nouns are the whole point: `ov_a`
+    /// and `ov_b` are **frames**, pure geometry with no pixel read, so that
+    /// floor asks what the transform *claims*; `blk` is the mean of |r| over
+    /// the **pixels** of that overlap carrying detail, so that floor asks
+    /// whether the claim is *true*. They used to read as a loose and a tight
+    /// version of one bar, back when they were `--min-overlap` and
+    /// `--min-agreement`, and this comment was three times as long trying to
+    /// talk people out of it. They are the only defence against two failure
+    /// modes that do not overlap at all, and each is blind to the other's:
     ///
     ///   * Two different photographs on the same page furniture — the corpus's
     ///     two Excel screenshots — map onto each other perfectly. Measured
@@ -279,10 +280,10 @@ impl Verdict {
         self.scale.is_finite()
             && self.scale >= 1.0 / r.max_scale
             && self.scale <= r.max_scale
-            && self.n_in >= r.min_inliers
+            && self.n_in >= r.min_aligned_points
             && (!r.centred_evidence || self.centred)
-            && self.ov_a.max(self.ov_b) >= r.min_overlap
-            && self.blk >= r.min_block_agreement
+            && self.ov_a.max(self.ov_b) >= r.min_frame_overlap
+            && self.blk >= r.min_pixel_correlation
     }
 }
 

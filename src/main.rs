@@ -49,8 +49,8 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Worker threads (default: all cores).
-    #[arg(short = 'j', long, default_value_t = 0)]
-    jobs: usize,
+    #[arg(short = 't', long, default_value_t = 0)]
+    threads: usize,
 
     /// Long side the analysis runs at. Lower is faster and blinder.
     #[arg(long, default_value_t = 640)]
@@ -60,30 +60,32 @@ struct Args {
     #[arg(short = 'k', long, default_value_t = 150)]
     candidates: usize,
 
-    /// Correspondences needed before a pair can be claimed.
+    /// Keypoint correspondences that must agree on one transform before a
+    /// pair can be claimed — the inlier count, under a name that does not
+    /// need RANSAC to read.
     ///
     /// One number, used by every tier. It was two: the claim-anchoring tier
     /// silently added 2, which is the sort of offset that looks principled and
     /// is really just a corpus talking.
     #[arg(long, default_value_t = 10)]
-    min_inliers: u32,
+    min_aligned_points: u32,
 
-    /// How much of one image must lie inside the other, 0..1.
+    /// How much of one image's frame must lie inside the other, 0..1.
+    ///
+    /// Geometry alone: what the fitted transform claims, with no pixel read.
+    /// Whether the claim is true is `--min-pixel-correlation`, which is a
+    /// different question and not a tighter version of this one.
     #[arg(long, default_value_t = 0.85)]
-    min_overlap: f32,
+    min_frame_overlap: f32,
 
-    /// How well the overlap must correlate, 0..1.
+    /// How well the pixels of that overlap must correlate, 0..1.
     ///
     /// The mean of |r| over the blocks of the overlap that carry detail. Half
     /// is the midpoint of what the statistic can report, not a value read off
     /// a corpus; the measured cliff, where wrong families start merging, is at
     /// 0.40.
     #[arg(long, default_value_t = 0.5)]
-    min_agreement: f32,
-
-    /// Skip the transform-propagation pass.
-    #[arg(long)]
-    no_propagate: bool,
+    min_pixel_correlation: f32,
 
     /// Write every verdict considered, accepted or not, to this CSV. For
     /// tuning the decision rule against a labelled corpus.
@@ -306,9 +308,9 @@ impl Dsu {
 struct OutPair {
     a: String,
     b: String,
-    inliers: u32,
-    overlap: f32,
-    agreement: f32,
+    aligned_points: u32,
+    frame_overlap: f32,
+    pixel_correlation: f32,
     scale: f32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     inverted: bool,
@@ -350,8 +352,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let t_start = Instant::now();
     few_arenas();
-    if args.jobs > 0 {
-        rayon::ThreadPoolBuilder::new().num_threads(args.jobs).build_global()?;
+    if args.threads > 0 {
+        rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
     }
     let verbose = args.verbose;
     macro_rules! stage {
@@ -513,7 +515,7 @@ fn main() -> Result<()> {
     let inv = timed!(13, InvertedFile::build(&lists, vocab.n_words(), max_posting));
     stage!(t_start, "inverted file");
 
-    let policy = verify::Policy::new(args.min_inliers, args.min_overlap, args.min_agreement);
+    let policy = verify::Policy::new(args.min_aligned_points, args.min_frame_overlap, args.min_pixel_correlation);
 
 
     // ---- candidates, then verification
@@ -551,7 +553,7 @@ fn main() -> Result<()> {
     let gate = if dumping {
         (3, 0.2)
     } else {
-        (policy.corroborated.min_inliers, policy.corroborated.min_overlap)
+        (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap)
     };
     let all_direct: Vec<Edge> = cand_pairs
         .par_iter()
@@ -701,33 +703,32 @@ fn main() -> Result<()> {
     let mut n_hypotheses = 0usize;
     // A composed pair is kept only if it clears the propagated tier's own
     // overlap floor; a dump wants every hypothesis the round considered.
-    let prop_min_ov = if dumping { 0.2 } else { policy.propagated.min_overlap };
-    if !args.no_propagate {
-        let mut pool: Vec<Edge> = all.clone();
-        for round in 0..PROPAGATE_MAX_ROUNDS {
-            let mut round_all = timed!(21, propagate(&items, &pool, n, prop_min_ov));
-            let before = propagated.len();
-            let seen: std::collections::HashSet<(usize, usize)> =
-                pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
-            let fresh: Vec<Edge> = round_all
-                .iter()
-                .filter(|(a, b, _, _, v)| !seen.contains(&(*a, *b)) && v.accepted(&policy.propagated))
-                .cloned()
-                .collect();
-            n_hypotheses += round_all.len();
-            if dumping {
-                all_propagated.append(&mut round_all);
-            } else {
-                drop(round_all);
-            }
-            propagated.extend(fresh.iter().cloned());
-            pool.extend(fresh);
-            stage!(t_start, "  propagation round {}: +{} pairs", round + 1, propagated.len() - before);
-            if propagated.len() == before {
-                break;
-            }
+    let prop_min_ov = if dumping { 0.2 } else { policy.propagated.min_frame_overlap };
+    let mut pool: Vec<Edge> = all.clone();
+    for round in 0..PROPAGATE_MAX_ROUNDS {
+        let mut round_all = timed!(21, propagate(&items, &pool, n, prop_min_ov));
+        let before = propagated.len();
+        let seen: std::collections::HashSet<(usize, usize)> =
+            pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
+        let fresh: Vec<Edge> = round_all
+            .iter()
+            .filter(|(a, b, _, _, v)| !seen.contains(&(*a, *b)) && v.accepted(&policy.propagated))
+            .cloned()
+            .collect();
+        n_hypotheses += round_all.len();
+        if dumping {
+            all_propagated.append(&mut round_all);
+        } else {
+            drop(round_all);
+        }
+        propagated.extend(fresh.iter().cloned());
+        pool.extend(fresh);
+        stage!(t_start, "  propagation round {}: +{} pairs", round + 1, propagated.len() - before);
+        if propagated.len() == before {
+            break;
         }
     }
+
     stage!(t_start, "propagated: {} of {} composed hypotheses", propagated.len(), n_hypotheses);
 
     // Weaker matches, admitted only between files an anchor already put in the
@@ -773,9 +774,14 @@ fn main() -> Result<()> {
 
     // ---- assemble
     //
-    // The pairs are the claim; the groups are the maximal cliques of them.
-    // Every pair emitted here is an edge of that graph, so a group never
-    // contains two files this run did not check against each other.
+    // The pairs are the claim. `graph` collects every one of them, and
+    // `group::find` reduces it to representatives — a representative plus the
+    // files that matched it directly, which is neither the closure nor the
+    // maximal cliques; both were measured and both are worse. So a group
+    // repeats claims this run actually made rather than implying new ones,
+    // and it is not an all-pairs assertion either: two members that both
+    // matched the representative were never compared with each other. The
+    // argument and the numbers are in `group.rs`.
     let mut out_pairs: Vec<OutPair> = Vec::new();
     let mut graph: Vec<(usize, usize)> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
@@ -788,9 +794,9 @@ fn main() -> Result<()> {
                     out_pairs.push(OutPair {
                         a: files[a].display().to_string(),
                         b: files[b].display().to_string(),
-                        inliers: 0,
-                        overlap: 1.0,
-                        agreement: 1.0,
+                        aligned_points: 0,
+                        frame_overlap: 1.0,
+                        pixel_correlation: 1.0,
                         scale: 1.0,
                         inverted: false,
                         identical: true,
@@ -809,9 +815,9 @@ fn main() -> Result<()> {
         out_pairs.push(OutPair {
             a: files[a].display().to_string(),
             b: files[b].display().to_string(),
-            inliers: v.n_in,
-            overlap: round3(v.ov_a.max(v.ov_b)),
-            agreement: round3(v.blk),
+            aligned_points: v.n_in,
+            frame_overlap: round3(v.ov_a.max(v.ov_b)),
+            pixel_correlation: round3(v.blk),
             scale: round3(v.scale),
             inverted: *inv_flag,
             identical: false,
@@ -859,12 +865,11 @@ fn main() -> Result<()> {
             "work_size": args.work_size,
             "features": FEATURES,
             "candidates": args.candidates,
-            "min_inliers": args.min_inliers,
-            "min_overlap": args.min_overlap,
-            "min_agreement": args.min_agreement,
+            "min_aligned_points": args.min_aligned_points,
+            "min_frame_overlap": args.min_frame_overlap,
+            "min_pixel_correlation": args.min_pixel_correlation,
             "stages": "anchor, propagate, corroborate",
-            "propagated": !args.no_propagate,
-        }),
+            }),
         files_enumerated: files.len(),
         files_analysed: n_ok,
         failures,

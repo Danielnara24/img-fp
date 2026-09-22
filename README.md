@@ -158,8 +158,8 @@ With `-o`, JSON carrying what each claim rests on:
 
 ```json
 {"tool": "img-fp",
- "pairs": [{"a": "...", "b": "...", "inliers": 214, "overlap": 1.0,
-            "agreement": 1.0, "scale": 0.25}],
+ "pairs": [{"a": "...", "b": "...", "aligned_points": 214,
+            "frame_overlap": 1.0, "pixel_correlation": 1.0, "scale": 0.25}],
  "groups": [{"representative": "...", "files": ["...", "..."]}]}
 ```
 
@@ -203,7 +203,7 @@ Two consequences, both deliberate:
 ## Options
 
 There are deliberately few, and each pass over the tool has removed more than
-it added: thirteen options once changed the result, and six do. Anything that
+it added: thirteen options once changed the result, and five do. Anything that
 was only ever a number somebody fitted to a corpus has been removed or derived.
 See `benchmark/VALIDATION.md` for the rule and `CLAUDE.md` for every sweep.
 
@@ -214,14 +214,29 @@ See `benchmark/VALIDATION.md` for the rule and `CLAUDE.md` for every sweep.
 | `--work-size 640` | long side the analysis runs at, Higher = Slower. Usable 448-896. |
 | `-k 150` | candidates verified per image, Higher = Slower. Usable 100-300. |
 
+`--work-size` is the only one of the two that is really connected to the clock:
+it scales decode and feature extraction, which are 80% of a run, so 384 costs
+43% of the time for 2.2 points of F1. `-k` is on a plateau — 25 instead of 150
+costs 0.001 — so it saves a little and claims almost as much either way. There
+is no third: everything below is a statement about what the tool should claim,
+and none of it is a way to buy time.
+
 **What it will claim**
 
 | | |
 |---|---|
-| `--min-inliers 10` | correspondences a claim needs, Higher = Stricter. Usable 8-20. |
-| `--min-overlap 0.85` | how much of one image must lie inside the other, Higher = Stricter. Usable 0.60-0.95. |
-| `--min-agreement 0.5` | how well the overlap must correlate, averaged over the blocks that carry detail, Higher = Stricter. Usable 0.45-0.70. |
-| `--no-propagate` | skip the transform-propagation pass, On = Stricter. Costs 7.1 points of F1. |
+| `--min-aligned-points 10` | keypoint correspondences that must agree on one transform, Higher = Stricter. Usable 8-20. |
+| `--min-frame-overlap 0.85` | how much of one image's frame must lie inside the other, Higher = Stricter. Usable 0.60-0.95. |
+| `--min-pixel-correlation 0.5` | how well the pixels of that overlap must correlate, averaged over the blocks carrying detail, Higher = Stricter. Usable 0.45-0.70. |
+
+The last two are not a loose and a tight version of one bar, however much they
+look like it. The overlap floor is **geometry** — how much of a frame the
+fitted transform claims, with no pixel read — and the correlation floor is the
+**pixels** in it, so each is the only defence against a failure mode the other
+cannot see at any setting. Two different photographs on the same page furniture
+overlap perfectly and correlate at nothing; an image rolled sideways and wrapped
+correlates almost perfectly over the fragment it still shares and overlaps at
+little. `CLAUDE.md` has the per-mode numbers.
 
 Stricter is not safer. Below the bottom of each range unrelated photographs
 start merging into one family, and above the top the tool simply stops finding
@@ -233,7 +248,7 @@ win the second.
 | | |
 |---|---|
 | `--cache PATH` | reuse the per-image analysis between runs. |
-| `-j N` | worker threads. Default: all cores. |
+| `-t N` | worker threads. Default: all cores. |
 | `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |
 | `--dump PATH` | every verdict considered, accepted or not, as CSV. |

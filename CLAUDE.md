@@ -221,7 +221,9 @@ Each derived file records `region` (rectangle of the original that survives),
   **It is worth 7.1 points of F1**, which is more than every threshold in the
   tool put together, and the figure of "about 1.5 points" that stood here until
   now predates both the single catalogue and the mip-pyramid pixel check.
-  Re-measured on the shipped build by running with and without the flag:
+  Re-measured on the shipped build by running with and without the pass
+  (`--no-propagate`, which is now a `--features prof` flag and not a CLI
+  option — see below):
 
   | | F1 | precision | recall | pairs | FP | groups |
   |---|---|---|---|---|---|---|
@@ -236,12 +238,34 @@ Each derived file records `region` (rectangle of the original that survives),
   loss is 13 points of recall rather than the 30 the pair count suggests.
 
   It costs **7-11 CPU-seconds**, some 6-8% of a cached run, and 0-2 s of wall.
-  Three alternating pairs with a 45 s cooldown, cached, `-j 8`: CPU 139.5 /
+  Three alternating pairs with a 45 s cooldown, cached, `-t 8`: CPU 139.5 /
   127.9 / 127.6 against 121.3 / 120.5 / 120.9, wall 23.3 / 20.6 / 19.7 against
   18.7 / 19.0 / 19.9. The median pair is -7.5 CPU-s; the first pair's -18.2 is
   the day's hottest run and is why these are quoted as pairs. So the exchange
   rate is seven points of F1 for six percent of the clock, and nothing else in
   the tool is close.
+
+  **Which is why `--no-propagate` is gone.** "Less time for less recall" is a
+  legitimate thing to want, and this was the worst available way to buy it —
+  not a worse point on the speed/accuracy frontier but nowhere near it, because
+  propagation lives in the last fifth of the pipeline while `--work-size`
+  scales the first four fifths. The two knobs' own tables share their shipped
+  row, so they compare directly:
+
+  | | F1 | recall | cold wall | cold CPU |
+  |---|---|---|---|---|
+  | **shipped** | **0.9775** | **96.05%** | **95.1 s** | **665 s** |
+  | no propagation | 0.9061 | 83.11% | — | -7 to -11 CPU-s |
+  | `--work-size 512` | 0.9724 | 95.04% | 75.3 s | 531 s |
+  | `--work-size 448` | 0.9652 | 93.63% | 65.3 s | 447 s |
+  | `--work-size 384` | 0.9553 | 91.78% | 55.7 s | 378 s |
+
+  Every work-size row **dominates** it: 384 gives back 4.9 points of F1 and 8.7
+  points of recall *and* saves 287 CPU-seconds where turning propagation off
+  saves 9. There is no corpus and no setting on which a user wants the flag, so
+  the pass is now unconditional. To re-measure the table above, put the `if`
+  back around the propagation loop in `main.rs`; that is a two-line edit and a
+  rebuild, and it is the right price for something no run should be doing.
 - **Three acceptance tests** (`verify::Policy`): `anchor` decides clustering,
   `propagated` judges composed transforms on pixels alone, `corroborated`
   applies only inside an existing cluster. Collapsing them into one threshold
@@ -383,10 +407,19 @@ and with no second corpus nothing will catch that. `benchmark/VALIDATION.md`
 records how the parameter surface was cut and what the held-out corpus proved
 while it existed; read it before adding a knob back.
 
-Applying that rule took the CLI from 13 result-changing options to 6, the
+Applying that rule took the CLI from 13 result-changing options to 5, the
 acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
 at equal or better F1 every time. Removing a parameter is the cheap experiment;
 run it before adding one.
+
+**And the names are load-bearing too.** `--min-frame-overlap` and
+`--min-pixel-correlation` were `--min-overlap` and `--min-agreement`, which
+read as a loose and a tight version of one bar — a misreading `verify.rs` used
+to spend fourteen lines of comment trying to prevent. The nouns now carry it:
+one is **frames**, pure geometry with no pixel read, and the other is the
+**pixels** in them. `--min-aligned-points` was `--min-inliers`, which is RANSAC
+jargon for "correspondences that agree on one transform". A name that needs a
+comment to stop a misreading is the wrong name; the comment got shorter.
 
 **How to tell whether a number is fitted, with no held-out corpus.** Two
 measurements, and they answer different questions. *Sweep it and look at the
@@ -407,13 +440,13 @@ thresholds below moved only where something other than F1 moved with them.
 every acceptance threshold is monotone in it over the usable range — looser is
 always better — right up to the point where two families merge and thousands of
 false pairs arrive at once. So sweep for the *cliff*, not the peak, and quote
-the distance to it. Measured on this corpus: `--min-inliers` is clean at 8 and
-catastrophic at 7 (8,148 cross-family pairs, 9 merges); `--min-agreement` is
+the distance to it. Measured on this corpus: `--min-aligned-points` is clean at 8 and
+catastrophic at 7 (8,148 cross-family pairs, 9 merges); `--min-pixel-correlation` is
 clean at 0.45 and merges at 0.40. The shipped values keep the same margin the
 previous build had, which is why neither of them moved to the value that
 scored best.
 
-**`--min-overlap` and `--min-agreement` are not two strengths of one bar.**
+**`--min-frame-overlap` and `--min-pixel-correlation` are not two strengths of one bar.**
 They sit one line apart in `Verdict::accepted`, which is why they read like a
 loose and a tight version of the same idea, and they are not: each is the only
 defence against a failure mode the other cannot see at any setting. The note on
@@ -423,7 +456,7 @@ a crop of its own original at median overlap **0.562** and median agreement
 **0.971**. Swept on the full corpus, everything else at stock, false pairs split
 into rearrangement traps and cross-family errors:
 
-| `--min-overlap` | F1 | precision | recall | FP | trap | cross | merges |
+| `--min-frame-overlap` | F1 | precision | recall | FP | trap | cross | merges |
 |---|---|---|---|---|---|---|---|
 | 0.50 | 0.9638 | 95.91% | 96.85% | 9,626 | 9,625 | **1** | 1 |
 | 0.60 | 0.9724 | 97.72% | 96.76% | 5,261 | 5,261 | 0 | 0 |
@@ -434,7 +467,7 @@ into rearrangement traps and cross-family errors:
 | 0.90 | 0.9741 | 99.61% | 95.31% | 871 | 871 | 0 | 0 |
 | 0.95 | 0.9642 | 99.65% | 93.40% | 770 | 770 | 0 | 0 |
 
-| `--min-agreement` | F1 | precision | recall | FP | trap | cross | merges |
+| `--min-pixel-correlation` | F1 | precision | recall | FP | trap | cross | merges |
 |---|---|---|---|---|---|---|---|
 | 0.30 | 0.8945 | 83.39% | 96.45% | 44,725 | 1,185 | **43,540** | 12 |
 | 0.35 | 0.9683 | 97.23% | 96.42% | 6,387 | 1,158 | **5,229** | 2 |
@@ -463,12 +496,12 @@ land in one half. Halves test whether a *shape* generalises, not whether a value
 is safe.
 
 **Neither of them is a cost knob, and the one cost effect runs backwards.**
-`--min-overlap` looks like one: it gates `pixel_check`, the most expensive thing
+`--min-frame-overlap` looks like one: it gates `pixel_check`, the most expensive thing
 done per pair, at `verify.rs:1149` and again on propagation. It saves almost
 nothing, because the quantity it gates is bimodal — of 210,133 direct verdicts
 eligible on inliers, **189,439 (90.2%) already have an overlap of 0.9 or more**,
 so the floor turns away 193,430 checks at 0.85 against 196,462 at 0.70 and
-183,653 at 0.95. Measured with `--no-propagate --features prof`, direct
+183,653 at 0.95. Measured with `--features prof` and propagation disabled, direct
 `pixel_check` is flat at 26.7-32.3 CPU-seconds across every setting of *either*
 knob. What does move is propagation, and it moves the wrong way: a round
 proposes every **unmatched** pair inside a component, so *tightening* a bar
@@ -482,15 +515,15 @@ the same configuration measured 41.4 s and 33.1 s on two reps, which is the 25%
 swing *Speed and memory* warns about. Set both for what the tool should claim,
 never for what it costs.
 
-**`--min-inliers` is the third bar in that `if`, and the only one propagation
-can overrule.** `Policy::new` gives the propagated tier `min_inliers: 0`
+**`--min-aligned-points` is the third bar in that `if`, and the only one propagation
+can overrule.** `Policy::new` gives the propagated tier `min_aligned_points: 0`
 (`verify.rs:228`) — no features vouch for a composed transform, so the count is
 not evidence about it — while overlap and agreement are inherited by all three
 tiers. A pair the inlier bar rejects can therefore come back through
 propagation; a pair the other two reject is gone. That asymmetry is most of why
 this knob behaves differently from the other two at the tight end.
 
-| `--min-inliers` | F1 | precision | recall | FP | trap | cross | merges | wall |
+| `--min-aligned-points` | F1 | precision | recall | FP | trap | cross | merges | wall |
 |---|---|---|---|---|---|---|---|---|
 | 5 | 0.9535 | 93.19% | 97.61% | 16,620 | 1,263 | **15,357** | 55 | 69.2 s |
 | 6 | 0.9668 | 96.02% | 97.34% | 9,390 | 1,232 | **8,158** | 13 | 49.8 s |
@@ -534,7 +567,7 @@ nothing resembling one. Two things make the answer *keep it at 10* anyway.
 following F1 leaves not a thin margin but none at all. And above the cliff the
 knob buys nothing to begin with: 8 -> 20 removes 273 false pairs, **every one of
 them a trap**, for 0.09 points of precision and 5.66 points of recall. Whatever
-`--min-inliers` does for precision, it does entirely in the single step from 7
+`--min-aligned-points` does for precision, it does entirely in the single step from 7
 to 8.
 
 The halves behave the way they did for agreement: identical to four places at 13
@@ -550,7 +583,7 @@ one of the three whose *clock* moves, and it moves at the loose end only,
 because that is where the families merge: a merged component is enormous and a
 propagation round proposes every unmatched pair inside one.
 
-| `--min-inliers` | composed hypotheses | `pixel_check` CPU-s, 2 reps | with `--no-propagate` |
+| `--min-aligned-points` | composed hypotheses | `pixel_check` CPU-s, 2 reps | no propagation |
 |---|---|---|---|
 | 6 | **340,008** | 57.0 / 44.9 | 44.2 / 29.4 |
 | **10** | **75,986** | **37.1 / 33.6** | **28.1 / 27.3** |
@@ -558,11 +591,109 @@ propagation round proposes every unmatched pair inside one.
 
 At 6 the hypothesis count is **4.5x** the shipped one and the sweep's run took
 49.8 s of wall against the usual ~25 s. At 20 it is +7.6% and the clock is level
-or better — which is where the propagated tier's `min_inliers: 0` shows up, since
+or better — which is where the propagated tier's `min_aligned_points: 0` shows up, since
 the pairs a tight inlier bar rejects are exactly the ones propagation gets back.
-Tightening `--min-agreement` to 0.70 doubles the hypotheses because nothing gets
+Tightening `--min-pixel-correlation` to 0.70 doubles the hypotheses because nothing gets
 them back. So the rule for all three holds, with this one for a different
 reason: a setting that costs real time is telling you it has merged something.
+
+**Making it self-adjusting: derivable, measured, and worse.** The bar is a
+*count*, so unlike the other two it has no natural scale — which makes it the
+obvious candidate for deriving from the corpus instead of fitting. There is a
+clean derivation available. `from_single` builds a 4-DoF similarity from one
+correspondence and maps its own anchor exactly, so under a null model of
+randomly-placed correspondences an observed count is `1 + Binomial(n_match - 1,
+p)`, where `p` is the chance a random correspondence lands within tolerance:
+
+```
+tau = max(0.015 * diag(B), 3)   p = pi*tau^2 / area(B) = pi * 2.25e-4 * (r + 1/r)
+```
+
+That is 1.47e-3 at 4:3 and depends on aspect only through `r + 1/r` — 2.0
+square, 2.34 at 16:9 — so it varies by well under one step. Every
+correspondence is tried as a hypothesis, so the run's expected number of
+coincidental anchors is `V * min(n_match,600) * P(X >= k-1)`; set that below
+alpha and solve for k. Every term is known at runtime: `n_match` is already a
+`Verdict` field and `V` is the candidate-pair count.
+
+**It reproduces both numbers it should.** At a typical rich pair and this
+corpus's 236,549 verified pairs it returns **10**, the shipped value; at
+alpha=1, where coincidence stops being expected, it returns 8-9, which is the
+measured cliff. Two unrelated methods landing on the same two numbers is as
+much confirmation as this project gets without a held-out corpus. It is also
+insensitive in the right way: 1000x in alpha moves the bar two steps, and so
+does 1000x in corpus size (8 at six files, 12 at 5.6M).
+
+**And it is worse.** Replayed over the shipped build's own verdicts, carried
+through `drop_weak_bridges` and component assembly:
+
+| rule | anchors | cross-family anchors | after bridge test | families merged |
+|---|---|---|---|---|
+| flat 6 | 199,179 | 20 | 7 | **2** |
+| flat 8 | 195,820 | 6 | 0 | 0 |
+| **flat 10 (shipped)** | **192,390** | **3** | **0** | **0** |
+| flat 12 | 189,277 | 2 | 0 | 0 |
+| derived alpha=1 | 201,778 | 25 | 5 | **1** |
+| derived alpha=0.01 | 201,007 | 13 | 1 | **1** |
+| derived alpha=0.001 | 200,156 | 9 | 1 | **1** |
+
+It merges `13.webp` with `low-light.avif` at **every** alpha, including one
+where it is stricter in aggregate than the flat bar. Tightening cannot fix it,
+because alpha moves the bar one step per three decades while the offending
+pairs are sparse and the model discounts sparse pairs by construction.
+
+**Why, and this is the part worth keeping.** Every cross-family anchor it
+admits and the flat bar rejects is sparse — `n_match` 8 to 42, `n_in` 5 to 9,
+two of them screenshots. The null model bounds **coincidence**, and coincidence
+was never the binding constraint. Correspondences between two different
+photographs exist *because* the images share real structure — a logo, a
+horizon, page furniture — so conditioned on there being few of them they are
+*more* likely to be geometrically consistent, not less. The model is loosest
+exactly where the evidence is least random. So the bar is flat because the
+failure mode it defends against does not scale with `n_match`, and any rule
+that hands an individual pair a discount walks into it. A *per-corpus* scaling
+is untouched by this result, since it never discounts a single pair; it is
+untested, not refuted.
+
+**What the same replay says about the margin.** Counting cross-family anchors
+*before* `drop_weak_bridges` shows something the output table above cannot: the
+precision plateau from 8 to 20 is real in the output, but the margin behind it
+is not flat. **8 leaves six cross-family anchors for the bridge test to absorb
+where 10 leaves three**, and the bridge test survives exactly one false edge.
+That is an argument against F1's preference for 8 that does not depend on F1 —
+and it is why the one merge that survives at alpha=0.001 gets through at all:
+its far side is a single file, which is the one shape `drop_weak_bridges` keeps
+by design.
+
+**Does the level transfer?** `--work-size 384` is a fair proxy for a
+keypoint-poor corpus — same ground truth, same content, about a third of the
+descriptors. Swept at both sizes:
+
+| bar | **ws 640** F1 | recall | cross | merges | **ws 384** F1 | recall | cross | merges |
+|---|---|---|---|---|---|---|---|---|
+| 6 | 0.9668 | 97.34% | **8,158** | 1 | 0.9755 | 95.60% | **4** | 2 |
+| 8 | **0.9809** | 96.74% | 0 | 0 | **0.9656** | 93.69% | 0 | 0 |
+| 10 | 0.9775 | 96.05% | 0 | 0 | 0.9553 | 91.78% | 0 | 0 |
+| 12 | 0.9714 | 94.84% | 0 | 0 | 0.9434 | 89.56% | 0 | 0 |
+
+Three readings. The **safe optimum is 8 at both** and the cliff sits between 6
+and 8 at both, so the level survived a 3x change in descriptor count — which
+was the specific worry, and it did not fire. The **price of the margin triples**:
+choosing 10 over 8 costs 0.69 points of recall at 640 and 1.91 at 384, buying
+nothing either time. And the **cliff's depth varies by three orders of
+magnitude** — one step below safe produces 8,158 cross-family pairs at 640 and
+4 at 384. That last one is the reason the margin is wider than F1 wants: the
+cost of going over the edge is not a corpus-independent quantity, so the
+distance to it should not be shaved to the minimum that happens to work here.
+
+**How all of that was measured, because it is reusable.** `--dump` sets the
+pixel-check gate to `(3, 0.2)`, so `blk` is a real measurement for every
+verdict with three inliers or more and *any* bar at or above 3 can be replayed
+offline against one run — no rebuild, no re-run per value. Replaying the anchor
+tier this way reproduced the run's own count to **186,616 against 186,614**,
+the gap being the dump's four-decimal rounding. `drop_weak_bridges` is a
+sixty-line Tarjan and replays the same way, which is what turns an anchor count
+into a merge count. Sweeping a CLI flag costs a run per value; this costs one.
 
 **The fourth pass, and what it removed.** Five numbers, all verified by
 deleting each and measuring, then by re-measuring the survivors in the deleted
@@ -691,12 +822,12 @@ machine reports *free*. The same baseline binary on the same corpus measured
 Within a session it still wanders: 861, 925, 947, 989, 1,008, 1,027 and
 1,050 MB on seven runs of the same binary, set by which large files happen to
 decode together. So a memory change worth
-less than 10% cannot be seen at `-j 8` at all, and the only deterministic
-reading is `-j 1`, where there is one decode in flight and the walk order
+less than 10% cannot be seen at `-t 8` at all, and the only deterministic
+reading is `-t 1`, where there is one decode in flight and the walk order
 decides everything. Measured there, the third pass is **785 MB to 770 MB**
 (803,596 and 804,668 KB against 787,192 and 790,208 KB, two runs each) — the
 shared analyses and the three Gaussian planes, and about as much as those two
-are worth. At `-j 8` the six runs of each average 977 MB against 914 MB, which
+are worth. At `-t 8` the six runs of each average 977 MB against 914 MB, which
 points the same way and proves nothing, given the spread above.
 
 The two figures together are the shape of the thing: what the program *holds*
@@ -707,11 +838,11 @@ One busy core boosts to 3.2 GHz; eight run at 1.27 GHz, and the extraction
 phase is only 2.9x faster on eight threads than on one. Under a power cap wall
 time follows *energy*, not cycles, and the two respond to different changes.
 Removing a **stall** — a float divide, a mispredicted branch, a cache miss the
-other hyperthread was glad of — is worth a clean 5% at `-j 1` and *nothing* at
-`-j 8`, where the sibling thread simply takes the slot. What moves the
+other hyperthread was glad of — is worth a clean 5% at `-t 1` and *nothing* at
+`-t 8`, where the sibling thread simply takes the slot. What moves the
 eight-thread clock is removing **work**: bytes not moved, instructions not
-issued. So measure a change at `-j 1` to learn whether it is faster, and at
-`-j 8` to learn whether it matters; several of the entries below were worth
+issued. So measure a change at `-t 1` to learn whether it is faster, and at
+`-t 8` to learn whether it matters; several of the entries below were worth
 half of what the single-threaded number promised, and the ones that survived
 are the ones that move less memory.
 
@@ -1052,9 +1183,9 @@ isolated one that can answer the question:
   (`ptrace_scope` is 1), so the instruction mix in the listing is the only
   direct evidence available.
 
-**Peak memory cannot be measured in one run at `-j 8`** — see the paragraph on
-it above. Use `-j 1`, which is deterministic, to see whether a change reduced
-what the program holds, and take several `-j 8` runs to see whether it matters.
+**Peak memory cannot be measured in one run at `-t 8`** — see the paragraph on
+it above. Use `-t 1`, which is deterministic, to see whether a change reduced
+what the program holds, and take several `-t 8` runs to see whether it matters.
 Note also that making *extraction* faster raises the eight-thread peak on its
 own, because each worker then spends a larger fraction of its time holding a
 decode buffer; that is what the decode budget is for, and why its claims have
