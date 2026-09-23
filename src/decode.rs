@@ -426,17 +426,62 @@ fn reduce<const CH: usize, const ALPHA: bool>(w: usize, h: usize, data: &[u8], w
         for sy in oy * k..(oy * k + k).min(h) {
             let line = &data[sy * w * CH..(sy + 1) * w * CH];
             grey_row::<CH, ALPHA>(line, &mut grey[..w]);
-            for (ox, r) in row.iter_mut().enumerate() {
-                let mut acc = 0.0f32;
-                for &g in grey[ox * k..(ox * k + k).min(w)].iter() {
-                    acc += g;
-                }
-                *r += acc;
-            }
+            box_row(k, &grey[..w], &mut row);
         }
         px.extend(row.iter().map(|v| v * inv));
     }
     Gray { w: ow, h: oh, px }
+}
+
+/// Add one source row's boxes into the output row.
+///
+/// `ow * k` samples in, `ow` sums out, each over `k` neighbours taken left to
+/// right. The box factor is a property of the picture, so it was a runtime
+/// bound on the innermost loop of the reduction — which means the compiler
+/// could neither unroll it nor see that `ox * k + k` never leaves the row, and
+/// the whole thing ran one float at a time. Handing it the factor as a
+/// constant lets the sums run eight output pixels at a time: for `k` of two,
+/// one deinterleave and one add.
+///
+/// The sums are the same sums in the same order. `acc` started at zero and a
+/// grey value is never negative, so `0.0 + g` is `g` and what is left is the
+/// same left-to-right chain; the loop over output pixels is what widens, and
+/// those are independent of each other. Only 2, 3 and 4 are spelled out —
+/// above that the loop has enough work per output to unroll on its own, and
+/// `box_factor` reaches 4 only past ten thousand pixels on the long side.
+#[inline]
+fn box_row(k: usize, grey: &[f32], row: &mut [f32]) {
+    // A picture narrower than one box — a tall strip reduced by its own long
+    // side — has an output pixel that runs off the end of the row. The general
+    // form below clamps it; the widened ones need whole boxes.
+    if row.len() * k <= grey.len() {
+        match k {
+            2 => return box_k::<2>(&grey[..row.len() * 2], row),
+            3 => return box_k::<3>(&grey[..row.len() * 3], row),
+            4 => return box_k::<4>(&grey[..row.len() * 4], row),
+            _ => {}
+        }
+    }
+    let w = grey.len();
+    for (ox, r) in row.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for &g in grey[ox * k..(ox * k + k).min(w)].iter() {
+            acc += g;
+        }
+        *r += acc;
+    }
+}
+
+#[inline(always)]
+fn box_k<const K: usize>(grey: &[f32], row: &mut [f32]) {
+    debug_assert_eq!(grey.len(), row.len() * K);
+    for (r, g) in row.iter_mut().zip(grey.chunks_exact(K)) {
+        let mut acc = 0.0f32;
+        for t in 0..K {
+            acc += g[t];
+        }
+        *r += acc;
+    }
 }
 
 /// One row of source pixels as grey values.

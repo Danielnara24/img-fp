@@ -440,6 +440,15 @@ Each derived file records `region` (rectangle of the original that survives),
   still holds the target, which keeps occupancy in [2.2, 2.9] from a thousand
   descriptors to eight million where the old rule ranged over [2.0, 30.5].
 
+  **And a word is a live leaf, not a leaf number.** The two are worth keeping
+  apart because the tree is trained on a *sample* — 160,000 descriptors — so
+  the number of leaves that can ever be reached is bounded by that, while the
+  numbering runs to `branching^depth`: 1,771,561 numbers over 156,519 live
+  leaves on the found corpus, 537,824 over 139,691 here. `quantise` returns the
+  live leaf's centre slot, which rises with its node number (centres are laid
+  down parent by parent and child by child), so every order downstream is
+  unchanged and the inverted file's three per-word arrays are a tenth the size.
+
   What that is worth, all at stock flags: the benchmark corpus is **pair-for-
   pair identical**, verdict fields included (it already had 16^5 words, which
   is what the new rule picks for it); the 3,965-file folder goes to **0
@@ -957,6 +966,17 @@ not moved across five passes, which is a coincidence rather than a law: the
 fifth pass took 16% off the matcher and 8% off decode, and the ratio came out
 where it started.)
 
+**Those three shares are at `--work-size 640` and the default is no longer
+there.** `--work-size` scales the first four fifths of the pipeline and the
+decoders it scales the *least*, since a file is decoded at its own size
+whatever the working size is — so lowering the default raised decode's share
+rather than lowering it. Measured at 384: decode is about **48%** of a
+benchmark run, extraction **39%** and the matcher the rest. That is the reason
+the seventh pass below is worth twice as much on the found corpus as here, and
+the reason anything further aimed at this corpus has to be aimed at the image
+crate's decoders — where, per the paragraph below and the DCT-scaled entry
+under *Tried and rejected*, there is not much to reach for.
+
 That table also settles a question worth not re-asking: the corpus's five
 exotic formats are *not* where the decode time is. WebP, TIFF, JXL and the
 libheif formats together are 431 of 5,638 files and about 80 CPU-seconds
@@ -1345,6 +1365,143 @@ anyway, balanced for slot: the found corpus **1,189.2 CPU-seconds before against
 is -1.4% and about what the arithmetic predicts. A change worth three per cent of
 a two-minute run is below this machine's resolution; the way to measure it is to
 run the phase it lives in on its own.
+
+**A seventh pass, over the addresses the matcher waits for and two numbers it
+was working out again.** Every change is byte-identical on both corpora — the
+same 217,380 pairs and 128 groups here, the same 4,578 pairs and 864 groups on
+the found one, every verdict field and every representative compared — and what
+they have in common is that none of them removes arithmetic. Five of the seven
+change *when* a byte is asked for or *how many* bytes there are; two delete work
+that was being repeated per pixel and could be done per row.
+
+- **A word is now the leaf's centre slot, not its node number, and the leaves
+  are one in ten.** The tree is trained on a sample of 160,000 descriptors, so
+  no more than that many leaves can ever be live — and the numbering went up to
+  `branching^depth`, which is 1,771,561 on the found corpus for 156,519 live
+  leaves and 537,824 here for 139,691. Everything downstream is indexed by
+  word, so the document frequencies, the idf and the posting offsets were three
+  arrays of 21 MB, read at one scattered word per posting run, holding two
+  megabytes of anything. Numbering the words densely is not an approximation
+  and not even a change of order: centres are laid down parent by parent and,
+  within a parent, child by child, so a leaf's slot rises with its node number,
+  and every consumer of a word list reads only that order. The descent stopped
+  needing `node_of` in its inner loop with it — the frontier carries the slot,
+  and the node number is looked up for the three survivors of a level rather
+  than for the hundred-odd children scored.
+- **The descent asks for all three parents' children at once.** A level is
+  three dependent misses deep — the slot's node number, that node's entry in
+  `head`, the block of centres it points at — and the three parents' chains are
+  independent. Walked a parent at a time they do not overlap, because a
+  parent's distances are more instructions than the machine can look past. The
+  `head` entries are read together now and each block's head is handed to the
+  prefetcher while that is happening.
+- **A query asks for a word's postings a few words early.** This was the
+  query's whole memory problem: a run is a few hundred contiguous bytes
+  somewhere in tens of megabytes, too short for the hardware prefetcher to lock
+  on to before it ends, and its address is not known until `off[w]` has
+  arrived. Two dependent trips to memory per word, a thousand words a query,
+  35,592 queries on the found corpus.
+- **The matcher's descriptor distance is the vocabulary's.** `correspond` kept
+  a portable copy — sixteen `u32` lanes, which the compiler widens a dimension
+  at a time — on the grounds that the loop around it waits for memory rather
+  than for arithmetic. It does, and it also runs four million times in a second
+  look; the byte kernel the fifth pass wrote for the descent is a quarter of
+  the instructions for the same integer sum.
+- **`shared` was paying for its output, not for its merge**, and it took
+  `shared_overlap` to see it. The merge is two microseconds and does not care
+  how much the two images have in common; the list it emits does, and the
+  candidates a query returns are by construction the images sharing the most
+  words with it. At 800 shared words the call is 34 microseconds and a
+  comparison sort of the 3,190 pairs it emits is 66 of the 68 a single core
+  charges for it. A keypoint index is smaller than `max_features`, so a pair is
+  twenty bits and two counting passes put it in the same order — a
+  least-significant-digit radix sort is stable and sorts on the whole key.
+  Measured on lists of the shape this really sees, sort against radix: 56 pairs
+  0.9 against 2.2 microseconds, 400 pairs 7.5 against 4.0, 1,200 pairs 23.6
+  against 10.2, 3,200 pairs 66.5 against 23.8. So the crossing is near 150 and
+  the shipped threshold is 192; below it, and for any pair index that does not
+  fit the digit, the comparison sort still runs.
+- **The gradient plane is not zeroed before it is written.**
+  `vec![[0.0; 2]; w * h]` is a `calloc`, and a `calloc` of a chunk the
+  allocator already holds is a `memset` — eight bytes a pixel wiped and then
+  overwritten. An octave's three gradient planes are as large as the octave and
+  the pyramid holds all of them at once for the description pass. The border is
+  what the zeros were for and is written as zeros directly; everything else is
+  written by the same indexed loop as before, which is the shape this has to
+  keep — filling the planes by pushing rows was measured at 2.5x and is still
+  under *Tried and rejected*.
+- **The enlargement worked out its columns once per row.** Which two source
+  columns an output column reads, and how far between them it sits, depends on
+  the column and nothing else — a divide, a floor, two clamps and a
+  subtraction, done again for every row of the picture. On the found corpus,
+  where every image is enlarged, `sift:base` reads **58.8 CPU-seconds before
+  and 42.3 after** in profiles either side of it.
+- **And the pixel check did the same thing twice, with divisions in it.** A
+  grid sample's column depends on `ix` alone and its row on `iy` alone, and so
+  do the two products the transform takes of them, since `apply` is one term
+  per axis and a constant. Both were worked out per sample, and the column
+  carried `ix / 47` with it — 2,304 real divisions per call, and 576 more of
+  `ix / 24` in the bounding-box probe above it, where a division is ten cycles
+  and nothing else in the loop is. The terms are added in the order `apply`
+  added them, because a probe that lands a bit either side of the frame is a
+  different bounding box and not a rounder one. The whole-overlap correlation
+  also stopped being a pass of its own: the blocks tile the grid exactly, so
+  the same samples are summed a block at a time rather than a row at a time.
+  That moves the last bits of `ncc`, which is reported and dumped and read by
+  no rule.
+- **The box reduction's inner loop got its factor as a constant.** `k` is a
+  property of the picture, so the compiler could neither unroll the loop nor
+  see that `ox * k + k` never leaves the row, and the sums ran one float at a
+  time. Two, three and four are spelled out; the sums are the same sums in the
+  same order, since `acc` started at zero and a grey value is never negative.
+
+**What the pass is worth end to end**, cold, cooled to measured idle + 3 C
+before each run and with the page cache evicted, in the order A B B A B A so
+that neither build always runs second:
+
+| found corpus | CPU-seconds | wall | peak PSS |
+|---|---|---|---|
+| **before** | 1,091.8 / 1,085.2 / 1,086.2 | 164.4 / 163.0 / 163.0 s | 1,209 / 1,209 / 1,206 MB |
+| **after** | 1,009.1 / 1,010.1 / 1,013.0 | 149.8 / 150.7 / 151.0 s | 1,194 / 1,194 / 1,194 MB |
+
+| benchmark corpus | CPU-seconds | wall | peak PSS |
+|---|---|---|---|
+| **before** | 426.8 / 400.5 / 400.3 | 68.0 / 63.2 / 62.9 s | 770 / 733 / 730 MB |
+| **after** | 388.5 / 387.9 / 386.0 | 61.8 / 61.5 / 61.1 s | 767 / 868 / 739 MB |
+
+That is **-7.1% of the CPU and -7.9% of the wall** on the found corpus, where
+the six runs agree to better than 1% each and every one of them ran between
+2,101 and 2,124 MHz — the tightest either corpus has measured in this file. On
+the benchmark corpus it is **-3.3%** taking the two slot-matched pairs (387.9
+against 400.5 and 386.0 against 400.3; the first `before` run is the session's
+cold one, at 2,247 MHz against the others' 2,434 to 2,496, and quoting the
+means instead would claim -5.3%), with **-2.6%** of the wall. The gap between
+the two corpora is the obvious one: half of a benchmark run is inside the image
+crate's decoders, and nothing here touches them.
+
+**Memory is down where the words are and level everywhere else.** The found
+corpus's peak PSS is 1,194 MB against 1,208, which is the 19 MB of posting
+offsets, document frequencies and idf the dense numbering gives back, less the
+radix scratch — half a megabyte a worker at the very worst, and far less in
+practice. The benchmark corpus's PSS column is the usual decode-budget noise
+and says nothing either way; the deterministic reading, `-t 1` on the 636-file
+subset, is **264,120 and 263,964 kB before against 264,080 and 264,296 after**,
+which is level to a tenth of a per cent.
+
+**One measurement tool changed with it.** `--features prof` timed every stage
+with `Instant::now()`, and the kernel can only serve that from the vDSO when
+the clocksource is the TSC. This laptop's is the **HPET** — a memory-mapped
+platform device shared by every core — so a clock read costs about 1.5
+microseconds here and a `timed!` pair costs 2.9. That is longer than most of
+what the table measures, and the charge lands in proportion to *call count*, so
+the stages it named loudest were partly the ones called most often: `shared`,
+`correspond` and `best_transform` are five million calls apiece on the found
+corpus, which is some 45 CPU-seconds of clock reads in a run of a thousand.
+`timed!` now takes `rdtsc` — twenty-odd cycles, no kernel, no lock — and the
+report calibrates it against one wall-clock interval taken over the whole run.
+The CPU says `constant_tsc` and `nonstop_tsc`, so it ticks at a fixed rate
+whatever the core clock is doing. Check `current_clocksource` before trusting a
+profile taken on another machine.
 
 ### What the second look costs, and the seven ways not to fix it
 
@@ -1854,6 +2011,18 @@ isolated one that can answer the question:
   and it is what says *where* to look. Stages nest where the code nests, so
   `decode:jpeg` contains `decode:codec` and `decode:reduce` contains
   `decode:fit`; do not add the column up.
+
+  It times with **`rdtsc`**, not with the clock, and that is not a micro-
+  optimisation: this machine's `current_clocksource` is `hpet`, the kernel
+  serves `clock_gettime` from the vDSO only for the TSC, and a clock read here
+  therefore costs about 1.5 microseconds — 2.9 for the pair `timed!` takes.
+  That is longer than most of what the table measures and it is charged in
+  proportion to *call count*, so a stage called five million times was being
+  charged fifteen seconds of clock reads. `rdtsc` is twenty-odd cycles and the
+  CPU reports `constant_tsc` and `nonstop_tsc`, so one calibration against the
+  wall at the end of the run turns cycles into seconds. Read
+  `/sys/devices/system/cpu/.../current_clocksource` before trusting a profile
+  taken anywhere else; on a TSC clocksource the old form was fine.
 - **`cargo test --release -- --ignored --nocapture`** runs benchmarks of the
   inner loops on synthetic data, in a few seconds each: `kernel_timings` (blur,
   extract, descriptor, orientation histogram, gradient), `reduce_timings` (the

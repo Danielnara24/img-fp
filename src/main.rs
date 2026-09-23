@@ -386,6 +386,7 @@ struct Output {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    prof::start();
     let t_start = Instant::now();
     few_arenas();
     if args.threads > 0 {
@@ -535,7 +536,7 @@ fn main() -> Result<()> {
     });
     let vocab = timed!(12, Vocabulary::build(&pool, &vp));
     drop(pool);
-    stage!(t_start, "vocabulary: {} words from {} samples", vocab.n_words(), vp.sample.min(n_desc));
+    stage!(t_start, "vocabulary: {} live words of {} from {} samples", vocab.n_live_words(), vocab.n_words(), vp.sample.min(n_desc));
 
     // Quantise. The word lists are built straight into the vector the inverted
     // file and every later stage read from: holding a second copy per image
@@ -548,7 +549,7 @@ fn main() -> Result<()> {
 
     // Inverted file. A word present in a fifth of the corpus says nothing.
     let max_posting = (n_ok / 5).max(32);
-    let inv = timed!(13, InvertedFile::build(&lists, vocab.n_words(), max_posting));
+    let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words(), max_posting));
     stage!(t_start, "inverted file");
 
     let policy = verify::Policy::new(args.min_aligned_points, args.min_frame_overlap, args.min_pixel_correlation);

@@ -196,20 +196,50 @@ struct Grad {
 }
 
 impl Grad {
+    /// The plane is not zeroed first.
+    ///
+    /// `vec![[0.0; 2]; w * h]` is a `calloc`, and a `calloc` of a chunk the
+    /// allocator already has is a `memset` — eight bytes a pixel, wiped and
+    /// then written again by the loop below. An octave's three gradient planes
+    /// are as large as the octave, and a pyramid holds them all at once for
+    /// the description pass, so it came to several megabytes an image of
+    /// writing zeros over pixels about to be overwritten.
+    ///
+    /// The border is what the zeros were for: the first and last row and
+    /// column carry no gradient, and they are written as zeros here instead.
+    /// Every other element is written by the same indexed loop as before, on
+    /// the same values in the same order — an indexed write loop being the one
+    /// shape this has to keep, since filling the plane by pushing rows was
+    /// measured at two and a half times the cost.
     fn of(l: &Layer) -> Grad {
         let (w, h) = (l.w, l.h);
-        let mut px = vec![[0.0f32; 2]; w * h];
-        for y in 1..h.saturating_sub(1) {
-            let up = &l.px[(y - 1) * w..y * w];
-            let row = &l.px[y * w..(y + 1) * w];
-            let dn = &l.px[(y + 1) * w..(y + 2) * w];
-            let out = &mut px[y * w..(y + 1) * w];
-            for x in 1..w - 1 {
-                let dx = row[x + 1] - row[x - 1];
-                let dy = up[x] - dn[x];
-                out[x] = [(dx * dx + dy * dy).sqrt(), fast_atan2_deg(dy, dx)];
+        let n = w * h;
+        let mut px: Vec<[f32; 2]> = Vec::with_capacity(n);
+        {
+            let spare = &mut px.spare_capacity_mut()[..n];
+            for y in 0..h {
+                let urow = &mut spare[y * w..(y + 1) * w];
+                if y == 0 || y + 1 >= h || w < 3 {
+                    for u in urow.iter_mut() {
+                        u.write([0.0, 0.0]);
+                    }
+                    continue;
+                }
+                let up = &l.px[(y - 1) * w..y * w];
+                let row = &l.px[y * w..(y + 1) * w];
+                let dn = &l.px[(y + 1) * w..(y + 2) * w];
+                urow[0].write([0.0, 0.0]);
+                urow[w - 1].write([0.0, 0.0]);
+                for x in 1..w - 1 {
+                    let dx = row[x + 1] - row[x - 1];
+                    let dy = up[x] - dn[x];
+                    urow[x].write([(dx * dx + dy * dy).sqrt(), fast_atan2_deg(dy, dx)]);
+                }
             }
         }
+        // Every element of the plane was written above: the two edge rows and
+        // the two edge columns as zeros, the rest by the sweep.
+        unsafe { px.set_len(n) };
         Grad { w, px }
     }
 }
@@ -459,22 +489,36 @@ fn reflect101(i: i32, n: usize) -> usize {
 }
 
 /// Bilinear enlargement by an integer factor.
+/// Bilinear enlargement by a whole factor.
+///
+/// Which two source columns an output column reads, and how far between them
+/// it sits, depends on the column and nothing else — so it was being worked
+/// out again for every row of the picture. A divide, a floor, two clamps and
+/// a subtraction, four hundred and forty-eight times over, for every one of
+/// four hundred and forty-eight rows. The column's taps are settled once here
+/// and read back per row; every value is the one the per-pixel form computed,
+/// so the enlargement is the same picture to the bit.
 fn upsample(g: &Gray, f: usize) -> Layer {
     let (w, h) = (g.w * f, g.h * f);
     let ff = f as f32;
+    let mut cols: Vec<(usize, usize, f32)> = Vec::with_capacity(w);
+    for x in 0..w {
+        let sx = (x as f32 + 0.5) / ff - 0.5;
+        let x0 = sx.floor().max(0.0) as usize;
+        let x1 = (x0 + 1).min(g.w - 1);
+        cols.push((x0, x1, (sx - x0 as f32).clamp(0.0, 1.0)));
+    }
     let mut px: Vec<f32> = Vec::with_capacity(w * h);
     for y in 0..h {
         let sy = (y as f32 + 0.5) / ff - 0.5;
         let y0 = sy.floor().max(0.0) as usize;
         let y1 = (y0 + 1).min(g.h - 1);
         let fy = (sy - y0 as f32).clamp(0.0, 1.0);
-        px.extend((0..w).map(|x| {
-            let sx = (x as f32 + 0.5) / ff - 0.5;
-            let x0 = sx.floor().max(0.0) as usize;
-            let x1 = (x0 + 1).min(g.w - 1);
-            let fx = (sx - x0 as f32).clamp(0.0, 1.0);
-            let a = g.px[y0 * g.w + x0] * (1.0 - fx) + g.px[y0 * g.w + x1] * fx;
-            let b = g.px[y1 * g.w + x0] * (1.0 - fx) + g.px[y1 * g.w + x1] * fx;
+        let r0 = &g.px[y0 * g.w..(y0 + 1) * g.w];
+        let r1 = &g.px[y1 * g.w..(y1 + 1) * g.w];
+        px.extend(cols.iter().map(|&(x0, x1, fx)| {
+            let a = r0[x0] * (1.0 - fx) + r0[x1] * fx;
+            let b = r1[x0] * (1.0 - fx) + r1[x1] * fx;
             a * (1.0 - fy) + b * fy
         }));
     }

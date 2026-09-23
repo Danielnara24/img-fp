@@ -200,10 +200,68 @@ impl Rng {
     }
 }
 
+/// Ask for the start of one parent's block of centres.
+///
+/// Two lines is one centre, and four is enough to start the hardware stream
+/// prefetcher on the rest — a parent holds at most sixteen of them and they
+/// are contiguous. Out of range cannot happen (the block is `n * DESC_LEN`
+/// bytes from `first * DESC_LEN`), but the bound is checked anyway because a
+/// prefetch of a wild address is a fault on some machines and this one is
+/// reached for every descriptor in the corpus.
+#[inline]
+fn prefetch_centres(centres: &[u8], kids: Kids) {
+    if kids.n == 0 {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        let start = kids.first as usize * DESC_LEN;
+        let end = (start + kids.n as usize * DESC_LEN).min(centres.len());
+        let mut at = start;
+        let mut lines = 0;
+        while at < end && lines < 4 {
+            _mm_prefetch(centres.as_ptr().add(at) as *const i8, _MM_HINT_T0);
+            at += 64;
+            lines += 1;
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = centres;
+}
+
 impl Vocabulary {
     /// Words are the leaves: `branching^depth` of them.
+    ///
+    /// This is the *node numbering*, not the count of words that exist. Almost
+    /// none of them do: the tree is trained on a sample of 160,000
+    /// descriptors, so at most that many nodes of the deepest level can be
+    /// live, out of the two or three million this returns. See
+    /// `n_live_words`, which is what the inverted file is built over.
     pub fn n_words(&self) -> usize {
         self.branching.pow(self.depth as u32)
+    }
+
+    /// How many words `quantise` can actually return.
+    ///
+    /// A word is the *centre slot* of a live leaf, not its node number, and on
+    /// a real corpus the two differ by an order of magnitude: the found corpus
+    /// numbers its leaves up to 1,771,561 and 156,519 of them are live, the
+    /// benchmark corpus 537,824 and 139,691. A tree is trained on a sample of
+    /// 160,000 descriptors, so no more than that many leaves can ever be live,
+    /// however large the numbering grows. Everything downstream is indexed by
+    /// word — the document frequencies, the idf, the posting offsets — so
+    /// numbering them densely takes those three arrays from twenty-one
+    /// megabytes read at random to two, which is the difference between a
+    /// cache miss per word of every query and none.
+    ///
+    /// The two numberings sort the same way, which is what makes the swap
+    /// invisible: centres are laid down parent by parent and, within a parent,
+    /// child by child, so a leaf's slot rises with its node number. Every
+    /// consumer of a word list — the merge in `shared`, the runs the inverted
+    /// file is built from — reads only that order.
+    pub fn n_live_words(&self) -> usize {
+        self.node_of[self.depth - 1].len()
     }
 
     pub fn build(descriptors: &[u8], p: &VocabParams) -> Vocabulary {
@@ -324,9 +382,18 @@ impl Vocabulary {
     pub fn quantise(&self, desc: &[u8], out: &mut Vec<u32>) {
         out.clear();
         let q: &[u8; DESC_LEN] = desc[..DESC_LEN].try_into().unwrap();
-        // Frontier of (node index at this level, distance). The distance is an
+        // Frontier of (centre slot at this level, distance). The distance is an
         // integer: both sides are bytes, so the sum of 128 squares is exact and
         // at most 8.3 M, and comparing two of them needs no float ordering.
+        //
+        // The slot, rather than the node number it stands for, because the
+        // translation is a random read into an array as long as the level and
+        // it was being made for every child scored — a hundred-odd of them per
+        // descriptor, against the three that survive. `node_of` is now asked
+        // only about the survivors, at the top of the level below, and the
+        // word a descriptor quantises to is the slot itself. See
+        // `n_live_words` for why that numbering is the one everything after
+        // this wants anyway.
         let mut cur = [(0u32, 0u32); FRONTIER];
         let mut next = [(0u32, 0u32); FRONTIER];
         let mut n_cur = 1usize;
@@ -334,12 +401,37 @@ impl Vocabulary {
             let mut n_next = 0usize;
             let centres = &self.levels[l];
             let head = &self.head[l];
-            let node_of = &self.node_of[l];
             // The frontier is rebuilt as the children are scored, so the
             // parents come out of it first. They are at most `max_paths`.
+            // This is where a slot becomes the node number `head` is indexed
+            // by; the root, which has no level above it, is node zero.
             let mut par = [0u32; FRONTIER];
-            for i in 0..n_cur {
-                par[i] = cur[i].0;
+            if l == 0 {
+                par[0] = 0;
+            } else {
+                let above = &self.node_of[l - 1];
+                for i in 0..n_cur {
+                    par[i] = above[cur[i].0 as usize];
+                }
+            }
+            // Where each parent's children are, asked for all of them before
+            // any of them is measured.
+            //
+            // A level is three dependent cache misses deep — the slot's node
+            // number, that node's entry in `head`, and the block of centres it
+            // points at — and the parents' three chains are independent of one
+            // another. Walked one parent at a time they do not overlap: a
+            // parent's distances are some hundreds of instructions, which is
+            // more than the machine can look past, so the second parent's
+            // `head` entry is not asked for until the first parent is done
+            // with. Reading all the `head` entries first, and handing the
+            // prefetcher the head of each block while doing it, puts the three
+            // chains alongside each other. The arithmetic is untouched: this
+            // only changes when the same bytes are asked for.
+            let mut kids = [Kids::default(); FRONTIER];
+            for pi in 0..n_cur {
+                kids[pi] = head[par[pi] as usize];
+                prefetch_centres(centres, kids[pi]);
             }
             // `max_paths` rather than the old `min(max_paths, n_next)`: the
             // two differ only when the level offers fewer children than that,
@@ -347,7 +439,7 @@ impl Vocabulary {
             let keep = self.max_paths;
             let mut held = 0usize;
             for pi in 0..n_cur {
-                let kids = head[par[pi] as usize];
+                let kids = kids[pi];
                 let n_live = kids.n as usize;
                 if n_live == 0 {
                     continue;
@@ -370,7 +462,7 @@ impl Vocabulary {
                     if n_next == FRONTIER {
                         break;
                     }
-                    let e = (node_of[first + k], dist2(q, c));
+                    let e = ((first + k) as u32, dist2(q, c));
                     next[n_next] = e;
                     n_next += 1;
                     if held == keep && !(e.1 < cur[held - 1].1) {
@@ -420,8 +512,8 @@ impl Vocabulary {
                 n_cur -= 1;
             }
         }
-        for &(node, _) in cur[..n_cur].iter() {
-            out.push(node);
+        for &(slot, _) in cur[..n_cur].iter() {
+            out.push(slot);
         }
     }
 }
@@ -466,7 +558,7 @@ fn quantise_centre(v: f32) -> u8 {
 /// portable form below gives the same number as the vector one.
 #[cfg(target_feature = "avx2")]
 #[inline]
-fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
     debug_assert!(c.len() >= DESC_LEN && DESC_LEN % 32 == 0);
     unsafe {
         use std::arch::x86_64::*;
@@ -496,7 +588,7 @@ fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
 /// is the same number the vector form gives.
 #[cfg(not(target_feature = "avx2"))]
 #[inline]
-fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
     const LANES: usize = 16;
     let mut acc = [0u32; LANES];
     for (a, b) in q.chunks_exact(LANES).zip(c[..DESC_LEN].chunks_exact(LANES)) {
@@ -720,10 +812,15 @@ pub struct WordList {
 
 impl WordList {
     /// Iterate (word, count) over the sorted list.
-    pub fn runs(&self) -> Runs<'_> {
-        Runs { wl: self, i: 0 }
+    pub fn runs(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.runs_at().map(|(_, w, c)| (w, c))
     }
 
+    /// The same, with the index each run starts at — which is what the query
+    /// needs in order to ask for a later word's postings ahead of time.
+    pub fn runs_at(&self) -> Runs<'_> {
+        Runs { wl: self, i: 0 }
+    }
 }
 
 pub struct Runs<'a> {
@@ -732,18 +829,19 @@ pub struct Runs<'a> {
 }
 
 impl Iterator for Runs<'_> {
-    type Item = (u32, u32);
-    fn next(&mut self) -> Option<(u32, u32)> {
+    type Item = (usize, u32, u32);
+    fn next(&mut self) -> Option<(usize, u32, u32)> {
         if self.i >= self.wl.word.len() {
             return None;
         }
-        let w = self.wl.word[self.i];
+        let at = self.i;
+        let w = self.wl.word[at];
         let mut c = 0u32;
         while self.i < self.wl.word.len() && self.wl.word[self.i] == w {
             c += 1;
             self.i += 1;
         }
-        Some((w, c))
+        Some((at, w, c))
     }
 }
 
@@ -758,6 +856,57 @@ pub struct InvertedFile {
     data: Vec<(u32, u32)>,
     /// log(N / df), per word.
     idf: Vec<f32>,
+}
+
+/// How far down the word list the query asks for its postings, in entries.
+///
+/// Entries rather than distinct words, because a run is walked without
+/// counting it first; a word occurs about twice in a list, so this is three or
+/// four words of lead. It wants to be short. A word's postings are a few
+/// hundred contiguous bytes and every one of them is read, so the whole run is
+/// asked for at once, and a core can only have so many misses outstanding —
+/// asking twenty words early would either exceed that or have the lines
+/// evicted before the loop arrived. Prefetching a line twice costs nothing, so
+/// the imprecision of counting entries does not matter.
+const POST_AHEAD: usize = 6;
+
+/// Lines of one posting run to ask for. Eight postings to a line, so this is
+/// the first five hundred and twelve of them, which is longer than all but a
+/// handful of runs.
+const POST_LINES: usize = 8;
+
+/// Ask for the postings of `words[at]`.
+///
+/// This is the query's whole memory problem. The postings of a word are a
+/// short contiguous run somewhere in a structure of tens of megabytes — too
+/// short for the hardware prefetcher to lock on to before it ends — and the
+/// address of the run is not even known until `off[w]` has arrived, so every
+/// word of every query paid two dependent trips to memory. Some thousand words
+/// a query, tens of thousands of queries.
+#[inline]
+fn prefetch_postings(inv: &InvertedFile, words: &[u32], at: usize) {
+    let Some(&w) = words.get(at) else { return };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        let w = w as usize;
+        let start = *inv.off.get_unchecked(w) as usize;
+        let end = *inv.off.get_unchecked(w + 1) as usize;
+        if start >= end {
+            return;
+        }
+        let p = inv.data.as_ptr().add(start) as *const i8;
+        let bytes = (end - start) * std::mem::size_of::<(u32, u32)>();
+        let mut at = 0usize;
+        let mut lines = 0usize;
+        while at < bytes && lines < POST_LINES {
+            _mm_prefetch(p.add(at), _MM_HINT_T0);
+            at += 64;
+            lines += 1;
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (inv, w);
 }
 
 impl InvertedFile {
@@ -828,8 +977,19 @@ impl InvertedFile {
         out.clear();
         touched.clear();
         let mut qmass = 0f32;
-        for (w, c) in wl.runs() {
+        let words = &wl.word[..];
+        for (at, w, c) in wl.runs_at() {
             let w = w as usize;
+            // The postings of a word further down the list, asked for now.
+            //
+            // A query walks about a thousand words and each one's postings are
+            // a few hundred contiguous bytes somewhere in a structure of tens
+            // of megabytes — so the run is streamed happily once it starts,
+            // and the miss that starts it is the whole cost. Worse, it is a
+            // *dependent* miss: `off[w]` has to arrive before the address of
+            // the postings is even known. Asking a few words early breaks the
+            // chain, and asks for nothing the loop was not about to read.
+            prefetch_postings(self, words, at + POST_AHEAD);
             let post = &self.data[self.off[w] as usize..self.off[w + 1] as usize];
             if post.is_empty() {
                 continue;
@@ -930,6 +1090,10 @@ const BLOCK: usize = 0;
 /// microseconds galloping against 2.5 with the filter.
 pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
     out.clear();
+    // The largest keypoint index emitted, as a running `or`. It decides
+    // whether the pairs can be sorted by counting rather than by comparing —
+    // see `sort_pairs` — and it costs one integer operation per pair.
+    let mut hi = 0u32;
     let (aw, bw) = (&a.word[..], &b.word[..]);
     let (na, nb) = (aw.len(), bw.len());
     let (mut i, mut j) = (0usize, 0usize);
@@ -983,18 +1147,108 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
             }
             for x in i0..i {
                 for y in j0..j {
-                    out.push((a.kp[x], b.kp[y]));
+                    let e = (a.kp[x], b.kp[y]);
+                    hi |= e.0 | e.1;
+                    out.push(e);
                 }
             }
             if out.len() > cap {
-                out.sort_unstable();
+                sort_pairs(out, hi);
                 out.dedup();
                 return;
             }
         }
     }
-    out.sort_unstable();
+    sort_pairs(out, hi);
     out.dedup();
+}
+
+/// Bits taken per radix pass, and the buckets that implies. Two passes of ten
+/// cover a keypoint index of a thousand, which is more than `max_features`
+/// lets an image hold.
+const RADIX_BITS: usize = 10;
+const RADIX_BUCKETS: usize = 1 << RADIX_BITS;
+
+/// Below this many pairs the comparison sort wins, because a radix pass has to
+/// clear and prefix-sum a thousand buckets whatever the list holds. Measured
+/// on lists of the shape this function really sees: 56 pairs cost 0.9
+/// microseconds comparing and 2.2 counting, 400 cost 7.5 and 4.0, 1,200 cost
+/// 23.6 and 10.2, 3,200 cost 66.5 and 23.8. The crossing is near 150.
+const RADIX_MIN: usize = 192;
+
+/// Scratch for the counting sort: the buffer it ping-pongs through and the
+/// buckets it counts into, kept per thread rather than allocated five million
+/// times.
+struct SortScratch {
+    tmp: Vec<(u32, u32)>,
+    cnt: Vec<u32>,
+}
+
+thread_local! {
+    static SORT_SCRATCH: std::cell::RefCell<SortScratch> =
+        const { std::cell::RefCell::new(SortScratch { tmp: Vec::new(), cnt: Vec::new() }) };
+}
+
+/// Sort the emitted pairs.
+///
+/// **This is what `shared` costs**, and it took a bench to see it. The merge
+/// that finds the shared words is a couple of microseconds and does not care
+/// how much the two images have in common; the list it emits does. The
+/// candidates a query returns are by construction the images sharing the most
+/// words with it, so the calls that matter are the ones emitting hundreds or
+/// thousands of pairs, and at that size the whole call is this sort:
+/// `shared_overlap` reads 2.1 microseconds at no shared words and 33.9 at
+/// eight hundred, and a comparison sort of the 3,190 pairs those eight hundred
+/// emit is 66 microseconds of the 68 a two-thread machine would charge for it.
+///
+/// A keypoint index is smaller than `max_features`, so a pair is twenty bits
+/// and two counting passes put it in order — the same order, since a
+/// least-significant-digit radix sort is stable and sorts on the whole key.
+/// `hi` is the `or` of every index emitted, so the fast path is taken only
+/// when the key really fits; anything wider falls back to comparing, as does
+/// anything short enough that clearing the buckets would cost more than the
+/// comparisons.
+fn sort_pairs(out: &mut Vec<(u32, u32)>, hi: u32) {
+    if out.len() < RADIX_MIN || hi >= RADIX_BUCKETS as u32 {
+        out.sort_unstable();
+        return;
+    }
+    SORT_SCRATCH.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let n = out.len();
+        // Grown, never refilled: the scratch is written before it is read on
+        // every pass, so zeroing it would be a pass over the pairs of its own.
+        if s.tmp.len() < n {
+            s.tmp.resize(n, (0, 0));
+        }
+        if s.cnt.len() != RADIX_BUCKETS {
+            s.cnt.resize(RADIX_BUCKETS, 0);
+        }
+        let cnt = &mut s.cnt[..RADIX_BUCKETS];
+        let tmp = &mut s.tmp[..n];
+        // Pass one on the second index, pass two on the first: both are below
+        // `RADIX_BUCKETS`, so each is its own digit and no shifting is needed.
+        for pass in 0..2 {
+            cnt.fill(0);
+            let (src, dst): (&[(u32, u32)], &mut [(u32, u32)]) =
+                if pass == 0 { (&out[..n], tmp) } else { (tmp, &mut out[..n]) };
+            for e in src.iter() {
+                let k = if pass == 0 { e.1 } else { e.0 } as usize;
+                cnt[k] += 1;
+            }
+            let mut run = 0u32;
+            for c in cnt.iter_mut() {
+                let take = *c;
+                *c = run;
+                run += take;
+            }
+            for &e in src.iter() {
+                let k = if pass == 0 { e.1 } else { e.0 } as usize;
+                dst[cnt[k] as usize] = e;
+                cnt[k] += 1;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1060,7 +1314,10 @@ mod tests {
         };
         let mut got = Vec::new();
         let mut want = Vec::new();
-        for &(la, lb) in [(0usize, 7usize), (1, 1), (3, 40), (9, 9), (17, 8), (64, 64), (300, 290), (1000, 30)].iter() {
+        // The last pair reaches past a thousand keypoints, which is the width
+        // `sort_pairs` counts in: above it the pairs go back to being compared,
+        // and that path has to give the same answer as the counting one.
+        for &(la, lb) in [(0usize, 7usize), (1, 1), (3, 40), (9, 9), (17, 8), (64, 64), (300, 290), (1000, 30), (1500, 1200)].iter() {
             for &(span, reps) in [(65535u32, 1u32), (400, 1), (64, 1), (65535, 7), (200, 3)].iter() {
                 let a = made(la, span, reps);
                 let b = made(lb, span, reps);

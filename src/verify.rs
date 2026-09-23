@@ -289,29 +289,16 @@ impl Verdict {
 
 // ------------------------------------------------------------ correspondence
 
-/// Squared distance between two descriptors.
-///
-/// Summed in sixteen independent lanes rather than one running total. The sum
-/// is over integers, so it is exact whatever order it is taken in, and the
-/// single total was a chain of 128 dependent adds — the loop could not use more
-/// than one of the machine's adders at a time. This is the innermost loop of
-/// the matcher: every candidate pair runs it once per shared word.
-#[inline]
-fn dist2(a: &[u8], b: &[u8]) -> u32 {
-    const LANES: usize = 16;
-    let mut acc = [0u32; LANES];
-    for (ca, cb) in a[..DESC_LEN].chunks_exact(LANES).zip(b[..DESC_LEN].chunks_exact(LANES)) {
-        for l in 0..LANES {
-            let d = ca[l] as i32 - cb[l] as i32;
-            acc[l] += (d * d) as u32;
-        }
-    }
-    let mut s = 0u32;
-    for l in 0..LANES {
-        s += acc[l];
-    }
-    s
-}
+// The squared distance between two descriptors is the vocabulary descent's,
+// and for the descent's reason: both sides are bytes, sixteen-bit lanes and a
+// pairwise multiply-add fold 128 of them in about twenty cycles, and the sum
+// is over integers so it is exact whatever order it is taken in. The matcher
+// had its own portable copy — sixteen `u32` lanes, which the compiler widens a
+// dimension at a time — on the grounds that the loop around it waits for
+// memory rather than for arithmetic. It does; it also runs four million times
+// in a second look, and the arithmetic it was waiting with was four times the
+// instructions for the same number.
+use crate::index::dist2;
 
 /// Nearest neighbour in B for each keypoint of A, over a restricted candidate
 /// set.
@@ -344,7 +331,7 @@ pub fn correspond(
     while i < cands.len() {
         let qi = cands[i].0;
         let mut best = (u32::MAX, 0u32);
-        let da = a.d(qi as usize);
+        let da: &[u8; DESC_LEN] = a.d(qi as usize).try_into().unwrap();
         while i < cands.len() && cands[i].0 == qi {
             let tj = cands[i].1;
             // The next few candidates' descriptors, asked for now.
@@ -1070,14 +1057,38 @@ fn pixel_check(
     invert: bool,
 ) -> (f32, u32, f32) {
     // Bounding box, in A's frame, of the part of A that lands inside B.
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    //
+    // A probe's column depends on `ix` alone and its row on `iy` alone, and so
+    // do the two products the transform takes of them — `apply` is
+    // `(m0*x + m1*y + m2, m3*x + m4*y + m5)`, which is one term per axis and a
+    // constant. Both halves were being worked out again for every probe, and
+    // the column carried a *division* with it: `ix / 24`, five hundred and
+    // seventy-six times, and `ix / 47` two thousand three hundred times in the
+    // grid below, where a division is ten cycles and nothing else in the loop
+    // is. Each is now taken once per row and once per column.
+    //
+    // The order the terms are added in is the order `apply` added them —
+    // `((m0*x) + (m1*y)) + m2` — because float addition is not associative and
+    // a probe that lands a bit either side of the frame is a different
+    // bounding box, not a rounder one.
     const P: usize = 24;
+    let mut pax = [0f32; P];
+    let mut pux = [0f32; P];
+    let mut pvx = [0f32; P];
+    for ix in 0..P {
+        let x = (ix as f32 + 0.5) / P as f32 * aw;
+        pax[ix] = x;
+        pux[ix] = m[0] * x;
+        pvx[ix] = m[3] * x;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for iy in 0..P {
+        let y = (iy as f32 + 0.5) / P as f32 * ah;
+        let (uy, vy) = (m[1] * y, m[4] * y);
         for ix in 0..P {
-            let x = (ix as f32 + 0.5) / P as f32 * aw;
-            let y = (iy as f32 + 0.5) / P as f32 * ah;
-            let (u, v) = apply(m, x, y);
+            let (u, v) = (pux[ix] + uy + m[2], pvx[ix] + vy + m[5]);
             if u >= 0.0 && u < bw && v >= 0.0 && v < bh {
+                let x = pax[ix];
                 x0 = x0.min(x);
                 y0 = y0.min(y);
                 x1 = x1.max(x);
@@ -1113,11 +1124,20 @@ fn pixel_check(
 
     let grid_a = GridTaps::of(&lod_a, (x0, x1 - x0), (y0, y1 - y0), ta.scale);
 
+    // The same two reductions as the bounding box above: the column's own
+    // position and the transform's term in it, taken once per column.
+    let mut gux = [0f32; GRID];
+    let mut gvx = [0f32; GRID];
+    for ix in 0..GRID {
+        let x = x0 + (x1 - x0) * ix as f32 / (GRID - 1) as f32;
+        gux[ix] = m[0] * x;
+        gvx[ix] = m[3] * x;
+    }
     for iy in 0..GRID {
         let y = y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32;
+        let (uy, vy) = (m[1] * y, m[4] * y);
         for ix in 0..GRID {
-            let x = x0 + (x1 - x0) * ix as f32 / (GRID - 1) as f32;
-            let (u, v) = apply(m, x, y);
+            let (u, v) = (gux[ix] + uy + m[2], gvx[ix] + vy + m[5]);
             if u < 0.0 || u >= bw || v < 0.0 || v >= bh {
                 continue;
             }
@@ -1132,6 +1152,14 @@ fn pixel_check(
     }
     let mut agree = 0f32;
     let mut total = 0u32;
+    // Whole-overlap correlation, summed as the blocks go by rather than in a
+    // pass of its own. The blocks tile the grid exactly and every sample is in
+    // one of them, so the same samples are summed; only the order is a block
+    // at a time instead of a row at a time, which moves the last bits of a
+    // figure nothing decides anything on — `ncc` is reported and dumped and
+    // read by no rule. The pass it replaces was two thousand three hundred
+    // more samples of `f64` arithmetic per pair considered.
+    let (mut ta, mut tb_, mut taa, mut tbb, mut tab, mut tn) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
     for by in (0..GRID).step_by(BLOCK) {
         for bx in (0..GRID).step_by(BLOCK) {
             let mut n = 0usize;
@@ -1151,6 +1179,12 @@ fn pixel_check(
                     sab += p * q;
                 }
             }
+            ta += sa;
+            tb_ += sb;
+            taa += saa;
+            tbb += sbb;
+            tab += sab;
+            tn += n as f64;
             if n < BLOCK * BLOCK {
                 continue;
             }
@@ -1179,19 +1213,7 @@ fn pixel_check(
         }
     }
     // Whole-overlap correlation, for reporting.
-    let (mut sa, mut sb, mut saa, mut sbb, mut sab, mut n) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
-    for k in 0..GRID * GRID {
-        if !ok[k] {
-            continue;
-        }
-        let (p, q) = (va[k] as f64, vb[k] as f64);
-        sa += p;
-        sb += q;
-        saa += p * p;
-        sbb += q * q;
-        sab += p * q;
-        n += 1.0;
-    }
+    let (sa, sb, saa, sbb, sab, n) = (ta, tb_, taa, tbb, tab, tn);
     let ncc = if n > 8.0 {
         let vara = saa - sa * sa / n;
         let varb = sbb - sb * sb / n;
