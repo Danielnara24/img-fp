@@ -123,15 +123,19 @@ impl Default for VocabParams {
 /// Only *live* nodes carry a centre. That distinction is not cosmetic at the
 /// sizes this reaches: the tree is sized so that its leaves outnumber the
 /// descriptors sampled to train it, and a level of `16^5` nodes would hold
-/// 536 MB of centres of which at most a sixth can ever be reached. `slot` maps
+/// 134 MB of centres of which at most a sixth can ever be reached. `slot` maps
 /// a node number to its centre, or to `DEAD` for the nodes k-means never
 /// populated.
 pub struct Vocabulary {
     pub branching: usize,
     pub depth: usize,
-    /// `levels[l]` holds the centres of the live nodes of level `l`,
-    /// `DESC_LEN` floats each, in node order.
-    levels: Vec<Vec<f32>>,
+    /// `levels[l]` holds the centres of the live nodes of level `l`, in node
+    /// order, `DESC_LEN` **bytes** each and one node's dimensions contiguous.
+    ///
+    /// Bytes, because the descent is waiting for memory rather than for
+    /// arithmetic — see `dist2` and `quantise_threads`. A centre is the mean of
+    /// descriptor bytes and is stored to the nearest one of them.
+    levels: Vec<Vec<u8>>,
     /// Per level, indexed by *parent* node number: where that parent's live
     /// children start in `levels[l]`, and how many there are.
     ///
@@ -162,14 +166,14 @@ const DEAD: u32 = u32::MAX;
 /// build time so the descent can keep its frontiers in arrays.
 const FRONTIER: usize = 64;
 
-/// Upper bound on `branching`, likewise, so the descent's accumulators are an
-/// array the compiler can keep in registers.
-const MAX_BRANCH: usize = 16;
-
-/// How many dimensions the distance loop is handed at a time, and the vector
-/// width it is handed them for. See `child_dists`.
+/// How many dimensions the k-means assignment loop is handed at a time, and
+/// the vector width it is handed them for. See `child_dists`.
 const SPAN: usize = 32;
 const LANES: usize = 8;
+
+/// Upper bound on `branching`, likewise, so the k-means assignment step's
+/// accumulators are an array the compiler can keep in registers.
+const MAX_BRANCH: usize = 16;
 
 #[inline]
 fn d2(a: &[f32], b: &[f32]) -> f32 {
@@ -204,7 +208,7 @@ impl Vocabulary {
 
     pub fn build(descriptors: &[u8], p: &VocabParams) -> Vocabulary {
         assert!(p.max_paths * p.branching <= FRONTIER, "vocabulary frontier too small");
-        assert!(p.branching <= MAX_BRANCH, "branching wider than the descent's accumulators");
+        assert!(p.branching <= MAX_BRANCH, "branching wider than k-means' accumulators");
         let n = descriptors.len() / DESC_LEN;
         let mut rng = Rng(p.seed);
         // Sample without replacement, deterministically.
@@ -223,7 +227,7 @@ impl Vocabulary {
             })
             .collect();
 
-        let mut levels: Vec<Vec<f32>> = Vec::with_capacity(p.depth);
+        let mut levels: Vec<Vec<u8>> = Vec::with_capacity(p.depth);
         let mut heads: Vec<Vec<Kids>> = Vec::with_capacity(p.depth);
         let mut node_ofs: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
         // Which sample belongs to which node of the previous level.
@@ -232,7 +236,7 @@ impl Vocabulary {
 
         for _level in 0..p.depth {
             let nodes = parents * p.branching;
-            let mut centres: Vec<f32> = Vec::new();
+            let mut centres: Vec<u8> = Vec::new();
             let mut slot = vec![DEAD; nodes];
             // Group sample indices by parent.
             let mut groups: Vec<Vec<u32>> = vec![Vec::new(); parents];
@@ -249,19 +253,23 @@ impl Vocabulary {
                 .collect();
             for (g, c, l, a) in results {
                 let base = g * p.branching;
-                // One parent's live children go down together, transposed:
-                // dimension-major, so that the descent walks all of them in
-                // step. See `quantise`.
+                // One parent's live children go down together, each one's
+                // dimensions contiguous, so that the descent reads a child's
+                // whole centre as two cache lines. See `quantise`.
                 let live: Vec<usize> = (0..p.branching).filter(|&c| l[c]).collect();
                 let first = (centres.len() / DESC_LEN) as u32;
                 for (k, &child) in live.iter().enumerate() {
                     slot[base + child] = first + k as u32;
                 }
-                // `c` holds the live centres only, in child order.
+                // `c` holds the live centres only, in child order. A centre is
+                // a mean of descriptor bytes; it is kept as the nearest byte,
+                // which is what makes the descent's reads a quarter of what
+                // they were. The deepest level loses nothing at all by it —
+                // a node with one member hands that member's own bytes down.
                 centres.reserve(live.len() * DESC_LEN);
-                for i in 0..DESC_LEN {
-                    for k in 0..live.len() {
-                        centres.push(c[k * DESC_LEN + i]);
+                for k in 0..live.len() {
+                    for i in 0..DESC_LEN {
+                        centres.push(quantise_centre(c[k * DESC_LEN + i]));
                     }
                 }
                 for (i, child) in a {
@@ -315,13 +323,12 @@ impl Vocabulary {
     /// descriptor too many.
     pub fn quantise(&self, desc: &[u8], out: &mut Vec<u32>) {
         out.clear();
-        let mut q = [0f32; DESC_LEN];
-        for i in 0..DESC_LEN {
-            q[i] = desc[i] as f32;
-        }
-        // Frontier of (node index at this level, distance).
-        let mut cur = [(0u32, 0f32); FRONTIER];
-        let mut next = [(0u32, 0f32); FRONTIER];
+        let q: &[u8; DESC_LEN] = desc[..DESC_LEN].try_into().unwrap();
+        // Frontier of (node index at this level, distance). The distance is an
+        // integer: both sides are bytes, so the sum of 128 squares is exact and
+        // at most 8.3 M, and comparing two of them needs no float ordering.
+        let mut cur = [(0u32, 0u32); FRONTIER];
+        let mut next = [(0u32, 0u32); FRONTIER];
         let mut n_cur = 1usize;
         for l in 0..self.depth {
             let mut n_next = 0usize;
@@ -346,24 +353,24 @@ impl Vocabulary {
                     continue;
                 }
                 let first = kids.first as usize;
-                // All of this parent's children at once — see `child_dists`.
                 // This is the innermost loop of quantisation: it runs
                 // `depth * max_paths` times for every descriptor in the
                 // corpus, and on a corpus of any size it is most of the
-                // retrieval stage.
+                // retrieval stage. Each child's centre is its own contiguous
+                // run of bytes, so a parent's children are read as one stream.
                 let blk = &centres[first * DESC_LEN..(first + n_live) * DESC_LEN];
-                let mut acc = [0f32; MAX_BRANCH];
-                child_dists(n_live, &q, blk, &mut acc);
                 // Only the closest `max_paths` children are descended, and
                 // only their distances are looked at afterwards. Ordering the
                 // whole frontier — up to forty-eight entries, once per level
                 // for every descriptor in the corpus — decided the order of
                 // forty-five nodes about to be discarded, so the survivors are
-                // picked out by this scan instead. It used to run over the
-                // finished frontier; run per child, it reads each distance
-                // where the distance already is.
-                for k in 0..n_live.min(FRONTIER - n_next) {
-                    let e = (node_of[first + k], acc[k]);
+                // picked out by this scan instead. It reads each distance
+                // where the distance is made.
+                for (k, c) in blk.chunks_exact(DESC_LEN).enumerate() {
+                    if n_next == FRONTIER {
+                        break;
+                    }
+                    let e = (node_of[first + k], dist2(q, c));
                     next[n_next] = e;
                     n_next += 1;
                     if held == keep && !(e.1 < cur[held - 1].1) {
@@ -383,13 +390,13 @@ impl Vocabulary {
             }
             // The scan gives the sorted order of the smallest three whenever
             // those three, and the boundary between kept and dropped, are
-            // unambiguous. When two distances are exactly equal across that
-            // boundary the answer is not determined by the distances at all,
-            // and which node the tree descends then depends on the sorting
-            // algorithm; rather than change that by accident, such a frontier
-            // is handed to the same sort as before. It is a rarity — a tie has
-            // to be exact, in floats summed over 128 dimensions — and the
-            // check that spots one is a pass of comparisons against a sort.
+            // unambiguous. When two distances are equal across that boundary
+            // the answer is not determined by the distances at all, and which
+            // node the tree descends then depends on the sorting algorithm;
+            // rather than leave that to chance, such a frontier is handed to
+            // the same sort as before. Integer centres make an exact tie less
+            // of a rarity than float ones did, which is the one place this
+            // matters.
             let mut ambiguous = false;
             for j in 1..held {
                 ambiguous |= cur[j].1 == cur[j - 1].1;
@@ -404,12 +411,12 @@ impl Vocabulary {
             }
             if ambiguous {
                 let nx = &mut next[..n_next];
-                nx.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                nx.sort_unstable_by_key(|e| e.1);
                 cur[..held].copy_from_slice(&next[..held]);
             }
-            let cut = cur[0].1 * self.path_ratio * self.path_ratio + 1.0;
+            let cut = cur[0].1 as f32 * self.path_ratio * self.path_ratio + 1.0;
             n_cur = held;
-            while n_cur > 1 && cur[n_cur - 1].1 > cut {
+            while n_cur > 1 && (cur[n_cur - 1].1 as f32) > cut {
                 n_cur -= 1;
             }
         }
@@ -419,37 +426,92 @@ impl Vocabulary {
     }
 }
 
-/// Squared distance from `q` to each of `k` centres held dimension-major in
-/// `blk`, into the first `k` lanes of `acc`. Each centre's sum is taken over
-/// the dimensions in order, so every distance is the same float it would be if
-/// the centres were measured one at a time — but `k` sums run at once instead
-/// of one chain of 128 dependent adds.
+/// A centre, as the descent stores it: the nearest byte to the mean.
 ///
-/// **The width reaches the loop as a constant**, which is the whole point of
-/// the dispatch below. It is a property of the tree, settled when it was
-/// built, and it is almost never `MAX_BRANCH`: `for_corpus` narrows the
-/// branching to the smallest tree that still holds the target occupancy, so
-/// the only corpora that land on sixteen are the ones whose descriptor count
-/// sits just above a power of it. Everything else ran down a loop whose trip
-/// count the compiler could not see, which neither unrolls nor vectorises.
-/// Measured on the descent alone, at depth 4 over 60,000 descriptors, the
-/// runtime-width loop cost 9,461 ns/descriptor at width 15 against 5,431 at
-/// width 16 — three quarters more, for less arithmetic. Held constant, every
-/// width is on the same curve.
+/// The rounding is worth a word, since it is the one lossy step in the
+/// vocabulary. A centre is the mean of a cluster of descriptors drawn from a
+/// *sample* of the corpus — 160,000 of several million — so its own sampling
+/// error is on the order of a whole unit, a hundred times the half-unit this
+/// rounding adds. And it adds nothing at all where it would matter most: the
+/// deepest level of the tree is mostly nodes of one member, whose centre is
+/// that member's own bytes and is exact.
+#[inline]
+fn quantise_centre(v: f32) -> u8 {
+    // `as u8` saturates, and a mean of bytes cannot leave the range anyway.
+    v.round() as u8
+}
+
+/// Squared distance between a descriptor and a centre, both bytes.
 ///
-/// **And the dimensions go in four spans of thirty-two, except where the
-/// width is a whole number of vector lanes.** The sum is the same sum — the
-/// terms are still added in dimension order, so a distance finished in four
-/// pieces is the same float to the bit — but handing the loop a short,
-/// fixed-length run of dimensions is worth 20 to 37 per cent of the descent at
-/// every width from 9 to 15, which is every width `for_corpus` picks except
-/// two. At 8 and 16 the `k` floats are exactly one or two vector registers,
-/// the whole-array loop was already compiling to the right thing, and the
-/// split costs 6 to 8 per cent; those two keep it. `cargo test --release --
-/// --ignored --nocapture quantise_branching` is the measurement, and it wants
-/// running against both forms, because which one wins is a fact about the
-/// compiler and not about the arithmetic.
-#[inline(always)]
+/// **Bytes rather than floats is the whole point.** The tree a real corpus
+/// builds is a hundred megabytes and the descent reads a random part of it for
+/// every descriptor, so what the descent costs is not its arithmetic but its
+/// cache lines. Measured by `quantise_threads` against a 93 MB tree: with
+/// float centres one core took 7.5 microseconds a descriptor and eight cores
+/// took 2.9 each — a per-thread penalty of 3.2, where the same descent against
+/// a 2 MB tree paid 2.1. With byte centres the penalty is 1.9 at *every* tree
+/// size, which is to say the memory is no longer in the way, and the eight-core
+/// figure is 1.2 microseconds.
+///
+/// A centre in bytes is two cache lines where four floats' worth was eight. It
+/// was tried once before and rejected, on the grounds that widening the bytes
+/// cost more than the traffic saved — which is true on a tree that fits in
+/// cache, and was measured on the corpus where the descent is 9% of the run.
+/// It is the arithmetic below that makes the difference: sixteen-bit lanes and
+/// a pairwise multiply-add, so the widening costs two shuffles per thirty-two
+/// dimensions rather than a conversion per dimension.
+///
+/// The sum is over integers and cannot overflow — 128 dimensions at most 255
+/// apart is 8.3 M — so it is exact whatever order it is taken in, and the
+/// portable form below gives the same number as the vector one.
+#[cfg(target_feature = "avx2")]
+#[inline]
+fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+    debug_assert!(c.len() >= DESC_LEN && DESC_LEN % 32 == 0);
+    unsafe {
+        use std::arch::x86_64::*;
+        let zero = _mm256_setzero_si256();
+        let mut acc = zero;
+        for o in (0..DESC_LEN).step_by(32) {
+            let a = _mm256_loadu_si256(q.as_ptr().add(o) as *const __m256i);
+            let b = _mm256_loadu_si256(c.as_ptr().add(o) as *const __m256i);
+            // |a - b| per byte, with no sign to carry: one of the two
+            // saturating subtractions is zero.
+            let d = _mm256_or_si256(_mm256_subs_epu8(a, b), _mm256_subs_epu8(b, a));
+            // Sixteen-bit lanes, then square and sum adjacent pairs.
+            let lo = _mm256_unpacklo_epi8(d, zero);
+            let hi = _mm256_unpackhi_epi8(d, zero);
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(lo, lo));
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(hi, hi));
+        }
+        let half = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+        let pair = _mm_add_epi32(half, _mm_shuffle_epi32(half, 0b00_00_11_10));
+        let one = _mm_add_epi32(pair, _mm_shuffle_epi32(pair, 0b00_00_00_01));
+        _mm_cvtsi128_si32(one) as u32
+    }
+}
+
+/// The same distance, in sixteen independent lanes so that a target without
+/// `avx2` still does not walk one chain of 128 dependent adds. Integers, so it
+/// is the same number the vector form gives.
+#[cfg(not(target_feature = "avx2"))]
+#[inline]
+fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+    const LANES: usize = 16;
+    let mut acc = [0u32; LANES];
+    for (a, b) in q.chunks_exact(LANES).zip(c[..DESC_LEN].chunks_exact(LANES)) {
+        for l in 0..LANES {
+            let d = a[l] as i32 - b[l] as i32;
+            acc[l] += (d * d) as u32;
+        }
+    }
+    let mut s = 0u32;
+    for l in 0..LANES {
+        s += acc[l];
+    }
+    s
+}
+
 fn child_dists(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
     macro_rules! widths {
         ($($w:literal)*) => {
@@ -797,69 +859,137 @@ impl InvertedFile {
     }
 }
 
-/// Index of the first element of `s` that is not below `key`.
+/// Whether any word of `a` is also a word of `b`, for two runs of `BLOCK`
+/// sorted words.
 ///
-/// `s[0] < key` is the caller's precondition, so the answer is at least one
-/// and the walk always makes progress. Exponential search first, then binary
-/// over the bracket it lands in: the step doubles, so a key one place along
-/// costs one comparison and a key a thousand places along costs twenty rather
-/// than a thousand.
+/// All sixty-four comparisons at once: one vector holds `b`'s block, each of
+/// `a`'s eight words is broadcast against it, and the masks are collected. The
+/// intersection is *sparse* — two images share some tens of words out of
+/// thirteen hundred each — so this answers "no" almost every time, and the
+/// answer costs about one instruction per word compared against four unusable
+/// branches.
+#[cfg(target_feature = "avx2")]
 #[inline]
-fn gallop(s: &[u32], key: u32) -> usize {
-    debug_assert!(!s.is_empty() && s[0] < key);
-    let mut lo = 0usize;
-    let mut step = 1usize;
-    while lo + step < s.len() && s[lo + step] < key {
-        lo += step;
-        step *= 2;
+fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
+    debug_assert!(a.len() >= BLOCK && b.len() >= BLOCK);
+    unsafe {
+        use std::arch::x86_64::*;
+        let bv = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+        let mut acc = _mm256_setzero_si256();
+        for k in 0..BLOCK {
+            let av = _mm256_set1_epi32(*a.get_unchecked(k) as i32);
+            acc = _mm256_or_si256(acc, _mm256_cmpeq_epi32(av, bv));
+        }
+        _mm256_movemask_epi8(acc) != 0
     }
-    let hi = (lo + step).min(s.len());
-    lo + s[lo..hi].partition_point(|&v| v < key)
 }
+
+/// On a target without `avx2` there is no filter to run — `BLOCK` is zero and
+/// the block phase of `shared` is dead code — and this exists so that the phase
+/// still type-checks. Answering "yes, look at these" would also be *correct*
+/// there, just pointless: sixty-four scalar comparisons cost more than the eight
+/// merge steps they could skip.
+#[cfg(not(target_feature = "avx2"))]
+#[inline]
+fn blocks_meet(_a: &[u32], _b: &[u32]) -> bool {
+    true
+}
+
+/// Words compared at a time by the block filter, and the width of the vector
+/// that does it. Zero disables the filter, which is what a target without
+/// `avx2` gets.
+#[cfg(target_feature = "avx2")]
+const BLOCK: usize = 8;
+#[cfg(not(target_feature = "avx2"))]
+const BLOCK: usize = 0;
 
 /// Candidate descriptor pairs for two images: keypoints that share a word.
 ///
-/// The two lists are walked as a galloping intersection rather than a plain
-/// merge, because the intersection is *sparse*: a few hundred images' word
-/// lists hold about 1,300 entries each over a vocabulary of a million-odd
-/// words, and two of them share some tens. A plain merge takes one step per
-/// entry of both lists, and each step is a three-way comparison on data that
-/// gives the predictor nothing — measured, it was 43 microseconds a pair
-/// against 6 for the sort at the end of the same function, and it was called
-/// five million times in one run of a nine-thousand-image corpus. Skipping to
-/// the next candidate instead of walking to it is the same intersection in the
-/// same order, so the pairs that come out are unchanged.
+/// The intersection is *sparse*: two images' word lists hold about thirteen
+/// hundred entries each over a vocabulary of a million-odd words, and share
+/// some tens. It is also the matcher's most-called function — five million
+/// times in one run of a nine-thousand-image corpus, and four times that on
+/// one where most files have no duplicate and the mirrored pass re-asks.
+///
+/// So the words are merged in two phases. A **block filter** asks whether the
+/// next eight words of each side have anything in common at all, and when they
+/// do not — which is nearly always — it advances the side whose block ends
+/// first by all eight. A **scalar merge** takes over for the block pair that
+/// does meet, and it is where the pairs are emitted. The words come out in the
+/// same order a plain merge would give them, so `cap` still cuts the same
+/// place.
+///
+/// The two forms this replaces are worth recording, because both were
+/// measured. A plain three-way merge steps once per entry of both lists, and
+/// every step is a comparison the predictor cannot learn: 43 microseconds a
+/// pair. Galloping — skipping to the next candidate rather than walking to it
+/// — reduced the *steps* to one per entry of one list and left the branches
+/// exactly as unpredictable, which is why it was worth only 4%. Neither was
+/// bound by its comparisons; both were bound by being wrong about them.
+/// Measured on `shared_timings`, at 1,300 entries over 1.7 M words: 13.9
+/// microseconds galloping against 2.5 with the filter.
 pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
     out.clear();
+    let (aw, bw) = (&a.word[..], &b.word[..]);
+    let (na, nb) = (aw.len(), bw.len());
     let (mut i, mut j) = (0usize, 0usize);
-    while i < a.word.len() && j < b.word.len() {
-        match a.word[i].cmp(&b.word[j]) {
-            std::cmp::Ordering::Less => i += gallop(&a.word[i..], b.word[j]),
-            std::cmp::Ordering::Greater => j += gallop(&b.word[j..], a.word[i]),
-            std::cmp::Ordering::Equal => {
-                let w = a.word[i];
-                let i0 = i;
-                while i < a.word.len() && a.word[i] == w {
-                    i += 1;
+    while i < na && j < nb {
+        // Block phase. Nothing is emitted here: it only finds the first block
+        // pair that could hold a shared word.
+        let (mut ia, mut jb) = (i + BLOCK, j + BLOCK);
+        while BLOCK > 0 && ia <= na && jb <= nb && !blocks_meet(&aw[i..ia], &bw[j..jb]) {
+            // The block that ends first cannot match anything the other side
+            // has left, so it goes whole. Equal ends retire both.
+            let (am, bm) = (aw[ia - 1], bw[jb - 1]);
+            if am <= bm {
+                i = ia;
+                ia += BLOCK;
+            }
+            if bm <= am {
+                j = jb;
+                jb += BLOCK;
+            }
+        }
+        if i >= na || j >= nb {
+            break;
+        }
+        // Scalar phase, over the block pair the filter stopped at — or over
+        // the tails, where there is no whole block left to filter. It runs
+        // until one of the two windows is used up, which is as far as the
+        // filter's own reasoning reaches.
+        let (aend, bend) = if BLOCK == 0 { (na, nb) } else { (ia.min(na), jb.min(nb)) };
+        while i < aend && j < bend {
+            let (av, bv) = (aw[i], bw[j]);
+            // Two conditional increments rather than a three-way branch: a
+            // shared word is rare enough that the test below predicts, and the
+            // ordering of two words that differ does not.
+            i += (av < bv) as usize;
+            j += (bv < av) as usize;
+            if av != bv {
+                continue;
+            }
+            let (i0, j0) = (i, j);
+            while i < na && aw[i] == av {
+                i += 1;
+            }
+            while j < nb && bw[j] == av {
+                j += 1;
+            }
+            // A word matching many keypoints on both sides is repeated
+            // texture, not a landmark; it would dominate the list without
+            // helping the fit.
+            if (i - i0) * (j - j0) > 64 {
+                continue;
+            }
+            for x in i0..i {
+                for y in j0..j {
+                    out.push((a.kp[x], b.kp[y]));
                 }
-                let j0 = j;
-                while j < b.word.len() && b.word[j] == w {
-                    j += 1;
-                }
-                // A word matching many keypoints on both sides is repeated
-                // texture, not a landmark; it would dominate the list without
-                // helping the fit.
-                if (i - i0) * (j - j0) > 64 {
-                    continue;
-                }
-                for x in i0..i {
-                    for y in j0..j {
-                        out.push((a.kp[x], b.kp[y]));
-                    }
-                }
-                if out.len() > cap {
-                    break;
-                }
+            }
+            if out.len() > cap {
+                out.sort_unstable();
+                out.dedup();
+                return;
             }
         }
     }
@@ -870,6 +1000,78 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plain three-way merge the block filter replaced, kept as the
+    /// reference the filter is checked against: same pairs, same order, same
+    /// `cap` cut.
+    fn shared_reference(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
+        out.clear();
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.word.len() && j < b.word.len() {
+            match a.word[i].cmp(&b.word[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    let w = a.word[i];
+                    let i0 = i;
+                    while i < a.word.len() && a.word[i] == w {
+                        i += 1;
+                    }
+                    let j0 = j;
+                    while j < b.word.len() && b.word[j] == w {
+                        j += 1;
+                    }
+                    if (i - i0) * (j - j0) > 64 {
+                        continue;
+                    }
+                    for x in i0..i {
+                        for y in j0..j {
+                            out.push((a.kp[x], b.kp[y]));
+                        }
+                    }
+                    if out.len() > cap {
+                        break;
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Random lists at every shape that matters — sparse and dense
+    /// intersections, runs on one side and both, lists shorter than a block,
+    /// and a cap small enough to cut.
+    #[test]
+    fn the_block_filter_intersects_exactly_as_a_merge_does() {
+        let mut rng = Lcg(0x243f_6a88_85a3_08d3);
+        let mut made = |len: usize, span: u32, reps: u32| -> WordList {
+            let mut pairs: Vec<(u32, u32)> = (0..len)
+                .map(|k| {
+                    let w = (rng.byte() as u32) << 8 | rng.byte() as u32;
+                    (w % span.max(1) / reps.max(1) * reps.max(1), k as u32)
+                })
+                .collect();
+            pairs.sort_unstable();
+            WordList {
+                word: pairs.iter().map(|p| p.0).collect(),
+                kp: pairs.iter().map(|p| p.1).collect(),
+            }
+        };
+        let mut got = Vec::new();
+        let mut want = Vec::new();
+        for &(la, lb) in [(0usize, 7usize), (1, 1), (3, 40), (9, 9), (17, 8), (64, 64), (300, 290), (1000, 30)].iter() {
+            for &(span, reps) in [(65535u32, 1u32), (400, 1), (64, 1), (65535, 7), (200, 3)].iter() {
+                let a = made(la, span, reps);
+                let b = made(lb, span, reps);
+                for cap in [60_000usize, 32, 3] {
+                    shared(&a, &b, &mut got, cap);
+                    shared_reference(&a, &b, &mut want, cap);
+                    assert_eq!(got, want, "la {la} lb {lb} span {span} reps {reps} cap {cap}");
+                }
+            }
+        }
+    }
 
     struct Lcg(u64);
     impl Lcg {
@@ -1018,6 +1220,136 @@ mod bench {
         }
     }
 
+    /// `cargo test --release -- --ignored --nocapture shared_overlap`
+    ///
+    /// The same intersection at the overlap a real pair has. Two images that
+    /// share nothing still share some words — the reach histogram of a
+    /// nine-thousand-image corpus puts the typical candidate at thirty to a
+    /// hundred shared entries — and the cost of a call is not all in the merge:
+    /// every shared word emits `c_a * c_b` pairs and the list is sorted and
+    /// deduplicated before it is returned. This says how the two halves divide.
+    #[test]
+    #[ignore]
+    fn shared_overlap() {
+        let mut rng = Lcg(0x51ed_270b_6efc_2f4d);
+        let l = 1300usize;
+        let v = 1_771_561u32;
+        for shared_words in [0usize, 10, 40, 100, 300, 800] {
+            let lists: Vec<(WordList, WordList)> = (0..32)
+                .map(|_| {
+                    let mut wa: Vec<u32> = Vec::new();
+                    let mut wb: Vec<u32> = Vec::new();
+                    let mut w32 = |rng: &mut Lcg| {
+                        let (a, b, c) = (rng.byte() as u32, rng.byte() as u32, rng.byte() as u32);
+                        ((a << 16) | (b << 8) | c) % v
+                    };
+                    // Shared words first, then each side's own, then a run
+                    // length of one to three for each, as a descriptor's
+                    // multi-assignment gives.
+                    let mut common = Vec::new();
+                    for _ in 0..shared_words {
+                        common.push(w32(&mut rng));
+                    }
+                    for w in common.iter() {
+                        for _ in 0..1 + (rng.byte() % 3) {
+                            wa.push(*w);
+                        }
+                        for _ in 0..1 + (rng.byte() % 3) {
+                            wb.push(*w);
+                        }
+                    }
+                    while wa.len() < l {
+                        wa.push(w32(&mut rng));
+                    }
+                    while wb.len() < l {
+                        wb.push(w32(&mut rng));
+                    }
+                    let mk = |mut w: Vec<u32>| {
+                        w.sort_unstable();
+                        let kp: Vec<u32> = (0..w.len() as u32).collect();
+                        WordList { word: w, kp }
+                    };
+                    (mk(wa), mk(wb))
+                })
+                .collect();
+            let mut out = Vec::new();
+            let mut best = f64::MAX;
+            let mut emitted = 0usize;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                let mut n = 0usize;
+                emitted = 0;
+                for (a, b) in lists.iter() {
+                    shared(a, b, &mut out, 60_000);
+                    emitted += out.len();
+                    std::hint::black_box(&out);
+                    n += 1;
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            println!(
+                "shared_overlap: {best:9.0} ns/call  ({shared_words} shared words, {} pairs out)",
+                emitted / 32
+            );
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture shared_pool`
+    ///
+    /// The same intersection against a pool too large to cache, which is the
+    /// shape the matcher really asks for: a query list against nine thousand
+    /// other images' lists, each some ten kilobytes and none of them recently
+    /// read. `shared_timings` keeps its pool in L2 and so measures the
+    /// arithmetic; this one measures the arithmetic plus whatever the memory
+    /// costs, and the gap between the two is the answer to "would a faster
+    /// loop help".
+    #[test]
+    #[ignore]
+    fn shared_pool() {
+        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+        let mut w32 = || {
+            let a = rng.byte() as u32;
+            let b = rng.byte() as u32;
+            let c = rng.byte() as u32;
+            (a << 16) | (b << 8) | c
+        };
+        let l = 1300usize;
+        let v = 1_771_561u32;
+        for n_lists in [64usize, 1024, 8192] {
+            let lists: Vec<WordList> = (0..n_lists)
+                .map(|_| {
+                    let mut pairs: Vec<(u32, u32)> =
+                        (0..l).map(|k| (w32() % v, (k / 3) as u32)).collect();
+                    pairs.sort_unstable();
+                    WordList {
+                        word: pairs.iter().map(|p| p.0).collect(),
+                        kp: pairs.iter().map(|p| p.1).collect(),
+                    }
+                })
+                .collect();
+            let mb = n_lists as f64 * l as f64 * 8.0 / 1e6;
+            let mut out = Vec::new();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                let mut n = 0usize;
+                // One query list against a long stride of others, which is
+                // what a candidate list looks like: the query stays warm, the
+                // other side never does.
+                for q in 0..n_lists {
+                    for step in 1..17 {
+                        let o = (q * 7 + step * 613) % n_lists;
+                        shared(&lists[q], &lists[o], &mut out, 60_000);
+                        std::hint::black_box(&out);
+                        n += 1;
+                    }
+                }
+                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            println!("shared_pool: {best:9.0} ns/call  ({n_lists} lists, {mb:.0} MB)");
+        }
+    }
+
     /// `cargo test --release -- --ignored --nocapture quantise_depth`
     ///
     /// Cost per child-distance against the size of the tree, at a fixed
@@ -1051,7 +1383,53 @@ mod bench {
             println!(
                 "depth {depth}: {best:8.1} ns/descriptor  {:5.2} ns/child-distance  ({live} live centres, {:.1} MB)",
                 best / dists as f64,
-                live as f64 * DESC_LEN as f64 * 4.0 / 1e6
+                live as f64 * DESC_LEN as f64 / 1e6
+            );
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture quantise_threads`
+    ///
+    /// The descent on one core and on all of them, against a tree that fits in
+    /// cache and against one the size a real corpus builds. What the ratio
+    /// says: if eight threads cost far more per descriptor than one does, the
+    /// descent is waiting for memory and the way to speed it up is to make the
+    /// centres smaller; if they cost about the same, it is waiting for the
+    /// arithmetic and the way is to issue fewer instructions.
+    #[test]
+    #[ignore]
+    fn quantise_threads() {
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        let n = 120_000;
+        let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
+        for (depth, sample) in [(3usize, 160_000usize), (4, 160_000), (5, 160_000)] {
+            let p = VocabParams { depth, branching: 16, sample, ..Default::default() };
+            let v = Vocabulary::build(&desc, &p);
+            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum();
+            let mut best1 = f64::MAX;
+            let mut best8 = f64::MAX;
+            for _ in 0..3 {
+                let mut out = Vec::new();
+                let t = std::time::Instant::now();
+                for d in desc.chunks_exact(DESC_LEN) {
+                    v.quantise(d, &mut out);
+                    std::hint::black_box(&out);
+                }
+                best1 = best1.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+                let t = std::time::Instant::now();
+                desc.par_chunks(DESC_LEN * 64).for_each(|blk| {
+                    let mut out = Vec::new();
+                    for d in blk.chunks_exact(DESC_LEN) {
+                        v.quantise(d, &mut out);
+                        std::hint::black_box(&out);
+                    }
+                });
+                best8 = best8.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+            }
+            println!(
+                "depth {depth}: 1 thread {best1:8.1} ns/desc, all threads {best8:8.1} ns/desc  (x{:.2} per thread on 8, {live} centres, {:.0} MB)",
+                best8 * 8.0 / best1,
+                live as f64 * DESC_LEN as f64 / 1e6
             );
         }
     }

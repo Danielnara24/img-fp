@@ -30,7 +30,7 @@ frame.
 | F1 | **0.978** | 0.762 (SSCD) |
 | precision | 99.5% | 100.0% (three tools, at 25% recall) |
 | recall | **96.1%** | 64.8% (SSCD) |
-| transformations handled perfectly | **59 of 87** | 0 of 87 |
+| transformations handled perfectly | **60 of 87** | 0 of 87 |
 | image inside a bigger image | **55-62 of 62** | 0-30 of 62 (SSCD) |
 | wall clock | **105 s** | 1,949 s (SSCD) |
 | peak memory | **875 MB** | 1,479 MB (SSCD) |
@@ -42,8 +42,14 @@ timing rows are from that one session, where every tool faced the same
 temperature and the same cold page cache, and they are left as measured: a
 figure from a different session is not comparable with the ones beside it.
 img-fp has since had an optimisation pass worth ~9% of its CPU seconds for
-identical output, and a parameter pass — which is what moved the accuracy rows
-— that was level on the clock.
+identical output, a parameter pass — which is what moved the accuracy rows — and
+two more passes over the matcher that were level on this corpus's clock and
+worth 5% on a corpus of small images. Then a fifth, which is the only change in
+the tool's history to have moved a pair: it stores the vocabulary's centres as
+bytes rather than floats, because the descent was waiting for memory, and it is
+worth **9% of the CPU seconds here and 22% on a found corpus** for 0.0002 of F1
+*upwards* and one more transformation handled perfectly. The same corpus now
+runs in 103 s and 637 CPU-seconds under the same harness.
 
 No transformation is a single fixed point: each draws its amount per seed, so
 `scale_small` runs from 0.09 to 0.27 and `jpeg_low` from quality 7 to 26. A
@@ -187,7 +193,7 @@ It is deliberately neither of the two obvious things:
   graph. The same corpus gives 6,991 cliques for 62 families, one file
   appearing in 577 of them.
 
-Measured: **122 groups covering all 5,512 matched files, 9,713 claims, none of
+Measured: **123 groups covering all 5,514 matched files, 9,765 claims, none of
 them untested**, in 11 ms.
 
 Two consequences, both deliberate:

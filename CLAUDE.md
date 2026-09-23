@@ -12,21 +12,23 @@ against SSCD's 0.762 / 92.6% / 64.8%, and roughly two minutes against SSCD's
 1,949 s.
 
 (**The cost figures are the soft ones here, and the accuracy figures are not.**
-Accuracy is a property of the build: F1 0.978 is `out/v9`, reproducible to the
+Accuracy is a property of the build: F1 0.978 is `out/v10`, reproducible to the
 pair. Wall clock is a property of the session — this laptop's idle temperature
-alone moves it 25% — and the three numbers people want to compare were taken in
-three different sessions: the eleven competitors in `out/v5`, img-fp's previous
-build at 105 s in `out/v8`, this build at 122 s in `out/v9` on a die that
-started 12 C hotter. The only like-for-like reading of the last two is six
-alternating runs of each, which puts them level. So quote "about two minutes,
-against SSCD's half hour" and do not put weight on the third significant
-figure. See *Speed and memory*.)
+alone moves it 25% — and the numbers people want to compare were taken in four
+different sessions: the eleven competitors in `out/v5`, img-fp at 105 s in
+`out/v8`, the parameter pass at 122 s in `out/v9` on a die that started 12 C
+hotter, and this build at **103 s and 637 CPU-seconds in `out/v10`**. Only the
+last step is a like-for-like comparison — four alternating cold runs of each
+build, which put the fifth optimisation pass at -9% of the CPU here and -22% on
+a found corpus — and the two before it were level on the clock when measured
+that way. So quote "about a hundred seconds, against SSCD's half hour" and do
+not put weight on the third significant figure. See *Speed and memory*.)
 
-**59 of 87 transformations are handled perfectly** (all 62 seeds found across
-the whole range of the amount). Every other tool manages **zero**.
+**60 of 87 transformations are handled perfectly** (every seed found across the
+whole range of the amount). Every other tool manages **zero**.
 
 Precision holds where it matters: of 1,088 false pairs, **all 1,088 are the
-deliberate rearrangement traps**, leaving **no wrong pair at all** in 224,779
+deliberate rearrangement traps**, leaving **no wrong pair at all** in 224,868
 proposals against 15.65 million chances to be wrong — and so no wrong cluster
 merge. That is the number to watch: a merge's cost is every pair the two
 families imply, so it grows with the corpus while a lone bad pair does not.
@@ -71,6 +73,7 @@ benchmark/
   out/v5/             the competitors' run: eleven tools, one session
   out/v8/             img-fp's published cost row (see BASELINE.md)
   out/v9/             img-fp after the parameter pass
+  out/v10/            img-fp after the fifth optimisation pass: the shipped row
                       (out/v5/DAMAGED.md records a file overwritten there;
                        give bench.py a fresh --out, it merges into the old one)
 vendor/               third-party tools and venvs, gitignored
@@ -356,6 +359,19 @@ Each derived file records `region` (rectangle of the original that survives),
   cap are written against. A fixed 65,536 words made img-fp nearly useless on
   small folders; do not put it back.
 
+  **Its centres are stored as bytes, and that is the one lossy step in the
+  index.** A centre is the mean of a cluster of descriptors, and descriptors are
+  bytes; the tree is *built* in floats and then rounded to the nearest byte,
+  because the descent is bound by how much of a hundred-megabyte tree it can
+  drag through the caches rather than by its arithmetic. The rounding is
+  derived, not fitted: a centre is the mean of a cluster drawn from a *sample*
+  of the corpus — 160,000 descriptors of several million — so its own sampling
+  error is on the order of a whole unit, a hundred times the half-unit the
+  rounding adds, and at the deepest level, where most nodes hold one member,
+  the centre is that member's own bytes and the rounding is exact. Measured on
+  the benchmark corpus it is worth 0.0002 of F1 *upwards* with the false-pair
+  count unchanged to the pair; see *Speed and memory*.
+
   **And occupancy has to be held by the branching, not only by the depth.**
   This was a real defect and it stood for three versions. With `branching`
   pinned at 16 the only reachable sizes are `16^depth`, so the occupancy the
@@ -391,7 +407,7 @@ Each derived file records `region` (rectangle of the original that survives),
 
 ### What still misses
 
-9,189 pairs. The worst rows, out of 62 seeds: `crop_micro` 41 (a twentieth of
+9,100 pairs. The worst rows, out of 62 seeds: `crop_micro` 41 (a twentieth of
 the frame), `embed_tiny` 55, `contact_sheet` 55, `halftone` 56, `crop_strip_top`
 57, `scale_small` 58, `tiled_watermark` 59, `wave_vertical` 59. The pattern is
 what it has always been — very small crops, heavy downscales, and warps that
@@ -428,6 +444,16 @@ Applying that rule took the CLI from 13 result-changing options to 5, the
 acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
 at equal or better F1 every time. Removing a parameter is the cheap experiment;
 run it before adding one.
+
+**Every sweep table below was measured on the build before the fifth
+optimisation pass**, whose byte-rounded vocabulary centres moved the shipped
+point from F1 0.9775 to 0.9777 — 224,779 proposals to 224,868, the same 1,088
+false pairs, the same zero cross-family — and the tables are left as measured
+rather than half-rewritten. Nothing in them is a shape a tenth of a point of
+recall could change, and the two that matter, the *distance to the cliff* for
+`--min-pixel-correlation` and `--min-aligned-points`, are properties of the
+acceptance rule and not of the vocabulary. Re-sweeping either is a run per
+value; do it when a threshold is actually in question.
 
 **And the names are load-bearing too.** `--min-frame-overlap` and
 `--min-pixel-correlation` were `--min-overlap` and `--min-agreement`, which
@@ -866,7 +892,10 @@ are the ones that move less memory.
 Where the time goes now: decode ~35%, feature extraction ~45%, everything
 after it ~20%. Within extraction the descriptor is the largest single item, and
 within decode it is JPEG — `--features prof` prints the whole table at the end
-of a run, which is how the third pass below was aimed.
+of a run, which is how the third pass below was aimed. (Those three shares have
+not moved across five passes, which is a coincidence rather than a law: the
+fifth pass took 16% off the matcher and 8% off decode, and the ratio came out
+where it started.)
 
 That table also settles a question worth not re-asking: the corpus's five
 exotic formats are *not* where the decode time is. WebP, TIFF, JXL and the
@@ -877,9 +906,11 @@ path to reach for; see the DCT-scaled entry under *Tried and rejected*.
 
 **Those proportions are this corpus's, and a found one is not like it.** The
 same table over 9,285 photographs a camera roll might hold — 224x224 JPEGs,
-almost none of them duplicates — reads decode **1.3%**, extraction **37%**,
-everything after it **62%**, of which the mirrored and inverted second look
-alone is **46%**. Two things make the difference and neither is the pixels.
+almost none of them duplicates — reads decode **1.7%**, extraction **46%**,
+everything after it **52%**, of which the mirrored and inverted second look
+alone is **41%**. (Before the fifth pass those read 1.5%, 40% and 58%, with the
+second look at 44%: cutting the descent moved the balance back towards the
+pixels.) Two things make the difference and neither is the pixels.
 The second look runs on files the first pass did not anchor twice, which is
 349 of 5,638 here and **8,769 of 9,285** there, so its cost scales with how
 many files have *no* duplicate — the normal case. And a small image is
@@ -889,9 +920,10 @@ the enlargement off, the run goes 292 s to 94 s and the pairs go 4,581 to
 2,179, which makes it the largest speed/accuracy knob there is on a corpus of
 small images and not a defect.
 
-Priced by deletion, the second look is **117 s of wall and 832 CPU-seconds for
-633 pairs** on that corpus, against **14 thread-seconds for 5,774 pairs** on
-this one. Before reaching for it, read *What the second look costs* below: the
+Priced by deletion it was **117 s of wall and 832 CPU-seconds for 633 pairs**
+on that corpus, against **14 thread-seconds for 5,774 pairs** on this one; the
+fifth pass takes the first figure to **565 CPU-seconds** without changing what
+it buys. Before reaching for it, read *What the second look costs* below: the
 three obvious ways to make it cheaper were measured and all three are worse
 than they look.
 
@@ -1064,11 +1096,141 @@ alignment and `std::arch` — and the next blur reads `dst` straight back, so
 some of what a streaming store saves it would pay again.
 
 
+**A fifth pass, aimed at the descent's memory and three loops around it.** The
+first change here is **not byte-identical** — it rounds the vocabulary's centres
+— so unlike every pass above it, its accuracy is measured rather than asserted.
+On the benchmark corpus: F1 **0.9775 -> 0.9777**, precision 99.52% either way,
+recall 96.05% -> 96.09%, false pairs **1,088 either way and every one of them
+still a trap**, cross-family pairs **0 -> 0**, and the per-transform table gains
+a row (`video_call_frame` 61/62 -> 62/62) and loses none. The found corpus goes
+from 4,581 pairs to 4,578, with 301 dropped and 298 gained: a 6% churn in the
+pair set for a net of minus three, which is what a changed vocabulary looks like
+on a corpus whose matches are mostly marginal. The other three changes are
+byte-identical on both corpora, checked against the run before them.
+
+- **The tree's centres are bytes, and the descent measures them as integers.**
+  This is the whole of the pass and the rest is trimming. The descent reads
+  three paths' worth of a node's children per level — up to sixteen centres of
+  512 bytes each — out of a tree whose deep levels are 30 and 78 MB on this
+  corpus, and it does that for every descriptor in the corpus and three times
+  more for every image the second look re-asks. It was never waiting for its
+  arithmetic. The new `quantise_threads` is what says so: against a 93 MB tree,
+  float centres cost **7,460 ns a descriptor on one core and 2,943 on eight**
+  — a per-thread penalty of **3.16**, where the same descent against a 2 MB
+  tree paid **2.12**, and the gap between those two is the memory. With byte
+  centres the penalty is **1.88 at every tree size**, which is to say the
+  memory is no longer in the way at all, and the eight-core figure is **903
+  ns**. `quantise_depth`'s cost per child-distance, which used to read 19 ns
+  against a tree that fits in cache and 31 ns against one of 40 MB, is now flat
+  at **15.8 either way**.
+
+  **The kernel is what makes it work, and it is why this failed when it was
+  tried before.** Widening bytes to floats per *dimension*, in a block where a
+  node's children are interleaved, costs more than the traffic saves — that is
+  the measurement in *Tried and rejected*, and it stands. Child-major instead,
+  so a centre is 128 contiguous bytes and two cache lines: `|a - b|` from two
+  saturating subtractions, sixteen-bit lanes, and `_mm256_madd_epi16` to square
+  and sum adjacent pairs. That is the same instruction count as the float kernel
+  for a quarter of the bytes, and the sum is over integers — exact in any order,
+  bounded by 8.3 M, and the portable fallback gives the same number the vector
+  path gives. The width dispatch the float kernel needed is gone with it: a
+  child's distance no longer cares how many siblings it has.
+
+  In place, profiled cold: `quantise` plus `variant:quantise` go from **522 to
+  241 CPU-seconds** on the found corpus and from **71 to 31** here, which is
+  -54% and -56% of the descent. The tree also shrinks from 108 MB to 27 MB. That
+  does not move the peak — the peak is set by the decode budget — but it does
+  mean the whole vocabulary now fits in the memory one large decode used to
+  hold, and the found corpus's measured peak came down 8% with it.
+
+- **The word-list intersection asks eight words at a time whether it needs to
+  look at all.** Galloping, the previous winner, reduced the *steps* of the
+  merge and left every one of its branches exactly as unpredictable, which is
+  why it was worth 4%: the function was never bound by its comparisons but by
+  being wrong about them. Two images' lists hold about 1,300 entries each over a
+  million-odd words and share some tens, so the answer to "do the next eight
+  words of each side have anything in common" is almost always no, and one
+  vector of eight all-against-eight comparisons gives it in about one
+  instruction per word. The side whose block ends first then goes whole, and a
+  scalar merge takes over only for the block pair that does meet. The words come
+  out in the same order, so `cap` cuts in the same place, and
+  `the_block_filter_intersects_exactly_as_a_merge_does` holds the pair together
+  over every shape — empty lists, lists shorter than a block, runs on one side
+  and both, and a cap small enough to bite. Isolated (`shared_timings`, 1,300
+  entries over 1.7 M words): **13.9 microseconds a call -> 2.4**. In place on
+  the found corpus, where it is called five million times, measured on cached
+  runs with nothing else changed: the direct verification phase **7.0 -> 4.9
+  seconds** of wall and the second look **106 -> 77**. Profiled cold, where the
+  vocabulary change is in the figure too, `shared` reads **215 -> 137
+  CPU-seconds** — a long way short of the isolated 5.8x, because a call on real
+  lists is a merge *and* a sort of what the merge emitted, and only the merge got
+  faster.
+
+  Two benches were added to keep the next attempt honest, because the first one
+  measured the wrong thing twice. `shared_pool` runs the intersection against a
+  pool too large to cache — 85 MB of word lists — and says the cost is the same
+  as against 1 MB, so the function is not waiting for the lists. `shared_overlap`
+  varies how much the two sides share, and says the cost doubles from 40 shared
+  words to 300: past that the emitted pairs and the sort at the end dominate,
+  and a call on a real corpus is a merge plus a sort in roughly equal parts.
+
+- **The geometry stage stopped recording which correspondences a losing
+  hypothesis explained.** `count_inliers` wrote one byte per correspondence, and
+  that scattered store was the only narrow thing in a loop that otherwise maps,
+  subtracts and compares eight positions at a time. The caller reads the mask
+  for the hypothesis it keeps and for no other, and a hypothesis is kept only
+  when it beats every one before it, so `mark_inliers` takes a second pass over
+  the handful that win and the thousands that lose are only counted.
+
+- **The grey reduction de-interleaves explicitly.** `grey_of` is a few integer
+  operations and one division, and a whole row of them is nothing a compiler
+  cannot run eight at a time — except that a pixel's three bytes sit at `3x`,
+  and a loop whose loads are that shape neither unrolls nor vectorises. It held
+  the reduction to 6.2 cycles a pixel where the greyscale layout, the same loop
+  with one load and no division, ran at 3.6. Undoing the interleave with a
+  permute and a shuffle, eight pixels at a time, is bit for bit what the scalar
+  form gives: the channels are summed as integers, which is exact, and the one
+  division is the same IEEE division in a lane as in a register — as is the
+  alpha blend, which must stay three roundings rather than becoming an FMA.
+  Measured by `reduce_timings`: **rgb8 4000x3000 23.4 -> 15.5 ms**, **rgba8 35.4
+  -> 19.1**, l8 13.7 -> 12.0. The `k == 1` path — 92% of this corpus's files but
+  45% of its pixels, since the box factor only rises above one past 2,560 pixels
+  — was already being vectorised by the compiler and is level.
+
+**What the pass is worth end to end**, cold, on both corpora, with the order
+within each pair reversed so that neither build always ran second — which is
+worth a few per cent on its own here. Four runs of each build on the benchmark
+corpus:
+
+| benchmark corpus | CPU-seconds | wall |
+|---|---|---|
+| **before** | 722.6 / 722.3 / 719.7 / 728.2 | 114.2 / 113.4 / 112.4 / 113.4 s |
+| **after** | 609.1 / 673.9 / 671.1 / 673.8 | 95.0 / 104.1 / 104.4 / 105.2 s |
+
+| found corpus | CPU-seconds | wall | peak RSS |
+|---|---|---|---|
+| **before** | 1,506.5 / 1,516.0 | 219.1 / 219.2 s | 1,338 MB |
+| **after** | 1,179.6 / 1,165.3 | 173.3 / 169.6 s | 1,232 MB |
+
+That is **-7% of the CPU pair for pair on the benchmark corpus** and -9% on the
+means, with -10% of the wall clock — and **-22% of both on the found one**,
+where the descent is a third of the run rather than a twelfth. The found
+corpus's four runs agree to within 1% on each build, which is the tightest
+either corpus has measured in this file and is what a change this size looks
+like when it is larger than the noise. The old build is remarkably steady — 723 ± 4 CPU-seconds over four
+runs three hours apart — and the new one is not, for a reason worth knowing: its
+fastest run is the one that started with the most memory free (peak RSS 1,024 MB
+against 833), because the decode budget is a fraction of `MemAvailable` and a
+larger budget keeps more decodes in flight. The same two binaries measured 653
+and 666 CPU-seconds earlier the same evening, when the die was ten degrees
+cooler, which is the usual warning about absolute figures on this machine.
+
 ### What the second look costs, and three ways not to fix it
 
-It is **46% of a found corpus's run** and 1.8% of this one's. Of that, the
-re-quantisation of the permuted descriptors is about half, the word-list
-intersections a fifth, and retrieval and geometry the rest. Three cuts were
+It is **41% of a found corpus's run** and 1.5% of this one's. Of that, the
+re-quantisation of the permuted descriptors is about a third — it was half
+before its descent got three times faster — the word-list intersections a
+fifth, and retrieval and geometry the rest. Three cuts were
 measured and all three are worse than the cost:
 
 - **Narrowing its descent.** The second look's query does not need the same
@@ -1263,14 +1425,17 @@ What was worth doing in the **first** pass, in order of what it returned:
   at 512 bytes of centre each — 536 MB — and k-means handed back a full
   sixteen-wide block from every one of the 65,536 parents of the deepest level,
   which average two or three samples apiece. Storing only live centres took
-  that to 109 MB, and is most of the memory saving.
+  that to 109 MB, and is most of the memory saving. (A quarter of that again
+  since the centres became bytes — 27 MB — see the fifth pass.)
 - **Distances were measured one centre at a time.** Both quantisation and
   k-means walked a descriptor against a node's sixteen children in turn, and
   each of those is a chain of 128 dependent adds: one of the machine's several
-  adders busy. A parent's centres are now stored dimension-major, so all
-  sixteen sums run at once. Each sum is still taken over the dimensions in
-  order, so every distance is the same float to the bit. Quantisation went from
-  24 s to 7 s.
+  adders busy. A parent's centres were laid out dimension-major so that all
+  sixteen sums ran at once, each still taken over the dimensions in order and so
+  the same float to the bit. Quantisation went from 24 s to 7 s. (That layout
+  is now k-means' alone: the *descent* reads bytes, and a byte centre is short
+  enough that one child at a time in sixteen integer lanes beats sixteen
+  children at a time in floats — see the fifth pass.)
 - **The geometric fit read keypoints through two indirections.** Every
   correspondence proposes a transform and every transform is scored against
   every correspondence, so those four coordinates are read `n` times each.
@@ -1305,29 +1470,56 @@ What was worth doing in the **first** pass, in order of what it returned:
 alternating the two builds on the same corpus, which is the only protocol that
 works on this laptop:
 
-- *Byte centres in the vocabulary descent*, *narrowing the second look's
-  descent*, *dropping one of its three variants* and *cutting its candidate
-  list* — all four measured, all four worse than they look. The numbers are
-  under *What the second look costs* above, with the accuracy each would have
-  cost.
-- *Pruning the descent against a partial distance.* The centre block is
-  dimension-major, so the first quarter of the dimensions is the first quarter
-  of the block, and scoring that quarter for all of a node's children gives a
-  lower bound on every one of them — exact, since the terms still to be added
-  are squares, so a node whose closest child already loses can be abandoned
-  unread. It works, it is byte-identical, and it buys nothing. The reason is
-  worth keeping: the bound is a *quarter* of a distance tested against a
-  *whole* one, so a node has to be four times worse to be dropped after the
-  first quarter and a third worse after the third, and nodes that bad are rare
-  — the multi-path descent exists precisely because the winner is often not
-  under the nearest parent. Measured on the isolated descent it was level at
+- *Narrowing the second look's descent*, *dropping one of its three variants*
+  and *cutting its candidate list* — all three measured, all three worse than
+  they look. The numbers are under *What the second look costs* above, with the
+  accuracy each would have cost.
+- *Byte centres in the vocabulary descent* was here too, and **it is now what
+  ships** — see the fifth pass under *Speed and memory*. The entry is worth
+  keeping as a lesson about where a measurement was taken rather than about the
+  change: it was tried in a *dimension-major* block, where a node's sixteen
+  children are interleaved and widening them means unpacking sixteen bytes per
+  dimension, and it was measured end-to-end on this corpus, where the descent
+  is 9% of the run. Both halves of that hid it. Child-major with a pairwise
+  multiply-add is the same instruction count as the float kernel, and the
+  corpus where the descent is 31% of the run is the found one. The old
+  conclusion — "whatever cuts those bytes has to keep the floats" — was exactly
+  backwards; what it has to keep is the *width* of the widening.
+- *Pruning the descent against a partial distance.* Written against the old
+  dimension-major float block, where the first quarter of the dimensions was
+  the first quarter of the block, so scoring that quarter for all of a node's
+  children gave an exact lower bound on every one of them — the terms still to
+  be added are squares — and a node whose closest child already lost could be
+  abandoned unread. It worked, it was byte-identical, and it bought nothing.
+  The reason is worth keeping: the bound is a *quarter* of a distance tested
+  against a *whole* one, so a node has to be four times worse to be dropped
+  after the first quarter and a third worse after the third, and nodes that bad
+  are rare — the multi-path descent exists precisely because the winner is often
+  not under the nearest parent. Measured on the isolated descent it was level at
   some widths and **up to 12% slower** at others, the minimum-over-lanes
-  costing more than the blocks it saved. A bound that could pay would have to
-  be a whole distance taken from fewer bytes, which means a second, coarser
-  copy of every centre: 25% more memory to save at most 15% of the traffic,
-  on optimistic assumptions about how often a whole node loses. And node-level
-  is the only pruning this layout allows — the children's dimensions are
-  interleaved, so skipping one child skips no bytes.
+  costing more than the blocks it saved. The layout has since changed and a
+  child's bytes are now contiguous, so the same idea could abandon a *child*
+  rather than a node — but the descent is no longer waiting for memory, which
+  is the only thing such a bound saves.
+- *A ceiling on the inlier count, carried from retrieval into verification.*
+  There is an exact one and it is nearly free: sum, over the query's words that
+  a candidate also holds, of how many of the query's keypoints carry that word.
+  Every correspondence `shared` can offer is such a keypoint, `correspond`
+  keeps one per keypoint and `distinct_inliers` one per position, so
+  `n_in <= that sum` — and a tier wanting more aligned points than the ceiling
+  can never accept the pair, whatever the pixels say. It cost one `u32` per
+  slot in the query's accumulator and it **skipped nothing**: on the found
+  corpus, 0 of 1,077,507 candidate pairs and 0 of 3,946,050 second-look
+  candidates fell below the anchor's ten, and on this corpus 30,950 of 592,691
+  fell below the corroborated tier's eight — 5%, and those are the cheapest
+  pairs in the set. The reason is worth keeping, because it is about retrieval
+  rather than about the bound: the top hundred and fifty candidates are *by
+  construction* the images sharing the most words, and sharing ten word
+  incidences is a far weaker condition than agreeing on one transform. The
+  words a pair shares are simply not scarce enough to be evidence. (The
+  heavy-word leak the ceiling has to cover — words too common to index, which
+  `shared` finds and the query cannot — turned out to be empty: the median
+  query carries none, and on the found corpus not one of 9,285 carries any.)
 - *A per-thread pool for the scale-space planes*, to stop the churn of
   megabyte buffers per image. No measurable change in time, and 70 MB more
   peak. The allocator was already handling it.
@@ -1439,15 +1631,29 @@ isolated one that can answer the question:
   and it is what says *where* to look. Stages nest where the code nests, so
   `decode:jpeg` contains `decode:codec` and `decode:reduce` contains
   `decode:fit`; do not add the column up.
-- **`cargo test --release -- --ignored --nocapture`** runs three benchmarks of
-  the inner loops on synthetic data, on one core, in a few seconds each:
-  `kernel_timings` (blur, extract, descriptor, orientation histogram,
-  gradient), `reduce_timings` (the grey reduction at each channel layout and
-  box factor, and the area resampler) and `quantise_timings` (the vocabulary
-  descent). They report the *fastest* of nine runs, because the slow ones
-  belong to the machine. Use these to decide whether a change is worth a
-  corpus run at all — three of the four rejections above were settled here in
-  a minute apiece.
+- **`cargo test --release -- --ignored --nocapture`** runs benchmarks of the
+  inner loops on synthetic data, in a few seconds each: `kernel_timings` (blur,
+  extract, descriptor, orientation histogram, gradient), `reduce_timings` (the
+  grey reduction at each channel layout and box factor, and the area
+  resampler), `quantise_timings`, `quantise_depth` and `quantise_branching`
+  (the vocabulary descent against tree size and branching), and
+  `shared_timings` (the word-list intersection). They report the *fastest* of
+  several runs, because the slow ones belong to the machine. Use these to
+  decide whether a change is worth a corpus run at all — three of the four
+  rejections above were settled here in a minute apiece.
+
+  **Three more exist because a single-core bench on small data hid something
+  twice.** `quantise_threads` runs the descent on one core and on all of them,
+  because at eight threads the descent is mostly waiting for memory and one core
+  cannot see that: the fifth pass above is **3.3x** against the tree a real
+  corpus builds at eight threads, 1.9x on one core, and 1.5x against a tree
+  small enough to cache — and its first, scalar version was *slower* in cache
+  while already being much faster out of it, which is the shape that got byte
+  centres rejected the first time.
+  `shared_pool` runs the word-list intersection against 85 MB of lists rather
+  than 1 MB, and `shared_overlap` varies how much the two sides share — the
+  original bench's lists shared one word where a real pair shares tens, so it
+  was measuring a function the matcher does not call.
 - **`objdump -d`** on the release binary, after an `#[inline(never)]`, when
   the question is "did that actually vectorise". `perf` does not work on this
   box (`perf_event_paranoid` is 4) and neither does attaching a profiler
@@ -1538,7 +1744,7 @@ build.
 `--dump` writes every verdict considered, accepted or not, as CSV. Fit
 thresholds against that offline instead of re-running the tool per guess. Use
 `--cache` while tuning the matching stages: on the 5,638-image corpus a cold
-run is ~130 s and a cached one ~30 s, and the cache is keyed on the extraction
+run is ~95 s and a cached one ~17 s, and the cache is keyed on the extraction
 settings so changing `--work-size` invalidates it correctly.
 
 Note that timings taken this way are warm-cache and run about 40% faster than

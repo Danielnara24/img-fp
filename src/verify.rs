@@ -500,9 +500,13 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
         // correspondences out of hundreds — and a hypothesis that cannot win
         // is not worth finishing. See `count_inliers`.
         let need = best.map_or(3, |(c, _)| c + 1);
-        let count = count_inliers(&m, ax, ay, bx, by, tol2, &mut sc.hit, need);
+        let count = count_inliers(&m, ax, ay, bx, by, tol2, need);
         if count >= need {
-            best = Some((count, m));
+            // A hypothesis that beats the best so far is rare, and it is the
+            // only kind whose mask anyone reads.
+            let marked = mark_inliers(&m, ax, ay, bx, by, tol2, &mut sc.hit);
+            debug_assert_eq!(marked, count);
+            best = Some((marked, m));
             sc.mask.copy_from_slice(&sc.hit);
         }
     }
@@ -512,31 +516,39 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     for _ in 0..3 {
         let held = sc.mask.iter().filter(|v| **v).count();
         let Some(m2) = fit_affine(a, b, pairs, &sc.mask) else { break };
-        let count = count_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit, held);
+        let count = count_inliers(&m2, ax, ay, bx, by, tol2, held);
         if count < held {
             break;
         }
+        mark_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit);
         m = m2;
         sc.mask.copy_from_slice(&sc.hit);
     }
     Some((m, sc.mask.clone()))
 }
 
-/// Correspondences a transform explains, and which ones, at a fixed tolerance.
+/// How many correspondences a transform explains, at a fixed tolerance.
 ///
 /// `need` is the count below which the caller discards the answer. Once the
 /// correspondences still to be tested cannot carry the running total that far,
 /// the rest of them cannot change what the caller does, and the sweep stops.
 /// The returned count is then short of the truth — and short of `need`, which
-/// is all the caller reads it for — and `hit` is left half-written, which is
-/// safe because the caller only copies it out of a verdict it has kept.
+/// is all the caller reads it for.
 ///
 /// This is where the geometry stage spends itself: one hypothesis per
 /// correspondence, each scored against every correspondence. Almost all of
 /// them are wrong and explain a handful of points, so almost all of them are
 /// settled in the first chunk.
+///
+/// **It does not record which ones.** It used to, and the byte it wrote per
+/// correspondence was the only scattered store in an otherwise wide loop —
+/// eight positions map, subtract and compare in a vector, and then one lane at
+/// a time went out to a `bool`. The caller needs the mask for the hypothesis it
+/// keeps and for no other, and a hypothesis is kept only when it beats every
+/// one before it, so `mark_inliers` takes a second pass over the handful that
+/// win. Counting alone is what the other thousands get.
 #[inline]
-fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, hit: &mut [bool], need: usize) -> usize {
+fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, need: usize) -> usize {
     const CHUNK: usize = 64;
     let n = ax.len();
     let mut count = 0usize;
@@ -547,14 +559,29 @@ fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol
             let px = m[0] * ax[t] + m[1] * ay[t] + m[2];
             let py = m[3] * ax[t] + m[4] * ay[t] + m[5];
             let (dx, dy) = (px - bx[t], py - by[t]);
-            let ok = dx * dx + dy * dy < tol2;
-            hit[t] = ok;
-            count += ok as usize;
+            count += (dx * dx + dy * dy < tol2) as usize;
         }
         k = end;
         if count + (n - k) < need {
             return count;
         }
+    }
+    count
+}
+
+/// The same test, recording which correspondences passed it. Run only for a
+/// hypothesis the caller is keeping, so it never stops early: the mask has to
+/// cover every correspondence, and the count it returns is the whole count.
+#[inline]
+fn mark_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, hit: &mut [bool]) -> usize {
+    let mut count = 0usize;
+    for t in 0..ax.len() {
+        let px = m[0] * ax[t] + m[1] * ay[t] + m[2];
+        let py = m[3] * ax[t] + m[4] * ay[t] + m[5];
+        let (dx, dy) = (px - bx[t], py - by[t]);
+        let ok = dx * dx + dy * dy < tol2;
+        hit[t] = ok;
+        count += ok as usize;
     }
     count
 }
