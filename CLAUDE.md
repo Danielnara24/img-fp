@@ -81,6 +81,24 @@ in the root, 8 in `archive/`. `/home/daniel/Documents/IMGS-VAL` holds the 16
 seeds that were once a separate validation set and are now folded in; it keeps
 no derived tree.
 
+**The found corpus is `/home/daniel/Downloads`** — the "found corpus" every
+cost table above is measured against, 9,286 files of the kind a camera roll
+holds. It is **not labelled and has no ground truth**, so it scores nothing and
+never will: it is for *cost* — wall, CPU-seconds, peak RSS — and for the
+byte-identity check, where all that is asked of it is that two builds agree
+with each other. Keep it for its shape rather than its size, since that is what
+the benchmark corpus cannot supply: small images, upsampled before they are
+analysed, and almost no duplicates, which is what puts 46% of a run in the
+second look and 39% in the vocabulary descent. Quote it as a cost corpus and
+never as evidence about accuracy.
+
+(Two numbers on it have moved and the reason is not established: it reads 9,286
+files where the tables above assume 9,285, and the identity checks on
+2026-09-22 read **4,875 pairs and 875 groups** on both builds where the passes
+above quote 4,581 and 874. Both builds agreeing is what those checks need, so
+nothing above is invalidated — but re-measure rather than trusting the older
+pair count.)
+
 **There is currently no held-out corpus.** There was one, and
 `benchmark/VALIDATION.md` records what it bought — it is why the parameter
 surface is as small as it is. Folding it in was a deliberate trade, taken on
