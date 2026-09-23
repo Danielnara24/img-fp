@@ -181,6 +181,15 @@ static BUDGET: std::sync::LazyLock<Budget> = std::sync::LazyLock::new(|| Budget 
     limit: decode_budget(),
 });
 
+thread_local! {
+    /// How many claims this thread is already holding.
+    ///
+    /// It is not bookkeeping for its own sake: a worker can re-enter the
+    /// budget while holding it, and a thread that waits for room only it can
+    /// give back waits forever. See `reserve_inner`.
+    static HELD_HERE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// A claim on the decode budget, given back when the buffers it covers die.
 struct Permit(usize);
 
@@ -189,6 +198,7 @@ impl Drop for Permit {
         let mut q = BUDGET.state.lock().unwrap_or_else(|e| e.into_inner());
         q.held -= self.0;
         drop(q);
+        HELD_HERE.with(|h| h.set(h.get() - 1));
         BUDGET.room.notify_all();
     }
 }
@@ -202,6 +212,25 @@ fn reserve(bytes: u64) -> Permit {
 
 fn reserve_inner(bytes: u64) -> Permit {
     let want = bytes.min(isize::MAX as u64) as usize;
+    // A thread already holding a claim takes what it asks for and does not
+    // queue. It cannot safely wait: the room it would be waiting for is room
+    // it is itself holding, and every later ticket queues behind it, so the
+    // whole pool stops. That is not hypothetical — a decoder that runs its own
+    // work on the global rayon pool leaves its thread free to steal another
+    // image's task, and that task decodes, and so claims. `decode_jxl` was
+    // exactly this until it was given a pool of its own, and the shape is
+    // one library away from coming back.
+    //
+    // The overshoot is bounded by the nesting depth and costs nothing that
+    // matters: this bounds a transient, and a budget that hangs is worse than
+    // a budget briefly exceeded.
+    if HELD_HERE.with(|h| h.get()) > 0 {
+        let mut q = BUDGET.state.lock().unwrap_or_else(|e| e.into_inner());
+        q.held += want;
+        drop(q);
+        HELD_HERE.with(|h| h.set(h.get() + 1));
+        return Permit(want);
+    }
     let mut q = BUDGET.state.lock().unwrap_or_else(|e| e.into_inner());
     let ticket = q.issued;
     q.issued += 1;
@@ -214,6 +243,7 @@ fn reserve_inner(bytes: u64) -> Permit {
         q = BUDGET.room.wait(q).unwrap_or_else(|e| e.into_inner());
     }
     drop(q);
+    HELD_HERE.with(|h| h.set(h.get() + 1));
     // The next in line may now fit in what is left.
     BUDGET.room.notify_all();
     Permit(want)
@@ -554,6 +584,14 @@ fn weights(src: usize, dst: usize) -> Taps {
 
 fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let image = jxl_oxide::JxlImage::builder()
+        // jxl-oxide enables rayon by default and its default pool is the
+        // *global* one — the same pool the per-image walk runs on. A decode
+        // that dispatches there leaves its own thread waiting, and a waiting
+        // rayon worker steals: the stolen task is another image, which decodes
+        // and claims the budget while this thread's claim is still held.
+        // Nothing here needs a second level of parallelism anyway; the images
+        // are already one per thread.
+        .pool(jxl_oxide::JxlThreadPool::none())
         .read(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("jxl: {e}"))?;
     // The rendered frame, the float buffer it is streamed into and the bytes

@@ -1217,7 +1217,8 @@ And for peak memory, which was set by an accident of directory order:
   adjacent in the walk. Claims are served in the order they are made, so a
   large one cannot be starved by small ones slipping past, and a file larger
   than the whole budget still decodes — alone. Nothing about the output can
-  depend on it.
+  depend on it. It could also *hang*, for a reason that has nothing to do with
+  the queue; see *The decode budget could hang* below.
 - **Two allocator arenas instead of sixty-four.** glibc gives a process eight
   arenas per core and lets each keep what it has freed, which suits a program
   allocating small blocks in tight loops. This one takes a handful of very
@@ -1443,6 +1444,68 @@ Note also that making *extraction* faster raises the eight-thread peak on its
 own, because each worker then spends a larger fraction of its time holding a
 decode buffer; that is what the decode budget is for, and why its claims have
 to cover everything a decode holds.
+
+### The decode budget could hang, and the shape that did it
+
+**One run in twenty-five deadlocked**, and the mechanism took enough chasing
+that it is written down here rather than left in a commit message. A 0.2.0 run
+on the benchmark corpus stopped dead: all nine threads parked in
+`futex_wait`, zero CPU for the thirty-five minutes before it was killed,
+174 MB of the process swapped out — on the run of that session which started
+with the least memory free (1,952 MB).
+
+The budget's queue is not at fault. Twenty thousand claims at a 4 MB budget
+with 3 MB claims, eight threads, every claim therefore serialised, never
+hangs. What hangs is one thread claiming the budget **twice**:
+
+```
+decode -> decode_jxl -> jxl_oxide::render_frame
+       -> jxl_color::ColorTransform::run_with_threads
+       -> JxlThreadPool::for_each_vec        dispatches to the GLOBAL rayon pool
+       -> rayon WorkerThread::wait_until     waits for its own sub-tasks
+       -> WorkerThread::execute              and steals a job while it waits
+       -> img_fp::analyse -> decode -> reserve    claims 39.6 MB for another
+                                                  file, holding the first claim
+```
+
+`jxl-oxide` has `default = ["rayon"]` and its default pool is `rayon_global()`
+— the same pool the per-image walk runs on. A decode dispatching there leaves
+its own worker free to steal, rayon hands it another image, and that image
+decodes. `reserve` grants when `held == 0 || held + want <= limit`, and this
+thread *is* `held`, so a second claim that does not fit waits for room only it
+can give back, with every later ticket queued behind it. The budget is
+`MemAvailable / 8`, so on a tight machine almost nothing fits — which is how a
+rare re-entrancy became a certain hang on the tightest run of the day.
+
+Rare, because three things must coincide: a colour transform dispatching to the
+pool, rayon stealing an *outer* task at that moment, and the stolen task's
+claim not fitting. Instrumented to report re-entrant claims, the benchmark
+corpus produced **one in three runs**; the hang itself, one in twenty-five.
+
+Two changes, both in `decode.rs`:
+
+- **`decode_jxl` gets a pool of its own** (`JxlThreadPool::none()`). Nothing
+  here wants a second level of parallelism — the images are already one per
+  thread, and JXL is 62 files of 5,638.
+- **A thread already holding a claim never queues.** It takes what it asks for
+  and goes, because the room it would wait for is room it is itself holding, so
+  waiting can only deadlock; the overshoot is bounded by the nesting depth, and
+  a budget that hangs is worse than a budget briefly exceeded. That guard is
+  the part worth keeping, because the rule generalises: **any decoder that runs
+  its work on the global rayon pool can do this**, and it fails as a hang with
+  no CPU, no message and nothing in the output.
+
+Verified byte-identical on both corpora — the same 227,838 pairs and 122 groups
+here, the same 4,875 pairs and 875 groups on the found one, every verdict field
+compared, representatives included. Level on the clock: three cooled pairs at
+`-t 8` put it at **-1.8% of CPU** once the second-slot penalty is fitted out
+(which was **12%** that day, larger than the thing being measured), and the
+found corpus — which contains no JXL file at all and so cannot be affected —
+reads **-2.1%**, which is the honest size of this machine's noise after
+pairing. Peak RSS at `-t 1`, the deterministic reading, is **790,336 kB against
+790,508** at matched `MemAvailable`; the fourth run of that set reads 776,240
+and started with 330 MB less available, which is the budget moving, not the
+build.
 
 ### Tuning discipline
 
