@@ -81,23 +81,22 @@ in the root, 8 in `archive/`. `/home/daniel/Documents/IMGS-VAL` holds the 16
 seeds that were once a separate validation set and are now folded in; it keeps
 no derived tree.
 
-**The found corpus is `/home/daniel/Downloads`** — the "found corpus" every
-cost table above is measured against, 9,286 files of the kind a camera roll
-holds. It is **not labelled and has no ground truth**, so it scores nothing and
-never will: it is for *cost* — wall, CPU-seconds, peak RSS — and for the
+**The found corpus is `/home/daniel/Downloads/archive`** — the "found corpus"
+every cost table above is measured against, 9,285 files of the kind a camera
+roll holds. The path is the whole of it: run it on `~/Downloads` instead and
+one stray image from a neighbouring folder joins in, which reads 9,286 images
+and **4,875 pairs against the real corpus's 4,581**, because that one file
+lands in a family. A cost number taken that way is still a cost number; a pair
+count is not.
+
+It is **not labelled and has no ground truth**, so it scores nothing and never
+will: it is for *cost* — wall, CPU-seconds, peak RSS — and for the
 byte-identity check, where all that is asked of it is that two builds agree
 with each other. Keep it for its shape rather than its size, since that is what
 the benchmark corpus cannot supply: small images, upsampled before they are
 analysed, and almost no duplicates, which is what puts 46% of a run in the
 second look and 39% in the vocabulary descent. Quote it as a cost corpus and
 never as evidence about accuracy.
-
-(Two numbers on it have moved and the reason is not established: it reads 9,286
-files where the tables above assume 9,285, and the identity checks on
-2026-09-22 read **4,875 pairs and 875 groups** on both builds where the passes
-above quote 4,581 and 874. Both builds agreeing is what those checks need, so
-nothing above is invalidated — but re-measure rather than trusting the older
-pair count.)
 
 **There is currently no held-out corpus.** There was one, and
 `benchmark/VALIDATION.md` records what it bought — it is why the parameter
@@ -1514,13 +1513,22 @@ Two changes, both in `decode.rs`:
   no CPU, no message and nothing in the output.
 
 Verified byte-identical on both corpora — the same 227,838 pairs and 122 groups
-here, the same 4,875 pairs and 875 groups on the found one, every verdict field
+here, the same 4,581 pairs and 874 groups on the found one, every verdict field
 compared, representatives included. Level on the clock: three cooled pairs at
 `-t 8` put it at **-1.8% of CPU** once the second-slot penalty is fitted out
 (which was **12%** that day, larger than the thing being measured), and the
 found corpus — which contains no JXL file at all and so cannot be affected —
 reads **-2.1%**, which is the honest size of this machine's noise after
-pairing. Peak RSS at `-t 1`, the deterministic reading, is **790,336 kB against
+pairing. That corpus was then measured a third way, because two uncooled pairs
+on it had read **+6%** and **+8%** and a corpus the change cannot touch is the
+one place a regression cannot be real: a cooled, cache-evicted profiled pair
+puts it at **1,549.4 CPU-seconds against 1,557.5**, wall 225.1 against 226.6,
+peak RSS 304 kB lower, with the per-stage table **9 stages up and 10 down
+inside ±5%**, several of them stages whose machine code cannot have changed at
+all. The lesson there is the protocol rather than the fix: an uncooled second
+run on this machine invents an 8% regression out of nothing.
+
+Peak RSS at `-t 1`, the deterministic reading, is **790,336 kB against
 790,508** at matched `MemAvailable`; the fourth run of that set reads 776,240
 and started with 330 MB less available, which is the budget moving, not the
 build.
