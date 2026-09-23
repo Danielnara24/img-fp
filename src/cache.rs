@@ -11,9 +11,10 @@
 //! header, so changing the working size or the feature budget invalidates the
 //! whole file rather than silently mixing two kinds of record.
 
+use crate::problems::Problems;
 use crate::sift::{Features, Keypoint, DESC_LEN};
 use crate::verify::Thumb;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -105,23 +106,65 @@ impl<'a> Cur<'a> {
     }
 }
 
-pub fn load(path: &Path, want: Settings) -> HashMap<String, (Key, Record)> {
-    let mut out = HashMap::new();
-    let Ok(data) = std::fs::read(path) else { return out };
-    match read_all(&data, want, &mut out) {
-        Ok(()) => out,
-        Err(_) => HashMap::new(),
+/// Why a cache file produced nothing.
+///
+/// The two are worth keeping apart because only one of them is worth telling
+/// anyone about. A cache written at another working size holds records that
+/// describe a different analysis, so discarding it whole is the format doing
+/// its job — see the note on `Settings` — and it happens every time a sweep
+/// changes `--work-size`. A file that is not a cache at all, or that stops in
+/// the middle of a record, is a file the user pointed at and will keep
+/// pointing at, and it costs a full re-analysis every run until it is noticed.
+enum Reject {
+    /// Written by a run with different extraction settings. By design.
+    Stale,
+    /// Not a cache, or truncated: something to say out loud.
+    Damaged(anyhow::Error),
+}
+
+impl From<anyhow::Error> for Reject {
+    fn from(e: anyhow::Error) -> Self {
+        Reject::Damaged(e)
     }
 }
 
-fn read_all(data: &[u8], want: Settings, out: &mut HashMap<String, (Key, Record)>) -> Result<()> {
+/// Read what is usable out of the cache at `path`, reporting only what is
+/// worth reporting.
+///
+/// Every route out of here returns records rather than an error, because the
+/// cache is an optimisation: a run whose cache is missing, stale or ruined
+/// computes exactly the same pairs, only slower. What it must not do is be
+/// silent about the last of those.
+pub fn load(path: &Path, want: Settings, problems: &mut Problems) -> HashMap<String, (Key, Record)> {
+    let mut out = HashMap::new();
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        // Not being there yet is the first run with `--cache`, which is how
+        // the flag is meant to be used and not a problem.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            problems.cache(format!("could not read {}: {e}", path.display()));
+            return out;
+        }
+    };
+    match read_all(&data, want, &mut out) {
+        Ok(()) => out,
+        Err(Reject::Stale) => HashMap::new(),
+        Err(Reject::Damaged(e)) => {
+            problems.cache(format!("ignoring {}: {e}", path.display()));
+            HashMap::new()
+        }
+    }
+}
+
+fn read_all(data: &[u8], want: Settings, out: &mut HashMap<String, (Key, Record)>) -> Result<(), Reject> {
     let mut c = Cur(data, 0);
     if c.take(8)? != MAGIC {
-        bail!("not a cache file");
+        return Err(anyhow!("not a cache file").into());
     }
     let got = Settings { work_size: c.u32()?, features: c.u32()?, thumb: c.u32()? };
     if got != want {
-        bail!("settings changed");
+        return Err(Reject::Stale);
     }
     while !c.done() {
         let path = String::from_utf8_lossy(c.bytes()?).into_owned();

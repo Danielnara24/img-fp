@@ -20,13 +20,15 @@ mod cache;
 mod decode;
 mod group;
 mod index;
+mod problems;
 mod prof;
 mod sift;
 mod verify;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use index::{InvertedFile, Vocabulary, WordList};
+use problems::{Log, Problems};
 use rayon::prelude::*;
 use serde::Serialize;
 use sift::{Features, DESC_LEN};
@@ -110,29 +112,82 @@ struct Args {
     /// Print timings per stage.
     #[arg(short, long)]
     verbose: bool,
+
+    /// Write everything the run had to say to this file, uncapped.
+    ///
+    /// The console shows a count and up to ten examples per category; this is
+    /// the unabridged list, plus the stage timings whether or not `-v` asked
+    /// for them on screen. Truncated at the start of the run: it describes
+    /// this run.
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------- walking
 
-fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
+/// Every image file under `roots`, sorted and deduplicated.
+///
+/// Everything it passes over it counts, in one of two senses that must not be
+/// confused. What it cannot *read* is a problem: a root that does not exist
+/// arrives here as a single walk error — `is_file` is false for it, and
+/// `WalkDir` yields the `ENOENT` rather than an empty listing — so a mistyped
+/// path is loud instead of being a run that quietly scans one directory of the
+/// two it was given. A directory refused part-way through is the same failure
+/// with more at stake, since what is missing is everything under it and there
+/// is no telling from here how much that was.
+///
+/// What it was never going to read is a skip, and there are three. A file
+/// whose extension is not an image format is passed over without being
+/// sniffed, which is what makes pointing this at a home directory reasonable
+/// and is also the one thing that can hide a photograph — a JPEG named `.txt`
+/// is invisible. A symlink met during the walk is not followed, because a link
+/// and its target are one set of bytes and reading both would manufacture a
+/// duplicate pair out of one file; a path named on the command line *is*
+/// followed, because naming it is asking for it by name. And a file reached
+/// twice, by two overlapping roots or by being typed twice, is analysed once.
+///
+/// None of the three is a failure, so none of them touches the exit code —
+/// which is the whole reason the summary keeps two lists.
+fn walk(roots: &[PathBuf], problems: &mut Problems) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for root in roots {
         if root.is_file() {
             files.push(root.clone());
             continue;
         }
-        for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
+        for entry in walkdir::WalkDir::new(root).follow_links(false) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    let at = e.path().unwrap_or(root.as_path()).display().to_string();
+                    problems.unscannable(&at, &e);
+                    continue;
+                }
+            };
+            let kind = entry.file_type();
+            if kind.is_symlink() {
+                problems.symlink(&entry.path().display().to_string());
+                continue;
+            }
+            if !kind.is_file() {
                 continue;
             }
             let p = entry.into_path();
-            if decode::looks_like_image(&p) {
-                files.push(p);
+            if !decode::looks_like_image(&p) {
+                problems.not_an_image(&p.display().to_string());
+                continue;
             }
+            files.push(p);
         }
     }
     files.sort();
-    files.dedup();
+    files.dedup_by(|later, first| {
+        let same = later == first;
+        if same {
+            problems.listed_twice(&later.display().to_string());
+        }
+        same
+    });
     files
 }
 
@@ -200,6 +255,20 @@ struct Item {
     ok: bool,
     err: Option<String>,
 }
+
+/// Exit code for a run that finished and reported everything it found, but
+/// could not do all of it. `0` is a clean run, `1` is the fatal path — an
+/// error that stopped the run, printed by `main` — and `130` is the shell's
+/// convention for a Ctrl-C, which this process takes by dying on the signal
+/// rather than by handling it.
+///
+/// It exists because the results line reads exactly the same either way. A
+/// script that pipes the JSON somewhere sees "4,581 pairs" whether every file
+/// opened or a third of them refused, and this is the only part of the run it
+/// can test. What counts towards it — and, just as importantly, what is a skip
+/// and counts towards nothing — is in `problems.rs`, which also prints the
+/// summary that names every one of them.
+const EXIT_WITH_PROBLEMS: i32 = 2;
 
 const THUMB_LONG: usize = 128;
 
@@ -384,8 +453,35 @@ struct Output {
 
 // ---------------------------------------------------------------- main
 
+/// The only exit path.
+///
+/// `run` does the work and returns either an error that stopped it or nothing
+/// at all; this decides what the shell is told. The order is deliberate: the
+/// problem summary prints after the results, because it is the part to act on
+/// and the results are the part to read, and it prints on the fatal path too —
+/// a run that died writing its output has usually already found the images it
+/// could not open, and that is still worth saying.
+///
+/// A fatal error takes precedence over problems for the obvious reason: `1`
+/// says the run did not finish, which is a stronger statement than `2`, and
+/// anyhow's own `main` handling prints the error and supplies the code.
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Opened before any work, so that a log file that cannot be written is an
+    // ordinary fatal error at the top of the run rather than a discovery made
+    // an hour into one.
+    let log = Log::open(args.log_file.as_deref())?;
+    let mut problems = Problems::new(&log);
+    let outcome = run(&args, &log, &mut problems);
+    problems.print_summary();
+    outcome?;
+    if problems.any() {
+        std::process::exit(EXIT_WITH_PROBLEMS);
+    }
+    Ok(())
+}
+
+fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     prof::start();
     let t_start = Instant::now();
     few_arenas();
@@ -393,16 +489,33 @@ fn main() -> Result<()> {
         rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
     }
     let verbose = args.verbose;
+    // Every line the run says about itself goes to the log file whether or not
+    // the console asked for it: `-v` is about the terminal and `--log-file` is
+    // about the file, and one flag must not quietly decide the other. (That
+    // exact confusion is written up in `vid-fp`'s `verbosity`, where a
+    // `-q --log-file` run wrote an empty log.)
     macro_rules! stage {
         ($t:expr, $($arg:tt)*) => {
-            if verbose { eprintln!("[{:6.1}s] {}", $t.elapsed().as_secs_f64(), format!($($arg)*)); }
+            if verbose || log.active() {
+                let line = format!("[{:6.1}s] {}", $t.elapsed().as_secs_f64(), format!($($arg)*));
+                if verbose { eprintln!("{line}"); }
+                log.line(&line);
+            }
         };
     }
+    // Said on the console whatever the flags, and kept in the log with it.
+    macro_rules! say {
+        ($($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            eprintln!("{line}");
+            log.line(&line);
+        }};
+    }
 
-    let files = walk(&args.roots);
+    let files = walk(&args.roots, problems);
     stage!(t_start, "{} files", files.len());
     if files.is_empty() {
-        eprintln!("no image files found");
+        say!("no image files found");
         return Ok(());
     }
 
@@ -423,11 +536,11 @@ fn main() -> Result<()> {
         thumb: THUMB_LONG as u32,
     };
     let cached = match &args.cache {
-        Some(p) => cache::load(p, settings),
+        Some(p) => cache::load(p, settings, problems),
         None => Default::default(),
     };
-    if verbose && !cached.is_empty() {
-        eprintln!("[{:6.1}s] cache: {} usable records", t_start.elapsed().as_secs_f64(), cached.len());
+    if !cached.is_empty() {
+        stage!(t_start, "cache: {} usable records", cached.len());
     }
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
@@ -462,8 +575,12 @@ fn main() -> Result<()> {
             }
             let it = analyse(f, args.work_size, &sp);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if verbose && d % 250 == 0 {
-                eprintln!("[{:6.1}s]   described {d}", t_start.elapsed().as_secs_f64());
+            if (verbose || log.active()) && d % 250 == 0 {
+                let line = format!("[{:6.1}s]   described {d}", t_start.elapsed().as_secs_f64());
+                if verbose {
+                    eprintln!("{line}");
+                }
+                log.line(&line);
             }
             it
         })
@@ -491,17 +608,18 @@ fn main() -> Result<()> {
             .filter_map(|i| cache::key_of(&files[i]).map(|k| (names[i].as_str(), k, &*items[i].feats, &*items[i].thumb)))
             .collect();
         if let Err(e) = cache::save(p, settings, &entries) {
-            eprintln!("warning: could not write cache: {e}");
+            // Not fatal — the pairs this run reports are the same pairs — but
+            // the user asked for the analysis to be kept and the next run will
+            // pay for it again, which is exactly what a problem is here.
+            problems.cache(format!("could not write {}: {e}", p.display()));
         }
     }
-    if verbose {
-        eprintln!(
-            "[{:6.1}s] cpu: decode {:.0}s, features {:.0}s",
-            t_start.elapsed().as_secs_f64(),
-            T_DECODE.load(Ordering::Relaxed) as f64 / 1e6,
-            T_SIFT.load(Ordering::Relaxed) as f64 / 1e6
-        );
-    }
+    stage!(
+        t_start,
+        "cpu: decode {:.0}s, features {:.0}s",
+        T_DECODE.load(Ordering::Relaxed) as f64 / 1e6,
+        T_SIFT.load(Ordering::Relaxed) as f64 / 1e6
+    );
     // Nothing after this point extracts features, so the workers' blur scratch
     // is dead weight from here on.
     rayon::broadcast(|_| sift::release_scratch());
@@ -515,6 +633,22 @@ fn main() -> Result<()> {
     // peak then stood in the middle of this very phase. With the decode
     // budget holding that down, what is left is the plateau this releases.)
     timed!(37, release_memory());
+    // Counted here rather than at the JSON `failures` below, which is built
+    // from the same `items`: this is the last point every file has been
+    // through, and a fatal error further down should not lose the account of
+    // what would not open.
+    for (i, it) in items.iter().enumerate() {
+        match &it.err {
+            Some(e) => problems.unreadable(&files[i].display().to_string(), e),
+            // Decoded, described, and described to nothing. Nothing failed —
+            // a blank picture really has no local features — but the file is
+            // in the corpus and the matcher has nothing to say about it, and
+            // that is worth a line for the same reason a refusal is: the run
+            // did not answer the question it was asked about this file.
+            None if it.feats.len() == 0 => problems.featureless(&files[i].display().to_string()),
+            None => {}
+        }
+    }
     let n_ok = items.iter().filter(|i| i.ok).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
@@ -793,7 +927,7 @@ fn main() -> Result<()> {
     stage!(t_start, "corroborated: {} more pairs inside existing clusters", corroborated.len());
 
     if let Some(path) = &args.dump {
-        let f = std::fs::File::create(path)?;
+        let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
         let mut w = std::io::BufWriter::new(f);
         writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted")?;
         for (kind, set) in [("direct", &all_direct), ("variant", &variant_edges), ("propagated", &all_propagated)] {
@@ -808,7 +942,7 @@ fn main() -> Result<()> {
             }
         }
         w.flush()?;
-        eprintln!("dumped verdicts -> {}", path.display());
+        say!("dumped verdicts -> {}", path.display());
     }
 
     // ---- assemble
@@ -917,11 +1051,14 @@ fn main() -> Result<()> {
         pairs: out_pairs,
     };
 
-    match args.output {
+    match &args.output {
         Some(path) => {
-            let f = std::fs::File::create(&path)?;
+            // Fatal, and the context is the whole of what makes exit 1 useful:
+            // this is the run's output, there is nowhere else it went, and
+            // "No such file or directory" on its own does not say which file.
+            let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
             timed!(36, serde_json::to_writer(std::io::BufWriter::new(f), &out))?;
-            eprintln!(
+            say!(
                 "{} groups, {} pairs over {} images in {:.1}s -> {}",
                 out.groups.len(),
                 out.pairs.len(),
@@ -943,7 +1080,7 @@ fn main() -> Result<()> {
                 writeln!(w)?;
             }
             w.flush()?;
-            eprintln!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
+            say!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
         }
     }
     prof::report();

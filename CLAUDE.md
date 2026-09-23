@@ -87,6 +87,8 @@ src/
   verify.rs           correspondence, geometry, pixel agreement, the policy
   group.rs            pairs -> groups, around a representative
   cache.rs            on-disk cache of the per-image analysis
+  problems.rs         what was skipped, what could not be done, the exit code
+                      that says so, and --log-file
 benchmark/
   BASELINE.md         the competition's numbers. The bar to clear.
   VALIDATION.md       the held-out corpus, and what it says about overfitting
@@ -2334,6 +2336,55 @@ others: a group's members were each tested against the representative but not
 against each other, and files in several groups would be counted once per
 group. `score.py` prefers `pairs`, which is why the F1 figures above are
 unaffected by how grouping works.
+
+**Exit codes**, the same four `vid-fp` uses: `0` clean, `1` fatal (anyhow's
+own path out of `main`), `2` finished but something failed, `130` Ctrl-C. Only
+`2` needed building; `130` is the default signal disposition, since an
+interrupted run writes nothing and has nothing to clean up.
+
+**The summary is `vid-fp`'s, and so is the split it draws.** `Skipped:` then
+`Problems (N total):`, each category a count and up to ten examples, the same
+five-wide right-aligned count and the same `- ... and N more` elision. The
+split is the load-bearing part and it is what keeps exit `2` worth testing: a
+skip is what the tool was never going to read and touches nothing, a problem is
+what the run was asked for and did not get. Pointed at a home directory img-fp
+passes over most of it and still exits `0`.
+
+Skips: a file whose extension is not an image format (the one thing that can
+hide a photograph — a JPEG named `.txt` is passed over without being sniffed),
+a symlink met during a walk (a link and its target are one set of bytes; a path
+*named* on the command line is still followed), a file reached twice through
+overlapping roots. Problems: an image that would not decode, a path the walk
+could not read (a mistyped root arrives as one `ENOENT`, which is what stops a
+two-root run silently scanning one of them), an image that described to **no
+features at all**, and a `--cache` that could not be read or written.
+
+None of them changes a pair, which is the point — the results line reads the
+same either way, and the exit code is the only part of the difference a script
+can see. Two of the four are worth their own note. A *stale* cache is not
+counted: discarding every record when `--work-size` changes is the format doing
+its job and happens on every sweep, where a damaged one costs a full
+re-analysis every run until someone notices. And **featureless is a problem
+rather than a skip**, although nothing failed: the file decoded, described to
+nothing, and can now only match a byte-identical copy of itself. It is precise
+rather than noisy — 4 of 5,638 here, all of them crops of night sky or
+low-light seeds (`crop_strip_top` of `earth.jpeg`, two `low-light2` crops, a
+`panoramic.avif` strip), which is a diagnosis of four of that row's misses —
+and **0 of 2,786** photographs from the found corpus.
+
+**`--log-file PATH`** is the unabridged list: every skip and every problem as
+it is recorded, plus the stage timings whether or not `-v` printed them, plus
+the summary at the end. Truncated per run, written a line at a time with no
+buffer (a killed run keeps its tail, which is the case the flag is for), and
+`-v` and `--log-file` never decide each other — `vid-fp`'s `verbosity` note
+records what it cost to learn that. A path that cannot be created is fatal
+before any work starts.
+
+**So every benchmark run now exits 2**, because `Foto 38622.png` in the corpus
+is truncated and will not decode. `bench.py` knows (`OK_EXIT`, which lets
+`imgfp` return 0 or 2) and still records the code in `metrics.json`; anything
+else that shells out to img-fp needs the same treatment, or it will read a
+finished run as a failed one.
 
 **Two venvs.** `vendor/venv` is the general one. `vendor/venv-imagededup` has
 torch, so **SSCD and imagededup must run under it**; it also now has

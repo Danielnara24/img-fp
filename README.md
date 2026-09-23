@@ -290,8 +290,76 @@ win the second.
 | `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |
 | `--dump PATH` | every verdict considered, accepted or not, as CSV. |
+| `--log-file PATH` | everything the run had to say, uncapped. |
 
 Nothing in that last table changes a pair.
+
+## What it skipped, and what went wrong
+
+Nothing is said about a file while the run is working — a per-file line costs
+nothing until the day it is a quarter of a million of them pushing the results
+off the screen. The last thing a run prints is a count of what it passed over
+and what it could not do:
+
+```
+128 groups, 217380 pairs over 5637 images in 63.6s
+
+Skipped:
+      3  file(s) whose extension is not an image format
+         - /home/daniel/Documents/IMGS/derived/manifest.csv
+
+Problems (5 total):
+      1  image(s) could not be read
+         - .../WhatsApp Images/Foto 38622.png: unexpected end of file
+      4  image(s) have no features and can only match a byte-identical copy
+         - .../Desktop/Foto 55132.png
+```
+
+**The two lists are different kinds of thing, and only one of them is a
+failure.** A skip is something img-fp was never going to read: a file whose
+extension is not an image format (which is what makes pointing it at a home
+directory reasonable, and is also the one thing that can hide a photograph — a
+JPEG named `.txt` is invisible), a symlink met during a walk (a link and its
+target are one set of bytes, so following both would manufacture a duplicate
+pair out of one file — a path *named* on the command line is followed), or a
+file reached twice through overlapping roots. None of those touch the exit
+code. A problem is something the run was asked for and did not get, and each
+one does.
+
+The last category above is the odd one and it earns its place: those four files
+decoded perfectly and described to nothing, because a crop of a night sky has
+no local features to find. Nothing failed, and the tool still has nothing to
+say about them — which is worth a line, because the alternative is a file that
+silently cannot match. It does not fire on ordinary photographs: 2,786 camera
+photos produce no skips and no problems at all.
+
+`--log-file PATH` is the unabridged version. The summary names up to ten
+examples per category; the log holds every one of them, in full, as they
+happen, along with the per-stage timings whether or not `-v` asked for them on
+screen. It describes one run and is truncated at the start of it.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Ran clean |
+| `1` | Fatal error; the run did not finish |
+| `2` | Finished and reported, but something failed |
+| `130` | Interrupted with Ctrl-C |
+
+`2` is the `Problems` list above being non-empty. None of it changes the result
+— the pairs are the pairs either way — which is exactly why it needs a code,
+because the results line reads the same whether every file opened or a third of
+them refused. The unreadable images are in the JSON's `failures` as well.
+
+A stale `--cache` is not one of them. A cache written at another `--work-size`
+describes a different analysis and is discarded whole by design, silently and
+every time; a cache file that is *damaged* is reported, because it will cost a
+full re-analysis on every run until someone notices.
+
+`130` is the shell's convention for a Ctrl-C, and this process gets there by
+dying on the signal rather than handling it: an interrupted run writes nothing,
+so there is nothing to clean up.
 
 ## Cost
 
