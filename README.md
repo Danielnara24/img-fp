@@ -25,15 +25,23 @@ geometric relationship it found. So it finds the photograph inside the slide,
 the thumbnail of the 4000-pixel original, and the crop that kept a fifth of the
 frame.
 
-| | img-fp | best of eleven others |
-|---|---:|---:|
-| F1 | **0.978** | 0.762 (SSCD) |
-| precision | 99.5% | 100.0% (three tools, at 25% recall) |
-| recall | **96.1%** | 64.8% (SSCD) |
-| transformations handled perfectly | **60 of 87** | 0 of 87 |
-| image inside a bigger image | **55-62 of 62** | 0-30 of 62 (SSCD) |
-| wall clock | **105 s** | 1,949 s (SSCD) |
-| peak memory | **875 MB** | 1,479 MB (SSCD) |
+| | img-fp (default) | img-fp `--work-size 640` | best of eleven others |
+|---|---:|---:|---:|
+| F1 | **0.955** | **0.978** | 0.762 (SSCD) |
+| precision | 99.6% | 99.5% | 100.0% (three tools, at 25% recall) |
+| recall | 91.7% | **96.1%** | 64.8% (SSCD) |
+| transformations handled perfectly | 47 of 87 | **60 of 87** | 0 of 87 |
+| image inside a bigger image | 27-62 of 62 | **55-62 of 62** | 0-30 of 62 (SSCD) |
+| wall clock | **64 s** | 103 s | 1,949 s (SSCD) |
+| peak memory | 841 MB | 784 MB | 1,479 MB (SSCD) |
+
+The default runs at `--work-size 384`, below the accuracy knee, and 640 is the
+knee. The difference is 2.3 points of F1 — **all of it recall, none of it
+precision** — for about 60% more CPU. Read those two memory figures with care:
+they come from different sessions, and peak memory here is set by how much the
+machine had free at the time as much as by the work size. Measured properly, in
+one session with the two sizes alternating, it is **697 MB at the default
+against 849 MB at 640**, and the wall clock is 57 s against 82 s.
 
 5,638 images, 62 originals, 90 transformations, ground truth generated rather
 than judged, every tool run cold and alone on the same laptop.
@@ -48,40 +56,55 @@ worth 5% on a corpus of small images. Then a fifth, which is the only change in
 the tool's history to have moved a pair: it stores the vocabulary's centres as
 bytes rather than floats, because the descent was waiting for memory, and it is
 worth **9% of the CPU seconds here and 22% on a found corpus** for 0.0002 of F1
-*upwards* and one more transformation handled perfectly. The same corpus now
-runs in 103 s and 637 CPU-seconds under the same harness.
+*upwards* and one more transformation handled perfectly. A sixth took 9% off
+the matcher by not paying for verdicts that were going to be thrown away. At
+`--work-size 640` the corpus runs in 103 s and 637 CPU-seconds under that
+harness; the default runs it in **64 s and 416 CPU-seconds**.
 
 No transformation is a single fixed point: each draws its amount per seed, so
 `scale_small` runs from 0.09 to 0.27 and `jpeg_low` from quality 7 to 26. A
 transformation counts as *handled perfectly* only when all 62 seeds are found,
-across that whole range. img-fp clears 59 of them. **No other tool clears one.**
+across that whole range. img-fp clears 47 of them at the default and 60 at
+`--work-size 640`. **No other tool clears one, at any setting.**
 
 Where the difference is, out of 62 originals each:
 
-| | img-fp | SSCD | imagededup-CNN | czkawka | PDQ |
-|---|---:|---:|---:|---:|---:|
-| `collage_cell` | **62/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `magazine_spread` | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `contact_sheet` | **55/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `picture_in_picture` | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `embed_tiny` | **55/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `slide_deck` | **60/62** | 21/62 | 1/62 | 0/62 | 0/62 |
-| `pdf_page` | **62/62** | 16/62 | 2/62 | 0/62 | 0/62 |
-| `crop_quarter` | **60/62** | 9/62 | 0/62 | 0/62 | 0/62 |
-| `crop_micro` | **40/62** | 0/62 | 0/62 | 0/62 | 0/62 |
-| `crop_strip_top` | **57/62** | 5/62 | 2/62 | 0/62 | 0/62 |
+| | img-fp | at `--work-size 640` | SSCD | imagededup-CNN | czkawka | PDQ |
+|---|---:|---:|---:|---:|---:|---:|
+| `collage_cell` | **59/62** | **62/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `magazine_spread` | **54/62** | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `contact_sheet` | **29/62** | **55/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `picture_in_picture` | **45/62** | **60/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `embed_tiny` | **27/62** | **55/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `embed_small` | **57/62** | **62/62** | 30/62 | 1/62 | 0/62 | 0/62 |
+| `slide_deck` | **56/62** | **62/62** | 21/62 | 1/62 | 0/62 | 0/62 |
+| `pdf_page` | **56/62** | **62/62** | 16/62 | 2/62 | 0/62 | 0/62 |
+| `crop_quarter` | **59/62** | **60/62** | 9/62 | 0/62 | 0/62 | 0/62 |
+| `crop_micro` | **39/62** | **41/62** | 0/62 | 0/62 | 0/62 | 0/62 |
+| `crop_strip_top` | **54/62** | **57/62** | 5/62 | 2/62 | 0/62 | 0/62 |
 
-Where it does *not* lead: PDQ takes `halftone` 58/62 against 56, and SSCD
-`rot180` 61 against 60. Non-affine warping used to be on this list and no
-longer is — img-fp takes `perspective_top` and `keystone_side` 62/62 each
-against SSCD's 61, and leads `barrel_distort` (61 v 48) and `wave_vertical`
-(59 v 49). Every perceptual hash is at zero on all four warps.
+**This is where the default's work size costs the most, and it is not an
+accident.** An image inside a bigger image is a small part of the frame, so
+shrinking the frame to 384 shrinks it again — `embed_tiny` and `contact_sheet`
+roughly halve. The lead over the field survives it intact, because the field is
+at zero, but a corpus of slides, screenshots or contact sheets is the case for
+passing `--work-size 640`.
 
-Precision is not traded for any of it. All 1,088 of its false pairs are the
-deliberate rearrangement traps — `column_roll` slides the frame sideways and
-wraps, so a crop landing in the unbroken 63% really is present in both files.
-Outside the traps: **no wrong pair at all in 224,779 proposals**, against 15.65
-million chances to be wrong. SSCD takes the traps 11,237 times.
+Where it does *not* lead: PDQ takes `halftone` 58/62, against 55 at the default
+and 56 at 640. That is the only row any of the eleven takes, at either setting.
+SSCD had `rot180` 61 against 60 and no longer does — 62/62 now. Non-affine
+warping used to be on this list too: img-fp takes `keystone_side` 62/62 against
+SSCD's 61, is level on `perspective_top` at the default and ahead at 640, and
+leads `barrel_distort` (59 v 48) and `wave_vertical` (56 v 49). Every
+perceptual hash is at zero on all four warps.
+
+Precision is not traded for any of it — it is the one column the work size does
+not move. All 871 of its false pairs are the deliberate rearrangement traps —
+`column_roll` slides the frame sideways and wraps, so a crop landing in the
+unbroken 63% really is present in both files. Outside the traps: **no wrong
+pair at all in 214,373 proposals**, against 15.65 million chances to be wrong,
+and the same is true of all 1,088 of them at 640. SSCD takes the traps 11,237
+times.
 
 What that count really tracks is wrong *cluster merges*, and it is the number
 worth watching rather than the pair total: a bad merge costs every pair the two
@@ -217,15 +240,24 @@ See `benchmark/VALIDATION.md` for the rule and `CLAUDE.md` for every sweep.
 
 | | |
 |---|---|
-| `--work-size 640` | long side the analysis runs at, Lower = Stricter. |
+| `--work-size 384` | long side the analysis runs at, Lower = Faster and blinder. |
 | `-k 150` | candidates verified per image, Higher = Slower. |
 
 `--work-size` is the only one of the two that is really connected to the clock:
-it scales decode and feature extraction, which are 80% of a run, so 384 costs
-43% of the time for 2.2 points of F1. `-k` is on a plateau — 25 instead of 150
-costs 0.001 — so it saves a little and claims almost as much either way. There
-is no third: everything below is a statement about what the tool should claim,
-and none of it is a way to buy time.
+it scales decode and feature extraction, which are 80% of a run, so cost is
+near enough linear in it. **The default is below the accuracy knee on
+purpose.** 640 is the knee, and going there costs 61% more CPU for 2.3 points
+of F1 — all of it recall, and most of that recall is the containment rows,
+where the photograph is a small part of a larger canvas and shrinking the
+canvas shrinks the photograph past what the detector can describe. Use 640 for
+a corpus of screenshots, slides or contact sheets; the default is sized for a
+camera roll. Nothing above 640 is worth asking for: 768 buys 0.0006 for 16%
+more CPU, and 896 goes backwards and merges two families.
+
+`-k` is on a plateau — 100 through 300 are identical to the pair — so it saves
+a little and claims the same either way. There is no third: everything below is
+a statement about what the tool should claim, and none of it is a way to buy
+time.
 
 **What it will claim**
 

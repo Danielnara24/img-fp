@@ -53,7 +53,18 @@ struct Args {
     threads: usize,
 
     /// Long side the analysis runs at. Lower is faster and blinder.
-    #[arg(long, default_value_t = 640)]
+    ///
+    /// The one knob that really moves the clock, because it scales the first
+    /// four fifths of the pipeline: cost is near enough linear in the long
+    /// side. Accuracy is a ramp with a knee at 640, and the default is below
+    /// the knee on purpose, trading recall for time and memory. Going *down*
+    /// does not trade precision — it holds 99.5-99.6% from 384 to 768, so a
+    /// lower setting finds fewer duplicates rather than wronger ones, and what
+    /// it finds fewer of is mostly images embedded in bigger images. Going up
+    /// eventually does: 896 merges two families on the benchmark corpus.
+    /// The table is in `CLAUDE.md`; 640 is the setting to ask for when recall
+    /// matters more than the wait, and nothing above it is worth asking for.
+    #[arg(long, default_value_t = 384)]
     work_size: usize,
 
     /// Candidates verified per image.

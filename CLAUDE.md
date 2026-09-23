@@ -7,30 +7,60 @@ changing how anything is scored.
 
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
-every amount drawn per seed — F1 **0.978** at 99.5% precision and 96.1% recall,
-against SSCD's 0.762 / 92.6% / 64.8%, and roughly two minutes against SSCD's
-1,949 s.
+every amount drawn per seed — F1 **0.955** at 99.6% precision and 91.7% recall
+at the shipped default, against SSCD's 0.762 / 92.6% / 64.8%, and under a
+minute against SSCD's 1,949 s. At `--work-size 640` it is F1 **0.978** at
+99.5% / 96.1%, for 44% more wall clock and 61% more CPU.
+
+**The default sits below the accuracy knee on purpose, and 640 is the knee.**
+`--work-size` scales the first four fifths of the pipeline, so it is the only
+knob really connected to the clock, and what it trades is recall for time:
+384 gives up **4.4 points of recall** and buys **30% of the wall, 38% of the
+CPU and 18% of the peak memory**. Precision is not part of that trade — it
+moves 0.07 points the *right* way, and every false pair at either size is a
+deliberate rearrangement trap. But the recall it gives up is not spread
+evenly, and it comes out of the one capability nothing else in the field has
+at all: a photograph embedded in a bigger canvas. `embed_tiny` goes 55/62 to
+**27/62** and `contact_sheet` 55 to **29**, because shrinking the canvas to 384
+shrinks the photograph inside it below what the detector can describe. Fifteen
+transformations leave the perfect column, and nine of the fifteen are
+containment rows. **Anyone who cares about that case should pass
+`--work-size 640`**; see *Measured trade-offs* for the full table.
 
 (**The cost figures are the soft ones here, and the accuracy figures are not.**
-Accuracy is a property of the build: F1 0.978 is `out/v10`, reproducible to the
-pair. Wall clock is a property of the session — this laptop's idle temperature
-alone moves it 25% — and the numbers people want to compare were taken in four
-different sessions: the eleven competitors in `out/v5`, img-fp at 105 s in
-`out/v8`, the parameter pass at 122 s in `out/v9` on a die that started 12 C
-hotter, and this build at **103 s and 637 CPU-seconds in `out/v10`**. Only the
-last step is a like-for-like comparison — four alternating cold runs of each
-build, which put the fifth optimisation pass at -9% of the CPU here and -22% on
-a found corpus — and the two before it were level on the clock when measured
-that way. So quote "about a hundred seconds, against SSCD's half hour" and do
-not put weight on the third significant figure. See *Speed and memory*.)
+Accuracy is a property of the build and the work size: F1 0.955 at the default
+and 0.978 at 640 are both reproducible to the pair. Wall clock is a property of
+the session — this laptop's idle temperature alone moves it 25% — and the
+numbers people want to compare were taken in five different sessions: the
+eleven competitors in `out/v5`, img-fp at 105 s in `out/v8`, the parameter pass
+at 122 s in `out/v9`, the fifth optimisation pass at 103 s in `out/v10`, all
+four at `--work-size 640`, and the default's own row in `out/v11`. Only
+like-for-like pairs within one session mean anything: the work-size table in
+*Measured trade-offs* is one such session and is the right place to read the
+default against 640, and the optimisation passes were each measured by
+alternating cold runs of the two builds. So quote "under a minute, against
+SSCD's half hour" and do not put weight on the third significant figure. See
+*Speed and memory*.
 
-**60 of 87 transformations are handled perfectly** (every seed found across the
-whole range of the amount). Every other tool manages **zero**.
+**Every parameter sweep and every figure in *Speed and memory* was measured at
+`--work-size 640`**, which was the default when they were taken, and they are
+left as measured rather than half-rewritten: they are measurements of
+particular changes against particular builds, and re-running two hundred lines
+of them at a new work size would not make any of them more true. The four
+options were re-swept at 384 — the tables are under *Measured trade-offs* — and
+none of them moves. Where the new default changes a *conclusion* rather than a
+number there is exactly one place, and it is the `--min-pixel-correlation`
+cliff, which does not exist at 384.)
 
-Precision holds where it matters: of 1,088 false pairs, **all 1,088 are the
-deliberate rearrangement traps**, leaving **no wrong pair at all** in 224,868
-proposals against 15.65 million chances to be wrong — and so no wrong cluster
-merge. That is the number to watch: a merge's cost is every pair the two
+**47 of 87 transformations are handled perfectly** at the default (every seed
+found across the whole range of the amount), and **60 of 87** at
+`--work-size 640`. Every other tool manages **zero** at any setting.
+
+Precision holds where it matters: of 871 false pairs at the default, **all 871
+are the deliberate rearrangement traps**, leaving **no wrong pair at all** in
+214,373 proposals against 15.65 million chances to be wrong — and so no wrong
+cluster merge. At 640 the same is true of all 1,088 of them in 224,868
+proposals. That is the number to watch: a merge's cost is every pair the two
 families imply, so it grows with the corpus while a lone bad pair does not.
 The previous rule left two of them, and the count is small enough either way
 that zero should be read as "none survived", not as a guarantee.
@@ -64,6 +94,13 @@ benchmark/
   TOOLS.md            install/run notes and per-tool gotchas
   bench.py            the measurement harness (cold, sequential, instrumented)
   score.py            F1 against the generated ground truth
+  analyse.py          score.py plus the three things the tuning rule needs:
+                      false pairs split into traps and cross-family errors,
+                      the family merges those imply, and the same run
+                      re-scored on two disjoint halves of the seeds
+  replay.py           replays the anchor tier and drop_weak_bridges off one
+                      --dump, to count cross-family anchors *before* the
+                      bridge test — the margin an output table cannot show
   run_bench.sh        simpler sequential driver, no instrumentation
   runners/run_*.py    one wrapper per tool -> canonical JSON
   corpus/
@@ -73,9 +110,13 @@ benchmark/
   out/v5/             the competitors' run: eleven tools, one session
   out/v8/             img-fp's published cost row (see BASELINE.md)
   out/v9/             img-fp after the parameter pass
-  out/v10/            img-fp after the fifth optimisation pass: the shipped row
+  out/v10/            img-fp at the old default of --work-size 640
                       (out/v5/DAMAGED.md records a file overwritten there;
                        give bench.py a fresh --out, it merges into the old one)
+  out/v11/            img-fp at the shipped default, --work-size 384
+  out/v11-worksize/   the one-session cold --work-size sweep behind the table
+                      in *Measured trade-offs* (metrics only; the run JSONs
+                      are 50 MB apiece and were not kept)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -245,9 +286,9 @@ Each derived file records `region` (rectangle of the original that survives),
   (`--no-propagate`, which is now a `--features prof` flag and not a CLI
   option — see below):
 
-  | | F1 | precision | recall | pairs | FP | groups |
+  | at `--work-size 640` | F1 | precision | recall | pairs | FP | groups |
   |---|---|---|---|---|---|---|
-  | **shipped** | **0.9775** | **99.52%** | **96.05%** | **224,779** | **1,088** | **122** |
+  | **propagation on** | **0.9775** | **99.52%** | **96.05%** | **224,779** | **1,088** | **122** |
   | `--no-propagate` | 0.9061 | 99.60% | **83.11%** | 194,330 | 780 | 199 |
 
   All of it is recall — **13 points** of it — and precision is a rounding error
@@ -272,16 +313,20 @@ Each derived file records `region` (rectangle of the original that survives),
   scales the first four fifths. The two knobs' own tables share their shipped
   row, so they compare directly:
 
-  | | F1 | recall | cold wall | cold CPU |
+  | at `--work-size 640` | F1 | recall | cold wall | cold CPU |
   |---|---|---|---|---|
-  | **shipped** | **0.9775** | **96.05%** | **95.1 s** | **665 s** |
+  | **640, propagation on** | **0.9777** | **96.09%** | **82.4 s** | **579 s** |
   | no propagation | 0.9061 | 83.11% | — | -7 to -11 CPU-s |
-  | `--work-size 512` | 0.9724 | 95.04% | 75.3 s | 531 s |
-  | `--work-size 448` | 0.9652 | 93.63% | 65.3 s | 447 s |
-  | `--work-size 384` | 0.9553 | 91.78% | 55.7 s | 378 s |
+  | `--work-size 512` | 0.9724 | 95.03% | 69.4 s | 476 s |
+  | `--work-size 448` | 0.9658 | 93.75% | 60.7 s | 413 s |
+  | **`--work-size 384` (now the default)** | **0.9547** | **91.68%** | **57.4 s** | **360 s** |
 
-  Every work-size row **dominates** it: 384 gives back 4.9 points of F1 and 8.7
-  points of recall *and* saves 287 CPU-seconds where turning propagation off
+  (The `--no-propagate` row is the one line here still carried from the earlier
+  build; the work-size rows are the one-session sweep in *Measured trade-offs*.
+  Nothing about the argument depends on the difference.)
+
+  Every work-size row **dominates** it: 384 gives back 4.9 points of F1 and 8.6
+  points of recall *and* saves 219 CPU-seconds where turning propagation off
   saves 9. There is no corpus and no setting on which a user wants the flag, so
   the pass is now unconditional. To re-measure the table above, put the `if`
   back around the propagation loop in `main.rs`; that is a two-line edit and a
@@ -407,15 +452,30 @@ Each derived file records `region` (rectangle of the original that survives),
 
 ### What still misses
 
-9,100 pairs. The worst rows, out of 62 seeds: `crop_micro` 41 (a twentieth of
-the frame), `embed_tiny` 55, `contact_sheet` 55, `halftone` 56, `crop_strip_top`
-57, `scale_small` 58, `tiled_watermark` 59, `wave_vertical` 59. The pattern is
-what it has always been — very small crops, heavy downscales, and warps that
-break a fitted affine model — though the warps are much less of it than they
-were, because the pixel check no longer aliases across a scale gap.
+**19,378 pairs at the default, 9,100 at `--work-size 640`** — the default's
+extra 10,278 misses are what the speed is bought with, and they are not spread
+evenly. The worst rows, out of 62 seeds, with 640 in brackets: `embed_tiny` 27
+(55), `contact_sheet` 29 (55), `crop_micro` 39 (41), `picture_in_picture` 45
+(60), `crop_strip_top` 54 (57), `magazine_spread` 54 (60), `halftone` 55 (56),
+`tiled_watermark` 55 (59), `wall_poster` 55 (61), `pdf_page` 56 (62),
+`slide_deck` 56 (62), `wave_vertical` 56 (59).
 
-**One row where a competitor still leads**, down from two: PDQ takes `halftone`
-58/62 against 56. `rot180` was the other, and is now 62/62 against SSCD's 61 —
+Two patterns, and only one of them is new. The old one is what it has always
+been — very small crops, heavy downscales, and warps that break a fitted affine
+model, though the warps are much less of it than they were, because the pixel
+check no longer aliases across a scale gap. The new one is **containment**, and
+it is the default's doing: the rows that fall furthest are the ones where the
+photograph is a small part of a larger canvas, because 384 is the long side of
+the *canvas* and the photograph inside it is a fraction of that. Nine of the
+fifteen transformations that leave the perfect column between 640 and 384 are
+containment rows. This is the cost worth knowing about before recommending the
+default to anyone whose corpus is screenshots, slides or contact sheets.
+
+**One row where a competitor still leads**, at either work size, and it is the
+same row: PDQ takes `halftone` 58/62 against 55 at the default and 56 at 640.
+Checked against all nine competitor columns from `out/v5`, no other row changes
+hands at 384 — the margin narrows, and on the containment rows it narrows a
+lot, but 27/62 against SSCD's 0/62 is still the whole field. `rot180` was the other, and is now 62/62 against SSCD's 61 —
 it had been a cost of the anchor's enclosure test, and the mean-correlation
 block score pays it back. img-fp now leads on every warp row, `perspective_top`
 and `keystone_side` included at 62 against SSCD's 61, having been level before;
@@ -1909,8 +1969,11 @@ build.
 `--dump` writes every verdict considered, accepted or not, as CSV. Fit
 thresholds against that offline instead of re-running the tool per guess. Use
 `--cache` while tuning the matching stages: on the 5,638-image corpus a cold
-run is ~95 s and a cached one ~17 s, and the cache is keyed on the extraction
-settings so changing `--work-size` invalidates it correctly.
+run at the default is ~57 s and a cached one ~12 s (at 640, ~82 s and ~17 s),
+and the cache is keyed on the extraction settings so changing `--work-size`
+invalidates it correctly — which also means one cached extraction serves a
+whole threshold sweep at a given work size, and that is how the 384 sweeps in
+*Measured trade-offs* were taken.
 
 Note that timings taken this way are warm-cache and run about 40% faster than
 `bench.py`'s cold-cache figures. Compare tuning runs with each other, never
@@ -1940,36 +2003,124 @@ both of which caught something real in this pass:
   trap. A rule that only watches total FP would have rejected it.
 
 Measured trade-offs, so they need not be rediscovered. **`--work-size` is a
-knee, not a peak**, re-swept on this corpus and this build — the figures that
-stood here before (448 at F1 0.975, 640 at 0.980, 768 at 0.976, and 768 costing
-1.7x the clock of 640) were the old corpus and the pre-optimisation build, and
-they got the shape wrong in both columns: 448 is much worse than they say, 768
-is very slightly *better* than 640 rather than worse, and the cost above 640 is
-nothing like as steep. Cold runs, one warmup first so every run faced the same
-warm page cache, 60 s cooldown between:
+knee, not a peak**, and the shipped default is deliberately below it. Re-swept
+on this build, all six sizes in **one session** on `bench.py`'s own protocol —
+cold page cache, cooled to measured idle + 3 C before each — and run in the
+order 384, 896, 448, 768, 512, 640, so that the session's thermal drift does
+not track the thing being measured:
 
-| `--work-size` | F1 | precision | recall | wall | CPU | peak RSS |
+| `--work-size` | F1 | precision | recall | wall | CPU | peak PSS | cross-family |
+|---|---|---|---|---|---|---|---|
+| **384 (default)** | **0.9547** | **99.59%** | **91.68%** | **57.4 s** | **360 s** | **697 MB** | **0** |
+| 448 | 0.9658 | 99.59% | 93.75% | 60.7 s | 413 s | 765 MB | 0 |
+| 512 | 0.9724 | 99.55% | 95.03% | 69.4 s | 476 s | 737 MB | 0 |
+| **640 (the knee)** | **0.9777** | **99.52%** | **96.09%** | **82.4 s** | **579 s** | **849 MB** | **0** |
+| 768 | 0.9783 | 99.55% | 96.18% | 95.7 s | 670 s | 896 MB | 0 |
+| 896 | 0.9729 | 98.52% | 96.09% | 126.4 s | 841 s | 1,041 MB | **2,207** |
+
+CPU is the column to read: it is the steadier of the two, and the wall column
+carries the session — 896 ran second, at a mean 2,137 MHz against 384's 2,765,
+so some of its 126 s is the die rather than the work. Cost is near enough
+linear in the long side. F1 climbs steeply to 640 and then stops: 640 -> 768
+buys **0.0006** for 16% more CPU, and above that it goes backwards. Downwards
+it is expensive but bounded — 512 costs 0.005, 448 costs 0.012, 384 costs
+**0.023**, and every bit of it is recall.
+
+**The default is 384 and the knee is 640, which is a choice rather than a
+measurement.** What 384 buys is 38% of the CPU, 30% of the wall and 18% of the
+peak memory; what it costs is 4.4 points of recall, concentrated in the
+containment rows — see the header. The knee is where to go when recall matters
+more than the wait, and nothing above the knee is ever worth asking for.
+
+**There *is* a cliff, and it is at the top rather than the bottom.** This
+reverses what stood here before. `--work-size` sets the descriptor count, which
+sizes the vocabulary, and the note in *How img-fp works* says that route can
+merge families; the previous sweep found zero cross-family pairs at every size
+and concluded it had not fired. On this build **896 fires it**: precision
+98.52%, **2,207 cross-family pairs and two merged families** — `beach` with
+`panoramic3.jpg`, which is the "two different beaches match along what they
+share" failure exactly, plus one stray `city2.jpg`/`earth.jpeg` pair. It
+reproduces to the pair over two runs (230,196 pairs both times), and it is not
+the occupancy rule failing: `for_corpus` holds occupancy between 1.8 and 2.7
+across this whole range, so the extra descriptors are buying real matches
+between genuinely similar photographs rather than a coarser vocabulary. 768 is
+clean, 640 is clean, and everything below is clean — and by the one margin
+measurement that sees behind the output, 384 is the cleaner of the two sizes
+whose anchors were counted: **one cross-family anchor for the bridge test to
+absorb against 640's three**. So the direction the default moved is the safe
+direction, and the sizes to re-check after any change to
+`VocabParams::for_corpus` are the large ones.
+
+
+**What moving the default did to the other four, which is nothing.** Every
+result-changing option was re-swept at 384, on one extraction cached once, so
+each point is a 12 s run rather than a 57 s one. None of them moves, and two of
+them for a better reason than "the sweep says so".
+
+| `--min-aligned-points` | F1 | precision | recall | FP | trap | cross | merges |
+|---|---|---|---|---|---|---|---|
+| 6 | 0.9754 | 99.59% | 95.58% | 922 | 918 | **4** | 2 |
+| 7 | 0.9720 | 99.59% | 94.92% | 902 | 900 | **2** | 2 |
+| 8 | **0.9656** | 99.61% | 93.70% | 856 | 856 | 0 | 0 |
+| 9 | 0.9604 | 99.62% | 92.70% | 827 | 827 | 0 | 0 |
+| **10** | **0.9547** | **99.59%** | **91.68%** | **871** | **871** | **0** | **0** |
+| 11 | 0.9493 | 99.60% | 90.68% | 841 | 841 | 0 | 0 |
+| 12 | 0.9434 | 99.65% | 89.56% | 731 | 731 | 0 | 0 |
+
+The shape is the one the ws-384 column of the big table above already showed,
+and the argument is unchanged: F1 prefers **8**, by 1.09 points, and 8 is one
+step from a cliff that starts at 7. The price of the margin roughly triples at
+this work size — 2.02 points of recall against 0.69 at 640 — which is the one
+thing that could have justified moving it, and the replay says not to. Counting
+cross-family *anchors* before `drop_weak_bridges`, the measurement that decided
+this value at 640 and the only one that does not go through F1:
+
+| bar | anchors | cross-family anchors | after the bridge test | families merged |
+|---|---|---|---|---|
+| 6 | 182,266 | 14 | 2 | **2** |
+| 7 | 179,620 | 9 | 2 | **2** |
+| 8 | 177,003 | **3** | 0 | 0 |
+| 9 | 174,410 | 3 | 0 | 0 |
+| **10** | **172,125** | **1** | **0** | **0** |
+| 12 | 167,466 | 1 | 0 | 0 |
+
+**8 leaves three cross-family anchors for the bridge test to absorb where 10
+leaves one**, and the bridge test survives exactly one false edge. That is the
+same 3:1 shape it had at 640 (6 against 3 there), so a 40% cut in the
+descriptor count did not change what the margin is worth. The replay
+reproduces the runs' own merge counts exactly — 2 at bar 6 and 7, none from 8
+up — which is what makes it worth believing.
+
+**`--min-pixel-correlation`'s cliff is gone at 384, and this is the one
+conclusion the new default changes.** At 640 it merges families at 0.40 and
+catastrophically at 0.30, which is why it ships one step above its cliff. At
+384 there is no cliff in the swept range at all:
+
+| `--min-pixel-correlation` | F1 | precision | recall | FP | cross | merges |
 |---|---|---|---|---|---|---|
-| 384 | 0.9553 | 99.60% | 91.78% | 55.7 s | 378 s | 792 MB |
-| 448 | 0.9652 | 99.59% | 93.63% | 65.3 s | 447 s | 766 MB |
-| 512 | 0.9724 | 99.55% | 95.04% | 75.3 s | 531 s | 759 MB |
-| **640** | **0.9775** | **99.52%** | **96.05%** | **95.1 s** | **665 s** | **1,104 MB** |
-| 768 | 0.9782 | 99.55% | 96.15% | 99.4 s | 706 s | 1,106 MB |
-| 896 | 0.9775 | 99.48% | 96.08% | 111.3 s | 805 s | 990 MB |
+| 0.20 | 0.9564 | 99.56% | 92.02% | 939 | 0 | 0 |
+| 0.30 | 0.9562 | 99.57% | 91.98% | 919 | 0 | 0 |
+| 0.40 | 0.9559 | 99.59% | 91.90% | 885 | 0 | 0 |
+| **0.50** | **0.9547** | **99.59%** | **91.68%** | **871** | **0** | **0** |
+| 0.60 | 0.9508 | 99.61% | 90.94% | 827 | 0 | 0 |
 
-Cost is near enough linear in the long side while F1 climbs steeply to 640 and
-then stops: 640 -> 768 buys **0.0007** for 6% of the clock, and 640 -> 896 buys
-**nothing** for 17% of the wall and 21% of the CPU. Downwards it is expensive
-fast — 512 costs 0.005, 448 costs 0.012, 384 costs 0.022, all of it recall. So
-640 is the knee and the plateau above it is real, which is the one thing the old
-numbers hid by showing 768 as a decline.
+Not one cross-family pair anywhere from 0.20 to 0.60, where 0.30 at 640
+produces 43,540 of them across twelve merges. The reason is the same one that
+costs the default its recall: with 40% fewer descriptors the two Excel
+screenshots never reach ten aligned points, so at this work size the inlier bar
+is the only thing holding that family apart and the agreement bar is not
+binding. It stays at 0.50 regardless — the value is derived as the midpoint of
+what the statistic can report, not read off a corpus, and F1 is flat to 0.0017
+across the whole range. But **do not carry "no cliff" back to 640**, and do not
+read this as the bar being useless: it is the only defence against that failure
+mode at any size where the pairs do reach the inlier bar.
 
-**No cliff, and this is where one could have been.** `--work-size` sets the
-descriptor count, which sizes the vocabulary, and the occupancy trap in *How
-img-fp works* is reachable by exactly that route. It did not fire: **zero
-cross-family pairs at every size**, 384 to 896, and precision never leaves
-99.48-99.60%. Worth re-checking after any change to `VocabParams::for_corpus`,
-since that is the rule keeping it from firing.
+`--min-frame-overlap` keeps the shape it has at 640 — no cliff in the usable
+range, F1 best one step loose (0.80 at 0.9557 against 0.85's 0.9547) and that
+step buying 112 more trap false pairs for 0.001 of F1, so it does not move.
+`-k` is flatter than ever: **100, 150, 200 and 300 are identical to the pair**
+at 384, and 50 costs 0.0003. The knee is below 100 and the shipped 150 is
+still half the range clear of it.
 
 `--features` is gone: measured over 300 to 900 at a fixed vocabulary it moves
 F1 by 0.007 (0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977) and 900 costs 11%
