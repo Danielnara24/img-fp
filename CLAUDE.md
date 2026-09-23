@@ -1197,10 +1197,10 @@ byte-identical on both corpora, checked against the run before them.
   45% of its pixels, since the box factor only rises above one past 2,560 pixels
   — was already being vectorised by the compiler and is level.
 
-**What the pass is worth end to end**, cold, on both corpora, with the order
-within each pair reversed so that neither build always ran second — which is
-worth a few per cent on its own here. Four runs of each build on the benchmark
-corpus:
+**What the pass is worth end to end**, cold, with the order within each pair
+reversed so that neither build always ran second — which is worth a few per cent
+on its own here. Four runs of each build on the benchmark corpus and two on the
+found one:
 
 | benchmark corpus | CPU-seconds | wall |
 |---|---|---|
