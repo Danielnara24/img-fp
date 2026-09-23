@@ -1225,13 +1225,81 @@ larger budget keeps more decodes in flight. The same two binaries measured 653
 and 666 CPU-seconds earlier the same evening, when the die was ten degrees
 cooler, which is the usual warning about absolute figures on this machine.
 
-### What the second look costs, and three ways not to fix it
+**A sixth pass, over what a verdict costs when it is going to be thrown away.**
+The second look takes **3.94 million verdicts to find 459 pairs** on the found
+corpus, and one verdict in nine hundred reaches the ten aligned points an anchor
+needs. So the question is not what a *match* costs but what a *near-miss* costs,
+and the answer was: rather more than the geometry that decided it. All three
+changes are byte-identical over both corpora — the same 227,927 pairs and 123
+groups here, the same 4,578 and 864 there.
 
-It is **41% of a found corpus's run** and 1.5% of this one's. Of that, the
-re-quantisation of the permuted descriptors is about a third — it was half
-before its descent got three times faster — the word-list intersections a
-fifth, and retrieval and geometry the rest. Three cuts were
-measured and all three are worse than the cost:
+- **Two of the three tests a verdict faces ran before anything could reject
+  it.** `encloses_centre` transforms every keypoint of both images — 1,200 of
+  them — to ask whether the inliers bracket the middle of what the transform
+  claims, and at the shape this pass really sees (56 candidate pairs, 51
+  correspondences) it costs **3.5 microseconds against the geometry fit's 3.7**,
+  measured by the new `match_timings`. It is read by one tier, for verdicts that
+  clear every other bar. `distinct_inliers` likewise sorted a vector per verdict.
+  Both now sit behind the bar that rejects 99.9% of them: `n_in` cannot exceed
+  the number of correspondences the transform explains, and `best_transform`
+  already knows that count, so a verdict that cannot reach `gate.0` aligned
+  points returns before either test. `overlap` went behind the same bar for the
+  same reason. The stages vanish from the profile: `encloses` **20.5 CPU-seconds
+  to nothing**, `overlap` 4.1 to nothing.
+- **The matcher's two cold gathers now ask ahead.** `correspond` is not bound by
+  `dist2` — sixteen integer lanes measure 128 bytes in about twenty cycles — it
+  is bound by *finding* the descriptor: `b`'s block is 76 KB, the candidates land
+  in it at random, and on a corpus of nine thousand images none of it is in
+  cache. Measured against a pool too large to cache, the same call costs two to
+  three times what it costs warm. So the walk hands the next eight candidates'
+  descriptors, and their keypoints, to the prefetcher while the current distance
+  is still being summed, and `best_transform`'s coordinate gather does the same
+  one pair ahead. Within-run ratios against the untouched descent:
+  `correspond` **-26%**, `best_transform` **-20%**.
+- **`best_transform` stopped allocating a mask per verdict.** It returned the
+  inlier mask as a `Vec<bool>` of its own — an allocation, a copy and a free for
+  a buffer the caller drops eight lines later, four million times. The mask stays
+  in the scratch the function already has.
+
+**What the three are worth, and how to measure a change this size at all.**
+Everything here is in the matcher, so the honest measurement is a cached run —
+that is what `--cache` is for — and nine of them, three per build in a Latin
+square over the slots, separate the two halves of the pass:
+
+| found corpus, cached | CPU-seconds | wall |
+|---|---|---|
+| **before** | 456.3 / 451.0 / 464.6 | 75.2 / 67.1 / 69.1 s |
+| **the gate alone** | 446.3 / 442.2 / 450.8 | 68.1 / 68.9 / 67.1 s |
+| **gate and prefetch** | 416.1 / 415.1 / 414.6 | 62.9 / 62.5 / 62.3 s |
+
+That is **-2.4% for the gate and -9.2% for both**, with -11% of the wall clock,
+and the three runs of the final build agree to 0.4%. Profiled, `encloses` and
+`overlap` vanish, `correspond` reads -26% and `best_transform` -20% against the
+untouched descent in the same run.
+
+**The cold end-to-end runs cannot see it, and that is worth knowing too.** The
+matcher is a third of a cold run on the found corpus and a fifth here, so -9% of
+it is -3% and -2% respectively, against a spread of ±2% over four runs. Measured
+anyway, balanced for slot: the found corpus **1,189.2 CPU-seconds before against
+1,190.1 after** — level — and the benchmark corpus **667.7 against 658.2**, which
+is -1.4% and about what the arithmetic predicts. A change worth three per cent of
+a two-minute run is below this machine's resolution; the way to measure it is to
+run the phase it lives in on its own.
+
+### What the second look costs, and the seven ways not to fix it
+
+It is **41% of a found corpus's run** and 1.5% of this one's. Profiled on the
+found corpus after the sixth pass below, its 431 CPU-seconds divide as **the
+descent 150, the word-list intersections 85, the geometry and its
+correspondences 86, retrieval 55**, and the rest is ranking, the permutation
+itself and the loop. The shape behind those
+numbers is worth stating, because every attempt to cut the pass runs into it:
+**3.94 million verdicts to find 459 pairs**, each verdict over a median of 56
+candidate keypoint pairs spanning 48 distinct query keypoints, of which
+**4,551 — one in nine hundred — reach ten aligned points**. The work is spread
+thinly over an enormous number of pairs that are nearly, but not quite, nothing.
+
+Seven cuts have been measured and every one of them is worse than the cost:
 
 - **Narrowing its descent.** The second look's query does not need the same
   breadth as the index it queries, since the index side already multi-assigns
@@ -1249,13 +1317,108 @@ measured and all three are worse than the cost:
   this one **3,678 of 5,774** do, at a median rank of 40 — because an inverted
   file matches its whole family and the deep ranks are the rest of the family.
 
-**And the descent is bandwidth-bound, which is why the obvious kernel fix
-fails.** A child-distance costs **19 ns against a tree that fits in cache and
-31 ns against one of 40 MB** (`quantise_depth`), so roughly two fifths of it is
-waiting for centres. Storing the centres as bytes rather than floats is a
-quarter of the traffic and was tried: the u8-to-i32 widening made the
-arithmetic **70% slower** — the in-cache cost went 19 ns to 33 — and the two
-cancelled, leaving 2%. Whatever cuts those bytes has to keep the floats.
+- **An exact ceiling on the inlier count**, carried from retrieval into
+  verification, and a **second on the correspondence count**. Both are free and
+  neither fires. The retrieval ceiling is under *Tried and rejected*; the other
+  is simpler still — a pair cannot reach ten aligned points with fewer than ten
+  correspondences, so `verify` could stop before the geometry. Measured on the
+  found corpus: **0.0% of the 3.94 M variant verdicts have fewer than ten**, and
+  the mean is 47.7. Both ceilings fail for the same reason, and it is the reason
+  to stop looking for a third: the top hundred and fifty candidates are *by
+  construction* the images sharing the most words, so everything cheap about them
+  is already large. What separates a duplicate from a butterfly is the geometry,
+  and the geometry is the expensive part.
+- **Dropping variant words the corpus does not contain.** A word no image holds
+  can intersect with nothing, so removing it from a variant's word list is
+  exactly equivalent and makes every one of its 150 intersections shorter.
+  Measured: **477 of 40,861,489** variant word entries — 0.001%. With 160,000
+  live words over five million descriptors, a leaf is never empty.
+- **Relabelling the words instead of descending for them.** This is the one that
+  looked like the answer, and it is the most instructive failure here. The
+  descent for permuted descriptors is the pass's largest item; the permutations
+  are fixed; so for every live leaf, permute *its own centre*, descend that once
+  at build time, and a variant's word list becomes the image's own list read
+  through a 160,000-entry table — 30 microseconds against 6.8 milliseconds, and
+  the descriptor distances and the geometry still run on the real permuted
+  descriptors. The reasoning for why it should be safe was that a word only has
+  to bring a pair into the candidate list and hand the geometry some keypoint
+  pairs to test, and a descriptor whose permutation lands in a different leaf
+  than its permuted centre did costs one correspondence out of hundreds.
+  **It costs 21% of the mirrored pass's pairs**: 5,792 -> 4,584 on this corpus,
+  F1 **0.9777 -> 0.9770**, TP 223,780 -> 223,449, and five transformations drop
+  out of the perfect column (`collage_cell`, `keystone_side`, `pdf_page`,
+  `photo_of_screen`, `video_call_frame`) against two that join it. So the words
+  are not merely a candidate filter: the pairs this pass exists to find are the
+  marginal ones, and a marginal pair needs most of its correspondences, not some
+  of them. The exact form of the idea — a vocabulary whose centres are *closed*
+  under the three permutations, so that the relabelling is not an approximation
+  at all — is untouched by this result and is written up in
+  *An equivariant vocabulary* below — where it is measured and closed, for a
+  reason that is about photographs rather than about the idea.
+
+**The descent is no longer bandwidth-bound**, which is what the fifth pass was
+about: byte centres and an integer kernel took it from waiting on 31 ns a
+child-distance to a flat 15.8 in cache or out. What is left of it is arithmetic,
+and the only way to remove that is to stop asking for it — which is what the
+last two entries above are both trying to do.
+
+### An equivariant vocabulary, and the measurement that closes it
+
+The mirrored pass's largest single item is the **descent for permuted
+descriptors** — 150 of its 431 CPU-seconds on the found corpus — and it exists
+only because quantisation is not equivariant: the word of `M(d)` has nothing to
+do with the word of `d`, so 600 permuted descriptors have to be descended per
+image per variant. There is an exact way to remove it, it is elegant, and it
+does not work here. Both halves are worth writing down.
+
+**The three permutations form a group.** `mirror` and `invert` are involutions
+on the descriptor's 128 bins and they commute — `mirror` flips the grid's rows
+and negates the orientation bins, `invert` flips both axes and leaves the
+orientations — so with the identity and their composition they are `Z2 x Z2`, a
+group `G` of four elements, every one of them a permutation of coordinates and
+therefore an **isometry**: `||P(d) - P(c)|| = ||d - c||`.
+
+That is the lever. If the *set* of centres at each level of the tree is closed
+under `G`, the nearest centre to `P(d)` is the `P`-image of the nearest centre to
+`d`, at every level, and therefore `word(P(d)) = P̂(word(d))` for a permutation
+`P̂` of the leaf numbers that the build knows exactly. A variant's word list
+becomes the image's own list read through a table — 30 microseconds against 6.8
+milliseconds — with no approximation, and the multi-path set survives too, since
+the distances are identical. The build would follow: the root is the only fixed
+point of `G`, so its children are `branching / 4` k-means centres and their four
+images each (16 and 12 are both divisible by four); every deeper node sits in an
+orbit of four, so only representatives are k-meansed and their siblings' centres
+are the permuted copies, each representative trained on
+`∪_g g⁻¹ . members(g . r)` — its orbit's members mapped back into its own frame,
+which sums to the sample size over a level, so the build costs what it costs now.
+
+**And the corpus will not have it.** An equivariant tree has as many live leaves
+as the tree it replaces, but they come in orbits of four, so it is fitted to the
+*symmetrised* descriptor distribution rather than the real one. That is testable
+without building any of it: extend the sampling pool with the permuted images of
+every descriptor it holds and leave everything else alone. Measured on the
+benchmark corpus, against the shipped 0.9777 / 96.05% / **0 cross-family**:
+
+| sampling pool | F1 | recall | TP | cross-family FP |
+|---|---|---|---|---|
+| **as shipped** | **0.9777** | **96.05%** | **223,780** | **0** |
+| + all three permutations | 0.9760 | 95.86% | 223,235 | **42** |
+| + `mirror` only | 0.9764 | 95.81% | 223,108 | 0 |
+| + `invert` only | 0.9771 | 95.93% | 223,413 | 0 |
+
+The full group **merges families** — 42 cross-family pairs where the shipped
+build makes none — and even the half of it that natural-image statistics make
+plausible costs 0.24 points of recall. The reason is the one *How img-fp works*
+already documents about occupancy: a vocabulary fitted to a distribution the
+corpus does not have spends its words on regions the corpus does not occupy, so
+the words that carry the corpus get coarser, and coarse words match two
+different beaches along what they share. Descriptors are simply not
+`G`-symmetric in distribution — `invert` least of all, which is no surprise,
+since natural images are not symmetric in intensity.
+
+So the second look keeps descending, and the reason it must is a property of
+photographs rather than of this code. Anyone reaching for this again should
+re-run the three rows above first; they cost one cached run each.
 
 What was worth doing in the **third** pass. Every entry here removes
 instructions from a loop that was already vectorised or already tight, which
@@ -1637,8 +1800,10 @@ isolated one that can answer the question:
   grey reduction at each channel layout and box factor, and the area
   resampler), `quantise_timings`, `quantise_depth` and `quantise_branching`
   (the vocabulary descent against tree size and branching), and
-  `shared_timings` (the word-list intersection). They report the *fastest* of
-  several runs, because the slow ones belong to the machine. Use these to
+  `shared_timings` (the word-list intersection) and `match_timings` (the
+  per-candidate half of the matcher: correspondence, geometry and the enclosure
+  test, at the shape the second look really asks for). They report the *fastest*
+  of several runs, because the slow ones belong to the machine. Use these to
   decide whether a change is worth a corpus run at all — three of the four
   rejections above were settled here in a minute apiece.
 

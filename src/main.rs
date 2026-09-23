@@ -637,17 +637,18 @@ fn main() -> Result<()> {
     // matches at all", costs a seed apiece on three of the held-out mirror
     // transforms.
     let lonely: Vec<usize> = (0..n).filter(|&i| items[i].ok && degree[i] < 2).collect();
+    let variants = [
+        Variant { mirror: true, invert: false },
+        Variant { mirror: false, invert: true },
+        Variant { mirror: true, invert: true },
+    ];
     let variant_edges: Vec<Edge> = lonely
         .par_iter()
         .map_init(
             || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default()),
             |(acc, touched, scored, cands, matches, scratch), &i| timed!(38, {
                 let mut out: Vec<Edge> = Vec::new();
-                for var in [
-                    Variant { mirror: true, invert: false },
-                    Variant { mirror: false, invert: true },
-                    Variant { mirror: true, invert: true },
-                ] {
+                for var in variants {
                     let vf = timed!(40, variant_features(&items[i].feats, var));
                     let wl = timed!(39, quantise(&vocab, &vf));
                     timed!(14, inv.query(&wl, i as u32, acc, touched, scored));

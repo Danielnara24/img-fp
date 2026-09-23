@@ -347,6 +347,19 @@ pub fn correspond(
         let da = a.d(qi as usize);
         while i < cands.len() && cands[i].0 == qi {
             let tj = cands[i].1;
+            // The next few candidates' descriptors, asked for now.
+            //
+            // This loop is not bound by `dist2` — a descriptor is 128 bytes and
+            // sixteen integer lanes measure it in about twenty cycles — it is
+            // bound by *finding* the descriptor. `b`'s block is 76 KB, the
+            // candidates land in it at random, and on a corpus of nine thousand
+            // images nothing in it is in cache: two lines per candidate, fetched
+            // one dependent gather at a time. Measured against a pool of images
+            // too large to cache, the same call costs two to three times what it
+            // costs against a warm one. So the addresses are handed to the
+            // prefetcher while the current distance is still being summed; it
+            // changes nothing about what is computed.
+            prefetch_descriptor(b, cands, i + PREFETCH);
             let d = dist2(da, b.d(tj as usize));
             if d < best.0 {
                 best = (d, tj);
@@ -357,6 +370,34 @@ pub fn correspond(
             out.push((qi, best.1));
         }
     }
+}
+
+/// How far ahead the candidate walk asks for its descriptors. Two cache lines
+/// each and a DRAM round trip of a few hundred cycles against the twenty a
+/// distance takes, so the distance is worth about eight candidates of lead.
+const PREFETCH: usize = 8;
+
+/// Ask for the descriptor and the keypoint of `cands[k]`'s B side. Out of range
+/// is not an error — the walk is near its end and there is nothing to fetch.
+#[inline]
+fn prefetch_descriptor(b: &Features, cands: &[(u32, u32)], k: usize) {
+    let Some(&(_, tj)) = cands.get(k) else { return };
+    let tj = tj as usize;
+    if tj >= b.kps.len() {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::_mm_prefetch;
+        let d = b.desc.as_ptr().add(tj * DESC_LEN);
+        _mm_prefetch(d as *const i8, std::arch::x86_64::_MM_HINT_T0);
+        _mm_prefetch(d.add(64) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+        // `best_transform` reads this keypoint next, out of the same cold
+        // block, and one prefetch here is cheaper than a miss there.
+        _mm_prefetch(b.kps.as_ptr().add(tj) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (b, tj);
 }
 
 // ------------------------------------------------------------ geometry
@@ -453,8 +494,13 @@ pub fn compose(m1: &Affine, m2: &Affine) -> Affine {
     ]
 }
 
-/// Best transform explaining the correspondences, by inlier count.
-fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh: f32, scratch: &mut Scratch) -> Option<(Affine, Vec<bool>)> {
+/// Best transform explaining the correspondences, and how many it explains.
+///
+/// Which ones is left in `scratch.mask`, where the caller reads it. It used to
+/// come back as a `Vec<bool>` of its own, which is an allocation and a copy per
+/// verdict — four million of them on a corpus where most files have no
+/// duplicate — for a buffer the caller drops a few lines later.
+fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh: f32, scratch: &mut Scratch) -> Option<(Affine, usize)> {
     if pairs.len() < 3 {
         return None;
     }
@@ -471,7 +517,11 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     sc.ay.clear();
     sc.bx.clear();
     sc.by.clear();
-    for &(p, q) in pairs.iter() {
+    for (k, &(p, q)) in pairs.iter().enumerate() {
+        // Both keypoint arrays are cold and read at random — see
+        // `prefetch_descriptor`, which has already asked for `b`'s side of the
+        // candidates this list came from.
+        prefetch_keypoints(a, b, pairs, k + PREFETCH);
         let ka = &a.kps[p as usize];
         let kb = &b.kps[q as usize];
         sc.ax.push(ka.x);
@@ -510,7 +560,8 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
             sc.mask.copy_from_slice(&sc.hit);
         }
     }
-    let (_, mut m) = best?;
+    let (n_in, mut m) = best?;
+    let mut held_after = n_in;
     // Refine: least-squares affine on the inliers, recount, repeat while the
     // set does not shrink.
     for _ in 0..3 {
@@ -523,8 +574,27 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
         mark_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit);
         m = m2;
         sc.mask.copy_from_slice(&sc.hit);
+        held_after = count;
     }
-    Some((m, sc.mask.clone()))
+    Some((m, held_after))
+}
+
+/// Ask for the keypoints `pairs[k]` will read, on both sides.
+#[inline]
+fn prefetch_keypoints(a: &Features, b: &Features, pairs: &[(u32, u32)], k: usize) {
+    let Some(&(p, q)) = pairs.get(k) else { return };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        if (p as usize) < a.kps.len() {
+            _mm_prefetch(a.kps.as_ptr().add(p as usize) as *const i8, _MM_HINT_T0);
+        }
+        if (q as usize) < b.kps.len() {
+            _mm_prefetch(b.kps.as_ptr().add(q as usize) as *const i8, _MM_HINT_T0);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (a, b, p, q);
 }
 
 /// How many correspondences a transform explains, at a fixed tolerance.
@@ -587,16 +657,18 @@ fn mark_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2
 }
 
 /// Inliers counted once per distinct source position.
-fn distinct_inliers(a: &Features, pairs: &[(u32, u32)], mask: &[bool]) -> u32 {
-    let mut pts: Vec<(i32, i32)> = pairs
-        .iter()
-        .zip(mask)
-        .filter(|&(_, &m)| m)
-        .map(|(&(i, _), _)| {
-            let k = &a.kps[i as usize];
-            ((k.x * 2.0) as i32, (k.y * 2.0) as i32)
-        })
-        .collect();
+fn distinct_inliers(a: &Features, pairs: &[(u32, u32)], mask: &[bool], pts: &mut Vec<(i32, i32)>) -> u32 {
+    pts.clear();
+    pts.extend(
+        pairs
+            .iter()
+            .zip(mask)
+            .filter(|&(_, &m)| m)
+            .map(|(&(i, _), _)| {
+                let k = &a.kps[i as usize];
+                ((k.x * 2.0) as i32, (k.y * 2.0) as i32)
+            }),
+    );
     pts.sort_unstable();
     pts.dedup();
     pts.len() as u32
@@ -1146,6 +1218,7 @@ pub struct Scratch {
     by: Vec<f32>,
     mask: Vec<bool>,
     hit: Vec<bool>,
+    pts: Vec<(i32, i32)>,
 }
 
 pub struct Pair<'a> {
@@ -1168,7 +1241,7 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     v.n_match = matches.len() as u32;
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
-    let Some((m, mask)) = timed!(17, best_transform(p.fa, p.fb, matches, bw, bh, scratch)) else { return v };
+    let Some((m, n_agreeing)) = timed!(17, best_transform(p.fa, p.fb, matches, bw, bh, scratch)) else { return v };
     // `p.fa` is the query image already mirrored, so `m` maps mirrored-A
     // coordinates into B. Composing the mirror back in gives a transform from
     // A's own coordinates, which is what the rest of the tool stores, checks
@@ -1179,14 +1252,32 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     let m_query = m;
     let m = if var.mirror { compose(&mirror_affine(aw), &m) } else { m };
     v.m = m;
-    v.n_in = distinct_inliers(p.fa, matches, &mask);
-    v.centred = timed!(18, encloses_centre(p.fa, p.fb, &m_query, matches, &mask));
     v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
+    // **Everything below is gated on the aligned points, not just the pixels.**
+    //
+    // `gate.0` is the fewest any consumer of this verdict will accept, and
+    // `n_in` counts distinct positions among the correspondences this transform
+    // explains, so it cannot exceed the count returned above: a transform that
+    // explains too few is rejected whatever the frames and the pixels say. On a
+    // corpus where most files have no duplicate that is **99.9%** of the
+    // verdicts the mirrored pass takes — 3.94 M of them, against 4,551 that
+    // reach ten aligned points — and what they were paying for was two
+    // measurements nobody would read: `encloses_centre`, which transforms every
+    // keypoint of both images and costs as much as the geometry fit that
+    // preceded it, and the sort in `distinct_inliers`.
+    if n_agreeing < gate.0.max(3) as usize {
+        return v;
+    }
+    v.n_in = distinct_inliers(p.fa, matches, &scratch.mask, &mut scratch.pts);
+    if v.n_in < gate.0.max(3) {
+        return v;
+    }
+    v.centred = timed!(18, encloses_centre(p.fa, p.fb, &m_query, matches, &scratch.mask));
     let (oa, ob) = timed!(19, overlap(&m, aw, ah, bw, bh));
     v.ov_a = oa;
     v.ov_b = ob;
-    if v.n_in >= gate.0.max(3) && v.ov_a.max(v.ov_b) >= gate.1 {
+    if v.ov_a.max(v.ov_b) >= gate.1 {
         let (blk, n, ncc) = timed!(20, pixel_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert));
         v.blk = blk;
         v.blk_n = n;
@@ -1220,3 +1311,122 @@ pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verd
     v
 }
 
+// ---------------------------------------------------------------- kernel timings
+
+/// `cargo test --release -- --ignored --nocapture match_timings`
+///
+/// The per-candidate half of the matcher, at the shape the second look really
+/// asks for. On a corpus where most files have no duplicate, the mirrored pass
+/// reaches `correspond` and `best_transform` some four million times, with a
+/// median of 56 candidate keypoint pairs spanning 48 distinct query keypoints —
+/// and almost none of those pairs is a duplicate, so the geometry finds two or
+/// three inliers and the verdict is thrown away. That is the case to make fast,
+/// and it is not the case a duplicate exercises.
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::sift::DESC_LEN;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn byte(&mut self) -> u8 {
+            (self.next() >> 33) as u8
+        }
+        fn f(&mut self, hi: f32) -> f32 {
+            (self.next() >> 40) as f32 / (1 << 24) as f32 * hi
+        }
+    }
+
+    fn feats(rng: &mut Lcg, n: usize, w: u32, h: u32) -> Features {
+        let mut f = Features { w, h, kps: Vec::with_capacity(n), desc: Vec::with_capacity(n * DESC_LEN) };
+        for _ in 0..n {
+            f.kps.push(Keypoint {
+                x: rng.f(w as f32),
+                y: rng.f(h as f32),
+                sigma: 1.6 + rng.f(20.0),
+                angle: rng.f(360.0),
+                response: rng.f(1.0),
+            });
+            for _ in 0..DESC_LEN {
+                f.desc.push(rng.byte());
+            }
+        }
+        f
+    }
+
+    fn ms(mut f: impl FnMut()) -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            f();
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore]
+    fn match_timings() {
+        let mut rng = Lcg(0x2545_f491_4f6c_dd1d);
+        // A pool of images, so that the descriptors a call reads are not the
+        // ones the last call read: `correspond` gathers two cache lines per
+        // candidate out of a 76 KB descriptor block, and on a real corpus those
+        // are cold.
+        const POOL: usize = 96;
+        let imgs: Vec<Features> = (0..POOL).map(|_| feats(&mut rng, 600, 640, 480)).collect();
+        for &n_cand in &[16usize, 56, 200] {
+            // Candidate pairs as `shared` emits them: sorted, deduplicated,
+            // several B keypoints for some A keypoints.
+            let mut sets: Vec<Vec<(u32, u32)>> = Vec::new();
+            for _ in 0..POOL {
+                let mut v: Vec<(u32, u32)> = (0..n_cand)
+                    .map(|_| ((rng.next() % 600) as u32, (rng.next() % 600) as u32))
+                    .collect();
+                v.sort_unstable();
+                v.dedup();
+                sets.push(v);
+            }
+            let mut matches = Vec::new();
+            let mut scratch = Scratch::default();
+            let t_corr = ms(|| {
+                for k in 0..POOL {
+                    correspond(&imgs[k], &imgs[(k + 1) % POOL], &sets[k], &mut matches);
+                    std::hint::black_box(&matches);
+                }
+            });
+            // Geometry on the correspondences those produce.
+            let mut ms_sets: Vec<Vec<(u32, u32)>> = Vec::new();
+            for k in 0..POOL {
+                correspond(&imgs[k], &imgs[(k + 1) % POOL], &sets[k], &mut matches);
+                ms_sets.push(matches.clone());
+            }
+            let n_match: usize = ms_sets.iter().map(|m| m.len()).sum::<usize>() / POOL;
+            let t_geom = ms(|| {
+                for k in 0..POOL {
+                    let r = best_transform(&imgs[k], &imgs[(k + 1) % POOL], &ms_sets[k], 640.0, 480.0, &mut scratch);
+                    std::hint::black_box(&r);
+                }
+            });
+            // And the two tests the verdict then faces, which run per verdict
+            // whatever the geometry said.
+            let m = [1.01f32, 0.02, 3.0, -0.02, 1.01, -4.0];
+            let mask = vec![true; ms_sets[0].len()];
+            let t_encl = ms(|| {
+                for k in 0..POOL {
+                    let mask = &mask[..ms_sets[k].len().min(mask.len())];
+                    std::hint::black_box(encloses_centre(&imgs[k], &imgs[(k + 1) % POOL], &m, &ms_sets[k][..mask.len()], mask));
+                }
+            });
+            println!(
+                "{n_cand:4} candidates -> {n_match:3} matches: correspond {:7.1} us, best_transform {:7.1} us, encloses {:7.1} us  (per call)",
+                t_corr * 1000.0 / POOL as f64,
+                t_geom * 1000.0 / POOL as f64,
+                t_encl * 1000.0 / POOL as f64
+            );
+        }
+    }
+}

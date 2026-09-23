@@ -1220,6 +1220,62 @@ mod bench {
         }
     }
 
+    /// `cargo test --release -- --ignored --nocapture query_timings`
+    ///
+    /// Retrieval at the shape a found corpus gives it: nine thousand images of
+    /// about 1,300 word entries each over 170,000 live words, so the average
+    /// word is in some seventy images and a query walks a hundred thousand
+    /// postings into an accumulator of one float per image. The accumulator is
+    /// 37 KB at that size — bigger than a first-level cache and the reason
+    /// `query` blocks its images (see `ACC_BLOCK`).
+    #[test]
+    #[ignore]
+    fn query_timings() {
+        for (n_imgs, words) in [(9285usize, 170_000u32), (5637, 160_000)] {
+            let mut rng = Lcg(0x8e3f_1a9c_2b7d_4e51);
+            let lists: Vec<WordList> = (0..n_imgs)
+                .map(|_| {
+                    // Zipf-ish: a word's popularity is uneven, which is what
+                    // makes some postings long and the accumulator's reuse
+                    // pattern irregular.
+                    let mut pairs: Vec<(u32, u32)> = (0..1300)
+                        .map(|k| {
+                            let a = (rng.byte() as u32) << 16 | (rng.byte() as u32) << 8 | rng.byte() as u32;
+                            let b = (rng.byte() as u32) << 8 | rng.byte() as u32;
+                            let w = if b % 4 == 0 { a % (words / 64) } else { a % words };
+                            (w, (k / 3) as u32)
+                        })
+                        .collect();
+                    pairs.sort_unstable();
+                    WordList {
+                        word: pairs.iter().map(|p| p.0).collect(),
+                        kp: pairs.iter().map(|p| p.1).collect(),
+                    }
+                })
+                .collect();
+            let inv = InvertedFile::build(&lists, words as usize, (n_imgs / 5).max(32));
+            let mut acc = vec![0f32; n_imgs];
+            let (mut touched, mut out) = (Vec::new(), Vec::new());
+            let mut best = f64::MAX;
+            let mut hits = 0usize;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                hits = 0;
+                for (i, wl) in lists.iter().enumerate().step_by(7) {
+                    inv.query(wl, i as u32, &mut acc, &mut touched, &mut out);
+                    hits += out.len();
+                    std::hint::black_box(&out);
+                }
+                let n = lists.len().div_ceil(7);
+                best = best.min(t.elapsed().as_secs_f64() * 1e6 / n as f64);
+            }
+            println!(
+                "query: {best:8.1} us/query  ({n_imgs} images, {words} words, {} candidates scored)",
+                hits / lists.len().div_ceil(7)
+            );
+        }
+    }
+
     /// `cargo test --release -- --ignored --nocapture shared_overlap`
     ///
     /// The same intersection at the overlap a real pair has. Two images that
