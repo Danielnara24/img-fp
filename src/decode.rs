@@ -276,6 +276,110 @@ pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
     Ok(Decoded { work: gray })
 }
 
+/// What a file's header says, read without decoding anything: its format and
+/// the size of the picture. It exists for the progress bar, which weighs each
+/// file by what analysing it will cost (see `progress::analysis_cost`), and
+/// nothing about the result depends on it — a file this cannot read is
+/// weighed from its size and then decoded, or refused, as usual.
+pub struct Probe {
+    pub kind: Kind,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Read a file's header. JPEG and PNG, which are nearly every file in a real
+/// corpus, are parsed here by hand, because the `image` crate's JPEG decoder
+/// reads the whole file into memory before it will say how large the picture
+/// is — and a probe that reads every byte twice is not a probe. Walking the
+/// markers to the frame header touches a few kilobytes.
+pub fn probe(path: &Path) -> Option<Probe> {
+    use std::io::{BufRead, BufReader};
+    let mut r = BufReader::with_capacity(16 << 10, std::fs::File::open(path).ok()?);
+    let head = r.fill_buf().ok()?;
+    let kind = sniff(head);
+    let (w, h) = match kind {
+        Kind::Image(ImageFormat::Jpeg) => jpeg_size(&mut r)?,
+        Kind::Image(ImageFormat::Png) => {
+            // The signature, then IHDR's length and type, then its width and
+            // height; the chunk is required to come first.
+            let be = |i: usize| head.get(i..i + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+            (be(16)?, be(20)?)
+        }
+        Kind::Image(fmt) => image::ImageReader::with_format(r, fmt).into_dimensions().ok()?,
+        Kind::Jxl => jxl_size(&mut r)?,
+        Kind::Heif => {
+            let ctx = libheif_rs::HeifContext::read_from_file(path.to_str()?).ok()?;
+            let handle = ctx.primary_image_handle().ok()?;
+            (handle.width(), handle.height())
+        }
+        Kind::Unknown => image::ImageReader::new(r).with_guessed_format().ok()?.into_dimensions().ok()?,
+    };
+    Some(Probe { kind, w, h })
+}
+
+/// The frame size from a JPEG's start-of-frame segment, skipping every
+/// segment before it by its length.
+fn jpeg_size(r: &mut std::io::BufReader<std::fs::File>) -> Option<(u32, u32)> {
+    fn byte(r: &mut impl std::io::Read) -> Option<u8> {
+        let mut b = [0u8];
+        r.read_exact(&mut b).ok().map(|_| b[0])
+    }
+    let be16 = |r: &mut std::io::BufReader<std::fs::File>| Some(u16::from_be_bytes([byte(r)?, byte(r)?]));
+    // SOI, which `sniff` has already seen.
+    be16(r)?;
+    loop {
+        if byte(r)? != 0xFF {
+            return None;
+        }
+        let mut m = byte(r)?;
+        // Any number of 0xFF fill bytes may precede a marker.
+        while m == 0xFF {
+            m = byte(r)?;
+        }
+        // Markers that stand alone, with no length after them.
+        if matches!(m, 0x01 | 0xD0..=0xD8) {
+            continue;
+        }
+        let len = be16(r)? as i64;
+        // Every SOFn: C0-CF but for DHT (C4), JPG (C8) and DAC (CC).
+        if (0xC0..=0xCF).contains(&m) && !matches!(m, 0xC4 | 0xC8 | 0xCC) {
+            let _precision = byte(r)?;
+            let h = be16(r)?;
+            let w = be16(r)?;
+            return Some((w as u32, h as u32));
+        }
+        if len < 2 {
+            return None;
+        }
+        r.seek_relative(len - 2).ok()?;
+    }
+}
+
+/// A JPEG XL image's size, fed to the decoder a block at a time until the
+/// header is complete, which is a few hundred bytes into the file.
+fn jxl_size(r: &mut impl std::io::Read) -> Option<(u32, u32)> {
+    let mut uninit = jxl_oxide::JxlImage::builder().pool(jxl_oxide::JxlThreadPool::none()).build_uninit();
+    let mut buf = vec![0u8; 4096];
+    let mut valid = 0usize;
+    // An ICC profile can sit ahead of the frame; a megabyte of header is a
+    // file this is not going to learn anything cheap about.
+    for _ in 0..256 {
+        let n = r.read(&mut buf[valid..]).ok()?;
+        if n == 0 {
+            return None;
+        }
+        valid += n;
+        let used = uninit.feed_bytes(&buf[..valid]).ok()?;
+        buf.copy_within(used..valid, 0);
+        valid -= used;
+        match uninit.try_init().ok()? {
+            jxl_oxide::InitializeResult::NeedMoreData(u) => uninit = u,
+            jxl_oxide::InitializeResult::Initialized(img) => return Some((img.width(), img.height())),
+        }
+    }
+    None
+}
+
 fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32, Gray)> {
     let reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
     let mut decoder = reader.into_decoder()?;

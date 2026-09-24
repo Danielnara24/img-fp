@@ -90,6 +90,8 @@ src/
                       when nothing says, and how a record is packed
   problems.rs         what was skipped, what could not be done, the exit code
                       that says so, and --log-file
+  progress.rs         the progress bar: analysis weighted by estimated cost
+                      per file (from a header probe), a plain count after it
 benchmark/
   BASELINE.md         the competition's numbers. The bar to clear.
   VALIDATION.md       the held-out corpus, and what it says about overfitting

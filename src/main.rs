@@ -22,6 +22,7 @@ mod group;
 mod index;
 mod problems;
 mod prof;
+mod progress;
 mod sift;
 mod verify;
 
@@ -542,6 +543,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
     }
     let verbose = args.verbose;
+    let progress = progress::Progress::new();
     // Every line the run says about itself goes to the log file whether or not
     // the console asked for it: `-v` is about the terminal and `--log-file` is
     // about the file, and one flag must not quietly decide the other. (That
@@ -551,7 +553,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         ($t:expr, $($arg:tt)*) => {
             if verbose || log.active() {
                 let line = format!("[{:6.1}s] {}", $t.elapsed().as_secs_f64(), format!($($arg)*));
-                if verbose { eprintln!("{line}"); }
+                if verbose { progress.println(&line); }
                 log.line(&line);
             }
         };
@@ -560,7 +562,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     macro_rules! say {
         ($($arg:tt)*) => {{
             let line = format!($($arg)*);
-            eprintln!("{line}");
+            progress.println(&line);
             log.line(&line);
         }};
     }
@@ -593,6 +595,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     }
 
     // Byte-identical copies, before anything is decoded.
+    progress.spin("finding identical files");
     let exact = timed!(33, exact_groups(&files));
     stage!(t_start, "exact duplicates: {} groups", exact.len());
 
@@ -609,7 +612,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         thumb: THUMB_LONG as u32,
     };
     let mut cached = match &cache_path {
-        Some(p) => cache::load(p, settings, problems),
+        Some(p) => {
+            progress.spin("reading the cache");
+            cache::load(p, settings, problems)
+        }
         None => Default::default(),
     };
     if !cached.is_empty() {
@@ -655,6 +661,25 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             twin_of[i] = g[0];
         }
     }
+    // What each file still to be analysed is expected to cost, for the bar
+    // and nothing else. Read from headers, in parallel, and only for files the
+    // cache and the exact pass have not already answered, so a cached run
+    // opens nothing here.
+    progress.spin("reading headers");
+    let weight: Vec<u64> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            if twin_of[i] != i || mine[i].is_some() {
+                return 0;
+            }
+            let bytes = std::fs::metadata(&files[i]).map(|m| m.len()).unwrap_or(0);
+            let probe = decode::probe(&files[i]);
+            progress::analysis_cost(probe.as_ref(), bytes, args.work_size, sp.upsample_below)
+        })
+        .collect();
+    let todo = (0..n).filter(|&i| twin_of[i] == i && mine[i].is_none()).count();
+    stage!(t_start, "{todo} files to analyse");
+    let bar = progress.analysis(weight.iter().sum(), todo);
     let mut items: Vec<Item> = mine
         .into_par_iter()
         .enumerate()
@@ -671,18 +696,22 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                 };
             }
             let f = &files[i];
+            bar.set_message(f.file_name().unwrap_or_default().to_string_lossy().into_owned());
             let it = analyse(f, args.work_size, &sp);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            bar.set_prefix(format!("{d}/{todo}"));
+            bar.inc(weight[i]);
             if (verbose || log.active()) && d % 250 == 0 {
                 let line = format!("[{:6.1}s]   described {d}", t_start.elapsed().as_secs_f64());
                 if verbose {
-                    eprintln!("{line}");
+                    progress.println(&line);
                 }
                 log.line(&line);
             }
             it
         })
         .collect();
+    drop(weight);
     for i in 0..n {
         let r = twin_of[i];
         if r == i {
@@ -709,6 +738,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             false
         });
     if let Some(p) = &cache_path {
+        progress.spin("writing the cache");
         let mut entries: Vec<(&str, cache::Key, &Features, &Thumb)> = (0..n)
             .filter(|&i| items[i].ok)
             .filter_map(|i| cache::key_of(&files[i]).map(|k| (names[i].as_str(), k, &*items[i].feats, &*items[i].thumb)))
@@ -791,6 +821,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
 
     // Vocabulary from the corpus itself, at a depth the corpus chooses.
+    progress.spin("building the vocabulary");
     let vp = index::VocabParams::for_corpus(n_desc);
     let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc) * DESC_LEN);
     timed!(34, {
@@ -812,13 +843,19 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // Quantise. The word lists are built straight into the vector the inverted
     // file and every later stage read from: holding a second copy per image
     // costs as much again as the lists themselves.
+    let bar = progress.count("quantising", n as u64, "images");
     let lists: Vec<WordList> = items
         .par_iter()
-        .map(|it| if it.ok { timed!(11, quantise(&vocab, &it.feats)) } else { WordList::default() })
+        .map(|it| {
+            let wl = if it.ok { timed!(11, quantise(&vocab, &it.feats)) } else { WordList::default() };
+            bar.inc(1);
+            wl
+        })
         .collect();
     stage!(t_start, "quantised");
 
     // Inverted file. A word present in a fifth of the corpus says nothing.
+    progress.spin("building the inverted file");
     let max_posting = (n_ok / 5).max(32);
     let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words(), max_posting));
     stage!(t_start, "inverted file");
@@ -833,6 +870,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // the crop finds the photograph much more readily than the reverse — so
     // both directions genuinely have to be asked.
     type Edge = (usize, usize, Affine, bool, Verdict);
+    let bar = progress.count("finding candidates", n_ok as u64, "images");
     let mut cand_pairs: Vec<(u32, u32)> = (0..n)
         .into_par_iter()
         .filter(|&i| items[i].ok)
@@ -840,6 +878,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             || (vec![0f32; n], Vec::new(), Vec::new()),
             |(acc, touched, scored), i| {
                 timed!(14, inv.query(&lists[i], i as u32, acc, touched, scored));
+                bar.inc(1);
                 timed!(41, {
                     scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
                     rank_best(scored, args.candidates);
@@ -866,11 +905,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     } else {
         (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap)
     };
+    let bar = progress.count("verifying", cand_pairs.len() as u64, "pairs");
     let all_direct: Vec<Edge> = cand_pairs
         .par_iter()
         .map_init(
-            || (Vec::new(), Vec::new(), verify::Scratch::default()),
-            |(cands, matches, scratch), &(i, j)| timed!(42, {
+            || (Vec::new(), Vec::new(), verify::Scratch::default(), progress::Ticker::new(bar)),
+            |(cands, matches, scratch, ticker), &(i, j)| timed!(42, {
+                ticker.tick();
                 let (i, j) = (i as usize, j as usize);
                 timed!(15, index::shared(&lists[i], &lists[j], cands, 60_000));
                 if cands.len() < 3 {
@@ -943,6 +984,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // highest-scoring variant, 447 of them inside the merged best 150, and
     // the benchmark corpus's output is 217,376 pairs against 217,380 with
     // not one false pair more.
+    let bar = progress.count("mirrored and inverted", lonely.len() as u64, "images");
     let variant_edges: Vec<Edge> = lonely
         .par_iter()
         .map_init(
@@ -983,6 +1025,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                         out.push((lo, hi, mm, variants[v].invert, verdict));
                     }
                 }
+                bar.inc(1);
                 out
             }),
         )
@@ -1015,6 +1058,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // direct one, and on this corpus an inverted match between a 225-pixel
     // photograph of the Earth and a beach scene was the single edge that
     // merged two whole families into 3,002 false pairs.
+    progress.spin("propagating");
     let n_before = all.len();
     let all = drop_weak_bridges(all, n);
     stage!(t_start, "bridges: dropped {} lone links between clusters", n_before - all.len());
@@ -1189,6 +1233,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         })
         .collect();
 
+    // Cleared before anything is written to stdout, which shares the terminal.
+    progress.finish();
     let runtime = t_start.elapsed().as_secs_f64();
     let out = Output {
         tool: "img-fp",
