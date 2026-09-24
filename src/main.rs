@@ -105,9 +105,46 @@ struct Args {
     #[arg(long)]
     dump: Option<PathBuf>,
 
-    /// Reuse and update a cache of the per-image analysis.
-    #[arg(long)]
+    /// Keep the per-image analysis in this file instead of the default one.
+    ///
+    /// The analysis is cached whether or not this is given; the default is
+    /// `$XDG_CACHE_HOME/img-fp/analysis.bin`, or `~/.cache/img-fp` for a
+    /// machine that does not set it. An existing directory, or a path written
+    /// with a trailing slash, gets the default filename inside it, and missing
+    /// parents are created. One cache serves every directory this machine
+    /// scans: a run writes back what it analysed plus whatever the file
+    /// already held about images it did not look at and that are still there.
+    /// It is one plain file and deleting it costs a re-analysis and nothing
+    /// else.
+    #[arg(long, value_name = "PATH", conflicts_with = "no_cache")]
     cache: Option<PathBuf>,
+
+    /// Neither read nor write the cache.
+    ///
+    /// For measuring a cold run, and for a machine whose cache directory is
+    /// not somewhere hundreds of megabytes should go. Nothing about the result
+    /// changes: a cached record is the analysis this run would have done.
+    #[arg(long, conflicts_with = "prune_cache")]
+    no_cache: bool,
+
+    /// Delete the whole cache before running.
+    ///
+    /// The run then re-analyses everything and leaves a cache holding just
+    /// what it scanned. `--no-cache --clear-cache` deletes it and starts
+    /// nothing new.
+    #[arg(long)]
+    clear_cache: bool,
+
+    /// Drop the cached analysis of every image this scan did not find.
+    ///
+    /// The cache serves every directory on the machine, so it grows with all
+    /// of them; this makes it hold exactly the corpus in front of it. A
+    /// record is ~50 KB of descriptors, so a large library is measured in
+    /// gigabytes and it is worth being able to say so. Skipped, loudly, when
+    /// the walk could not read something it was pointed at: pruning against a
+    /// partial scan would throw away records for files that are still there.
+    #[arg(long)]
+    prune_cache: bool,
 
     /// Print timings per stage.
     #[arg(short, long)]
@@ -512,6 +549,26 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         }};
     }
 
+    // Where the analysis is kept. Resolved even when the file does not exist
+    // yet, because that is the first run and it is the run that creates it —
+    // and even under `--no-cache`, if the run has been asked to delete it.
+    let cache_path = if args.no_cache && !args.clear_cache {
+        None
+    } else {
+        cache::resolve_path(args.cache.as_deref(), problems)
+    };
+    if args.clear_cache {
+        if let Some(p) = &cache_path {
+            match std::fs::remove_file(p) {
+                Ok(()) => say!("cleared {}", p.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // Asked for and not done, and the next run will read the cache
+                // this one meant to be rid of.
+                Err(e) => problems.cache(format!("could not delete {}: {e}", p.display())),
+            }
+        }
+    }
+    let cache_path = cache_path.filter(|_| !args.no_cache);
     let files = walk(&args.roots, problems);
     stage!(t_start, "{} files", files.len());
     if files.is_empty() {
@@ -535,13 +592,40 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         features: FEATURES as u32,
         thumb: THUMB_LONG as u32,
     };
-    let cached = match &args.cache {
+    let mut cached = match &cache_path {
         Some(p) => cache::load(p, settings, problems),
         None => Default::default(),
     };
     if !cached.is_empty() {
         stage!(t_start, "cache: {} usable records", cached.len());
     }
+    let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+    // Every walked file's record comes *out* of the map rather than being
+    // copied from it. The analysis is the largest thing the run holds, and
+    // cloning it here made it exist twice over — once in the map and once in
+    // `items` — for the length of the phase that already sets the peak, and
+    // then charged a second bill to free the originals. On the found corpus
+    // that was 1.9 s of dropping a nine-thousand-record map, about as much
+    // again cloning into it, and 164 MB of peak.
+    //
+    // What is left in the map afterwards is exactly the records for files this
+    // run did not walk, which is what `carry_over` wants; the two counts taken
+    // here are what tells the save below whether it has anything to write.
+    let (mut in_cache, mut same_key) = (0usize, 0usize);
+    let mine: Vec<Option<cache::Record>> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let got = cached.remove(name)?;
+            in_cache += 1;
+            let k = cache::key_of(&files[i])?;
+            if got.0.len != k.len || got.0.mtime != k.mtime {
+                return None;
+            }
+            same_key += 1;
+            Some(got.1)
+        })
+        .collect();
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
     // second copy of a file is not a cheaper way to reach the same answer, it
@@ -555,24 +639,22 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             twin_of[i] = g[0];
         }
     }
-    let mut items: Vec<Item> = files
-        .par_iter()
+    let mut items: Vec<Item> = mine
+        .into_par_iter()
         .enumerate()
-        .map(|(i, f)| {
+        .map(|(i, rec)| {
             if twin_of[i] != i {
                 return Item::default();
             }
-            let key = cache::key_of(f);
-            if let (Some(k), Some((ck, rec))) = (&key, cached.get(&f.display().to_string())) {
-                if ck.len == k.len && ck.mtime == k.mtime {
-                    return Item {
-                        feats: rec.feats.clone().into(),
-                        thumb: rec.thumb.clone().into(),
-                        ok: true,
-                        err: None,
-                    };
-                }
+            if let Some(rec) = rec {
+                return Item {
+                    feats: rec.feats.into(),
+                    thumb: rec.thumb.into(),
+                    ok: true,
+                    err: None,
+                };
             }
+            let f = &files[i];
             let it = analyse(f, args.work_size, &sp);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             if (verbose || log.active()) && d % 250 == 0 {
@@ -598,22 +680,61 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             analyse(&files[i], args.work_size, &sp)
         };
     }
-    // Every usable record has been copied into `items` by now, and the map
-    // holds a second copy of the analysis of every file that was cached.
-    drop(cached);
-    if let Some(p) = &args.cache {
-        let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
-        let entries: Vec<(&str, cache::Key, &Features, &Thumb)> = (0..n)
+    // `--prune-cache` keeps only what this scan found, and gives that up when
+    // the scan is not a complete account of what is out there: a root that
+    // would not resolve or a directory that would not open leaves files
+    // unseen, and dropping their records would cost a re-analysis of images
+    // nothing is wrong with. The run says so and exits 2 rather than pruning
+    // anyway or pruning silently.
+    let prune = args.prune_cache
+        && (problems.walk_was_complete() || {
+            say!("not pruning: the walk could not read everything it was pointed at");
+            problems.cache("--prune-cache skipped: the walk was incomplete".into());
+            false
+        });
+    if let Some(p) = &cache_path {
+        let mut entries: Vec<(&str, cache::Key, &Features, &Thumb)> = (0..n)
             .filter(|&i| items[i].ok)
             .filter_map(|i| cache::key_of(&files[i]).map(|k| (names[i].as_str(), k, &*items[i].feats, &*items[i].thumb)))
             .collect();
-        if let Err(e) = cache::save(p, settings, &entries) {
+        let own = entries.len();
+        // What the cache already knew about images this run never walked —
+        // which, every walked file's record having been taken out of the map
+        // above, is everything still in it. The cache is one file for the
+        // machine rather than one per corpus, so scanning a second directory
+        // must not cost the first one its analysis; see `cache::carry_over`.
+        let kept = if prune { Vec::new() } else { cache::carry_over(&cached) };
+        if !kept.is_empty() {
+            stage!(t_start, "cache: {} records kept from other scans", kept.len());
+        }
+        entries.extend_from_slice(&kept);
+        let dropped = cached.len() - kept.len();
+        if prune && dropped > 0 {
+            say!("pruned {dropped} cached record(s) this scan did not find");
+        }
+        // Nothing to write is worth noticing rather than writing anyway. A
+        // threshold sweep is a dozen runs over one unchanged corpus, and
+        // rewriting the whole cache each time is several CPU-seconds of
+        // deflate for a file that would come out byte for byte the same.
+        //
+        // There is nothing to write when no record was dropped (`dropped`),
+        // none was added or changed (every record this run writes of its own
+        // was already there under the same key), and none was superseded and
+        // then lost (a file whose record no longer fitted and which then would
+        // not describe).
+        if dropped == 0 && own == same_key && same_key == in_cache {
+            stage!(t_start, "cache: unchanged, not rewritten");
+        } else if let Err(e) = cache::save(p, settings, &entries) {
             // Not fatal — the pairs this run reports are the same pairs — but
-            // the user asked for the analysis to be kept and the next run will
-            // pay for it again, which is exactly what a problem is here.
+            // the next run will pay for this one's analysis all over again,
+            // which is exactly what a problem is here.
             problems.cache(format!("could not write {}: {e}", p.display()));
         }
     }
+    // What is left in the map is the analyses of files this run did not walk,
+    // which the save above has just finished borrowing. Nothing reads them
+    // again and they are megabytes apiece.
+    drop(cached);
     stage!(
         t_start,
         "cpu: decode {:.0}s, features {:.0}s",

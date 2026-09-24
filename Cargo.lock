@@ -543,10 +543,11 @@ dependencies = [
 
 [[package]]
 name = "img-fp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "image",
  "jxl-oxide",
  "libheif-rs",

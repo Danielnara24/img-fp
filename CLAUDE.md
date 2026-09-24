@@ -86,7 +86,8 @@ src/
   index.rs            vocabulary tree, inverted file, containment scoring
   verify.rs           correspondence, geometry, pixel agreement, the policy
   group.rs            pairs -> groups, around a representative
-  cache.rs            on-disk cache of the per-image analysis
+  cache.rs            on-disk cache of the per-image analysis: where it lives
+                      when nothing says, and how a record is packed
   problems.rs         what was skipped, what could not be done, the exit code
                       that says so, and --log-file
 benchmark/
@@ -2138,13 +2139,14 @@ build.
 ### Tuning discipline
 
 `--dump` writes every verdict considered, accepted or not, as CSV. Fit
-thresholds against that offline instead of re-running the tool per guess. Use
-`--cache` while tuning the matching stages: on the 5,638-image corpus a cold
-run at the default is ~57 s and a cached one ~12 s (at 640, ~82 s and ~17 s),
-and the cache is keyed on the extraction settings so changing `--work-size`
-invalidates it correctly — which also means one cached extraction serves a
+thresholds against that offline instead of re-running the tool per guess. The
+cache is on by default and is what makes tuning the matching stages practical:
+on the 5,638-image corpus a cold run at the default is ~57 s and a cached one
+~12 s (at 640, ~82 s and ~17 s), and the cache is keyed on the extraction
+settings so changing `--work-size` invalidates it correctly — which also means one cached extraction serves a
 whole threshold sweep at a given work size, and that is how the 384 sweeps in
-*Measured trade-offs* were taken.
+*Measured trade-offs* were taken. A sweep's runs after the first also write
+nothing: an unchanged record set is not rewritten.
 
 Note that timings taken this way are warm-cache and run about 40% faster than
 `bench.py`'s cold-cache figures. Compare tuning runs with each other, never
@@ -2357,7 +2359,7 @@ a symlink met during a walk (a link and its target are one set of bytes; a path
 overlapping roots. Problems: an image that would not decode, a path the walk
 could not read (a mistyped root arrives as one `ENOENT`, which is what stops a
 two-root run silently scanning one of them), an image that described to **no
-features at all**, and a `--cache` that could not be read or written.
+features at all**, and a cache that could not be read, written or created.
 
 None of them changes a pair, which is the point — the results line reads the
 same either way, and the exit code is the only part of the difference a script
@@ -2386,10 +2388,157 @@ is truncated and will not decode. `bench.py` knows (`OK_EXIT`, which lets
 else that shells out to img-fp needs the same treatment, or it will read a
 finished run as a failed one.
 
+**The cache is on by default, and it is one file for the machine.**
+`$XDG_CACHE_HOME/img-fp/analysis.bin`, `~/.cache/img-fp/analysis.bin` without
+that variable, `/tmp/img-fp/` without `HOME` — the same lookup `vid-fp` does
+for `fingerprints.redb`, and `--cache PATH` overrides it the same way, naming
+the file unless it names a directory or ends in a slash. Three things follow
+and only the first is obvious:
+
+- **A cost measurement has to say `--no-cache`**, or it is measuring a cache
+  read. `bench.py` passes it; anything else that times img-fp must, and a
+  timing that came out four times too fast is this. Accuracy runs do not care
+  — a cached record *is* the analysis the run would have done, and the pairs
+  are identical either way, which is checkable in one command.
+- **A run writes back what it did not look at.** One cache serving every
+  directory on the machine would otherwise be worse than none: scanning
+  `~/Pictures` and then `~/Downloads` would leave the first one's analysis
+  destroyed, silently, and the user never asked for a cache to begin with. So
+  `cache::carry_over` keeps every loaded record for a path this run did not
+  cover — and drops it if the file is no longer on disk, which is what keeps
+  the file from growing forever and is why there is no `--prune-cache` here.
+  A record dropped by mistake, from an unmounted drive say, costs a
+  re-analysis of a few milliseconds an image, where in `vid-fp` the same
+  mistake costs an afternoon. **`--prune-cache`** is the stronger version and
+  is a flag for that reason: it keeps only what the scan in front of it found,
+  and it gives itself up — loudly, with a problem and exit 2 — when the walk
+  could not read something it was pointed at, since pruning against a partial
+  scan throws away records for files that are still there.
+  **`--clear-cache`** deletes the file before the run; with `--no-cache` it
+  deletes it and starts nothing new.
+- **The settings header still invalidates the whole file**, and now that is
+  every corpus's records rather than one's. It is the format doing its job
+  (see `Settings`) and a `--work-size` sweep pays it every time, which is
+  another reason a sweep should hand itself a `--cache` of its own. A cache
+  written by a build with a different *format* is discarded the same way and
+  just as silently — the magic carries a version, and a file with the right
+  prefix and the wrong version is stale rather than damaged.
+
+**A cached record is moved into the run, not copied into it.** Every walked
+file's record is `remove`d from the loaded map before the analysis pass, so
+what the pass finds is a record it can take; what is left in the map is exactly
+the set `carry_over` wants. Cloning it instead — which is what the first
+version did — made the largest thing the run holds exist twice over during the
+phase that already sets the peak, and then charged again to free the
+originals. On the found corpus that was **1.9 s of dropping a nine-thousand-
+record map**, a similar amount cloning into it, and **164 MB of peak** (1,371
+to 1,207 MB): the pre-matching half of a cached run went **6.6 s to 2.2 s**
+and the whole run 59.2 s to 55.8 s. CPU-seconds are level (367 against 377,
+which is this machine's noise), because what was removed is memory traffic and
+a free, and the run is dominated by a stage this did not touch.
+
+**And a run that changed nothing does not rewrite it.** The new record set is
+compared with the loaded one by key; if nothing was added, changed or dropped,
+the file already says what this run would say. That matters because rewriting
+is not free — deflating a corpus's analysis is several CPU-seconds — and the
+tuning workflow is a dozen cached runs over one unchanged corpus.
+
 **Two venvs.** `vendor/venv` is the general one. `vendor/venv-imagededup` has
 torch, so **SSCD and imagededup must run under it**; it also now has
 `pillow-heif` and `pillow-jxl-plugin`. `vendor/venv-imgdupes` backs the
 imgdupes binary. Getting this wrong looks like `ModuleNotFoundError: torch`.
+
+### What a cached run still has to do
+
+**The cache holds the per-image analysis, and on a found corpus that is under
+half the work.** Asked why a cached rescan of 9,285 images takes ~47 s against
+a cold ~116 s, the stage table answers it exactly (cached, `-t 8`, cooled, on
+a warmer day than the question was asked on — 55.8 s total):
+
+| stage | wall |
+|---|---|
+| walk, exact-duplicate hash | 0.2 s |
+| **cache load** (660 MB, inflate + mip pyramids, parallel) | **2.0 s** |
+| decode and describe | **0 — this is what the cache buys** |
+| vocabulary built from the corpus's own descriptors | 1.7 s |
+| quantise 4.88 M descriptors into words | 4.6 s |
+| inverted file, retrieval of 1.08 M candidate pairs | 2.9 s |
+| verify candidates -> 1,962 anchors | 4.6 s |
+| **the mirrored and inverted second look** | **38-47 s** |
+| bridges, propagation, corroboration, grouping | 0.4 s |
+
+So the answer is not the cache and not the format: **everything after
+extraction depends on the corpus as a whole and has to run every time.** The
+vocabulary is trained on this corpus's descriptors, a word's meaning changes
+when the corpus does, and a candidate list is a statement about other images —
+none of it is a property of one file that a per-file cache could hold.
+
+And two thirds of what is left is the **second look**, for the reason
+*What the second look costs* gives: 8,766 of these 9,285 images have no
+duplicate, so nearly every one of them is re-asked mirrored and inverted —
+3.94 M verdicts to find 459 pairs. That is the shape of a found corpus, and it
+is why the same cache makes the *benchmark* corpus about five times faster
+(57 s cold to ~12 s) where it makes this one twice: there, extraction is 80%
+of a cold run and the second look is 14 thread-seconds.
+
+The lever nobody has pulled is a flag to skip the second look. It would be
+worth ~40 s of this run for **459 of its 4,578 pairs**, which is a real trade
+rather than a dominated one — unlike `--no-propagate`, which is why that flag
+is gone. It has not been built because nothing has asked for it.
+
+### How big the cache is, and why it is not smaller
+
+**A record is the analysis, and the analysis is ~148 bytes per keypoint**: 128
+of descriptor, 20 of keypoint, plus a thumbnail of up to 128x128. The found
+corpus is the worst case rather than the best — its files are 224x224, which
+`upsample_below` enlarges to 448 before describing, so each yields some 530
+keypoints and 93 KB of analysis from a 25 KB JPEG. The file being bigger than
+the corpus is not the encoding going wrong; it is how much analysis a small
+picture produces, and the knob connected to *that* is the enlargement, which
+is worth 4,581 pairs against 2,179 and is not a storage decision.
+
+**What the encoding was wasting was a quarter, and that is now taken.**
+Measured on 300 files of the found corpus — descriptors 71.5% of a record, the
+thumbnail 17.2%, the keypoints 11.2%:
+
+| stream | as written before | as written now | how |
+|---|---|---|---|
+| descriptors | 1.000 | **0.758** | deflate, and nothing else helps |
+| keypoints | 1.000 | **0.763** | the five f32 fields split into byte planes |
+| thumbnail | 1.000 | **0.681** | PNG's Paeth predictor, then deflate |
+
+Whole file: **0.755 on the found corpus** (93.1 KB an image to 70.3) and
+**0.720 on the benchmark one** (48 KB to 34.6), pair-for-pair identical output
+on both, packed and unpacked in parallel batches so the clock does not notice.
+
+**The descriptors are the wall, and the measurements that say so are worth
+keeping** — they are what stops the next attempt:
+
+- Their bytes carry **5.81 bits of order-0 entropy**, so deflate's 0.758 is
+  already the Huffman bound. `zstd -1` gets 0.728, `zstd -19` 0.675 at 12
+  seconds per 20 MB, and the best context model tried (previous bin plus
+  orientation index) lowers the entropy only to **5.48 bits, or 0.685**. A
+  range coder is 150 lines that have to be exactly reversible, for 7% of the
+  file.
+- **Not one descriptor in 159,701 was a duplicate of another**, within an
+  image or across the corpus, so there is nothing for an LZ to find. That is
+  also why transposing them is *worse* (0.766 against 0.752): dimension-major
+  breaks what little locality there is.
+- Grouping the three streams across a whole batch of records rather than per
+  record is **0.7521 against 0.7526**, which is nothing — the streams are long
+  enough already, and per-record keeps the format streamable and the packing
+  parallel.
+- Dropping `response`, which nothing outside the extractor reads, would take
+  the keypoint stream to 0.638 and the file to 0.741. Declined: it is 1.9% of
+  the file in exchange for a cached `Keypoint` that differs from a computed
+  one in a field, which is exactly the kind of thing a later reader would
+  trip over.
+
+Concurrent runs are last-writer-wins: the loser's records are lost and nothing
+is corrupted, because the temporary file a save renames into place carries the
+process id. Two runs sharing one cache is not a case worth locking for — the
+cost of losing is one re-analysis — but two runs sharing one *temporary file*
+would be a damaged cache, which is a case worth a suffix.
 
 ## Benchmarking discipline
 
@@ -2402,8 +2551,9 @@ imgdupes binary. Getting this wrong looks like `ModuleNotFoundError: torch`.
   timings are not comparable to a desktop's; relative ones under identical
   conditions are. Never use a fixed absolute temperature ceiling — measure the
   idle baseline first, or the cooldown silently times out every time.
-- **Clear both caches.** Tool caches per tool (czkawka `-H`, imgdupes
-  `--no-cache`, dupeGuru fresh temp db, SSCD denied `--embeddings`), and the
+- **Clear both caches.** Tool caches per tool (img-fp `--no-cache`, czkawka
+  `-H`, imgdupes `--no-cache`, dupeGuru fresh temp db, SSCD denied
+  `--embeddings`), and the
   kernel page cache with `posix_fadvise(POSIX_FADV_DONTNEED)` over the corpus.
   No passwordless sudo here, so `drop_caches` is unavailable — fadvise is
   unprivileged and better anyway, evicting only the corpus. Without it the

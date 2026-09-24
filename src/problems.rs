@@ -235,6 +235,18 @@ impl<'a> Problems<'a> {
         self.count() > 0
     }
 
+    /// Whether the walk saw everything it was pointed at.
+    ///
+    /// Only `--prune-cache` asks: pruning against a scan that could not read
+    /// one of its roots would throw away good records for files that are
+    /// still there, and the cache is the one thing a run keeps. Every other
+    /// problem leaves the walk's own account complete — an image that would
+    /// not decode was still *found*, and its record is dropped for the reason
+    /// `carry_over` gives rather than for this one.
+    pub fn walk_was_complete(&self) -> bool {
+        self.unscannable.count == 0
+    }
+
     /// Problems only. A skip is not a failure and must not move the exit code.
     pub fn count(&self) -> usize {
         self.problems().iter().map(|(t, _)| t.count).sum()

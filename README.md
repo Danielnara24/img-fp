@@ -8,8 +8,23 @@ Linux, CLI only.
 ```
 img-fp ~/Pictures                       # one group per blank-line block, keeper first
 img-fp ~/Pictures -o dupes.json         # full results with transforms and evidence
-img-fp ~/Pictures --cache ~/.cache/imgfp.bin   # reuse analysis between runs
+img-fp ~/Pictures --work-size 640       # slower, and finds more of what is embedded
 ```
+
+The per-image analysis is kept in `$XDG_CACHE_HOME/img-fp/analysis.bin` (or
+`~/.cache/img-fp/analysis.bin`), so a second run over the same directory is a
+quarter of the time. `--cache PATH` puts it somewhere else and `--no-cache`
+keeps it nowhere. One cache serves every directory you scan — a run writes back
+what it analysed plus what the file already held about images it did not look
+at, and forgets an image once the file is gone.
+
+It is not small: **35 KB an image for photographs, 70 KB for small ones**,
+because what it holds is the analysis — 128 bytes of descriptor and 20 of
+keypoint for each of up to 600 keypoints, and a small image is the expensive
+case rather than the cheap one, since anything under the working size is
+enlarged before it is described. `--prune-cache` cuts it back to the corpus in
+front of it, `--clear-cache` empties it, and it is one plain file you can
+delete at the cost of a re-analysis.
 
 ## What it is for
 
@@ -285,7 +300,10 @@ win the second.
 
 | | |
 |---|---|
-| `--cache PATH` | reuse the per-image analysis between runs. |
+| `--cache PATH` | keep the per-image analysis here instead of `~/.cache/img-fp`. |
+| `--no-cache` | do not read or write it at all. |
+| `--prune-cache` | drop cached analyses of images this scan did not find. |
+| `--clear-cache` | delete the cache before running. |
 | `-t N` | worker threads. Default: all cores. |
 | `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |
@@ -352,10 +370,12 @@ screen. It describes one run and is truncated at the start of it.
 because the results line reads the same whether every file opened or a third of
 them refused. The unreadable images are in the JSON's `failures` as well.
 
-A stale `--cache` is not one of them. A cache written at another `--work-size`
+A stale cache is not one of them. A cache written at another `--work-size`
 describes a different analysis and is discarded whole by design, silently and
 every time; a cache file that is *damaged* is reported, because it will cost a
-full re-analysis on every run until someone notices.
+full re-analysis on every run until someone notices. A cache directory that
+cannot be created is reported for the same reason, and the run goes on without
+one — the pairs are the pairs either way.
 
 `130` is the shell's convention for a Ctrl-C, and this process gets there by
 dying on the signal rather than handling it: an interrupted run writes nothing,
@@ -366,8 +386,9 @@ so there is nothing to clean up.
 About 95 s for 5,638 images on a thermally-limited Ryzen 7 3700U laptop,
 reading everything from a cold page cache. Decoding is about 35% of that and
 local feature extraction about 45%; narrowing 15.9 million possible pairs down
-to 224,779 claims takes the remaining fifth. With `--cache`, a second run over
-the same directory is a quarter of the time.
+to 224,779 claims takes the remaining fifth. That is a run with nothing cached;
+a second run over the same directory is a quarter of the time, because four
+fifths of that work is the analysis and the analysis is kept.
 
 Peak memory is two things added together. The steady part is the analysis
 itself — a few hundred kilobytes of descriptors and one thumbnail per image,
