@@ -2,6 +2,16 @@
 name = "img-fp"
 version = "0.7.0"
 edition = "2024"
+description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
+authors = ["Danielnara24"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Danielnara24/img-fp"
+readme = "README.md"
+keywords = ["image", "duplicate", "deduplication", "fingerprint", "cli"]
+categories = ["command-line-utilities", "multimedia::images"]
+# CLAUDE.md is internal design notes addressed to a coding agent; it is on
+# GitHub for contributors and has nothing to say to a crate consumer.
+exclude = ["CLAUDE.md"]
 
 [dependencies]
 anyhow = "1.0.104"

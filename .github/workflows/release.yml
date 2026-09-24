@@ -1,0 +1,199 @@
+# .github/workflows/release.yml
+#
+# Builds a release binary and attaches it to a GitHub Release when you push a
+# version tag (e.g. `git tag v0.7.0 && git push origin v0.7.0`).
+#
+# Everything is pure Rust except HEIC/HEIF/AVIF, which go through the system's
+# libheif, linked DYNAMICALLY. So the binary needs `libheif.so.1` on the target
+# to start at all -- even for a folder of JPEGs -- and at least 1.17, because
+# libheif-rs is built with `v1_17` and calls API that older versions lack.
+# That is what pins the runner: 24.04 is the oldest Ubuntu with 1.17 (22.04
+# has 1.12), and its glibc 2.39 becomes the floor for every user, since glibc
+# is backward compatible but not forward compatible.
+#
+# Each release publishes:
+#   img-fp-<version>-x86_64-linux-gnu  -> archival, one per release
+#   img-fp-x86_64-linux-gnu            -> stable name, so this URL always works:
+#     https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-x86_64-linux-gnu
+# plus a .sha256 beside each.
+#
+# The same tag also publishes the crate to crates.io (`publish-crate`),
+# gated on the binary build so nothing reaches a registry that cannot take
+# a version back.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required to create/update the GitHub Release
+
+jobs:
+  build:
+    name: x86_64 Linux binary
+    runs-on: ubuntu-24.04
+    env:
+      # .cargo/config.toml says `target-cpu=native`, which is right on the
+      # machine the benchmarks run on and wrong here: native on a CI runner is
+      # whatever that host happens to be (often AVX-512), and the binary would
+      # die with SIGILL on older users' CPUs. RUSTFLAGS replaces the config's
+      # rustflags outright. x86-64-v3 is AVX2 + FMA + BMI2 (Haswell 2013+,
+      # every Zen), which is what the `cfg(target_feature = "avx2")` kernels in
+      # index.rs and decode.rs need; below it they compile to the portable
+      # fallbacks. Job-wide so Build and Test agree and Test does not rebuild
+      # the binary with different flags.
+      RUSTFLAGS: "-C target-cpu=x86-64-v3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        # `img-fp --version` reports Cargo.toml's version, not the tag's, so a
+        # binary published as v0.8.0 that says 0.7.0 is the drift this catches.
+        # Read out of the [package] section alone, so a dependency's `version`
+        # cannot answer.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE="$(sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)"
+          if [ -z "$CRATE" ]; then
+            echo "::error::could not read version from Cargo.toml [package]"
+            exit 1
+          fi
+          if [ "$TAG" != "$CRATE" ]; then
+            echo "::error::tag v$TAG does not match Cargo.toml version $CRATE"
+            exit 1
+          fi
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libheif-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        # Same profile and flags as the Build, so the test build reuses its
+        # artifacts and target/release/img-fp is still the binary that ships.
+        # The timing benches are #[ignore]d and do not run here; accuracy is
+        # measured against the local corpus, which is not in the repo.
+        run: cargo test --release --locked
+
+      - name: Verify the binary
+        # The only shared libraries allowed are libheif and what a C/C++
+        # toolchain always brings. Anything else -- a stray libjxl, libwebp,
+        # libdav1d -- is a dependency no release note tells the user about.
+        run: |
+          BIN=target/release/img-fp
+          "$BIN" --version
+          echo "DT_NEEDED:"; objdump -p "$BIN" | grep NEEDED
+          UNEXPECTED="$(objdump -p "$BIN" | awk '/NEEDED/ {print $2}' \
+            | grep -vE '^(libheif\.so\.1|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libstdc\+\+\.so\.6|ld-linux-x86-64\.so\.2)$' || true)"
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::unexpected shared library dependency: $UNEXPECTED"
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BIN=target/release/img-fp
+          mkdir -p dist
+          # Same binary, two names: a versioned copy for history and a stable
+          # copy so the /releases/latest/download/ URL never changes.
+          cp "$BIN" "dist/img-fp-${VERSION}-x86_64-linux-gnu"
+          cp "$BIN" "dist/img-fp-x86_64-linux-gnu"
+          cd dist
+          for f in *; do sha256sum "$f" > "$f.sha256"; done
+          ls -la
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            x86_64 Linux binary.
+
+            ```bash
+            sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d
+            curl -L -o img-fp \
+              https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-x86_64-linux-gnu
+            chmod +x img-fp && sudo install -m 755 img-fp /usr/local/bin/img-fp
+            ```
+
+            Requires an x86_64 CPU with AVX2 (Intel Haswell 2013+, any AMD
+            Zen), glibc 2.39 and libheif 1.17 or newer (Ubuntu 24.04+,
+            Debian 13+, Fedora 40+). libheif must be installed for the binary
+            to start at all; its decoder plugins (`libde265` for HEIC, `dav1d`
+            or `aom` for AVIF) are needed only to read those two formats, and
+            without them those files are reported as problems rather than
+            matched.
+
+  publish-crate:
+    name: Publish to crates.io
+    # Gated on the binary build, and deliberately so: a GitHub Release can be
+    # deleted and re-cut, while a crates.io version can only be yanked and its
+    # number is spent for ever. Nothing reaches the registry from a tag that
+    # could not produce a working, tested binary.
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # this job publishes elsewhere; it writes nothing here
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        # `cargo publish` builds the packaged source before uploading it, and
+        # that build needs libheif exactly as a `cargo install` user's does.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libheif-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the token is configured
+        # Failing here costs nothing; failing inside `cargo publish` happens
+        # after a full verification build.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it under" \
+                 "Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Skip if this version is already published
+        # Re-running a release to fix an artifact must not hard-fail on
+        # `crate version already exists`. A version goes up once; every later
+        # run of the same tag is a no-op rather than a red cross. (The tag was
+        # already checked against Cargo.toml in the build job.)
+        id: published
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+                    -H 'User-Agent: img-fp release workflow' \
+                    "https://crates.io/api/v1/crates/img-fp/$VERSION")"
+          if [ "$CODE" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::img-fp $VERSION is already on crates.io; not publishing again"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.published.outputs.already == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # --locked so the registry gets the dependency versions this release was
+        # tested against, the same flag the build job uses.
+        run: cargo publish --locked

@@ -421,9 +421,37 @@ cannot read them.
 
 Needs `libheif` (HEIC/AVIF) at build time. Everything else is pure Rust.
 
+## Installing
+
+A prebuilt x86_64 Linux binary is attached to each
+[release](https://github.com/Danielnara24/img-fp/releases); it needs `libheif1`
+1.17 or newer installed (Ubuntu 24.04+, Debian 13+) and a CPU with AVX2. Or
+from crates.io, with libheif's development package installed:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo install img-fp
+```
+
+The flag matters: the hot loops have AVX2 kernels chosen at compile time, and
+without it `cargo install` builds the portable fallbacks.
+
 ## Building
 
 ```bash
 cargo build --release      # target/release/img-fp
 cargo test --release
 ```
+
+Inside the repository `.cargo/config.toml` already sets `target-cpu=native`.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at
+your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+The released binary links the system's `libheif` (LGPL-3.0) dynamically; it is
+not bundled, and that does not affect the licence above.
