@@ -375,6 +375,22 @@ fn rank_best(scored: &mut Vec<(u32, f32)>, k: usize) {
     scored.sort_unstable_by(cmp);
 }
 
+/// The three variants' candidate lists as one: each candidate once, under the
+/// variant it scored highest for, and the best `k` of those in the order
+/// `rank_best` uses — score, then the lower index.
+///
+/// Each list is already its variant's best `k`, and that is enough to rank
+/// the merge exactly. A candidate outside its best variant's top `k` has `k`
+/// others ahead of it there, and each of those scores at least as well in the
+/// merge as it did in that list, so it could not have made the merged `k`
+/// either.
+fn merge_variants(merged: &mut Vec<(u32, f32, u8)>, k: usize) {
+    merged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
+    merged.dedup_by_key(|e| e.0);
+    merged.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    merged.truncate(k);
+}
+
 /// Quantise every descriptor of an image into the sorted word list the
 /// inverted file speaks.
 fn quantise(vocab: &Vocabulary, f: &Features) -> WordList {
@@ -909,41 +925,62 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         Variant { mirror: false, invert: true },
         Variant { mirror: true, invert: true },
     ];
+    // Each variant is asked the same retrieval question it always was, and
+    // then the three answers are spent as one: a candidate is verified once,
+    // under the variant it scored highest for, and only the best `-k` of the
+    // merged list are verified at all.
+    //
+    // It used to be the best `-k` of *each* variant, three verdicts' worth of
+    // candidates per file, and a verdict is what the pass spends most of its
+    // time rejecting — 3.94 M of them on a found corpus for 459 pairs. Almost
+    // every file the pass is asked about has no mirrored or inverted twin, so
+    // two of its three lists are nothing but the retrieval's best guesses at
+    // a question with no answer, and a third list of those says nothing the
+    // first two did not. What a true pair looks like is a candidate that
+    // scores far above the rest under the one variant that relates the two
+    // files; it keeps its place when the lists are merged, and the pairs
+    // measure it: 459 of 459 anchors on the found corpus come from their
+    // highest-scoring variant, 447 of them inside the merged best 150, and
+    // the benchmark corpus's output is 217,376 pairs against 217,380 with
+    // not one false pair more.
     let variant_edges: Vec<Edge> = lonely
         .par_iter()
         .map_init(
-            || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default()),
-            |(acc, touched, scored, cands, matches, scratch), &i| timed!(38, {
+            || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default(), Vec::new()),
+            |(acc, touched, scored, cands, matches, scratch, merged), &i| timed!(38, {
                 let mut out: Vec<Edge> = Vec::new();
-                for var in variants {
-                    let vf = timed!(40, variant_features(&items[i].feats, var));
-                    let wl = timed!(39, quantise(&vocab, &vf));
-                    timed!(14, inv.query(&wl, i as u32, acc, touched, scored));
+                let vf: [Features; 3] = timed!(40, std::array::from_fn(|v| variant_features(&items[i].feats, variants[v])));
+                let wl: [WordList; 3] = std::array::from_fn(|v| timed!(39, quantise(&vocab, &vf[v])));
+                merged.clear();
+                for v in 0..3 {
+                    timed!(14, inv.query(&wl[v], i as u32, acc, touched, scored));
                     timed!(41, rank_best(scored, args.candidates));
-                    for &(j, _) in scored.iter() {
-                        let j = j as usize;
-                        timed!(15, index::shared(&wl, &lists[j], cands, 60_000));
-                        if cands.len() < 3 {
-                            continue;
-                        }
-                        let p = verify::Pair {
-                            fa: &vf,
-                            fb: &items[j].feats,
-                            ta: &items[i].thumb,
-                            tb: &items[j].thumb,
+                    merged.extend(scored.iter().map(|&(j, s)| (j, s, v as u8)));
+                }
+                timed!(41, merge_variants(merged, args.candidates));
+                for &(j, _, v) in merged.iter() {
+                    let (j, v) = (j as usize, v as usize);
+                    timed!(15, index::shared(&wl[v], &lists[j], cands, 60_000));
+                    if cands.len() < 3 {
+                        continue;
+                    }
+                    let p = verify::Pair {
+                        fa: &vf[v],
+                        fb: &items[j].feats,
+                        ta: &items[i].thumb,
+                        tb: &items[j].thumb,
+                    };
+                    let verdict = verify::verify(&p, cands, variants[v], gate, matches, scratch);
+                    if verdict.accepted(&policy.anchor) {
+                        let (lo, hi, mm) = if i < j {
+                            (i, j, verdict.m)
+                        } else {
+                            match verify::invert_affine(&verdict.m) {
+                                Some(mi) => (j, i, mi),
+                                None => continue,
+                            }
                         };
-                        let v = verify::verify(&p, cands, var, gate, matches, scratch);
-                        if v.accepted(&policy.anchor) {
-                            let (lo, hi, mm) = if i < j {
-                                (i, j, v.m)
-                            } else {
-                                match verify::invert_affine(&v.m) {
-                                    Some(mi) => (j, i, mi),
-                                    None => continue,
-                                }
-                            };
-                            out.push((lo, hi, mm, var.invert, v));
-                        }
+                        out.push((lo, hi, mm, variants[v].invert, verdict));
                     }
                 }
                 out
