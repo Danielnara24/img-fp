@@ -7,6 +7,7 @@ Linux, CLI only.
 
 ```
 img-fp ~/Pictures                       # one group per blank-line block, keeper first
+img-fp -r ~/Pictures                    # and every folder below it
 img-fp ~/Pictures -o dupes.json         # full results with transforms and evidence
 img-fp ~/Pictures --work-size 640       # slower, and finds more of what is embedded
 ```
@@ -304,6 +305,7 @@ win the second.
 | `--no-cache` | do not read or write it at all. |
 | `--prune-cache` | drop cached analyses of images this scan did not find. |
 | `--clear-cache` | delete the cache before running. |
+| `-r` | descend into subdirectories. Default: only the images directly in each directory named. |
 | `-t N` | worker threads. Default: all cores. |
 | `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |

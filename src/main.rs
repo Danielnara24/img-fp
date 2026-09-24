@@ -47,6 +47,11 @@ struct Args {
     #[arg(required = true)]
     roots: Vec<PathBuf>,
 
+    /// Descend into subdirectories. Without it a directory means the images
+    /// directly inside it and nothing below.
+    #[arg(short, long)]
+    recursive: bool,
+
     /// Write JSON results here instead of a summary on stdout.
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -163,7 +168,8 @@ struct Args {
 
 // ---------------------------------------------------------------- walking
 
-/// Every image file under `roots`, sorted and deduplicated.
+/// Every image file in `roots`, sorted and deduplicated — directly inside
+/// each directory root, or anywhere below it when `recursive`.
 ///
 /// Everything it passes over it counts, in one of two senses that must not be
 /// confused. What it cannot *read* is a problem: a root that does not exist
@@ -186,14 +192,15 @@ struct Args {
 ///
 /// None of the three is a failure, so none of them touches the exit code —
 /// which is the whole reason the summary keeps two lists.
-fn walk(roots: &[PathBuf], problems: &mut Problems) -> Vec<PathBuf> {
+fn walk(roots: &[PathBuf], recursive: bool, problems: &mut Problems) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for root in roots {
         if root.is_file() {
             files.push(root.clone());
             continue;
         }
-        for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let depth = if recursive { usize::MAX } else { 1 };
+        for entry in walkdir::WalkDir::new(root).follow_links(false).max_depth(depth) {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
@@ -587,7 +594,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         }
     }
     let cache_path = cache_path.filter(|_| !args.no_cache);
-    let files = walk(&args.roots, problems);
+    let files = walk(&args.roots, args.recursive, problems);
     stage!(t_start, "{} files", files.len());
     if files.is_empty() {
         say!("no image files found");
