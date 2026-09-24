@@ -1552,7 +1552,7 @@ mod bench {
                 .map(|_| {
                     let mut wa: Vec<u32> = Vec::new();
                     let mut wb: Vec<u32> = Vec::new();
-                    let mut w32 = |rng: &mut Lcg| {
+                    let w32 = |rng: &mut Lcg| {
                         let (a, b, c) = (rng.byte() as u32, rng.byte() as u32, rng.byte() as u32);
                         ((a << 16) | (b << 8) | c) % v
                     };
