@@ -18,6 +18,7 @@
 
 mod cache;
 mod decode;
+mod extensions;
 mod group;
 mod index;
 mod problems;
@@ -51,6 +52,25 @@ struct Args {
     /// directly inside it and nothing below.
     #[arg(short, long)]
     recursive: bool,
+
+    /// Extensions a directory walk treats as images, comma-separated or repeated.
+    ///
+    /// Case-insensitive; a leading dot or `*.` is optional. The default is
+    /// every format img-fp decodes. `-x '*'` takes every file whatever it is
+    /// called, the only way to reach files with no extension; each is
+    /// identified by its bytes, and one that is not a picture is skipped. An
+    /// entry prefixed with `!` is an exception: `-x '!gif'` is every file but
+    /// those, `-x 'jpg,png,!png'` is the list with one removed. Quote both
+    /// forms, since a shell eats a bare `*` or `!`. A file named on the
+    /// command line is taken whatever it is called.
+    #[arg(
+        short = 'x',
+        long = "extensions",
+        value_delimiter = ',',
+        value_name = "EXT",
+        default_values_t = decode::EXTENSIONS.map(String::from)
+    )]
+    extensions: Vec<String>,
 
     /// Write JSON results here instead of a summary on stdout.
     #[arg(short, long)]
@@ -168,8 +188,10 @@ struct Args {
 
 // ---------------------------------------------------------------- walking
 
-/// Every image file in `roots`, sorted and deduplicated — directly inside
-/// each directory root, or anywhere below it when `recursive`.
+/// Every file in `roots` that `wanted` takes, sorted and deduplicated —
+/// directly inside each directory root, or anywhere below it when `recursive`.
+/// A root that is a file is taken whatever it is called: naming it is asking
+/// for it.
 ///
 /// Everything it passes over it counts, in one of two senses that must not be
 /// confused. What it cannot *read* is a problem: a root that does not exist
@@ -181,10 +203,10 @@ struct Args {
 /// is no telling from here how much that was.
 ///
 /// What it was never going to read is a skip, and there are three. A file
-/// whose extension is not an image format is passed over without being
-/// sniffed, which is what makes pointing this at a home directory reasonable
+/// whose extension `-x` does not take — by default, one that is not an image
+/// format or has no extension at all — is passed over without being sniffed, which is what makes pointing this at a home directory reasonable
 /// and is also the one thing that can hide a photograph — a JPEG named `.txt`
-/// is invisible. A symlink met during the walk is not followed, because a link
+/// is invisible unless `-x '*'` asks for everything. A symlink met during the walk is not followed, because a link
 /// and its target are one set of bytes and reading both would manufacture a
 /// duplicate pair out of one file; a path named on the command line *is*
 /// followed, because naming it is asking for it by name. And a file reached
@@ -192,7 +214,7 @@ struct Args {
 ///
 /// None of the three is a failure, so none of them touches the exit code —
 /// which is the whole reason the summary keeps two lists.
-fn walk(roots: &[PathBuf], recursive: bool, problems: &mut Problems) -> Vec<PathBuf> {
+fn walk(roots: &[PathBuf], recursive: bool, wanted: &extensions::Wanted, problems: &mut Problems) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for root in roots {
         if root.is_file() {
@@ -218,7 +240,7 @@ fn walk(roots: &[PathBuf], recursive: bool, problems: &mut Problems) -> Vec<Path
                 continue;
             }
             let p = entry.into_path();
-            if !decode::looks_like_image(&p) {
+            if !wanted.accepts(&p) {
                 problems.not_an_image(&p.display().to_string());
                 continue;
             }
@@ -543,6 +565,9 @@ fn main() -> Result<()> {
 }
 
 fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
+    // Before anything else: a `-x` that can match no file is a mistake to
+    // stop on, not a walk to take.
+    let (wanted, extensions_note) = extensions::normalize(&args.extensions)?;
     prof::start();
     let t_start = Instant::now();
     few_arenas();
@@ -582,10 +607,27 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     } else {
         cache::resolve_path(args.cache.as_deref(), problems)
     };
+    // The run's header, in `vid-fp`'s words: what it was asked to do, before
+    // it does any of it, so a run's log says which settings produced it.
+    say!(
+        "Settings -> Work size: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
+         Min pixel correlation: {}, Threads: {}, Recursive: {}",
+        args.work_size,
+        args.candidates,
+        args.min_aligned_points,
+        args.min_frame_overlap,
+        args.min_pixel_correlation,
+        rayon::current_num_threads(),
+        args.recursive
+    );
+    if let Some(note) = &extensions_note {
+        say!("{note}");
+    }
     if args.clear_cache {
         if let Some(p) = &cache_path {
+            say!("Clearing all cache at {}...", p.display());
             match std::fs::remove_file(p) {
-                Ok(()) => say!("cleared {}", p.display()),
+                Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 // Asked for and not done, and the next run will read the cache
                 // this one meant to be rid of.
@@ -594,16 +636,23 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         }
     }
     let cache_path = cache_path.filter(|_| !args.no_cache);
-    let files = walk(&args.roots, args.recursive, problems);
+    match &cache_path {
+        Some(p) => say!("Cache: {}", p.display()),
+        None if args.no_cache => say!("Cache: off (--no-cache)"),
+        None => say!("Cache: off"),
+    }
+    say!("Scanning: {:?}", args.roots);
+    say!("{}", wanted.describe());
+    let files = walk(&args.roots, args.recursive, &wanted, problems);
     stage!(t_start, "{} files", files.len());
     if files.is_empty() {
-        say!("no image files found");
+        say!("No images found.");
         return Ok(());
     }
 
     // Byte-identical copies, before anything is decoded.
     progress.spin("finding identical files");
-    let exact = timed!(33, exact_groups(&files));
+    let mut exact = timed!(33, exact_groups(&files));
     stage!(t_start, "exact duplicates: {} groups", exact.len());
 
     // Decode and describe.
@@ -686,6 +735,18 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         .collect();
     let todo = (0..n).filter(|&i| twin_of[i] == i && mine[i].is_none()).count();
     stage!(t_start, "{todo} files to analyse");
+    // A wildcard walk has not guessed at anything, so what it found is files;
+    // calling them images is how a home directory reads as a photo library.
+    let found = if wanted.is_a_guess_at_images() { "images" } else { "files" };
+    // The three add up to `n`: a copy is answered by its original whether or
+    // not the cache also knew it, so it is counted as a copy and only there.
+    let copies = (0..n).filter(|&i| twin_of[i] != i).count();
+    let from_cache = n - copies - todo;
+    if from_cache > 0 || copies > 0 {
+        say!("Found {n} {found}; {from_cache} already cached, {copies} identical copies, {todo} to analyse.");
+    } else {
+        say!("Found {n} {found}. Analysing...");
+    }
     let bar = progress.analysis(weight.iter().sum(), todo);
     let mut items: Vec<Item> = mine
         .into_par_iter()
@@ -811,8 +872,18 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // from the same `items`: this is the last point every file has been
     // through, and a fatal error further down should not lose the account of
     // what would not open.
+    let not_asked: Vec<bool> = (0..n)
+        .map(|i| {
+            !wanted.is_a_guess_at_images()
+                && !extensions::names_an_image(&files[i])
+                && items[i].err.as_deref() == Some(decode::NOT_AN_IMAGE)
+        })
+        .collect();
     for (i, it) in items.iter().enumerate() {
         match &it.err {
+            // A file a wildcard walk reached that is no picture at all never
+            // claimed to be one; see `extensions.rs`.
+            Some(_) if not_asked[i] => problems.not_image_content(&files[i].display().to_string()),
             Some(e) => problems.unreadable(&files[i].display().to_string(), e),
             // Decoded, described, and described to nothing. Nothing failed —
             // a blank picture really has no local features — but the file is
@@ -823,11 +894,22 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             None => {}
         }
     }
+    // Two byte-identical files that are not pictures at all — a pair of empty
+    // files, two copies of a README — are identical, and are not a duplicate
+    // *image*, which is the only claim this tool makes. Only a wildcard walk
+    // can bring such files in, and they leave the exact groups here, before
+    // anything reads those groups as pairs. A byte-identical pair of broken
+    // `.jpg`s is still reported: those did claim to be images.
+    for g in exact.iter_mut() {
+        g.retain(|&i| !not_asked[i]);
+    }
+    exact.retain(|g| g.len() > 1);
     let n_ok = items.iter().filter(|i| i.ok).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
 
     // Vocabulary from the corpus itself, at a depth the corpus chooses.
+    say!("Analysis complete. Matching {n_ok} images...");
     progress.spin("building the vocabulary");
     let vp = index::VocabParams::for_corpus(n_desc);
     let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc) * DESC_LEN);
@@ -1236,7 +1318,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         .iter()
         .enumerate()
         .filter_map(|(i, it)| {
-            it.err.as_ref().map(|e| serde_json::json!({"path": files[i].display().to_string(), "error": e}))
+            let e = it.err.as_ref().filter(|_| !not_asked[i])?;
+            Some(serde_json::json!({"path": files[i].display().to_string(), "error": e}))
         })
         .collect();
 
@@ -1254,7 +1337,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             "min_pixel_correlation": args.min_pixel_correlation,
             "stages": "anchor, propagate, corroborate",
             }),
-        files_enumerated: files.len(),
+        // A file a wildcard walk reached and that turned out not to be a
+        // picture is a skip, like one the extension list turned away, and is
+        // not counted by either.
+        files_enumerated: files.len() - not_asked.iter().filter(|&&x| x).count(),
         files_analysed: n_ok,
         failures,
         runtime_seconds: (runtime * 1000.0).round() / 1000.0,

@@ -42,23 +42,18 @@ pub enum Kind {
     Unknown,
 }
 
-const EXTENSIONS: &[&str] = &[
+/// What a walk takes when `-x` is not given: every extension this can decode.
+/// A file with none at all is left out by default, as in `vid-fp`, and
+/// `-x '*'` is how to reach it; see `extensions.rs`.
+pub const EXTENSIONS: [&str; 25] = [
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "bmp", "tif", "tiff", "avif", "heic",
     "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "tga", "dds", "qoi", "exr", "ff",
 ];
 
-/// Cheap pre-filter on the path: known image extension, or no extension at
-/// all (which then gets sniffed). Files with an unrelated extension are
-/// skipped without being opened.
-pub fn looks_like_image(path: &Path) -> bool {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => {
-            let ext = ext.to_ascii_lowercase();
-            EXTENSIONS.contains(&ext.as_str())
-        }
-        None => true,
-    }
-}
+/// The error `decode` gives for bytes that are no picture format at all, as
+/// opposed to a picture that would not decode. Under a wildcard walk the first
+/// is a file that never claimed to be an image, and is a skip, not a problem.
+pub const NOT_AN_IMAGE: &str = "not an image";
 
 /// Identify a format from the first bytes.
 pub fn sniff(b: &[u8]) -> Kind {
@@ -268,7 +263,7 @@ pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
             // have no magic), then give up.
             match image::guess_format(&bytes) {
                 Ok(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
-                Err(_) => bail!("not an image"),
+                Err(_) => bail!(NOT_AN_IMAGE),
             }
         }
     };

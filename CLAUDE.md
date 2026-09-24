@@ -126,7 +126,9 @@ vendor/               third-party tools and venvs, gitignored
 ```
 
 The corpus lives outside the repo at `/home/daniel/Documents/IMGS`: 54 seeds
-in the root, 8 in `archive/`. `/home/daniel/Documents/IMGS-VAL` holds the 16
+in the root, 8 in `archive/`. One seed, `beach`, has no extension, so any run meant
+to be compared with the published figures needs `-x '*'` — a walk leaves an
+extensionless file out otherwise, as `vid-fp`'s does. `bench.py` passes it. `/home/daniel/Documents/IMGS-VAL` holds the 16
 seeds that were once a separate validation set and are now folded in; it keeps
 no derived tree.
 
@@ -2354,8 +2356,12 @@ skip is what the tool was never going to read and touches nothing, a problem is
 what the run was asked for and did not get. Pointed at a home directory img-fp
 passes over most of it and still exits `0`.
 
-Skips: a file whose extension is not an image format (the one thing that can
-hide a photograph — a JPEG named `.txt` is passed over without being sniffed),
+Skips: a file whose extension `-x` does not take — by default one that is not
+an image format or has none, as in `vid-fp` (the one thing that can hide a
+photograph — a JPEG named `.txt` is passed over without being sniffed); under
+a wildcard `-x`, a file whose bytes are no picture and whose name never said
+they were (it is also dropped from the exact groups, so two copies of a README
+are not a pair);
 a symlink met during a walk (a link and its target are one set of bytes; a path
 *named* on the command line is still followed), a file reached twice through
 overlapping roots. Problems: an image that would not decode, a path the walk

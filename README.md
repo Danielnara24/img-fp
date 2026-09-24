@@ -306,6 +306,7 @@ win the second.
 | `--prune-cache` | drop cached analyses of images this scan did not find. |
 | `--clear-cache` | delete the cache before running. |
 | `-r` | descend into subdirectories. Default: only the images directly in each directory named. |
+| `-x EXT,...` | extensions a directory walk takes, as in `vid-fp`. Default: every format below. `-x '*'` takes every file, including those with no extension; `-x '!gif'` every file but those; `-x 'jpg,png,!png'` a list with one removed. |
 | `-t N` | worker threads. Default: all cores. |
 | `-o PATH` | write JSON instead of a summary. |
 | `-v` | timings per stage. |
@@ -325,7 +326,7 @@ and what it could not do:
 128 groups, 217380 pairs over 5637 images in 63.6s
 
 Skipped:
-      3  file(s) whose extension is not an image format
+      3  file(s) whose extension is not searched (see -x)
          - /home/daniel/Documents/IMGS/derived/manifest.csv
 
 Problems (5 total):
@@ -339,7 +340,9 @@ Problems (5 total):
 failure.** A skip is something img-fp was never going to read: a file whose
 extension is not an image format (which is what makes pointing it at a home
 directory reasonable, and is also the one thing that can hide a photograph — a
-JPEG named `.txt` is invisible), a symlink met during a walk (a link and its
+JPEG named `.txt`, or with no extension, is invisible unless `-x '*'` asks for
+every file; a file that walk reaches and that turns out not to be a picture is
+a skip too, and is never reported as an identical pair), a symlink met during a walk (a link and its
 target are one set of bytes, so following both would manufacture a duplicate
 pair out of one file — a path *named* on the command line is followed), or a
 file reached twice through overlapping roots. None of those touch the exit
@@ -411,8 +414,11 @@ the fastest thing that finds anything at all beyond byte-identical copies
 ## Formats
 
 JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF, HEIC/HEIF, JXL, ICO, PNM, TGA, QOI,
-OpenEXR, farbfeld. Identified by content, so a file with a wrong extension or
-none at all still works — one seed in the benchmark corpus has no extension.
+OpenEXR, farbfeld. Identified by content, so a file with the wrong extension
+still works. One with none at all is left out of a directory walk unless
+`-x '*'` is given, as in `vid-fp` — one seed in the benchmark corpus has no
+extension, which is why `bench.py` passes it. A file named on the command line
+is taken whatever it is called.
 
 A format a tool cannot open is indistinguishable from one it failed to match,
 which is why this list is longer than it looks like it needs to be: three of

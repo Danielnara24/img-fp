@@ -121,6 +121,7 @@ pub struct Problems<'a> {
 
     // Skips: the tool passing over what it was never going to read.
     not_an_image: Tally,
+    not_image_content: Tally,
     symlink: Tally,
     listed_twice: Tally,
 
@@ -136,6 +137,7 @@ impl<'a> Problems<'a> {
         Problems {
             log,
             not_an_image: Tally::default(),
+            not_image_content: Tally::default(),
             symlink: Tally::default(),
             listed_twice: Tally::default(),
             unscannable: Tally::default(),
@@ -148,10 +150,12 @@ impl<'a> Problems<'a> {
 
     // ---- skips
 
-    /// A file whose extension names a format img-fp does not read. The filter
-    /// is why a scan of a home directory is not an attempt to decode it, and
-    /// it is also the one thing that can hide a photograph: a JPEG saved as
-    /// `.txt` is passed over here and never sniffed. Hence the count.
+    /// A file the walk's extension list turned away — by default, one whose
+    /// extension names a format img-fp does not read, or that has none. The
+    /// filter is why a scan of a home directory is not an attempt to decode
+    /// it, and it is also the one thing that can hide a photograph: a JPEG
+    /// saved as `.txt`, or with no extension, is passed over here and never
+    /// sniffed unless `-x '*'` asks for it. Hence the count.
     pub fn not_an_image(&mut self, path: &str) {
         record(self.log, &mut self.not_an_image, "skip/not-an-image", path.into());
     }
@@ -163,6 +167,14 @@ impl<'a> Problems<'a> {
     /// be deduced.
     pub fn symlink(&mut self, path: &str) {
         record(self.log, &mut self.symlink, "skip/symlink", path.into());
+    }
+
+    /// A file a wildcard walk (`-x '*'`, `-x '!gif'`) handed over whose bytes
+    /// are no picture format at all. It never claimed to be an image, so
+    /// nothing was asked of it and nothing failed — which is what separates it
+    /// from a `.jpg` that will not decode, still a problem.
+    pub fn not_image_content(&mut self, path: &str) {
+        record(self.log, &mut self.not_image_content, "skip/not-image-content", path.into());
     }
 
     /// The same file reached twice, because it was named twice or because two
@@ -211,9 +223,10 @@ impl<'a> Problems<'a> {
 
     // ---- reporting
 
-    fn skips(&self) -> [(&Tally, &'static str); 3] {
+    fn skips(&self) -> [(&Tally, &'static str); 4] {
         [
-            (&self.not_an_image, "file(s) whose extension is not an image format"),
+            (&self.not_an_image, "file(s) whose extension is not searched (see -x)"),
+            (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
             (&self.symlink, "symlink(s), which are not followed"),
             (&self.listed_twice, "path(s) reached twice (named twice, or overlapping roots)"),
         ]
@@ -330,6 +343,7 @@ mod tests {
         let log = Log::default();
         let mut p = p(&log);
         p.not_an_image("/notes.txt");
+        p.not_image_content("/README");
         p.symlink("/link.jpg");
         p.listed_twice("/a.jpg");
         assert_eq!(p.count(), 0, "skips are not failures");
