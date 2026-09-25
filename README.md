@@ -320,7 +320,7 @@ time.
 |---|---|
 | `--min-aligned-points 10` | keypoint correspondences that must agree on one transform, Higher = Stricter. Usable 8-20. |
 | `--min-frame-overlap 0.85` | how much of one image's frame must lie inside the other, Higher = Stricter. Usable 0.60-0.95. |
-| `--min-pixel-correlation 0.5` | how well the pixels of that overlap must correlate, averaged over the blocks carrying detail, Higher = Stricter. Usable 0.45-0.70. |
+| `--min-pixel-correlation 0.6` | how well the pixels of that overlap must correlate, averaged over the blocks carrying detail, Higher = Stricter. Usable 0.45-0.70. |
 
 The last two are not a loose and a tight version of one bar, however much they
 look like it. The overlap floor is **geometry** — how much of a frame the

@@ -930,18 +930,38 @@ struct Lod<'a> {
 }
 
 impl Lod<'_> {
+    /// A tap at `(x, y)` in thumbnail coordinates — pixel `j` of level zero
+    /// spans `[j, j + 1)` — which in a level of factor `f` is the pixel whose
+    /// centre is `x * f - 0.5`. See `to_level`.
     #[inline]
     fn at(&self, x: f32, y: f32) -> f32 {
         let (p, w, h, f) = self.lo;
-        let a = Thumb::tap(p, w, h, x * f, y * f);
+        let a = Thumb::tap(p, w, h, to_level(x, f), to_level(y, f));
         match self.hi {
             None => a,
             Some((p, w, h, f)) => {
-                let b = Thumb::tap(p, w, h, x * f, y * f);
+                let b = Thumb::tap(p, w, h, to_level(x, f), to_level(y, f));
                 a + (b - a) * self.t
             }
         }
     }
+}
+
+/// A position in a thumbnail's coordinates as an index into a pyramid level.
+///
+/// Thumbnail coordinates are edge-based: pixel `j` of level zero covers
+/// `[j, j + 1)`, because that is the box `resize_area` averaged into it, and a
+/// pixel of level `i` covers `2^i` of those. An index is centre-based — `tap`
+/// reads pixel `j` whole at `j` — so the index of a coordinate is `x * f - 0.5`.
+/// Reading `x * f` instead put every tap up to half a pixel of its level low
+/// and to the right. On both sides of an unrotated pair that is the same
+/// shift and cancels; under a reflection it is the opposite shift on one
+/// side, and the two thumbnails were compared a pixel out of register —
+/// `rot180`'s exact rotations scored a median agreement of 0.69 where a
+/// transpose scored 0.996.
+#[inline(always)]
+fn to_level(x: f32, f: f32) -> f32 {
+    x * f - 0.5
 }
 
 /// Where the comparison grid lands in one thumbnail, one axis at a time.
@@ -959,7 +979,11 @@ struct AxisTaps {
 }
 
 impl AxisTaps {
-    /// Sample `k` sits at `((start + span * k / (GRID - 1)) * scale) * f`.
+    /// Sample `k` sits at `to_level((start + span * k / (GRID - 1) + 0.5) * scale, f)`.
+    ///
+    /// The `+ 0.5` is the frame's own convention meeting the thumbnail's:
+    /// keypoints, and so the transform, put a working pixel's centre at its
+    /// integer index, and the thumbnail's coordinates put its left edge there.
     ///
     /// Spelled in exactly that order, and with the thumbnail's scale and the
     /// level's kept apart, because multiplication of floats is not
@@ -970,7 +994,7 @@ impl AxisTaps {
     fn of(start: f32, span: f32, scale: f32, f: f32, n: usize) -> AxisTaps {
         let mut t = AxisTaps { i: [0; GRID], f: [0.0; GRID] };
         for k in 0..GRID {
-            let p = (start + span * k as f32 / (GRID - 1) as f32) * scale * f;
+            let p = to_level((start + span * k as f32 / (GRID - 1) as f32 + 0.5) * scale, f);
             let (i, fr) = Thumb::split(p, n);
             t.i[k] = i as u32;
             t.f[k] = fr;
@@ -987,14 +1011,14 @@ enum LevelTaps {
 }
 
 impl LevelTaps {
-    fn of(lvl: (&[u8], usize, usize, f32), gx: (f32, f32), gy: (f32, f32), scale: f32) -> LevelTaps {
+    fn of(lvl: (&[u8], usize, usize, f32), gx: (f32, f32), gy: (f32, f32), scale: (f32, f32)) -> LevelTaps {
         let (px, w, h, f) = lvl;
         if w < 2 || h < 2 {
             return LevelTaps::Degenerate(px.first().copied().unwrap_or(0) as f32);
         }
         LevelTaps::Grid {
-            x: AxisTaps::of(gx.0, gx.1, scale, f, w),
-            y: AxisTaps::of(gy.0, gy.1, scale, f, h),
+            x: AxisTaps::of(gx.0, gx.1, scale.0, f, w),
+            y: AxisTaps::of(gy.0, gy.1, scale.1, f, h),
         }
     }
 
@@ -1017,7 +1041,7 @@ struct GridTaps {
 }
 
 impl GridTaps {
-    fn of(l: &Lod, gx: (f32, f32), gy: (f32, f32), scale: f32) -> GridTaps {
+    fn of(l: &Lod, gx: (f32, f32), gy: (f32, f32), scale: (f32, f32)) -> GridTaps {
         GridTaps {
             lo: LevelTaps::of(l.lo, gx, gy, scale),
             hi: l.hi.map(|h| LevelTaps::of(h, gx, gy, scale)),
@@ -1125,13 +1149,14 @@ mod wide {
         }
     }
 
-    /// `Thumb::tap` into one level, at `(x * f, y * f)`.
+    /// `Thumb::tap` into one level, at `(to_level(x, f), to_level(y, f))`.
     #[inline(always)]
     unsafe fn tap(l: (&[u8], usize, usize, f32), x: __m256, y: __m256) -> __m256 {
         unsafe {
             let f = _mm256_set1_ps(l.3);
-            let (x0, fx) = split(_mm256_mul_ps(x, f), l.1);
-            let (y0, fy) = split(_mm256_mul_ps(y, f), l.2);
+            let half = _mm256_set1_ps(0.5);
+            let (x0, fx) = split(_mm256_sub_ps(_mm256_mul_ps(x, f), half), l.1);
+            let (y0, fy) = split(_mm256_sub_ps(_mm256_mul_ps(y, f), half), l.2);
             let i = _mm256_add_epi32(_mm256_mullo_epi32(y0, _mm256_set1_epi32(l.1 as i32)), x0);
             lerp(l.0, l.1, i, fx, fy)
         }
@@ -1164,7 +1189,7 @@ mod wide {
         ga: &GridTaps,
         la: &Lod,
         lb: &Lod,
-        b_scale: f32,
+        b_scale: (f32, f32),
         m: &Affine,
         gux: &[f32; GRID],
         gvx: &[f32; GRID],
@@ -1179,7 +1204,8 @@ mod wide {
             let zero = _mm256_setzero_ps();
             let (vbw, vbh) = (_mm256_set1_ps(bw), _mm256_set1_ps(bh));
             let (m2, m5) = (_mm256_set1_ps(m[2]), _mm256_set1_ps(m[5]));
-            let bs = _mm256_set1_ps(b_scale);
+            let (bsx, bsy) = (_mm256_set1_ps(b_scale.0), _mm256_set1_ps(b_scale.1));
+            let half = _mm256_set1_ps(0.5);
             let c255 = _mm256_set1_ps(255.0);
             for (iy, &y) in rows.iter().enumerate() {
                 let (uy, vy) = (_mm256_set1_ps(m[1] * y), _mm256_set1_ps(m[4] * y));
@@ -1201,7 +1227,10 @@ mod wide {
                     if invert {
                         s = _mm256_sub_ps(c255, s);
                     }
-                    let (x, y) = (_mm256_mul_ps(u, bs), _mm256_mul_ps(v, bs));
+                    let (x, y) = (
+                        _mm256_mul_ps(_mm256_add_ps(u, half), bsx),
+                        _mm256_mul_ps(_mm256_add_ps(v, half), bsy),
+                    );
                     let mut r = tap(lb.lo, x, y);
                     if let Some(h) = lb.hi {
                         r = blend(r, tap(h, x, y), lb.t);
@@ -1305,7 +1334,14 @@ fn pixel_check(
     let lod_a = ta.lod(raw_a);
     let lod_b = tb.lod(raw_b);
 
-    let grid_a = GridTaps::of(&lod_a, (x0, x1 - x0), (y0, y1 - y0), ta.scale);
+    // Each axis at its own scale. `Thumb::scale` is the horizontal one; the
+    // thumbnail's two sides are rounded separately, so the vertical one differs
+    // by up to half a thumbnail pixel over the frame — a misregistration that
+    // grows down the picture and, like the half pixel in `to_level`, cancels
+    // only when both sides are the same way up.
+    let sa = (ta.w as f32 / aw, ta.h as f32 / ah);
+    let sb = (tb.w as f32 / bw, tb.h as f32 / bh);
+    let grid_a = GridTaps::of(&lod_a, (x0, x1 - x0), (y0, y1 - y0), sa);
 
     // The same two reductions as the bounding box above: the column's own
     // position and the transform's term in it, taken once per column.
@@ -1322,7 +1358,7 @@ fn pixel_check(
     if wide::fits(&grid_a, &lod_a, &lod_b) {
         let rows: [f32; GRID] = std::array::from_fn(|iy| y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32);
         // `fits` has checked every level this reads.
-        unsafe { wide::sample(&grid_a, &lod_a, &lod_b, tb.scale, m, &gux, &gvx, &rows, (bw, bh), invert, &mut va, &mut vb, &mut ok) };
+        unsafe { wide::sample(&grid_a, &lod_a, &lod_b, sb, m, &gux, &gvx, &rows, (bw, bh), invert, &mut va, &mut vb, &mut ok) };
         sampled = true;
     }
     if !sampled {
@@ -1339,7 +1375,7 @@ fn pixel_check(
                 // An inverted match is compared against the inverse of A
                 // rather than by keeping a second copy of every thumbnail.
                 va[k] = if invert { 255.0 - s } else { s };
-                vb[k] = lod_b.at(u * tb.scale, v * tb.scale);
+                vb[k] = lod_b.at((u + 0.5) * sb.0, (v + 0.5) * sb.1);
                 ok[k] = true;
             }
         }

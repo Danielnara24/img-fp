@@ -132,11 +132,15 @@ struct Args {
 
     /// How well the pixels of that overlap must correlate, 0..1.
     ///
-    /// The mean of |r| over the blocks of the overlap that carry detail. Half
-    /// is the midpoint of what the statistic can report, not a value read off
-    /// a corpus; the measured cliff, where wrong families start merging, is at
-    /// 0.40.
-    #[arg(long, default_value_t = 0.5)]
+    /// The mean of |r| over the blocks of the overlap that carry detail. 0.6
+    /// is chosen for what a user wants grouped, not for F1: at 0.5 the tool
+    /// makes no wrong pair but groups images that are merely similar enough.
+    /// Against the corpus it costs 0.6 points of recall at the default work
+    /// size and 0.8 at 640, mostly `tiled_watermark` and the warps, and buys
+    /// fewer trap pairs. The cliff, where wrong families start merging, is at
+    /// 0.40 at `--work-size 640` and absent at 384. At 0.7 a lone pair of
+    /// watermarked images from different photographs survives at 640.
+    #[arg(long, default_value_t = 0.6)]
     min_pixel_correlation: f32,
 
     /// Write every verdict considered, accepted or not, to this CSV. For

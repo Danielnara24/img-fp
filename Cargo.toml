@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
