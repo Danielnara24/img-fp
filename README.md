@@ -8,7 +8,8 @@ Linux, CLI only.
 ```
 img-fp ~/Pictures                       # one group per blank-line block, keeper first
 img-fp -r ~/Pictures                    # and every folder below it
-img-fp ~/Pictures -o dupes.json         # full results with transforms and evidence
+img-fp ~/Pictures -o dupes.csv          # the same rows, for a spreadsheet
+img-fp ~/Pictures -o dupes.json         # every pair, with what each one rests on
 img-fp ~/Pictures --work-size 640       # slower, and finds more of what is embedded
 ```
 
@@ -197,18 +198,56 @@ made.
 
 ## Output
 
-Human-readable by default: one group per blank-line-separated block.
+Three layouts, the ones `vid-fp` writes. `-o FILE` picks one by its extension
+(`.txt`, `.csv`, `.json`; anything else is text), `--format txt|csv|json` picks
+one whatever the file is called, and without `-o` — or with `-o -` — the report
+goes to stdout, as text unless `--format` says otherwise. Progress, the summary
+line and the problems all go to stderr, so stdout is only ever the report.
 
-With `-o`, JSON carrying what each claim rests on:
+**Text**, the default: one block per group, representative first, and each
+member beside the pair that put it there.
+
+```
+group_1: 3 files
+	REP,   4032x3024, 3.1MB, /photos/beach.jpg
+	MATCH, 4032x3024, 3.1MB, identical, /backup/beach.jpg
+	MATCH, 1024x768, 212.4KB, 412 points, overlap 0.99, correlation 0.93, /phone/beach-small.jpg
+```
+
+`points` is how many keypoint correspondences agree on the transform,
+`overlap` how much of one frame the transform puts inside the other, and
+`correlation` how well the pixels of that overlap agree. A pair can also be
+`propagated` — a transform composed along a path through the group and then
+checked against the pixels, which no keypoints vouch for — and `mirrored` or
+`inverted`. Resolution and size are read from the file, and are `-` where its
+header could not be.
+
+**CSV**: the same rows with a header, `;`-separated as `vid-fp`'s are —
+`group`, `role` (`representative` or `match`), `path`, `width`, `height`,
+`size`, `size_bytes`, then the member's pair with the representative:
+`relation` (`identical`, `direct` or `propagated`), `aligned_points`,
+`frame_overlap`, `pixel_correlation`, `mirrored`, `inverted`. The
+representative's own row leaves those empty, and so is any figure that was not
+measured. A file in two groups has a row in each, with each group's evidence.
+
+**JSON**: the complete record. Its groups are the CSV's rows, one object per
+file keyed by the CSV's columns, with `null` where the CSV has an empty cell;
+beside them is every pair asserted, not only each member's pair with its
+representative:
 
 ```json
 {"tool": "img-fp",
  "pairs": [{"a": "...", "b": "...", "aligned_points": 214,
-            "frame_overlap": 1.0, "pixel_correlation": 1.0, "scale": 0.25}],
- "groups": [{"representative": "...", "files": ["...", "..."]}]}
+            "frame_overlap": 1.0, "pixel_correlation": 1.0, "scale": 0.25,
+            "mirrored": true}],
+ "groups": [{"group": "group_1", "representative": "...",
+             "files": [{"path": "...", "role": "representative", "width": 4032, ...},
+                       {"path": "...", "role": "match", "relation": "direct",
+                        "aligned_points": 214, "frame_overlap": 1.0, ...}]}]}
 ```
 
 `pairs` is what the tool asserts; each entry is a pair it actually tested.
+`mirrored`, `inverted`, `identical` and `propagated` appear only when true.
 
 A **group is a representative and every file that matched it directly**. The
 representative is the best-connected file — usually the original or a clean
@@ -308,7 +347,8 @@ win the second.
 | `-r` | descend into subdirectories. Default: only the images directly in each directory named. |
 | `-x EXT,...` | extensions a directory walk takes, as in `vid-fp`. Default: every format below. `-x '*'` takes every file, including those with no extension; `-x '!gif'` every file but those; `-x 'jpg,png,!png'` a list with one removed. |
 | `-t N` | worker threads. Default: all cores. |
-| `-o PATH` | write JSON instead of a summary. |
+| `-o PATH` | write the results here; `-` is stdout. Text, CSV or JSON by the extension. |
+| `--format F` | `txt`, `csv` or `json`, whatever `-o` is called. |
 | `-v` | timings per stage. |
 | `--dump PATH` | every verdict considered, accepted or not, as CSV. |
 | `--log-file PATH` | everything the run had to say, uncapped. |

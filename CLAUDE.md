@@ -88,6 +88,8 @@ src/
   group.rs            pairs -> groups, around a representative
   cache.rs            on-disk cache of the per-image analysis: where it lives
                       when nothing says, and how a record is packed
+  report.rs           the results as text, CSV or JSON (vid-fp's three), and
+                      which one -o / --format asked for
   problems.rs         what was skipped, what could not be done, the exit code
                       that says so, and --log-file
   progress.rs         one progress bar for the whole run: each stage owns a
@@ -2479,11 +2481,17 @@ img-fp's own `groups` are **not** a closure — each is a representative plus th
 files that matched it, and it names the representative (see `src/group.rs`):
 
 ```json
-"groups": [{"representative": "/path/a", "files": ["/path/a", "/path/b"]}]
+"groups": [{"group": "group_1", "representative": "/path/a",
+            "files": [{"path": "/path/a", "role": "representative", ...},
+                      {"path": "/path/b", "role": "match", "relation": "direct", ...}]}]
 ```
 
-`files` is the key every consumer reads, and `score.py` already handles that
-shape. The rule still holds for img-fp too, for a different reason than for the
+Each entry of `files` is the CSV report's row for that file, keyed by its
+columns — the evidence is the member's pair with *this* group's
+representative. Earlier builds wrote bare paths there, which is what every
+file under `out/v*` holds; `score.py` reads both (a dict gives its `path`).
+
+The `pairs`-wins rule still holds for img-fp too, for a different reason than for the
 others: a group's members were each tested against the representative but not
 against each other, and files in several groups would be counted once per
 group. `score.py` prefers `pairs`, which is why the F1 figures above are

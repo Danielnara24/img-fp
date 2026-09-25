@@ -25,6 +25,7 @@ mod problems;
 mod prof;
 mod progress;
 use progress::Stage;
+mod report;
 mod sift;
 mod verify;
 
@@ -33,7 +34,6 @@ use clap::Parser;
 use index::{InvertedFile, Vocabulary, WordList};
 use problems::{Log, Problems};
 use rayon::prelude::*;
-use serde::Serialize;
 use sift::{Features, DESC_LEN};
 use std::collections::HashMap;
 use std::io::Write;
@@ -73,9 +73,21 @@ struct Args {
     )]
     extensions: Vec<String>,
 
-    /// Write JSON results here instead of a summary on stdout.
-    #[arg(short, long)]
+    /// Write the results here instead of stdout; `-` is stdout.
+    ///
+    /// The format follows the extension — `.txt`, `.csv`, `.json`, and
+    /// anything else is text — unless `--format` says otherwise. A file
+    /// really named `-` is `./-`.
+    #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+
+    /// Write the results in this format whatever `--output` is called.
+    ///
+    /// Text is the groups for reading, CSV the same rows for sorting, JSON the
+    /// complete record: every pair asserted and what it rests on. Needed on
+    /// stdout, which has no extension to read.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    format: Option<report::Format>,
 
     /// Worker threads (default: all cores).
     #[arg(short = 't', long, default_value_t = 0)]
@@ -519,47 +531,7 @@ impl Dsu {
 
 // ---------------------------------------------------------------- output
 
-#[derive(Serialize)]
-struct OutPair {
-    a: String,
-    b: String,
-    aligned_points: u32,
-    frame_overlap: f32,
-    pixel_correlation: f32,
-    scale: f32,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    inverted: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    identical: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    propagated: bool,
-}
-
-/// One group: the file everything in it was verified against, and the files.
-///
-/// `files` includes the representative, and is the key `score.py` and the
-/// other consumers read, so the group is still a plain list of paths to
-/// anything that does not care which one is the head.
-#[derive(Serialize)]
-struct OutGroup {
-    representative: String,
-    files: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct Output {
-    tool: &'static str,
-    config: serde_json::Value,
-    files_enumerated: usize,
-    files_analysed: usize,
-    failures: Vec<serde_json::Value>,
-    runtime_seconds: f64,
-    /// Largest first. Each is a representative and the files that matched it
-    /// directly. These overlap: a file that is a duplicate of two files that
-    /// are not duplicates of each other appears under both.
-    groups: Vec<OutGroup>,
-    pairs: Vec<OutPair>,
-}
+use report::{OutGroup, OutPair, Output};
 
 // ---------------------------------------------------------------- main
 
@@ -581,6 +553,14 @@ fn main() -> Result<()> {
     // ordinary fatal error at the top of the run rather than a discovery made
     // an hour into one.
     let log = Log::open(args.log_file.as_deref())?;
+    // The same for the two files written at the end, which would otherwise
+    // fail after the whole run — a directory named where a file was meant is
+    // the usual way. Checked, not created: a run that dies should not leave an
+    // empty results file, nor truncate the last one.
+    let stdout = Path::new("-");
+    for path in [&args.output, &args.dump].into_iter().flatten().filter(|p| *p != stdout) {
+        report::check_writable(path)?;
+    }
     interrupt()?;
     let mut problems = Problems::new(&log);
     let outcome = run(&args, &log, &mut problems);
@@ -1439,9 +1419,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                         frame_overlap: 1.0,
                         pixel_correlation: 1.0,
                         scale: 1.0,
+                        mirrored: false,
                         inverted: false,
                         identical: true,
                         propagated: false,
+                        ia: a,
+                        ib: b,
                     });
                 }
             }
@@ -1460,9 +1443,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             frame_overlap: round3(v.ov_a.max(v.ov_b)),
             pixel_correlation: round3(v.blk),
             scale: round3(v.scale),
+            mirrored: v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0,
             inverted: *inv_flag,
             identical: false,
             propagated: v.n_match == 0,
+            ia: a,
+            ib: b,
         });
     }
     out_pairs.sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
@@ -1485,6 +1471,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         .map(|g| OutGroup {
             representative: files[g.representative].display().to_string(),
             files: g.members.iter().map(|&i| files[i].display().to_string()).collect(),
+            rep: g.representative,
+            members: g.members.clone(),
         })
         .collect();
     groups.sort_by(|a, b| {
@@ -1525,37 +1513,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         pairs: out_pairs,
     };
 
-    match &args.output {
-        Some(path) => {
-            // Fatal, and the context is the whole of what makes exit 1 useful:
-            // this is the run's output, there is nowhere else it went, and
-            // "No such file or directory" on its own does not say which file.
-            let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
-            timed!(36, serde_json::to_writer(std::io::BufWriter::new(f), &out))?;
-            say!(
-                "{} groups, {} pairs over {} images in {:.1}s -> {}",
-                out.groups.len(),
-                out.pairs.len(),
-                n_ok,
-                runtime,
-                path.display()
-            );
-        }
-        None => {
-            let stdout = std::io::stdout();
-            let mut w = std::io::BufWriter::new(stdout.lock());
-            // Representative first in each block: it is the file the rest
-            // were compared against, and the one to keep.
-            for g in out.groups.iter() {
-                writeln!(w, "{}", g.representative)?;
-                for f in g.files.iter().filter(|f| **f != g.representative) {
-                    writeln!(w, "{f}")?;
-                }
-                writeln!(w)?;
-            }
-            w.flush()?;
-            say!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
-        }
+    let target = report::Target::of(args.output.as_deref(), args.format);
+    timed!(36, report::write(&target, &out, &files))?;
+    let summary = format!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
+    match &target.sink {
+        report::Sink::File(path) => say!("{summary} -> {}", path.display()),
+        report::Sink::Stdout => say!("{summary}"),
     }
     prof::report();
     Ok(())

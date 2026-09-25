@@ -375,10 +375,15 @@ pub struct Span {
 /// said what the file holds.
 static WRITING: Mutex<()> = Mutex::new(());
 
-/// The temporary file a compaction or a fresh cache is being written into,
-/// while there is one: the handler removes it, since the file it would have
-/// replaced is still there and still whole.
-static PARTIAL: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The temporary files a compaction or a fresh cache is being written into,
+/// while there are any: the handler removes them, since the files they would
+/// have replaced are still there and still whole.
+///
+/// A list although a run writes one cache at a time. As a single slot, two
+/// stores written at once — which the tests do, one per test thread — took
+/// each other's entry, and whichever found the slot empty concluded it had
+/// been interrupted.
+static PARTIAL: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// Records appended by this run, for the handler to report.
 static APPENDED: AtomicUsize = AtomicUsize::new(0);
@@ -397,7 +402,7 @@ fn lock<T>(m: &'static Mutex<T>) -> MutexGuard<'static, T> {
 /// guard is held until the process exits, so no worker appends after this.
 pub fn seal() -> (MutexGuard<'static, ()>, usize) {
     let held = lock(&WRITING);
-    if let Some(tmp) = lock(&PARTIAL).take() {
+    for tmp in lock(&PARTIAL).drain(..) {
         std::fs::remove_file(tmp).ok();
     }
     (held, APPENDED.load(Ordering::SeqCst))
@@ -412,12 +417,21 @@ pub fn seal() -> (MutexGuard<'static, ()>, usize) {
 fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<File> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::remove_file(&tmp).ok();
-    *lock(&PARTIAL) = Some(tmp.clone());
+    lock(&PARTIAL).push(tmp.clone());
+    // Takes this call's entry out of the list, and says whether it was still
+    // there to take — the handler having removed it is how an interrupt shows.
+    let unregister = |partial: &mut Vec<PathBuf>| match partial.iter().position(|p| *p == tmp) {
+        Some(k) => {
+            partial.swap_remove(k);
+            true
+        }
+        None => false,
+    };
     let made = (|| -> Result<File> {
         let f = OpenOptions::new().read(true).append(true).create(true).open(&tmp)?;
         fill(&f)?;
         let mut partial = lock(&PARTIAL);
-        if partial.take().is_none() {
+        if !unregister(&mut partial) {
             bail!("interrupted");
         }
         std::fs::rename(&tmp, path)?;
@@ -427,7 +441,7 @@ fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<F
         // A half-written temporary file is this run's litter, and the next
         // run will not know to clear it: the name carries a process id
         // precisely so that no other run touches it.
-        *lock(&PARTIAL) = None;
+        unregister(&mut lock(&PARTIAL));
         std::fs::remove_file(&tmp).ok();
     }
     made
