@@ -1037,6 +1037,189 @@ impl GridTaps {
     }
 }
 
+/// The comparison grid's samples, eight at a time.
+///
+/// Reading the two thumbnails was nearly all of what the pixel check cost —
+/// some forty of its fifty microseconds, measured by `pixel_timings`, against
+/// a few for the block statistics — and three quarters of that was the B side,
+/// whose samples land wherever the transform puts them: two clamps, two
+/// truncations and a fraction per axis per pyramid level, four byte reads and
+/// three interpolations, and a blend between the levels, for each of 2,304
+/// samples, one at a time.
+///
+/// All of it is the same arithmetic in every lane, so it runs eight samples
+/// to an instruction here. The reads are gathers, two per level: a bilinear
+/// tap wants two adjacent bytes from each of two rows, and a four-byte read
+/// at the top-left pixel covers the top pair while one ending at the
+/// bottom-right pixel covers the bottom pair. Both stay inside the level,
+/// because `split` never places a tap past its second-to-last row or column:
+/// the top read ends at `(h-2)w + (w-2) + 3 = (h-1)w + 1`, which is inside a
+/// plane of `hw` bytes whenever `w >= 2`, and the bottom one starts at
+/// `w - 2 >= 0`.
+///
+/// **Every value is the float the scalar path computes.** Each lane performs
+/// the same operations on the same operands in the same order — the clamps as
+/// compares and blends that send NaN where the scalar comparisons send it,
+/// the truncation and fraction as the scalar form takes them, each product
+/// and sum rounded on its own with no fused multiply-add — so this is a
+/// change in how many samples an instruction handles, not in what any sample
+/// is. `pixel_timings` prints a checksum over every figure the check returns
+/// to hold it to that.
+#[cfg(target_feature = "avx2")]
+mod wide {
+    use super::*;
+    use std::arch::x86_64::*;
+
+    const L: usize = 8;
+    const _: () = assert!(GRID % L == 0);
+
+    /// Whether every level both sides read is one this path can: at least two
+    /// pixels each way, and as many bytes as its size says.
+    pub(super) fn fits(ga: &GridTaps, la: &Lod, lb: &Lod) -> bool {
+        let level = |l: (&[u8], usize, usize, f32)| l.1 >= 2 && l.2 >= 2 && l.0.len() >= l.1 * l.2;
+        let grid = |t: &LevelTaps| matches!(t, LevelTaps::Grid { .. });
+        level(la.lo)
+            && grid(&ga.lo)
+            && match (la.hi, &ga.hi) {
+                (None, None) => true,
+                (Some(h), Some(t)) => level(h) && grid(t),
+                _ => false,
+            }
+            && level(lb.lo)
+            && lb.hi.is_none_or(level)
+    }
+
+    /// `Thumb::split`, a lane at a time.
+    #[inline(always)]
+    unsafe fn split(v: __m256, n: usize) -> (__m256i, __m256) {
+        unsafe {
+            let zero = _mm256_setzero_ps();
+            let hi = _mm256_set1_ps(n as f32 - 1.001);
+            // `v > 0 ? (v < hi ? v : hi) : 0`, with a NaN failing both tests
+            // exactly as it does in the scalar comparisons.
+            let below = _mm256_cmp_ps::<_CMP_LT_OQ>(v, hi);
+            let above0 = _mm256_cmp_ps::<_CMP_GT_OQ>(v, zero);
+            let c = _mm256_blendv_ps(zero, _mm256_blendv_ps(hi, v, below), above0);
+            let i = _mm256_cvttps_epi32(c);
+            (i, _mm256_sub_ps(c, _mm256_cvtepi32_ps(i)))
+        }
+    }
+
+    /// `Thumb::lerp` over eight located taps.
+    #[inline(always)]
+    unsafe fn lerp(px: &[u8], w: usize, i: __m256i, fx: __m256, fy: __m256) -> __m256 {
+        unsafe {
+            let base = px.as_ptr() as *const i32;
+            let top = _mm256_i32gather_epi32::<1>(base, i);
+            let bot = _mm256_i32gather_epi32::<1>(base, _mm256_add_epi32(i, _mm256_set1_epi32(w as i32 - 2)));
+            let m = _mm256_set1_epi32(0xff);
+            let p00 = _mm256_cvtepi32_ps(_mm256_and_si256(top, m));
+            let p01 = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32::<8>(top), m));
+            let p10 = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32::<16>(bot), m));
+            let p11 = _mm256_cvtepi32_ps(_mm256_srli_epi32::<24>(bot));
+            let one = _mm256_set1_ps(1.0);
+            let gx = _mm256_sub_ps(one, fx);
+            let a = _mm256_add_ps(_mm256_mul_ps(p00, gx), _mm256_mul_ps(p01, fx));
+            let b = _mm256_add_ps(_mm256_mul_ps(p10, gx), _mm256_mul_ps(p11, fx));
+            _mm256_add_ps(_mm256_mul_ps(a, _mm256_sub_ps(one, fy)), _mm256_mul_ps(b, fy))
+        }
+    }
+
+    /// `Thumb::tap` into one level, at `(x * f, y * f)`.
+    #[inline(always)]
+    unsafe fn tap(l: (&[u8], usize, usize, f32), x: __m256, y: __m256) -> __m256 {
+        unsafe {
+            let f = _mm256_set1_ps(l.3);
+            let (x0, fx) = split(_mm256_mul_ps(x, f), l.1);
+            let (y0, fy) = split(_mm256_mul_ps(y, f), l.2);
+            let i = _mm256_add_epi32(_mm256_mullo_epi32(y0, _mm256_set1_epi32(l.1 as i32)), x0);
+            lerp(l.0, l.1, i, fx, fy)
+        }
+    }
+
+    /// `LevelTaps::at` for the eight grid columns from `ix`.
+    #[inline(always)]
+    unsafe fn grid_tap(t: &LevelTaps, px: &[u8], w: usize, ix: usize, iy: usize) -> __m256 {
+        let LevelTaps::Grid { x, y } = t else { unreachable!("`fits` admits only grids") };
+        unsafe {
+            let xi = _mm256_loadu_si256(x.i.as_ptr().add(ix) as *const __m256i);
+            let fx = _mm256_loadu_ps(x.f.as_ptr().add(ix));
+            let row = _mm256_set1_epi32((y.i[iy] as usize * w) as i32);
+            lerp(px, w, _mm256_add_epi32(row, xi), fx, _mm256_set1_ps(y.f[iy]))
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn blend(a: __m256, b: __m256, t: f32) -> __m256 {
+        unsafe { _mm256_add_ps(a, _mm256_mul_ps(_mm256_sub_ps(b, a), _mm256_set1_ps(t))) }
+    }
+
+    /// Fill `va`, `vb` and `ok` exactly as the scalar loop in `pixel_check`
+    /// does. `rows[iy]` is the grid row's position in A's frame.
+    ///
+    /// # Safety
+    /// `fits(ga, la, lb)` must hold.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn sample(
+        ga: &GridTaps,
+        la: &Lod,
+        lb: &Lod,
+        b_scale: f32,
+        m: &Affine,
+        gux: &[f32; GRID],
+        gvx: &[f32; GRID],
+        rows: &[f32; GRID],
+        (bw, bh): (f32, f32),
+        invert: bool,
+        va: &mut [f32; GRID * GRID],
+        vb: &mut [f32; GRID * GRID],
+        ok: &mut [bool; GRID * GRID],
+    ) {
+        unsafe {
+            let zero = _mm256_setzero_ps();
+            let (vbw, vbh) = (_mm256_set1_ps(bw), _mm256_set1_ps(bh));
+            let (m2, m5) = (_mm256_set1_ps(m[2]), _mm256_set1_ps(m[5]));
+            let bs = _mm256_set1_ps(b_scale);
+            let c255 = _mm256_set1_ps(255.0);
+            for (iy, &y) in rows.iter().enumerate() {
+                let (uy, vy) = (_mm256_set1_ps(m[1] * y), _mm256_set1_ps(m[4] * y));
+                for ix in (0..GRID).step_by(L) {
+                    let u = _mm256_add_ps(_mm256_add_ps(_mm256_loadu_ps(gux.as_ptr().add(ix)), uy), m2);
+                    let v = _mm256_add_ps(_mm256_add_ps(_mm256_loadu_ps(gvx.as_ptr().add(ix)), vy), m5);
+                    let out = _mm256_or_ps(
+                        _mm256_or_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(u, zero), _mm256_cmp_ps::<_CMP_GE_OQ>(u, vbw)),
+                        _mm256_or_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(v, zero), _mm256_cmp_ps::<_CMP_GE_OQ>(v, vbh)),
+                    );
+                    let outside = _mm256_movemask_ps(out) as u32;
+                    if outside == 0xff {
+                        continue;
+                    }
+                    let mut s = grid_tap(&ga.lo, la.lo.0, la.lo.1, ix, iy);
+                    if let (Some(t), Some(h)) = (&ga.hi, la.hi) {
+                        s = blend(s, grid_tap(t, h.0, h.1, ix, iy), la.t);
+                    }
+                    if invert {
+                        s = _mm256_sub_ps(c255, s);
+                    }
+                    let (x, y) = (_mm256_mul_ps(u, bs), _mm256_mul_ps(v, bs));
+                    let mut r = tap(lb.lo, x, y);
+                    if let Some(h) = lb.hi {
+                        r = blend(r, tap(h, x, y), lb.t);
+                    }
+                    let k = iy * GRID + ix;
+                    // A sample outside B is left as the scalar loop leaves it:
+                    // zero, and not `ok`.
+                    _mm256_storeu_ps(va.as_mut_ptr().add(k), _mm256_andnot_ps(out, s));
+                    _mm256_storeu_ps(vb.as_mut_ptr().add(k), _mm256_andnot_ps(out, r));
+                    for lane in 0..L {
+                        ok[k + lane] = outside >> lane & 1 == 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Resample the overlap from both thumbnails and compare it blockwise.
 ///
 /// Returns (agreement, comparable blocks, whole-overlap correlation).
@@ -1133,21 +1316,32 @@ fn pixel_check(
         gux[ix] = m[0] * x;
         gvx[ix] = m[3] * x;
     }
-    for iy in 0..GRID {
-        let y = y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32;
-        let (uy, vy) = (m[1] * y, m[4] * y);
-        for ix in 0..GRID {
-            let (u, v) = (gux[ix] + uy + m[2], gvx[ix] + vy + m[5]);
-            if u < 0.0 || u >= bw || v < 0.0 || v >= bh {
-                continue;
+    #[allow(unused_mut)]
+    let mut sampled = false;
+    #[cfg(target_feature = "avx2")]
+    if wide::fits(&grid_a, &lod_a, &lod_b) {
+        let rows: [f32; GRID] = std::array::from_fn(|iy| y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32);
+        // `fits` has checked every level this reads.
+        unsafe { wide::sample(&grid_a, &lod_a, &lod_b, tb.scale, m, &gux, &gvx, &rows, (bw, bh), invert, &mut va, &mut vb, &mut ok) };
+        sampled = true;
+    }
+    if !sampled {
+        for iy in 0..GRID {
+            let y = y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32;
+            let (uy, vy) = (m[1] * y, m[4] * y);
+            for ix in 0..GRID {
+                let (u, v) = (gux[ix] + uy + m[2], gvx[ix] + vy + m[5]);
+                if u < 0.0 || u >= bw || v < 0.0 || v >= bh {
+                    continue;
+                }
+                let k = iy * GRID + ix;
+                let s = grid_a.at(&lod_a, ix, iy);
+                // An inverted match is compared against the inverse of A
+                // rather than by keeping a second copy of every thumbnail.
+                va[k] = if invert { 255.0 - s } else { s };
+                vb[k] = lod_b.at(u * tb.scale, v * tb.scale);
+                ok[k] = true;
             }
-            let k = iy * GRID + ix;
-            let s = grid_a.at(&lod_a, ix, iy);
-            // An inverted match is compared against the inverse of A rather
-            // than by keeping a second copy of every thumbnail.
-            va[k] = if invert { 255.0 - s } else { s };
-            vb[k] = lod_b.at(u * tb.scale, v * tb.scale);
-            ok[k] = true;
         }
     }
     let mut agree = 0f32;
@@ -1450,5 +1644,57 @@ mod bench {
                 t_encl * 1000.0 / POOL as f64
             );
         }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture pixel_timings`
+    ///
+    /// The pixel check at the shapes it meets: a near-identity pair, a
+    /// photograph found at a third of its size inside another, and a rotated
+    /// one, each read through thumbnails of the size the tool keeps. It prints
+    /// a checksum of every figure the check returned, so a change meant to be
+    /// exact can be held to that in one line.
+    #[test]
+    #[ignore]
+    fn pixel_timings() {
+        let mut rng = Lcg(0x6a09_e667_f3bc_c908);
+        let thumb = |rng: &mut Lcg, w: usize, h: usize| {
+            // Smooth structure with some grain, so blocks are neither flat nor
+            // pure noise.
+            let (a, b, c) = (rng.f(0.2) + 0.02, rng.f(0.2) + 0.02, rng.f(6.0));
+            let px: Vec<u8> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as f32, (i / w) as f32);
+                    let v = 128.0 + 90.0 * (a * x + c).sin() * (b * y).cos() + (rng.byte() % 24) as f32;
+                    v.clamp(0.0, 255.0) as u8
+                })
+                .collect();
+            Thumb::new(w as u16, h as u16, w as f32 / 384.0, px)
+        };
+        const POOL: usize = 64;
+        let ta: Vec<Thumb> = (0..POOL).map(|_| thumb(&mut rng, 128, 96)).collect();
+        let tb: Vec<Thumb> = (0..POOL).map(|_| thumb(&mut rng, 128, 85)).collect();
+        let (aw, ah, bw, bh) = (384.0f32, 288.0f32, 384.0f32, 255.0f32);
+        let cases: [(&str, Affine); 4] = [
+            ("near-identity", [1.01, 0.01, 2.0, -0.01, 0.99, -3.0]),
+            ("third, inside", [0.33, 0.0, 120.0, 0.0, 0.33, 60.0]),
+            ("rotated 30", [0.75, -0.43, 150.0, 0.43, 0.75, -40.0]),
+            ("enlarged", [2.4, 0.1, -200.0, -0.1, 2.4, -150.0]),
+        ];
+        let mut sum = 0u64;
+        for (name, m) in cases.iter() {
+            for inv in [false, true] {
+                for k in 0..POOL {
+                    let (b, n, c) = pixel_check(&ta[k], &tb[k], m, aw, ah, bw, bh, inv);
+                    sum = sum.wrapping_mul(0x100000001b3).wrapping_add(b.to_bits() as u64 ^ (n as u64) << 32 ^ c.to_bits() as u64);
+                }
+            }
+            let t = ms(|| {
+                for k in 0..POOL {
+                    std::hint::black_box(pixel_check(&ta[k], &tb[k], m, aw, ah, bw, bh, false));
+                }
+            });
+            println!("pixel_check {name:14}: {:7.2} us per call", t * 1000.0 / POOL as f64);
+        }
+        println!("pixel_check checksum {sum:016x}");
     }
 }

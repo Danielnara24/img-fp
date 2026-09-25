@@ -393,17 +393,44 @@ fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
 /// and three times more for every image the second look re-asks. Measured on
 /// a nine-thousand-image corpus it was 2.2 ms a query, which is more than the
 /// retrieval it ranks.
+///
+/// **The selection runs on integers.** A positive finite float's bits order
+/// the same way the float does, so `(!score_bits << 32) | index` is one `u64`
+/// whose ascending order is exactly the comparator's — score descending, then
+/// the lower index — and comparing two of them is one instruction where the
+/// float comparator was a `partial_cmp`, an `unwrap` and a tie-break, each a
+/// branch the selection mispredicts about half the time. Every score a query
+/// hands this is positive (a touched image has at least one shared word, of
+/// idf at least ln 5); anything else takes the comparator, as before.
 fn rank_best(scored: &mut Vec<(u32, f32)>, k: usize) {
     let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0));
     if k == 0 {
         scored.clear();
         return;
     }
-    if scored.len() > k {
-        scored.select_nth_unstable_by(k - 1, cmp);
-        scored.truncate(k);
+    if scored.len() <= k || !scored.iter().all(|e| e.1 > 0.0 && e.1.is_finite()) {
+        if scored.len() > k {
+            scored.select_nth_unstable_by(k - 1, cmp);
+            scored.truncate(k);
+        }
+        scored.sort_unstable_by(cmp);
+        return;
     }
-    scored.sort_unstable_by(cmp);
+    RANK_KEYS.with(|keys| {
+        let keys = &mut *keys.borrow_mut();
+        keys.clear();
+        keys.extend(scored.iter().map(|&(j, s)| (!s.to_bits() as u64) << 32 | j as u64));
+        keys.select_nth_unstable(k - 1);
+        keys.truncate(k);
+        keys.sort_unstable();
+        scored.clear();
+        scored.extend(keys.iter().map(|&key| (key as u32, f32::from_bits(!((key >> 32) as u32)))));
+    });
+}
+
+thread_local! {
+    /// `rank_best`'s keys, kept per worker rather than allocated per query.
+    static RANK_KEYS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The three variants' candidate lists as one: each candidate once, under the
@@ -989,9 +1016,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         .into_par_iter()
         .filter(|&i| items[i].ok)
         .map_init(
-            || (vec![0f32; n], Vec::new(), Vec::new()),
-            |(acc, touched, scored), i| {
-                timed!(14, inv.query(&lists[i], i as u32, acc, touched, scored));
+            || (vec![0f32; n], Vec::new()),
+            |(acc, scored), i| {
+                timed!(14, inv.query(&lists[i], i as u32, acc, scored));
                 bar.add(items[i].feats.len() as u64);
                 timed!(41, {
                     scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
@@ -1115,14 +1142,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         .par_iter()
         .zip(lonely_weight.par_iter())
         .map_init(
-            || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default(), Vec::new()),
-            |(acc, touched, scored, cands, matches, scratch, merged), (&i, &w)| timed!(38, {
+            || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default(), Vec::new()),
+            |(acc, scored, cands, matches, scratch, merged), (&i, &w)| timed!(38, {
                 let mut out: Vec<Edge> = Vec::new();
                 let vf: [Features; 3] = timed!(40, std::array::from_fn(|v| variant_features(&items[i].feats, variants[v])));
                 let wl: [WordList; 3] = std::array::from_fn(|v| timed!(39, quantise(&vocab, &vf[v])));
                 merged.clear();
                 for v in 0..3 {
-                    timed!(14, inv.query(&wl[v], i as u32, acc, touched, scored));
+                    timed!(14, inv.query(&wl[v], i as u32, acc, scored));
                     timed!(41, rank_best(scored, args.candidates));
                     merged.extend(scored.iter().map(|&(j, s)| (j, s, v as u8)));
                 }
@@ -1764,5 +1791,41 @@ mod tests {
         for (a, b) in id.iter().zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]) {
             assert!((a - b).abs() < 1e-4, "{id:?}");
         }
+    }
+
+    /// `rank_best` selects on integer keys when it can; it has to choose the
+    /// same candidates in the same order as the float comparator, ties and
+    /// all, and fall back to the comparator for anything a key cannot carry.
+    #[test]
+    fn rank_best_keys_order_as_the_comparator_does() {
+        let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0));
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for n in [0usize, 1, 5, 149, 150, 151, 400, 3000] {
+            for levels in [3u64, 50, 1 << 20] {
+                let mut scored: Vec<(u32, f32)> = (0..n as u32).map(|j| (j, 1e-3 + (next() % levels) as f32 * 0.37)).collect();
+                // Shuffled, since a query now hands them over in index order.
+                for i in (1..scored.len()).rev() {
+                    scored.swap(i, (next() % (i as u64 + 1)) as usize);
+                }
+                for k in [0usize, 1, 7, 150] {
+                    let mut want = scored.clone();
+                    want.sort_by(cmp);
+                    want.truncate(k);
+                    let mut got = scored.clone();
+                    super::rank_best(&mut got, k);
+                    assert_eq!(got.iter().map(|e| (e.0, e.1.to_bits())).collect::<Vec<_>>(), want.iter().map(|e| (e.0, e.1.to_bits())).collect::<Vec<_>>(), "n {n} levels {levels} k {k}");
+                }
+            }
+        }
+        // A score no key can carry goes to the comparator.
+        let mut got = vec![(3u32, 0.0f32), (1, 2.0), (2, 2.0)];
+        super::rank_best(&mut got, 2);
+        assert_eq!(got, vec![(1, 2.0), (2, 2.0)]);
     }
 }

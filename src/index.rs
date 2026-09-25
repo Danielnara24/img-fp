@@ -136,8 +136,11 @@ pub struct Vocabulary {
     /// arithmetic — see `dist2` and `quantise_threads`. A centre is the mean of
     /// descriptor bytes and is stored to the nearest one of them.
     levels: Vec<Vec<u8>>,
-    /// Per level, indexed by *parent* node number: where that parent's live
-    /// children start in `levels[l]`, and how many there are.
+    /// Per level, the squared length of each centre in `levels[l]`, by slot.
+    /// See `Query`.
+    norms: Vec<Vec<u32>>,
+    /// Where the root's live children start in `levels[0]`, and how many
+    /// there are. Every other node's children are found through `down`.
     ///
     /// The descent used to read a dense node-to-centre table and scan a
     /// parent's sixteen slots twice — once to find the first live child, once
@@ -145,10 +148,20 @@ pub struct Vocabulary {
     /// are properties of the tree, settled when it was built; asking them
     /// again for every descriptor in the corpus is the same work several
     /// million times over.
-    head: Vec<Vec<Kids>>,
-    /// Per level, indexed by centre slot: the node number that centre belongs
-    /// to. This is what the dense table was really being consulted for.
-    node_of: Vec<Vec<u32>>,
+    root: Kids,
+    /// Per level, indexed by centre *slot*: where that centre's live children
+    /// start in the level below, and how many there are.
+    ///
+    /// This is `head[l + 1][node_of[l][slot]]` asked once, at build time. The
+    /// descent used to ask it once per surviving parent per level, as two
+    /// reads — the slot's node number, then that node's entry in `head` —
+    /// each depending on the one before and both depending on the distances
+    /// that chose the parent. On the deep levels of a real tree all three
+    /// arrays are megabytes, so a level of the descent opened with a chain of
+    /// three misses before the first centre could be measured. It is one now,
+    /// and it is asked for as soon as a child takes a place in the frontier
+    /// rather than when the level below begins.
+    down: Vec<Vec<Kids>>,
     max_paths: usize,
     path_ratio: f32,
 }
@@ -230,6 +243,20 @@ fn prefetch_centres(centres: &[u8], kids: Kids) {
     let _ = centres;
 }
 
+/// Ask for one centre's entry in `down`.
+#[inline]
+fn prefetch_kids(below: &[Kids], slot: u32) {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(k) = below.get(slot as usize) {
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(k as *const Kids as *const i8, _MM_HINT_T0);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (below, slot);
+}
+
 impl Vocabulary {
     /// Words are the leaves: `branching^depth` of them.
     ///
@@ -261,7 +288,7 @@ impl Vocabulary {
     /// consumer of a word list — the merge in `shared`, the runs the inverted
     /// file is built from — reads only that order.
     pub fn n_live_words(&self) -> usize {
-        self.node_of[self.depth - 1].len()
+        self.levels[self.depth - 1].len() / DESC_LEN
     }
 
     pub fn build(descriptors: &[u8], p: &VocabParams) -> Vocabulary {
@@ -286,6 +313,7 @@ impl Vocabulary {
             .collect();
 
         let mut levels: Vec<Vec<u8>> = Vec::with_capacity(p.depth);
+        let mut norms: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
         let mut heads: Vec<Vec<Kids>> = Vec::with_capacity(p.depth);
         let mut node_ofs: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
         // Which sample belongs to which node of the previous level.
@@ -357,17 +385,22 @@ impl Vocabulary {
                 }
                 head[parent] = Kids { first: if first == u32::MAX { 0 } else { first }, n };
             }
+            norms.push(centres.chunks_exact(DESC_LEN).map(|c| c.iter().map(|&v| v as u32 * v as u32).sum()).collect());
             levels.push(centres);
             heads.push(head);
             node_ofs.push(node_of);
             parents = nodes;
         }
+        let down: Vec<Vec<Kids>> = (0..p.depth.saturating_sub(1))
+            .map(|l| node_ofs[l].iter().map(|&node| heads[l + 1][node as usize]).collect())
+            .collect();
         Vocabulary {
             branching: p.branching,
             depth: p.depth,
             levels,
-            head: heads,
-            node_of: node_ofs,
+            norms,
+            root: heads[0][0],
+            down,
             max_paths: p.max_paths,
             path_ratio: p.path_ratio,
         }
@@ -382,6 +415,8 @@ impl Vocabulary {
     pub fn quantise(&self, desc: &[u8], out: &mut Vec<u32>) {
         out.clear();
         let q: &[u8; DESC_LEN] = desc[..DESC_LEN].try_into().unwrap();
+        let qp = Query::new(q);
+        let mut dist = [0u32; MAX_BRANCH];
         // Frontier of (centre slot at this level, distance). The distance is an
         // integer: both sides are bytes, so the sum of 128 squares is exact and
         // at most 8.3 M, and comparing two of them needs no float ordering.
@@ -400,37 +435,32 @@ impl Vocabulary {
         for l in 0..self.depth {
             let mut n_next = 0usize;
             let centres = &self.levels[l];
-            let head = &self.head[l];
-            // The frontier is rebuilt as the children are scored, so the
-            // parents come out of it first. They are at most `max_paths`.
-            // This is where a slot becomes the node number `head` is indexed
-            // by; the root, which has no level above it, is node zero.
-            let mut par = [0u32; FRONTIER];
+            // Where each parent's children are, asked for all of them before
+            // any of them is measured. The frontier is rebuilt as the children
+            // are scored, so the parents come out of it first; they are at
+            // most `max_paths`, and the root, which has no level above it, is
+            // the one parent of level zero.
+            //
+            // The parents' chains are independent of one another. Walked one
+            // parent at a time they do not overlap: a parent's distances are
+            // some hundreds of instructions, which is more than the machine
+            // can look past, so the second parent's entry would not be asked
+            // for until the first parent was done with. Reading all of them
+            // first, and handing the prefetcher the head of each block while
+            // doing it, puts the chains alongside each other. The arithmetic
+            // is untouched: this only changes when the same bytes are asked
+            // for.
+            let below = if l + 1 < self.depth { Some(&self.down[l][..]) } else { None };
+            let mut kids = [Kids::default(); FRONTIER];
             if l == 0 {
-                par[0] = 0;
+                kids[0] = self.root;
             } else {
-                let above = &self.node_of[l - 1];
-                for i in 0..n_cur {
-                    par[i] = above[cur[i].0 as usize];
+                let above = &self.down[l - 1];
+                for pi in 0..n_cur {
+                    kids[pi] = above[cur[pi].0 as usize];
                 }
             }
-            // Where each parent's children are, asked for all of them before
-            // any of them is measured.
-            //
-            // A level is three dependent cache misses deep — the slot's node
-            // number, that node's entry in `head`, and the block of centres it
-            // points at — and the parents' three chains are independent of one
-            // another. Walked one parent at a time they do not overlap: a
-            // parent's distances are some hundreds of instructions, which is
-            // more than the machine can look past, so the second parent's
-            // `head` entry is not asked for until the first parent is done
-            // with. Reading all the `head` entries first, and handing the
-            // prefetcher the head of each block while doing it, puts the three
-            // chains alongside each other. The arithmetic is untouched: this
-            // only changes when the same bytes are asked for.
-            let mut kids = [Kids::default(); FRONTIER];
             for pi in 0..n_cur {
-                kids[pi] = head[par[pi] as usize];
                 prefetch_centres(centres, kids[pi]);
             }
             // `max_paths` rather than the old `min(max_paths, n_next)`: the
@@ -451,6 +481,7 @@ impl Vocabulary {
                 // retrieval stage. Each child's centre is its own contiguous
                 // run of bytes, so a parent's children are read as one stream.
                 let blk = &centres[first * DESC_LEN..(first + n_live) * DESC_LEN];
+                qp.dists(blk, &self.norms[l][first..first + n_live], &mut dist);
                 // Only the closest `max_paths` children are descended, and
                 // only their distances are looked at afterwards. Ordering the
                 // whole frontier — up to forty-eight entries, once per level
@@ -458,11 +489,11 @@ impl Vocabulary {
                 // forty-five nodes about to be discarded, so the survivors are
                 // picked out by this scan instead. It reads each distance
                 // where the distance is made.
-                for (k, c) in blk.chunks_exact(DESC_LEN).enumerate() {
+                for (k, &dk) in dist[..n_live].iter().enumerate() {
                     if n_next == FRONTIER {
                         break;
                     }
-                    let e = ((first + k) as u32, dist2(q, c));
+                    let e = ((first + k) as u32, dk);
                     next[n_next] = e;
                     n_next += 1;
                     if held == keep && !(e.1 < cur[held - 1].1) {
@@ -475,6 +506,13 @@ impl Vocabulary {
                     }
                     cur[j] = e;
                     held += (held < keep) as usize;
+                    // A child that takes a place may be a parent of the next
+                    // level, and where its children are is a read into an
+                    // array as long as this level. Asking for it now lets it
+                    // arrive while the rest of the level is measured.
+                    if let Some(below) = below {
+                        prefetch_kids(below, e.0);
+                    }
                 }
             }
             if n_next == 0 {
@@ -514,6 +552,169 @@ impl Vocabulary {
         }
         for &(slot, _) in cur[..n_cur].iter() {
             out.push(slot);
+        }
+    }
+}
+
+/// A descriptor prepared for the descent: widened once, and its squared
+/// length taken once.
+///
+/// The descent measures some hundred and forty centres for every descriptor,
+/// and `dist2` measured each from scratch: both sides' bytes subtracted,
+/// widened and squared. But the square of a difference is
+///
+/// ```text
+/// |q - c|^2  =  |q|^2 + |c|^2 - 2 q.c
+/// ```
+///
+/// and of those three only the dot product depends on both sides. `|c|^2` is
+/// a property of the tree, stored beside each centre when it is built, and
+/// `|q|^2` and the widened query are a property of the descriptor, taken once
+/// here rather than once per centre. What is left per centre is a load, the
+/// widening of the centre's own bytes and a multiply-add — seven operations a
+/// thirty-two bytes where the difference form took ten — and four centres at
+/// a time share one horizontal reduction where each used to pay for its own.
+///
+/// **It is the same number, not an approximation of it.** Everything is an
+/// integer: `|q|^2` and `|c|^2` are at most 128 * 255^2 = 8.3 M apiece and the
+/// dot product no more, so nothing overflows, and the identity is exact in
+/// integers. The descent sees the distance it always saw.
+struct Query {
+    #[cfg(target_feature = "avx2")]
+    lo: [std::arch::x86_64::__m256i; DESC_LEN / 32],
+    #[cfg(target_feature = "avx2")]
+    hi: [std::arch::x86_64::__m256i; DESC_LEN / 32],
+    #[cfg(target_feature = "avx2")]
+    norm: u32,
+    /// Without the vector unit the difference form is as good as any, and
+    /// this is just the descriptor.
+    #[cfg(not(target_feature = "avx2"))]
+    q: [u8; DESC_LEN],
+}
+
+impl Query {
+    #[inline]
+    fn new(q: &[u8; DESC_LEN]) -> Query {
+        #[cfg(target_feature = "avx2")]
+        unsafe {
+            let norm = q.iter().map(|&v| v as u32 * v as u32).sum();
+            use std::arch::x86_64::*;
+            let zero = _mm256_setzero_si256();
+            let mut lo = [zero; DESC_LEN / 32];
+            let mut hi = [zero; DESC_LEN / 32];
+            for b in 0..DESC_LEN / 32 {
+                let v = _mm256_loadu_si256(q.as_ptr().add(b * 32) as *const __m256i);
+                // The centre is widened by the same two unpacks below, so the
+                // lanes pair up whatever order the unpacks leave them in.
+                lo[b] = _mm256_unpacklo_epi8(v, zero);
+                hi[b] = _mm256_unpackhi_epi8(v, zero);
+            }
+            Query { lo, hi, norm }
+        }
+        #[cfg(not(target_feature = "avx2"))]
+        Query { q: *q }
+    }
+
+    /// Distances from this query to each centre of `blk`, into `out`.
+    #[inline]
+    fn dists(&self, blk: &[u8], norms: &[u32], out: &mut [u32; MAX_BRANCH]) {
+        let n = norms.len();
+        debug_assert!(n <= MAX_BRANCH && blk.len() == n * DESC_LEN);
+        #[cfg(target_feature = "avx2")]
+        unsafe {
+            let mut k = 0usize;
+            while k + 4 <= n {
+                let d = self.dots4(blk.as_ptr().add(k * DESC_LEN));
+                for i in 0..4 {
+                    out[k + i] = self.norm + norms[k + i] - 2 * d[i];
+                }
+                k += 4;
+            }
+            while k < n {
+                let d = self.dot1(blk.as_ptr().add(k * DESC_LEN));
+                out[k] = self.norm + norms[k] - 2 * d;
+                k += 1;
+            }
+        }
+        #[cfg(not(target_feature = "avx2"))]
+        for k in 0..n {
+            out[k] = dist2(&self.q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN]);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let q = self.q_bytes();
+            debug_assert!((0..n).all(|k| out[k] == dist2(&q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN])));
+        }
+    }
+
+    /// The query's bytes again, for the debug check that the two forms agree.
+    #[cfg(debug_assertions)]
+    fn q_bytes(&self) -> [u8; DESC_LEN] {
+        #[cfg(target_feature = "avx2")]
+        unsafe {
+            use std::arch::x86_64::*;
+            let mut q = [0u8; DESC_LEN];
+            for b in 0..DESC_LEN / 32 {
+                let v = _mm256_packus_epi16(self.lo[b], self.hi[b]);
+                _mm256_storeu_si256(q.as_mut_ptr().add(b * 32) as *mut __m256i, v);
+            }
+            q
+        }
+        #[cfg(not(target_feature = "avx2"))]
+        self.q
+    }
+
+    /// One centre's widened dot product with the query, as eight lanes.
+    #[cfg(target_feature = "avx2")]
+    #[inline(always)]
+    unsafe fn dot_lanes(&self, c: *const u8) -> std::arch::x86_64::__m256i {
+        use std::arch::x86_64::*;
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let mut acc = zero;
+            for b in 0..DESC_LEN / 32 {
+                let v = _mm256_loadu_si256(c.add(b * 32) as *const __m256i);
+                // Each product is at most 255^2 and a pair of them fits an
+                // `i32` lane with room to spare.
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(self.lo[b], _mm256_unpacklo_epi8(v, zero)));
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(self.hi[b], _mm256_unpackhi_epi8(v, zero)));
+            }
+            acc
+        }
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[inline(always)]
+    unsafe fn dot1(&self, c: *const u8) -> u32 {
+        use std::arch::x86_64::*;
+        unsafe {
+            let acc = self.dot_lanes(c);
+            let half = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+            let pair = _mm_add_epi32(half, _mm_shuffle_epi32(half, 0b00_00_11_10));
+            let one = _mm_add_epi32(pair, _mm_shuffle_epi32(pair, 0b00_00_00_01));
+            _mm_cvtsi128_si32(one) as u32
+        }
+    }
+
+    /// Four consecutive centres' dot products, reduced together: two rounds of
+    /// pairwise horizontal adds leave each 128-bit half holding a partial sum
+    /// per centre, and one add of the halves finishes all four.
+    #[cfg(target_feature = "avx2")]
+    #[inline(always)]
+    unsafe fn dots4(&self, c: *const u8) -> [u32; 4] {
+        use std::arch::x86_64::*;
+        unsafe {
+            let a0 = self.dot_lanes(c);
+            let a1 = self.dot_lanes(c.add(DESC_LEN));
+            let a2 = self.dot_lanes(c.add(2 * DESC_LEN));
+            let a3 = self.dot_lanes(c.add(3 * DESC_LEN));
+            let h01 = _mm256_hadd_epi32(a0, a1);
+            let h23 = _mm256_hadd_epi32(a2, a3);
+            let h = _mm256_hadd_epi32(h01, h23);
+            let s = _mm_add_epi32(_mm256_castsi256_si128(h), _mm256_extracti128_si256(h, 1));
+            let mut out = [0u32; 4];
+            _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, s);
+            out
         }
     }
 }
@@ -853,10 +1054,37 @@ impl Iterator for Runs<'_> {
 /// pointer per word.
 pub struct InvertedFile {
     off: Vec<u32>,
-    data: Vec<(u32, u32)>,
+    /// One posting per entry: the image in the high 24 bits, and how many
+    /// times the word occurs in it in the low eight. See `POST_COUNT_BITS`.
+    data: Vec<u32>,
     /// log(N / df), per word.
     idf: Vec<f32>,
+    /// The postings whose count did not fit in eight bits, by position in
+    /// `data`, with the count they really have. Almost always empty: a word
+    /// occurring 255 times in one image is 255 of its 600 descriptors on one
+    /// leaf.
+    wide: Vec<(u32, u32)>,
+    /// Images indexed; every posting names one below this.
+    n_images: usize,
+    /// Whether some indexed word is in every image, and so weighs nothing.
+    /// See `query_touched`.
+    zero_idf: bool,
 }
+
+/// How a posting is packed: image above, count below.
+///
+/// A posting used to be a pair of `u32`s, and the query is nothing but a walk
+/// over postings — **8.7 billion of them** on the found corpus, 245,000 a
+/// query, from an array of some fifty megabytes that no cache holds. At that
+/// size the walk is paying for bytes, so the posting is now half as many:
+/// twenty-four bits of image is sixteen million of them, which is a corpus
+/// whose analysis would not fit in any memory this runs in, and eight bits of
+/// count covers every count but the pathological. A count that does not fit
+/// is stored as `POST_COUNT_MAX` and the real one kept in `wide`; the query
+/// needs it only when the query's own count is at least as large, and asks
+/// then.
+const POST_COUNT_BITS: u32 = 8;
+const POST_COUNT_MAX: u32 = (1 << POST_COUNT_BITS) - 1;
 
 /// How far down the word list the query asks for its postings, in entries.
 ///
@@ -896,7 +1124,7 @@ fn prefetch_postings(inv: &InvertedFile, words: &[u32], at: usize) {
             return;
         }
         let p = inv.data.as_ptr().add(start) as *const i8;
-        let bytes = (end - start) * std::mem::size_of::<(u32, u32)>();
+        let bytes = (end - start) * std::mem::size_of::<u32>();
         let mut at = 0usize;
         let mut lines = 0usize;
         while at < bytes && lines < POST_LINES {
@@ -919,6 +1147,7 @@ impl InvertedFile {
             }
         }
         let mut idf = vec![0f32; n_words];
+        let mut zero_idf = false;
         let mut off: Vec<u32> = Vec::with_capacity(n_words + 1);
         let mut total = 0u32;
         for w in 0..n_words {
@@ -931,10 +1160,13 @@ impl InvertedFile {
                 continue;
             }
             idf[w] = (n as f32 / d as f32).ln();
+            zero_idf |= idf[w] == 0.0;
             total += df[w];
         }
         off.push(total);
-        let mut data = vec![(0u32, 0u32); total as usize];
+        assert!(n < 1 << (32 - POST_COUNT_BITS), "{n} images is more than a posting can name");
+        let mut data = vec![0u32; total as usize];
+        let mut wide: Vec<(u32, u32)> = Vec::new();
         // The document counts become write cursors, so the images of a word
         // land in the order they are visited: increasing image index, as
         // before.
@@ -947,11 +1179,70 @@ impl InvertedFile {
                     continue;
                 }
                 let at = cursor[w] as usize;
-                data[at] = (img as u32, c);
+                if c >= POST_COUNT_MAX {
+                    wide.push((at as u32, c));
+                }
+                data[at] = (img as u32) << POST_COUNT_BITS | c.min(POST_COUNT_MAX);
                 cursor[w] = at as u32 + 1;
             }
         }
-        InvertedFile { off, data, idf }
+        // Written in image order within each word, so not sorted by position.
+        wide.sort_unstable();
+        InvertedFile { off, data, idf, wide, n_images: n, zero_idf }
+    }
+
+    /// `query` as it was before its inner loop lost its tests, for the one
+    /// index where they mattered.
+    ///
+    /// The fast loop finds the images a query touched by their scores being
+    /// non-zero, which is right whenever every word weighs something. A word
+    /// in every image of the corpus weighs ln 1 = 0, and it can be indexed
+    /// only when the posting cap is at least the corpus — a folder of 32
+    /// images or fewer. There an image can be touched and score nothing, and
+    /// the old loop listed it (once per such posting, until it scored) and the
+    /// mirrored pass went on to verify it. A handful of images is no place to
+    /// be fast, so it is simply the old loop, over the packed postings.
+    #[cold]
+    fn query_touched(&self, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) {
+        let mut touched: Vec<u32> = Vec::new();
+        let mut qmass = 0f32;
+        for (w, c) in wl.runs() {
+            let w = w as usize;
+            let (p0, p1) = (self.off[w] as usize, self.off[w + 1] as usize);
+            if p0 == p1 {
+                continue;
+            }
+            let idf2 = self.idf[w] * self.idf[w];
+            qmass += c as f32 * idf2;
+            for (k, &e) in self.data[p0..p1].iter().enumerate() {
+                let other = e >> POST_COUNT_BITS;
+                if other == exclude {
+                    continue;
+                }
+                let mut cnt = e & POST_COUNT_MAX;
+                if cnt == POST_COUNT_MAX {
+                    cnt = self.wide_count(p0 + k);
+                }
+                let a = &mut acc[other as usize];
+                if *a == 0.0 {
+                    touched.push(other);
+                }
+                *a += cnt.min(c) as f32 * idf2;
+            }
+        }
+        let inv = 1.0 / qmass.max(1e-6);
+        for &o in touched.iter() {
+            let s = acc[o as usize] * inv;
+            acc[o as usize] = 0.0;
+            out.push((o, s));
+        }
+    }
+
+    /// The real count of the posting at `at`, whose packed count saturated.
+    #[cold]
+    fn wide_count(&self, at: usize) -> u32 {
+        let i = self.wide.binary_search_by_key(&(at as u32), |e| e.0).expect("a saturated posting is recorded");
+        self.wide[i].1
     }
 
     /// The idf-weighted fraction of the query's words that also occur in each
@@ -966,16 +1257,15 @@ impl InvertedFile {
     ///
     /// The query list need not be one of the indexed ones; the mirrored and
     /// inverted passes query with lists that were never indexed.
-    pub fn query(
-        &self,
-        wl: &WordList,
-        exclude: u32,
-        acc: &mut [f32],
-        touched: &mut Vec<u32>,
-        out: &mut Vec<(u32, f32)>,
-    ) {
+    pub fn query(&self, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) {
         out.clear();
-        touched.clear();
+        let n = acc.len();
+        // Every posting names an image of the corpus, and `acc` must have a
+        // slot for each: the write below is unchecked on the strength of this.
+        assert!(n >= self.n_images, "an accumulator shorter than the corpus");
+        if self.zero_idf {
+            return self.query_touched(wl, exclude, acc, out);
+        }
         let mut qmass = 0f32;
         let words = &wl.word[..];
         for (at, w, c) in wl.runs_at() {
@@ -990,31 +1280,80 @@ impl InvertedFile {
             // the postings is even known. Asking a few words early breaks the
             // chain, and asks for nothing the loop was not about to read.
             prefetch_postings(self, words, at + POST_AHEAD);
-            let post = &self.data[self.off[w] as usize..self.off[w + 1] as usize];
+            let (p0, p1) = (self.off[w] as usize, self.off[w + 1] as usize);
+            let post = &self.data[p0..p1];
             if post.is_empty() {
                 continue;
             }
             let idf2 = self.idf[w] * self.idf[w];
             qmass += c as f32 * idf2;
-            for &(other, cnt) in post.iter() {
-                if other == exclude {
-                    continue;
+            // Histogram intersection: a word occurring three times in the
+            // query and once in the other image is one shared landmark, not
+            // three.
+            //
+            // This is the loop the query is, and it is now nothing but a
+            // read, a multiply and an add. It used to test each image against
+            // `exclude` and against "never touched before", to keep a list of
+            // the images it had touched; both are gone. The query image's own
+            // slot is simply cleared at the end, and the touched images are
+            // found by scanning the accumulator once — which is `n` floats
+            // against the quarter of a million postings a query walks on a
+            // found corpus, and reads them eight at a time. The sum each slot
+            // receives is the same products added in the same order, so the
+            // scores are the same floats.
+            if c == 1 {
+                // Most of a query's words occur in it once, and then the
+                // intersection is one whatever the other image holds: the
+                // contribution is `1.0 * idf2`, which is `idf2` to the bit.
+                for &e in post {
+                    let other = (e >> POST_COUNT_BITS) as usize;
+                    debug_assert!(other < n);
+                    unsafe { *acc.get_unchecked_mut(other) += idf2 };
                 }
-                let a = &mut acc[other as usize];
-                if *a == 0.0 {
-                    touched.push(other);
+            } else if c < POST_COUNT_MAX {
+                for &e in post {
+                    let other = (e >> POST_COUNT_BITS) as usize;
+                    let cnt = e & POST_COUNT_MAX;
+                    debug_assert!(other < n);
+                    unsafe { *acc.get_unchecked_mut(other) += cnt.min(c) as f32 * idf2 };
                 }
-                // Histogram intersection: a word occurring three times in the
-                // query and once in the other image is one shared landmark,
-                // not three.
-                *a += cnt.min(c) as f32 * idf2;
+            } else {
+                // The query's own count is large enough that a saturated
+                // posting's real count could matter. Never on a real corpus.
+                for (k, &e) in post.iter().enumerate() {
+                    let other = (e >> POST_COUNT_BITS) as usize;
+                    let mut cnt = e & POST_COUNT_MAX;
+                    if cnt == POST_COUNT_MAX {
+                        cnt = self.wide_count(p0 + k);
+                    }
+                    acc[other] += cnt.min(c) as f32 * idf2;
+                }
             }
         }
+        if (exclude as usize) < n {
+            acc[exclude as usize] = 0.0;
+        }
         let inv = 1.0 / qmass.max(1e-6);
-        for &o in touched.iter() {
-            let s = acc[o as usize] * inv;
-            acc[o as usize] = 0.0;
-            out.push((o, s));
+        // Every contribution is positive — a count of at least one times an
+        // idf of at least ln 5 — so a touched slot is exactly a non-zero one.
+        const LANES: usize = 8;
+        let mut base = 0usize;
+        for chunk in acc.chunks_exact_mut(LANES) {
+            if chunk.iter().fold(false, |a, &v| a | (v != 0.0)) {
+                for (k, a) in chunk.iter_mut().enumerate() {
+                    if *a != 0.0 {
+                        out.push(((base + k) as u32, *a * inv));
+                        *a = 0.0;
+                    }
+                }
+            }
+            base += LANES;
+        }
+        for (k, a) in acc[base..].iter_mut().enumerate() {
+            if *a != 0.0 {
+                out.push(((base + k) as u32, *a * inv));
+                *a = 0.0;
+            }
         }
     }
 }
@@ -1393,6 +1732,122 @@ mod tests {
         firsts.dedup();
         assert!(firsts.len() > GROUPS, "the second level separated nothing");
     }
+
+    /// The query as it was written before its postings were packed and its
+    /// inner loop lost its tests: every posting a pair, the query image
+    /// skipped, the touched images listed as they were first reached. Kept as
+    /// the reference `query` is checked against.
+    fn query_reference(lists: &[WordList], max_posting: usize, wl: &WordList, exclude: u32) -> Vec<(u32, f32)> {
+        let n = lists.len();
+        let n_words = lists.iter().flat_map(|l| l.word.iter()).map(|&w| w as usize + 1).max().unwrap_or(0).max(
+            wl.word.iter().map(|&w| w as usize + 1).max().unwrap_or(0),
+        );
+        let mut df = vec![0usize; n_words];
+        let mut post: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_words];
+        for (img, l) in lists.iter().enumerate() {
+            for (w, c) in l.runs() {
+                df[w as usize] += 1;
+                post[w as usize].push((img as u32, c));
+            }
+        }
+        let mut acc = vec![0f32; n];
+        let mut touched = Vec::new();
+        let mut qmass = 0f32;
+        for (w, c) in wl.runs() {
+            let w = w as usize;
+            let d = df[w];
+            if d == 0 || d > max_posting {
+                continue;
+            }
+            let idf = (n as f32 / d as f32).ln();
+            let idf2 = idf * idf;
+            qmass += c as f32 * idf2;
+            for &(other, cnt) in post[w].iter() {
+                if other == exclude {
+                    continue;
+                }
+                if acc[other as usize] == 0.0 {
+                    touched.push(other);
+                }
+                acc[other as usize] += cnt.min(c) as f32 * idf2;
+            }
+        }
+        let inv = 1.0 / qmass.max(1e-6);
+        let mut out: Vec<(u32, f32)> = Vec::new();
+        for &o in touched.iter() {
+            out.push((o, acc[o as usize] * inv));
+            acc[o as usize] = 0.0;
+        }
+        out.sort_by_key(|e| (e.0, e.1.to_bits()));
+        out
+    }
+
+    /// Packed postings, the saturated counts behind them, and the loop that
+    /// skips nothing: the same images with the same scores, to the bit, as the
+    /// query they replaced. The lists are built so that some words occur
+    /// hundreds of times in one image — past what eight bits of count can say
+    /// — in the query and in the indexed images both, which is the one case
+    /// the packed form has to ask `wide` about.
+    #[test]
+    fn packed_postings_score_exactly_as_pairs_did() {
+        let mut rng = Lcg(0x1f83_d9ab_5be0_cd19);
+        let mut made = |len: usize, span: u32, heavy: usize| -> WordList {
+            let mut pairs: Vec<(u32, u32)> = (0..len)
+                .map(|k| {
+                    let w = if k < heavy { 7 } else { ((rng.byte() as u32) << 8 | rng.byte() as u32) % span };
+                    (w, k as u32)
+                })
+                .collect();
+            pairs.sort_unstable();
+            WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1).collect() }
+        };
+        for &(n_imgs, span) in [(3usize, 50u32), (40, 400), (200, 3000)].iter() {
+            let lists: Vec<WordList> =
+                (0..n_imgs).map(|i| made(300, span, [0, 1, 254, 255, 256, 290][i % 6])).collect();
+            let n_words = span as usize;
+            for max_posting in [n_imgs, (n_imgs / 5).max(2)] {
+                let inv = InvertedFile::build(&lists, n_words, max_posting);
+                let mut acc = vec![0f32; n_imgs];
+                let mut got = Vec::new();
+                for (q, heavy) in [(0usize, 0usize), (1, 1), (2, 260), (3, 300), (4, 254)] {
+                    let wl = made(300, span, heavy);
+                    let exclude = (q % n_imgs) as u32;
+                    inv.query(&wl, exclude, &mut acc, &mut got);
+                    got.sort_by_key(|e| (e.0, e.1.to_bits()));
+                    let want = query_reference(&lists, max_posting, &wl, exclude);
+                    assert_eq!(got.len(), want.len(), "n {n_imgs} span {span} cap {max_posting} heavy {heavy}");
+                    for (g, w) in got.iter().zip(want.iter()) {
+                        assert_eq!((g.0, g.1.to_bits()), (w.0, w.1.to_bits()), "n {n_imgs} span {span} heavy {heavy}");
+                    }
+                    assert!(acc.iter().all(|&v| v == 0.0), "the accumulator is left clean");
+                }
+            }
+        }
+    }
+
+    /// The descent's distance, as a norm and a dot product, against the
+    /// difference form it replaced — including the bytes at both ends of the
+    /// range, where an overflow or a sign would show.
+    #[test]
+    fn query_distances_are_dist2() {
+        let mut rng = Lcg(0x9b05_688c_2b3e_6c1f);
+        let mut cases: Vec<[u8; DESC_LEN]> = vec![[0; DESC_LEN], [255; DESC_LEN], std::array::from_fn(|i| if i % 2 == 0 { 255 } else { 0 })];
+        for _ in 0..200 {
+            cases.push(std::array::from_fn(|_| rng.byte()));
+        }
+        for q in cases.iter() {
+            let qp = Query::new(q);
+            for n in 1..=MAX_BRANCH {
+                let blk: Vec<u8> = (0..n).flat_map(|k| cases[(k * 7 + q[0] as usize) % cases.len()]).collect();
+                let norms: Vec<u32> = blk.chunks_exact(DESC_LEN).map(|c| c.iter().map(|&v| v as u32 * v as u32).sum()).collect();
+                let mut out = [0u32; MAX_BRANCH];
+                qp.dists(&blk, &norms, &mut out);
+                for k in 0..n {
+                    assert_eq!(out[k], dist2(q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN]));
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- kernel timings
@@ -1512,14 +1967,14 @@ mod bench {
                 .collect();
             let inv = InvertedFile::build(&lists, words as usize, (n_imgs / 5).max(32));
             let mut acc = vec![0f32; n_imgs];
-            let (mut touched, mut out) = (Vec::new(), Vec::new());
+            let mut out = Vec::new();
             let mut best = f64::MAX;
             let mut hits = 0usize;
             for _ in 0..5 {
                 let t = std::time::Instant::now();
                 hits = 0;
                 for (i, wl) in lists.iter().enumerate().step_by(7) {
-                    inv.query(wl, i as u32, &mut acc, &mut touched, &mut out);
+                    inv.query(wl, i as u32, &mut acc, &mut out);
                     hits += out.len();
                     std::hint::black_box(&out);
                 }
@@ -1713,10 +2168,10 @@ mod bench {
     #[ignore]
     fn quantise_threads() {
         let mut rng = Lcg(0x1234_5678_9abc_def0);
-        let n = 120_000;
+        let n = 480_000;
         let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
-        for (depth, sample) in [(3usize, 160_000usize), (4, 160_000), (5, 160_000)] {
-            let p = VocabParams { depth, branching: 16, sample, ..Default::default() };
+        for (depth, branching, sample) in [(4usize, 16usize, 160_000usize), (5, 16, 160_000), (6, 11, 160_000)] {
+            let p = VocabParams { depth, branching, sample, ..Default::default() };
             let v = Vocabulary::build(&desc, &p);
             let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum();
             let mut best1 = f64::MAX;
@@ -1740,7 +2195,7 @@ mod bench {
                 best8 = best8.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
             }
             println!(
-                "depth {depth}: 1 thread {best1:8.1} ns/desc, all threads {best8:8.1} ns/desc  (x{:.2} per thread on 8, {live} centres, {:.0} MB)",
+                "depth {depth} x{branching}: 1 thread {best1:8.1} ns/desc, all threads {best8:8.1} ns/desc  (x{:.2} per thread on 8, {live} centres, {:.0} MB)",
                 best8 * 8.0 / best1,
                 live as f64 * DESC_LEN as f64 / 1e6
             );

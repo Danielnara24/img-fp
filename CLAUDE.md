@@ -1511,6 +1511,147 @@ The CPU says `constant_tsc` and `nonstop_tsc`, so it ticks at a fixed rate
 whatever the core clock is doing. Check `current_clocksource` before trusting a
 profile taken on another machine.
 
+**An eighth pass, and the rule it was measured by: at eight threads this
+machine charges for µops, not for waiting.** Every change is byte-identical on
+both corpora — the same 217,376 pairs and 128 groups here, the same 4,576 pairs
+and 862 groups on the found one, every verdict field compared — and the pass is
+worth **-6.6% of the CPU and -7.3% of the wall on the found corpus**, **-4.6% and
+-4.3% on this one**, and 48 MB of the found corpus's peak.
+
+The rule first, because it decided what was worth finishing. The first three
+changes below — the query, the descent's kernel, the pixel check — were
+measured in place with `--features prof`, and the query's stage alone fell from
+84 CPU-seconds to 43; an A/B of the three together took the found run down by
+**27**. That is not a contradiction. A stage's CPU-seconds under `prof` are
+thread-time, and thread-time includes waiting for memory; at eight threads the
+other hyperthread runs while one waits, so a wait removed is mostly time the
+core was already spending on someone else. What the run's CPU-seconds follow is
+what the core *executes*: the query change alone removed some 35 G µops — a
+branch, a compare and a push per posting, 8.7 billion postings — which at the
+one to two G µops a CPU-second this chip manages on eight threads is most of
+the 27. A stage table that halves is therefore a claim about stalls until an
+end-to-end A/B says otherwise, and the A/B is the only figure quoted as the
+pass's worth.
+
+- **A posting is four bytes, and the query's inner loop is a read, a multiply
+  and an add.** The found corpus's queries walk **8.7 billion postings** —
+  245,000 a query, 35,583 queries — out of some fifty megabytes no cache
+  holds. A posting was a pair of `u32`s; it is now the image in 24 bits and the
+  count in 8, with the rare count past 254 kept in a side table (`wide`) and
+  asked only when the query's own count is as large. The loop also tested every
+  posting against the query image and against "never touched", to keep a
+  touched list; the query image's slot is now cleared at the end and the
+  touched images are found by one scan of the accumulator, `n` floats against a
+  quarter of a million postings. A query word occurring once — most of them —
+  adds `idf2` itself, since `1.0 * idf2` is `idf2`. Scores are the same products
+  added in the same order. **One exception, kept exactly:** a word in every
+  image has idf 0, which is indexable only when the posting cap reaches the
+  corpus — 32 images or fewer — and there an image can be touched and score
+  nothing; the old loop listed it and the second look verified it, so such an
+  index takes the old loop (`query_touched`).
+  `packed_postings_score_exactly_as_pairs_did` holds both paths against the
+  old query, saturated counts and zero-idf words included.
+- **The candidate ranking selects on integers.** A positive float's bits sort
+  as the float does, so `(!score_bits << 32) | index` is one `u64` whose order
+  is the comparator's; the selection over nine thousand candidates stops
+  paying a `partial_cmp`, an `unwrap` and a tie-break per comparison. Any score
+  a key cannot carry falls back to the comparator. `cand:rank` 14.2 -> 6.7
+  CPU-seconds on the found corpus.
+- **The descent measures `|q|^2 + |c|^2 - 2 q.c`.** `|c|^2` is stored beside
+  each centre at build time and the widened query is taken once per
+  descriptor, so a centre costs a load, a widening and a multiply-add, and four
+  centres share one horizontal reduction. It is the same integer. And a level
+  now opens with one dependent read rather than three: `down[l][slot]` is where
+  a centre's children are, folded at build time out of `node_of` and `head`,
+  and it is prefetched the moment a child takes a place in the frontier.
+  `quantise_threads` now has a depth-6, branching-11 tree, which is the found
+  corpus's shape: about **-10% at eight threads**, level on one, with the bench
+  swinging nearly as much between runs — a direction, not a figure. A
+  single-thread breakdown of that descent says why it is not more: the kernel is
+  a quarter of it, the frontier's bookkeeping another quarter, and the rest is
+  waiting for the deep levels. `query_distances_are_dist2` holds the kernel to
+  `dist2` at both ends of the byte range.
+- **The pixel check reads both thumbnails eight samples at a time.** Reading
+  them was nearly all of the check — `pixel_timings`: some forty of fifty
+  microseconds, three quarters of it the rotated B side — and the block
+  statistics were noise. Two four-byte gathers per level per eight samples cover
+  a bilinear tap's two rows (the top read starts at the top-left pixel, the
+  bottom one ends at the bottom-right, and `split` never lets either leave the
+  plane); the clamps are compares and blends that send a NaN where the scalar
+  comparisons send it, and every product is rounded on its own. `pixel_timings`
+  prints a checksum over every figure the check returns: unchanged, and
+  **57 -> 29 microseconds** a call near identity. In place on this corpus,
+  `pixel_check` **34.9 -> 20.7** CPU-seconds and `pixel_check:prop` 8.4 -> 4.4.
+- **The octave's top Gaussian is not written.** It exists to make the last
+  difference, carries no gradient and starts no octave, and it was written out
+  and dropped unread (`blur_top`). At eight threads the blur is waiting on
+  memory — `blur_threads` reads **x5.2** per thread against one, where a
+  cache-resident descriptor reads x1.9 — so a plane not written is worth
+  having: the octave's five blurs went **16.3-16.7 -> 14.6-14.8 ms** a thread.
+- **The extremum sweep skips dead pixels eight at a time**, reading its flags
+  as a word; a tenth of a row survives, and each dead pixel was a load and a
+  branch. **The orientation histogram got the descriptor's split**: the weight
+  argument and the bin are worked out for a row eight samples at a time, and
+  only the table read and the add go one by one.
+
+`extract_threads` is new, and it is the check to run on anything in `sift.rs`:
+the whole extractor at the two shapes the corpora hand it, one core and all of
+them, with a checksum over every keypoint field and descriptor byte. Both
+changes above leave it at `48a0f69e907049e6` / `6efa669a9cb66fb9`.
+
+**What the pass is worth end to end**, cold, cooled, cache evicted, in the
+order A B B A A B:
+
+| found corpus | CPU-seconds | wall | peak RSS |
+|---|---|---|---|
+| **before** | 971.3 / 954.5 / 948.3 | 142.9 / 138.7 / 138.9 s | 1,220 MB |
+| **after** | 900.8 / 896.6 / 887.4 | 131.7 / 129.7 / 128.4 s | 1,172 MB |
+
+| benchmark corpus | CPU-seconds | wall |
+|---|---|---|
+| **before** | 380.0 / 379.4 / 378.1 | 59.4 / 59.4 / 59.2 s |
+| **after** | 367.8 / 354.2 / 363.0 | 57.6 / 56.3 / 56.5 s |
+
+Slot-matched, the found corpus's three pairs are -7.3%, -6.1% and -6.4%, and
+this corpus's -3.2%, -6.6% and -4.0% (CPU is user plus sys throughout). The gap
+between the two is the usual one: half of a benchmark run is the image crate's
+decoders, and a found run is a third retrieval, which is where most of this
+pass landed. The same A/B taken after only the first three changes read -2.9%
+and -4.8%, so the rest of the list is worth about four points on the found
+corpus and nothing this corpus can resolve.
+
+**Threads, which is the largest lever in this file and not a change to it.**
+The same binary on this corpus at `-t 4` costs **247 CPU-seconds against 375
+at `-t 8`** (two runs each, cooled: 251.1 / 242.8 against 367.7 / 383.5), for
+**+15% of the wall** (68.3 s against 59.1). Four physical cores under a power
+cap: the second hyperthread on each buys a sixth more throughput and is
+charged as a whole second CPU. So "how many CPU-seconds does a run take" and
+"how long does a run take" have different best answers here, and the default
+(`-t 0`, every logical core) is the answer to the second.
+
+Tried in this pass and rejected, each measured:
+
+- *The descriptor's trilinear corners, eight samples at a time*, leaving the
+  scatter nothing but adds. Exact, and no faster at one thread or eight:
+  the scatter is bound by its **eight stores a sample** on a core that retires
+  one a cycle, not by the fourteen operations that feed them — which is what
+  the entry below on four-at-a-time weights found from the other side.
+- *Holding the eight bins a sample adds into in registers* while consecutive
+  samples share them, writing back only when the set changes — exact, since
+  every bin receives the same additions in the same order. **13% slower**
+  single-threaded: consecutive samples change bins more often than the
+  store-forwarding chain it removes costs.
+- *Computing gradients lazily*, only where a keypoint's window reads them.
+  Counted before building it: windows cover **69% of the gradient planes' 16x16
+  tiles here and 77% on the found corpus** (85% and 97% of rows), so the most it
+  could save is some eighteen CPU-seconds across both, for keeping every
+  Gaussian alive through description.
+- *glibc tunables* (`trim_threshold` 1 GB, `mmap_threshold` 32 MB): minor
+  faults down a quarter, sys time down 2-3 s of a 370 s run, inside the noise.
+- *Dropping the mirror+invert variant* from the second look, since the corpus
+  has no mirrored negative. It costs **3.2 points of recall** (F1 0.9547 ->
+  0.9368, 44 perfect transforms against 47) — see *What the second look costs*.
+
 ### What the second look costs, and the seven ways not to fix it
 
 It is **41% of a found corpus's run** and 1.5% of this one's. Profiled on the
@@ -1536,7 +1677,11 @@ Seven cuts have been measured and every one of them is worse than the cost:
   pays: **all 467** of the found corpus's anchors come from `mirror`, and
   `invert` and `mirror+invert` yield **zero**; on this corpus `invert` yields
   **4,915 of 5,774** and mirror 276. Neither can go, and a corpus that
-  measured only one of them would have concluded otherwise.
+  measured only one of them would have concluded otherwise. Nor can the third,
+  though the catalogue has no mirrored negative: asking only `mirror` and
+  `invert` costs **3.2 points of recall** here (F1 0.9547 -> 0.9368, 47
+  perfect transforms -> 44), which is a third of the pass's cost on the found
+  corpus bought back at a price this corpus will not pay.
 - **Cutting its candidate list.** On the found corpus only **40 of 467**
   anchors sit beyond rank 25, so `-k 25` would cost almost nothing there. On
   this one **3,678 of 5,774** do, at a median rank of 40 — because an inverted

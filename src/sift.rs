@@ -288,11 +288,13 @@ struct BlurScratch {
     /// that count. See `blur_into`.
     ring: Vec<f32>,
     padded: Vec<f32>,
+    /// One output row, for a blur whose Gaussian is not kept. See `blur_top`.
+    row: Vec<f32>,
 }
 
 thread_local! {
     static BLUR_SCRATCH: std::cell::RefCell<BlurScratch> =
-        const { std::cell::RefCell::new(BlurScratch { ring: Vec::new(), padded: Vec::new() }) };
+        const { std::cell::RefCell::new(BlurScratch { ring: Vec::new(), padded: Vec::new(), row: Vec::new() }) };
 }
 
 /// Drop this thread's blur scratch. Called once the analysis phase is over,
@@ -302,6 +304,7 @@ pub fn release_scratch() {
         let mut s = s.borrow_mut();
         s.ring = Vec::new();
         s.padded = Vec::new();
+        s.row = Vec::new();
     });
 }
 
@@ -313,7 +316,7 @@ fn blur(src: &Layer, sigma: f32) -> Layer {
 /// The same, over a plane that is not a `Layer` — the working image itself,
 /// which the pyramid's base is a blur of.
 fn blur_plane(w: usize, h: usize, px: &[f32], sigma: f32) -> Layer {
-    BLUR_SCRATCH.with(|s| blur_into(w, h, px, sigma, &mut s.borrow_mut(), false).0)
+    BLUR_SCRATCH.with(|s| blur_into(w, h, px, sigma, &mut s.borrow_mut(), false, true).0.unwrap())
 }
 
 /// Blur, and the difference-of-Gaussians it forms with the layer it blurred.
@@ -324,9 +327,23 @@ fn blur_plane(w: usize, h: usize, px: &[f32], sigma: f32) -> Layer {
 /// still in cache — so the subtraction costs one store and the two reads it
 /// used to make are gone. Same two floats, same subtraction, same order.
 fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
-    let (g, d) = BLUR_SCRATCH.with(|s| blur_into(src.w, src.h, &src.px, sigma, &mut s.borrow_mut(), true));
-    // The `true` above is what makes the difference exist.
-    (g, d.unwrap())
+    let (g, d) = BLUR_SCRATCH.with(|s| blur_into(src.w, src.h, &src.px, sigma, &mut s.borrow_mut(), true, true));
+    // The first `true` above is what makes the difference exist.
+    (g.unwrap(), d.unwrap())
+}
+
+/// The difference alone, for the top layer of an octave.
+///
+/// That layer exists only to make the octave's last difference: it carries no
+/// gradient and no octave starts from it, so its Gaussian was written out — a
+/// whole plane of stores, each of which first reads the line it lands in — and
+/// dropped unread. At eight threads the blur is waiting on memory rather than
+/// on arithmetic (`blur_threads`: five times slower per thread than alone,
+/// where the extractor as a whole is under three), so a plane not written is
+/// the currency here. The difference is the same subtraction of the same two
+/// floats; only the Gaussian's row now lives in a scratch row.
+fn blur_top(src: &Layer, sigma: f32) -> Layer {
+    BLUR_SCRATCH.with(|s| blur_into(src.w, src.h, &src.px, sigma, &mut s.borrow_mut(), true, false)).1.unwrap()
 }
 
 /// One row of the horizontal pass: symmetric kernel, eight outputs at a time
@@ -365,7 +382,7 @@ fn blur_row(row: &[f32], padded: &mut [f32], out: &mut [f32], kc: f32, ks: &[f32
     }
 }
 
-fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, want_dog: bool) -> (Layer, Option<Layer>) {
+fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, want_dog: bool, want_gauss: bool) -> (Option<Layer>, Option<Layer>) {
     let k = gaussian_kernel(sigma);
     let r = k.len() / 2;
     let kc = k[r];
@@ -392,9 +409,13 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
     if s.padded.len() < w + 2 * r {
         s.padded.resize(w + 2 * r, 0.0);
     }
+    if !want_gauss && s.row.len() < w {
+        s.row.resize(w, 0.0);
+    }
     let ring = &mut s.ring[..ring_rows * w];
     let padded = &mut s.padded[..w + 2 * r];
-    let mut dst: Vec<f32> = Vec::with_capacity(w * h);
+    let scratch_row = &mut s.row[..if want_gauss { 0 } else { w }];
+    let mut dst: Vec<f32> = Vec::with_capacity(if want_gauss { w * h } else { 0 });
     let mut dog: Vec<f32> = Vec::with_capacity(if want_dog { w * h } else { 0 });
     let mut filtered = 0usize; // rows of `src` already through the horizontal pass
     {
@@ -420,12 +441,19 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
             }
             let base = y % ring_rows;
             let c = &ring[base * w..(base + 1) * w];
-            let urow = &mut spare[y * w..(y + 1) * w];
-            for x in 0..w {
-                urow[x].write(c[x] * kc);
-            }
-            // Every element of the row was written just above.
-            let acc = unsafe { &mut *(urow as *mut [std::mem::MaybeUninit<f32>] as *mut [f32]) };
+            let acc: &mut [f32] = if want_gauss {
+                let urow = &mut spare[y * w..(y + 1) * w];
+                for x in 0..w {
+                    urow[x].write(c[x] * kc);
+                }
+                // Every element of the row was written just above.
+                unsafe { &mut *(urow as *mut [std::mem::MaybeUninit<f32>] as *mut [f32]) }
+            } else {
+                for x in 0..w {
+                    scratch_row[x] = c[x] * kc;
+                }
+                &mut scratch_row[..]
+            };
             // Away from the two edges no tap reflects, and a tap's slot
             // follows from this row's by one conditional wrap. That replaces
             // two `reflect101` searches and two divisions by `ring_rows` —
@@ -463,9 +491,11 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
             }
         }
     }
-    // Every row of the plane was filled above.
-    unsafe { dst.set_len(w * h) };
-    let g = Layer { w, h, px: dst };
+    // Every row of the plane was filled above, if there is a plane.
+    let g = want_gauss.then(|| {
+        unsafe { dst.set_len(w * h) };
+        Layer { w, h, px: dst }
+    });
     let d = want_dog.then(|| Layer { w, h, px: dog });
     (g, d)
 }
@@ -611,6 +641,14 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
         gauss.push(Some(std::mem::replace(&mut octave_base, Layer { w: 0, h: 0, px: vec![] })));
         let mut dog: Vec<Layer> = Vec::with_capacity(s + 2);
         for i in 1..s + 3 {
+            if i == s + 2 {
+                // The top layer: its difference and nothing else. See
+                // `blur_top`.
+                dog.push(timed!(6, blur_top(gauss[i - 1].as_ref().unwrap(), sig[i])));
+                gauss.push(None);
+                gauss[i - 1] = None;
+                break;
+            }
             let (l, d) = timed!(6, blur_dog(gauss[i - 1].as_ref().unwrap(), sig[i]));
             gauss.push(Some(l));
             dog.push(d);
@@ -821,10 +859,28 @@ fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_sc
                 );
                 alive[i] = ((v > thr_pre) & (v >= biggest)) | ((v < -thr_pre) & (v <= smallest));
             }
-            for i in 0..span {
-                if !alive[i] {
+            // The survivors, in order. A row is about a tenth survivors, so
+            // the flags are read eight at a time and a run of eight dead
+            // pixels costs one test rather than eight loads and eight
+            // branches; the pixels that are alive are visited in the order
+            // they always were.
+            let mut i = 0usize;
+            while i < span {
+                if i + 8 <= span {
+                    // `bool` is one byte, zero or one, so eight of them are a
+                    // word that is zero exactly when all eight are false.
+                    let eight = unsafe { std::ptr::read_unaligned(alive.as_ptr().add(i) as *const u64) };
+                    if eight == 0 {
+                        i += 8;
+                        continue;
+                    }
+                }
+                let here = i;
+                i += 1;
+                if !alive[here] {
                     continue;
                 }
+                let i = here;
                 let xu = lo + i;
                 let v = c1[xu];
                 let positive = v > 0.0;
@@ -948,6 +1004,11 @@ fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
     Some(x)
 }
 
+/// Samples of an orientation histogram's row worked out before any is added
+/// in. A row is at most `2 * radius + 1` wide and the radius is `4.5` scales,
+/// so thirty-two covers every row at the scales this runs at in one block.
+const ORI_SWEEP: usize = 32;
+
 fn orientation_hist(g: &Grad, h: usize, px: f32, py: f32, radius: i32, sigma: f32, hist: &mut [f32; ORI_BINS]) -> f32 {
     let expf_scale = -1.0 / (2.0 * sigma * sigma);
     let mut temphist = [0f32; ORI_BINS];
@@ -975,21 +1036,35 @@ fn orientation_hist(g: &Grad, h: usize, px: f32, py: f32, radius: i32, sigma: f3
         }
         let row = y as usize * g.w;
         let span = &g.px[row + (cx + j0) as usize..row + (cx + j1) as usize + 1];
-        for (n, &[mag, ori]) in span.iter().enumerate() {
-            let j = j0 + n as i32;
-            let t = (i * i + j * j) as f32 * neg_scale;
-            let wgt = tbl.at(t);
-            // `ori` came out of `fast_atan2_deg` in 0..=360, so the rounded
-            // bin is in 0..=ORI_BINS: the conversion cannot saturate, the
-            // wrap can only ever fire at the top end, and the result indexes
-            // the histogram. The test for a negative bin that used to stand
-            // here could not fire at all.
-            let mut bin = unsafe { (ori * ORI_BINS as f32 / 360.0).round().to_int_unchecked::<u32>() as usize };
-            if bin >= ORI_BINS {
-                bin -= ORI_BINS;
+        // Two sweeps, for the reason the descriptor has three: working out a
+        // sample's weight argument and its bin is the same short chain of
+        // arithmetic for every sample and runs eight at a time, while reading
+        // the weight table and adding into the histogram go one sample after
+        // another. Interleaved, the second half held the first to one sample
+        // at a time as well. Each value is the float the single loop computed,
+        // and the histogram receives the same products in the same order.
+        let mut jj = j0;
+        for block in span.chunks(ORI_SWEEP) {
+            let mut sw_t = [0f32; ORI_SWEEP];
+            let mut sw_bin = [0u32; ORI_SWEEP];
+            for (u, &[_, ori]) in block.iter().enumerate() {
+                let j = jj + u as i32;
+                sw_t[u] = (i * i + j * j) as f32 * neg_scale;
+                // `ori` came out of `fast_atan2_deg` in 0..=360, so the
+                // rounded bin is in 0..=ORI_BINS: the conversion cannot
+                // saturate, the wrap can only ever fire at the top end, and
+                // the result indexes the histogram. Converted as a signed
+                // integer, which a vector can do and an unsigned one cannot;
+                // over 0..=36 the two are the same number.
+                let b = unsafe { (ori * ORI_BINS as f32 / 360.0).round().to_int_unchecked::<i32>() };
+                sw_bin[u] = if b >= ORI_BINS as i32 { b - ORI_BINS as i32 } else { b } as u32;
             }
-            debug_assert!(bin < ORI_BINS);
-            unsafe { *temphist.get_unchecked_mut(bin) += wgt * mag };
+            jj += block.len() as i32;
+            for (u, &[mag, _]) in block.iter().enumerate() {
+                let bin = sw_bin[u] as usize;
+                debug_assert!(bin < ORI_BINS);
+                unsafe { *temphist.get_unchecked_mut(bin) += tbl.at(sw_t[u]) * mag };
+            }
         }
     }
     let n = ORI_BINS;
@@ -1380,6 +1455,124 @@ mod bench {
             best = best.min(t.elapsed().as_secs_f64() * 1000.0);
         }
         best
+    }
+
+    /// `cargo test --release -- --ignored --nocapture extract_threads`
+    ///
+    /// The whole extractor, at the two shapes the two corpora hand it — a
+    /// 224-pixel thumbnail that is enlarged to 448 before it is analysed, and a
+    /// photograph already reduced to the 384 working size — on one core and
+    /// on every thread at once. Prints a checksum over every keypoint field and
+    /// every descriptor byte, so a change meant to be exact can be held to
+    /// that here before a corpus run.
+    #[test]
+    #[ignore]
+    fn extract_threads() {
+        let img = |w: usize, h: usize, seed: u32| {
+            let mut px = vec![0f32; w * h];
+            let mut s = seed;
+            for (i, v) in px.iter_mut().enumerate() {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                *v = ((s >> 16) & 0xff) as f32 / 255.0 * 0.15
+                    + (((i % w) / (11 + seed as usize % 7) + (i / w) / 13) % 5) as f32 * 0.12
+                    + ((x * 0.07 + seed as f32).sin() * (y * 0.045).cos()) * 0.25
+                    + 0.3;
+            }
+            crate::decode::Gray { w, h, px }
+        };
+        let p = Params { max_features: 600, ..Params::default() };
+        for (w, h) in [(224usize, 224usize), (384, 288)] {
+            let imgs: Vec<crate::decode::Gray> = (0..8).map(|k| img(w, h, 7 + k as u32 * 101)).collect();
+            let mut sum = 0u64;
+            for g in imgs.iter() {
+                let f = extract(g, &p);
+                for k in f.kps.iter() {
+                    for v in [k.x, k.y, k.sigma, k.angle, k.response] {
+                        sum = sum.wrapping_mul(0x100000001b3).wrapping_add(v.to_bits() as u64);
+                    }
+                }
+                for &b in f.desc.iter() {
+                    sum = sum.wrapping_mul(0x100000001b3).wrapping_add(b as u64);
+                }
+            }
+            let reps = 1;
+            let t1 = ms(|| {
+                for _ in 0..reps {
+                    for g in imgs.iter() {
+                        std::hint::black_box(extract(g, &p));
+                    }
+                }
+            }) / (reps * imgs.len()) as f64;
+            let threads = rayon::current_num_threads();
+            let t8 = ms(|| {
+                use rayon::prelude::*;
+                (0..threads).into_par_iter().for_each(|_| {
+                    for _ in 0..reps {
+                        for g in imgs.iter() {
+                            std::hint::black_box(extract(g, &p));
+                        }
+                    }
+                });
+            }) / (reps * imgs.len()) as f64;
+            println!("extract {w}x{h}: 1 thread {t1:.3} ms, {threads} threads {t8:.3} ms each (x{:.2}); checksum {sum:016x}", t8 / t1);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn blur_threads() {
+        // The pyramid's five blurs of one octave at the size the found corpus
+        // enlarges to, on one core and then on every thread at once: this
+        // machine is power-capped and its hyperthreads share a core, so what
+        // a change is worth at eight threads is not what it is worth at one.
+        let base = synthetic(448, 448);
+        let sig = [1.226f32, 1.545, 1.946, 2.452, 3.089];
+        let mut sum = 0u64;
+        {
+            let mut g = Layer { w: base.w, h: base.h, px: base.px.clone() };
+            for (k, &s) in sig.iter().enumerate() {
+                if k + 1 == sig.len() {
+                    for v in blur_top(&g, s).px.iter() {
+                        sum = sum.wrapping_mul(0x100000001b3).wrapping_add(v.to_bits() as u64);
+                    }
+                    break;
+                }
+                let (l, d) = blur_dog(&g, s);
+                for v in l.px.iter().chain(d.px.iter()) {
+                    sum = sum.wrapping_mul(0x100000001b3).wrapping_add(v.to_bits() as u64);
+                }
+                g = l;
+            }
+        }
+        let once = || {
+            let mut g = Layer { w: base.w, h: base.h, px: base.px.clone() };
+            for (k, &s) in sig.iter().enumerate() {
+                if k + 1 == sig.len() {
+                    std::hint::black_box(blur_top(&g, s));
+                    break;
+                }
+                let (l, d) = blur_dog(&g, s);
+                std::hint::black_box(&d);
+                g = l;
+            }
+        };
+        let reps = 40;
+        let t1 = ms(|| {
+            for _ in 0..reps {
+                once();
+            }
+        }) / reps as f64;
+        let threads = rayon::current_num_threads();
+        let t8 = ms(|| {
+            use rayon::prelude::*;
+            (0..threads).into_par_iter().for_each(|_| {
+                for _ in 0..reps {
+                    once();
+                }
+            });
+        }) / reps as f64;
+        println!("blur octave 448x448: 1 thread {t1:.3} ms, {threads} threads {t8:.3} ms each (x{:.2}); checksum {sum:016x}", t8 / t1);
     }
 
     #[test]
