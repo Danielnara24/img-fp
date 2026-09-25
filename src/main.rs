@@ -1021,7 +1021,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                 timed!(14, inv.query(&lists[i], i as u32, acc, scored));
                 bar.add(items[i].feats.len() as u64);
                 timed!(41, {
-                    scored.retain(|&(j, s)| items[j as usize].ok && s > 0.0);
+                    // Every image the query touched, including one that scores
+                    // nothing: that happens only when all it shares are words
+                    // in every image, which an index can hold only on a folder
+                    // of 32 or fewer (see `query_touched`) — and on a folder
+                    // of two it is every word a duplicate shares. Dropping it
+                    // there found no pair at all; the second look never did.
+                    scored.retain(|&(j, _)| items[j as usize].ok);
                     rank_best(scored, args.candidates);
                     scored
                         .iter()

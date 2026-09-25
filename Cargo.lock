@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "img-fp"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "clap",
