@@ -1427,6 +1427,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                         inverted: false,
                         identical: true,
                         propagated: false,
+                        corroborated: false,
                         ia: a,
                         ib: b,
                     });
@@ -1434,7 +1435,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             }
         }
     }
-    for (a, b, _, inv_flag, v) in all.iter().chain(propagated.iter()).chain(corroborated.iter()) {
+    let tiers = all.iter().map(|e| (e, false)).chain(propagated.iter().map(|e| (e, false)));
+    for ((a, b, _, inv_flag, v), corroborated) in tiers.chain(corroborated.iter().map(|e| (e, true))) {
         let (a, b) = (*a, *b);
         if !seen.insert((a, b)) {
             continue;
@@ -1451,6 +1453,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
             inverted: *inv_flag,
             identical: false,
             propagated: v.n_match == 0,
+            corroborated,
             ia: a,
             ib: b,
         });

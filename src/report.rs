@@ -99,6 +99,11 @@ pub struct OutPair {
     pub identical: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub propagated: bool,
+    /// A direct match admitted only because an anchor had already put both
+    /// files in one cluster, and so held to `CLUSTER_SLACK_*` less than an
+    /// anchor: its correlation can sit below `--min-pixel-correlation`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub corroborated: bool,
     /// Indices into the run's file list, for finding a member's pair with its
     /// representative. Not written: `a` and `b` say the same thing.
     #[serde(skip)]
@@ -250,12 +255,15 @@ fn pair_index(out: &Output) -> HashMap<(usize, usize), &OutPair> {
 
 /// `identical` for the same bytes, `propagated` for a transform composed along
 /// a path and then checked against the pixels, `direct` for one fitted to
-/// keypoints the two files share.
+/// keypoints the two files share, and `corroborated` for a direct one that
+/// cleared only the lower bar a pair inside an existing cluster faces.
 fn relation(p: &OutPair) -> &'static str {
     if p.identical {
         "identical"
     } else if p.propagated {
         "propagated"
+    } else if p.corroborated {
+        "corroborated"
     } else {
         "direct"
     }
@@ -322,7 +330,7 @@ fn rows<'a>(
             size: f.bytes.map(format_size),
             size_bytes: f.bytes,
             relation: p.map(relation),
-            aligned_points: p.filter(|p| relation(p) == "direct").map(|p| p.aligned_points),
+            aligned_points: p.filter(|p| matches!(relation(p), "direct" | "corroborated")).map(|p| p.aligned_points),
             frame_overlap: p.map(|p| p.frame_overlap),
             pixel_correlation: p.map(|p| p.pixel_correlation),
             mirrored: p.map(|p| p.mirrored),
@@ -364,6 +372,7 @@ fn evidence(r: &Row) -> String {
     };
     let mut s = match (how, r.aligned_points) {
         ("identical", _) => "identical".to_string(),
+        ("corroborated", Some(n)) => format!("corroborated, {n} points, overlap {ov:.2}, correlation {corr:.2}"),
         (_, Some(n)) => format!("{n} points, overlap {ov:.2}, correlation {corr:.2}"),
         (how, None) => format!("{how}, overlap {ov:.2}, correlation {corr:.2}"),
     };
@@ -461,6 +470,7 @@ mod tests {
             inverted: false,
             identical: false,
             propagated: false,
+            corroborated: false,
             ia,
             ib,
         }
@@ -556,5 +566,28 @@ mod tests {
         assert_eq!(v["pairs"][1]["mirrored"], true);
         assert!(v["pairs"][0].get("mirrored").is_none());
         assert!(v["pairs"][0].get("ia").is_none());
+    }
+
+    #[test]
+    fn a_corroborated_pair_says_so_in_every_format() {
+        let mut out = output();
+        out.pairs[1].corroborated = true;
+        out.pairs[1].aligned_points = 9;
+        out.pairs[1].pixel_correlation = 0.54;
+        let facts = HashMap::new();
+        let mut txt = Vec::new();
+        write_txt(&mut txt, &out, &facts).unwrap();
+        assert!(String::from_utf8(txt)
+            .unwrap()
+            .contains("\tMATCH, -, -, corroborated, 9 points, overlap 0.99, correlation 0.54, mirrored, /2;x.jpg\n"));
+        let mut csv = Vec::new();
+        write_csv(&mut csv, &out, &facts).unwrap();
+        assert!(String::from_utf8(csv).unwrap().contains(";corroborated;9;0.987;0.54;true;false"));
+        let mut json = Vec::new();
+        write_json(&mut json, &out, &facts).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(v["groups"][0]["files"][2]["relation"], "corroborated");
+        assert_eq!(v["pairs"][1]["corroborated"], true);
+        assert!(v["pairs"][0].get("corroborated").is_none());
     }
 }

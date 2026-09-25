@@ -225,7 +225,7 @@ header could not be.
 **CSV**: the same rows with a header, `;`-separated as `vid-fp`'s are —
 `group`, `role` (`representative` or `match`), `path`, `width`, `height`,
 `size`, `size_bytes`, then the member's pair with the representative:
-`relation` (`identical`, `direct` or `propagated`), `aligned_points`,
+`relation` (`identical`, `direct`, `corroborated` or `propagated`), `aligned_points`,
 `frame_overlap`, `pixel_correlation`, `mirrored`, `inverted`. The
 representative's own row leaves those empty, and so is any figure that was not
 measured. A file in two groups has a row in each, with each group's evidence.
