@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2024"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
@@ -25,6 +25,11 @@ rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 walkdir = "2.5.0"
+# Ctrl-C keeps what the analysis has finished; see `interrupt` in main.rs. The
+# handler runs on a thread of its own rather than in signal context, so it can
+# take a lock and print. "termination" is SIGTERM and SIGHUP as well, as in
+# vid-fp.
+ctrlc = { version = "3.5", features = ["termination"] }
 
 # One codegen unit and cross-crate inlining. The pipeline is a handful of tight
 # loops calling into `image`'s decoders and `rayon`; nothing here changes what

@@ -327,8 +327,7 @@ struct Item {
 /// Exit code for a run that finished and reported everything it found, but
 /// could not do all of it. `0` is a clean run, `1` is the fatal path — an
 /// error that stopped the run, printed by `main` — and `130` is the shell's
-/// convention for a Ctrl-C, which this process takes by dying on the signal
-/// rather than by handling it.
+/// convention for a Ctrl-C; see `interrupt`.
 ///
 /// It exists because the results line reads exactly the same either way. A
 /// script that pipes the JSON somewhere sees "4,581 pairs" whether every file
@@ -582,6 +581,7 @@ fn main() -> Result<()> {
     // ordinary fatal error at the top of the run rather than a discovery made
     // an hour into one.
     let log = Log::open(args.log_file.as_deref())?;
+    interrupt()?;
     let mut problems = Problems::new(&log);
     let outcome = run(&args, &log, &mut problems);
     problems.print_summary();
@@ -590,6 +590,79 @@ fn main() -> Result<()> {
         std::process::exit(EXIT_WITH_PROBLEMS);
     }
     Ok(())
+}
+
+/// Exit code for an interrupted run: the shell's own for a process ended by
+/// SIGINT, and what `vid-fp` returns.
+const EXIT_INTERRUPTED: i32 = 130;
+
+/// Ctrl-C (and SIGTERM, SIGHUP) keeps what the analysis has finished, and
+/// exits at once.
+///
+/// **At once is the requirement**, not a nicety: an interrupt that took a few
+/// seconds to save would teach people to press Ctrl-C again, and the second
+/// press would cost them what the first was saving. So the handler writes
+/// nothing. Every finished analysis is appended to the cache the moment its
+/// worker makes it (`cache::Store`), which means the work an interrupt keeps
+/// is already in the file when the key is pressed, and all there is left to do
+/// is wait for the one append that may be in flight — microseconds into the
+/// page cache — and hold the lock so no other starts. Analyses still in
+/// progress are dropped rather than waited for: one image per worker, and the
+/// next run redoes them in the time this one would have spent finishing.
+///
+/// Nothing after the analysis is worth keeping, because nothing after it is a
+/// property of one file — the vocabulary, the candidates and the verdicts all
+/// depend on the corpus as a whole. So an interrupt in any other stage keeps
+/// what the cache already holds and exits just as fast, and one during a
+/// compaction removes the half-written copy and leaves the file it was copying.
+///
+/// **A second press is the default action**, which is to die on the signal:
+/// the handler hands SIGINT back to the kernel before doing anything else. The
+/// first press takes microseconds, so the second should never be needed; it
+/// is there for a disk that has stopped answering. The worst it can leave is
+/// half a record at the end of the cache, which the next run cuts off.
+///
+/// No summary: the run did not finish, and the problems it had found so far
+/// are an account of a run nobody is going to read the results of.
+fn interrupt() -> Result<()> {
+    ctrlc::set_handler(|| {
+        #[cfg(unix)]
+        {
+            const SIG_DFL: usize = 0;
+            unsafe extern "C" {
+                fn signal(signum: i32, handler: usize) -> usize;
+            }
+            // SIGHUP, SIGINT, SIGTERM.
+            for sig in [1, 2, 15] {
+                unsafe {
+                    signal(sig, SIG_DFL);
+                }
+            }
+        }
+        let (_held, kept) = cache::seal();
+        progress::clear_for_exit();
+        if kept > 0 {
+            let (noun, verb) = if kept == 1 { ("description", "was") } else { ("descriptions", "were") };
+            eprintln!("Interrupted. {kept} new image {noun} {verb} saved to cache.");
+        } else {
+            eprintln!("Interrupted.");
+        }
+        // `_exit`, not `exit`: the workers are still running, some of them
+        // inside libheif, and `exit` would run the C++ static destructors out
+        // from under them. Nothing is buffered that needs flushing — stderr
+        // is not, the log is written a line at a time, and the cache is
+        // written through the kernel.
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn _exit(status: i32) -> !;
+            }
+            unsafe { _exit(EXIT_INTERRUPTED) }
+        }
+        #[cfg(not(unix))]
+        std::process::exit(EXIT_INTERRUPTED);
+    })
+    .context("could not install the Ctrl-C handler")
 }
 
 fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
@@ -704,13 +777,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         features: FEATURES as u32,
         thumb: THUMB_LONG as u32,
     };
-    let mut cached = match &cache_path {
+    let (mut cached, mut store) = match &cache_path {
         Some(p) => {
             progress.begin(Stage::CacheRead);
-            cache::load(p, settings, problems)
+            let (cached, store) = cache::open(p, settings, problems);
+            (cached, Some(store))
         }
         None => Default::default(),
     };
+    // Records in the file that the map does not hold: each superseded by a
+    // later one for the same path. Something to compact away, if nothing else is.
+    let superseded = store.as_ref().map_or(0, |s| s.records() - cached.len());
     if !cached.is_empty() {
         stage!(t_start, "cache: {} usable records", cached.len());
     }
@@ -727,7 +804,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // run did not walk, which is what `carry_over` wants; the two counts taken
     // here are what tells the save below whether it has anything to write.
     let (mut in_cache, mut same_key) = (0usize, 0usize);
-    let mine: Vec<Option<cache::Record>> = names
+    let mine: Vec<Option<(cache::Record, cache::Span)>> = names
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -738,9 +815,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                 return None;
             }
             same_key += 1;
-            Some(got.1)
+            Some((got.1, got.2))
         })
         .collect();
+    // Where each file's record sits in the cache file, for the ones that have
+    // one. A cached record's is known now; a new one's, when its worker has
+    // appended it.
+    let mut span_of: Vec<Option<cache::Span>> = mine.iter().map(|m| m.as_ref().map(|r| r.1)).collect();
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
     // second copy of a file is not a cheaper way to reach the same answer, it
@@ -761,7 +842,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     let todo = (0..n).filter(|&i| twin_of[i] == i && mine[i].is_none()).count();
     // Whether the save below will have anything to write, as far as it can be
     // told yet: something new to describe, or a record that no longer fitted.
-    let rewrite = cache_path.is_some() && (todo > 0 || same_key != in_cache);
+    let rewrite = cache_path.is_some() && (superseded > 0 || same_key != in_cache || args.prune_cache);
     progress.forecast(|f| {
         f.to_describe = Some(todo);
         f.cache_write = rewrite;
@@ -795,23 +876,33 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     let total_weight: u64 = weight.iter().sum();
     progress.forecast(|f| f.describe = Some(total_weight));
     let bar = progress.begin_counted(Stage::Describe, total_weight, todo, "images");
-    let mut items: Vec<Item> = mine
+    // Each record goes into the cache file as soon as it is made, which is
+    // what lets an interrupt keep the analysis without writing anything; see
+    // `cache::Store`.
+    let keep = |i: usize, key: Option<cache::Key>, it: &Item| -> Option<cache::Span> {
+        let (s, key) = (store.as_ref()?, key?);
+        if !it.ok {
+            return None;
+        }
+        s.append(&names[i], key, &it.feats, &it.thumb)
+    };
+    let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
         .into_par_iter()
         .enumerate()
         .map(|(i, rec)| {
             if twin_of[i] != i {
-                return Item::default();
+                return (Item::default(), None);
             }
-            if let Some(rec) = rec {
-                return Item {
-                    feats: rec.feats.into(),
-                    thumb: rec.thumb.into(),
-                    ok: true,
-                    err: None,
-                };
+            if let Some((rec, _)) = rec {
+                let it = Item { feats: rec.feats.into(), thumb: rec.thumb.into(), ok: true, err: None };
+                return (it, None);
             }
             let f = &files[i];
+            // Keyed before it is read, so that a file changing under the
+            // analysis is described again next time rather than trusted.
+            let key = store.as_ref().and_then(|_| cache::key_of(f));
             let it = analyse(f, args.work_size, &sp);
+            let span = keep(i, key, &it);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             bar.add(weight[i]);
             if (verbose || log.active()) && d % 250 == 0 {
@@ -821,10 +912,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                 }
                 log.line(&line);
             }
-            it
+            (it, span)
         })
-        .collect();
+        .unzip();
     drop(weight);
+    for (s, a) in span_of.iter_mut().zip(appended) {
+        if a.is_some() {
+            *s = a;
+        }
+    }
     for i in 0..n {
         let r = twin_of[i];
         if r == i {
@@ -837,6 +933,16 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         } else {
             analyse(&files[i], args.work_size, &sp)
         };
+    }
+    // A copy has a record of its own, under its own path, and its original's
+    // analysis is only now in `items`.
+    let late: Vec<(usize, cache::Span)> = (0..n)
+        .into_par_iter()
+        .filter(|&i| twin_of[i] != i && span_of[i].is_none())
+        .filter_map(|i| Some((i, keep(i, cache::key_of(&files[i]), &items[i])?)))
+        .collect();
+    for (i, s) in late {
+        span_of[i] = Some(s);
     }
     // `--prune-cache` keeps only what this scan found, and gives that up when
     // the scan is not a complete account of what is out there: a root that
@@ -854,13 +960,16 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         f.images = Some(items.iter().filter(|i| i.ok).count());
         f.descriptors = Some(items.iter().map(|i| i.feats.len()).sum());
     });
-    if let Some(p) = &cache_path {
+    if let (Some(p), Some(store)) = (&cache_path, store.as_mut()) {
         progress.begin(Stage::CacheWrite);
-        let mut entries: Vec<(&str, cache::Key, &Features, &Thumb)> = (0..n)
-            .filter(|&i| items[i].ok)
-            .filter_map(|i| cache::key_of(&files[i]).map(|k| (names[i].as_str(), k, &*items[i].feats, &*items[i].thumb)))
-            .collect();
-        let own = entries.len();
+        if let Some(e) = store.failure() {
+            // Not fatal — the pairs this run reports are the same pairs — but
+            // the next run will pay for this one's analysis all over again,
+            // which is exactly what a problem is here.
+            problems.cache(format!("could not write {}: {e}", p.display()));
+        }
+        let mut entries: Vec<(&str, cache::Span)> =
+            (0..n).filter(|&i| items[i].ok).filter_map(|i| Some((names[i].as_str(), span_of[i]?))).collect();
         // What the cache already knew about images this run never walked —
         // which, every walked file's record having been taken out of the map
         // above, is everything still in it. The cache is one file for the
@@ -875,25 +984,21 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         if prune && dropped > 0 {
             say!("pruned {dropped} cached record(s) this scan did not find");
         }
-        // Nothing to write is worth noticing rather than writing anyway. A
-        // threshold sweep is a dozen runs over one unchanged corpus, and
-        // rewriting the whole cache each time is several CPU-seconds of
-        // deflate for a file that would come out byte for byte the same.
+        // Every record worth keeping is already in the file, since each went
+        // in as it was made. The file needs rewriting only when it holds
+        // something else as well — a record superseded, dropped or pruned —
+        // and then the rewrite is a copy; see `cache::Store::compact`.
         //
-        // There is nothing to write when no record was dropped (`dropped`),
-        // none was added or changed (every record this run writes of its own
-        // was already there under the same key), and none was superseded and
-        // then lost (a file whose record no longer fitted and which then would
-        // not describe).
-        if dropped == 0 && own == same_key && same_key == in_cache {
-            stage!(t_start, "cache: unchanged, not rewritten");
-        } else if let Err(e) = cache::save(p, settings, &entries) {
-            // Not fatal — the pairs this run reports are the same pairs — but
-            // the next run will pay for this one's analysis all over again,
-            // which is exactly what a problem is here.
+        // Nothing to rewrite is worth noticing rather than rewriting anyway. A
+        // threshold sweep is a dozen runs over one unchanged corpus, and every
+        // one of them finds the file already says what it would write.
+        if store.records() == entries.len() || !store.writable() {
+            stage!(t_start, "cache: {} records, none to compact", store.records());
+        } else if let Err(e) = store.compact(settings, &mut entries) {
             problems.cache(format!("could not write {}: {e}", p.display()));
         }
     }
+    drop(store);
     // What is left in the map is the analyses of files this run did not walk,
     // which the save above has just finished borrowing. Nothing reads them
     // again and they are megabytes apiece.

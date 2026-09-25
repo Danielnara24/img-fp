@@ -2490,9 +2490,17 @@ group. `score.py` prefers `pairs`, which is why the F1 figures above are
 unaffected by how grouping works.
 
 **Exit codes**, the same four `vid-fp` uses: `0` clean, `1` fatal (anyhow's
-own path out of `main`), `2` finished but something failed, `130` Ctrl-C. Only
-`2` needed building; `130` is the default signal disposition, since an
-interrupted run writes nothing and has nothing to clean up.
+own path out of `main`), `2` finished but something failed, `130` Ctrl-C
+(and SIGTERM, SIGHUP), which keeps every analysis finished so far in the cache
+and exits **at once** — within 60 ms of the signal on this laptop, which is
+what a `SIGKILL` takes as well, so it is the kernel tearing the process down
+and not the handler. It is instant because it writes nothing: each record is
+appended to the cache by the worker that made it (`cache::Store`), so the
+handler waits for the one append in flight, if any, and exits (`interrupt` in
+`main.rs`). A slow save would train people to press Ctrl-C twice, and the
+second press would cost them what the first was saving; a second press is the
+default disposition anyway, and the worst it can leave is half a record at
+the end of the file, which the next run cuts off without calling it damage.
 
 **The summary is `vid-fp`'s, and so is the split it draws.** `Skipped:` then
 `Problems (N total):`, each category a count and up to ten examples, the same
@@ -2591,11 +2599,19 @@ and the whole run 59.2 s to 55.8 s. CPU-seconds are level (367 against 377,
 which is this machine's noise), because what was removed is memory traffic and
 a free, and the run is dominated by a stage this did not touch.
 
-**And a run that changed nothing does not rewrite it.** The new record set is
-compared with the loaded one by key; if nothing was added, changed or dropped,
-the file already says what this run would say. That matters because rewriting
-is not free — deflating a corpus's analysis is several CPU-seconds — and the
-tuning workflow is a dozen cached runs over one unchanged corpus.
+**And a run writes its records as it goes, not at the end.** Each analysis is
+packed by its worker and appended to the file the moment it exists — which is
+what makes Ctrl-C keep the work for free, see *Exit codes* — so the file holds
+every record worth keeping by the time the analysis ends. It is rewritten only
+when it also holds something not worth keeping: a record superseded by a later
+one for the same path, a file that has gone, a `--prune-cache`. Then the
+rewrite is a **copy** of the records worth keeping, byte for byte and sorted,
+with nothing unpacked or deflated again. So a sweep's cached runs write
+nothing at all, and a cold run no longer has a save phase: the deflate that
+used to run over the whole corpus after the analysis runs on each worker as it
+finishes an image. Measured on `derived/Desktop`, interrupted twice and then
+finished, the pairs and groups are identical to a run that was never
+interrupted, and the resumed file is the same size to the byte.
 
 **Two venvs.** `vendor/venv` is the general one. `vendor/venv-imagededup` has
 torch, so **SSCD and imagededup must run under it**; it also now has

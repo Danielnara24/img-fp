@@ -110,9 +110,9 @@ pub struct Forecast {
     pub to_describe: Option<usize>,
     /// Their summed `analysis_cost`, once the headers have been read.
     pub describe: Option<u64>,
-    /// Whether the cache will be rewritten at the end of the analysis. A run
-    /// that found every record it needed leaves the file alone, and the stage
-    /// costs nothing.
+    /// Whether the cache will be compacted at the end of the analysis. A run
+    /// whose file holds nothing but records worth keeping leaves it alone,
+    /// and the stage costs nothing.
     pub cache_write: bool,
     pub images: Option<usize>,
     pub descriptors: Option<usize>,
@@ -138,9 +138,13 @@ impl Forecast {
     /// Keypoints per image before the analysis has counted them. `FEATURES`
     /// is the ceiling and most photographs come close to it.
     const KEYPOINTS_PER_IMAGE: f64 = 500.0;
-    /// Packing and deflating a keypoint's 148 bytes of record, and the
+    /// Copying a keypoint's share of a record into a compacted cache, and the
     /// memory handed back after the analysis, which is charged to this stage.
-    const CACHE_WRITE_PER_KEYPOINT: f64 = 7_500.0;
+    /// Records are packed by the describing workers now, so this is a copy:
+    /// 159,216 keypoints compacted in under the 0.1 s the stage log resolves,
+    /// and this is that ceiling rather than a fit. (Deflating them here, as
+    /// the stage used to, was 7,500.)
+    const CACHE_WRITE_PER_KEYPOINT: f64 = 300.0;
     const VOCAB_PER_SAMPLE: f64 = 26_000.0;
     const VOCAB_SAMPLE: f64 = 160_000.0;
     const QUANTISE_PER_DESC: f64 = 2_700.0;
@@ -363,6 +367,7 @@ impl Progress {
         // Cleared when dropped, whatever path the run takes out of `run`: a
         // fatal error should read as the error, not as a bar frozen above it.
         let bar = ProgressBar::new(LEN).with_finish(ProgressFinish::AndClear);
+        let _ = BAR.set(bar.clone());
         bar.set_style(
             ProgressStyle::with_template(&format!(
                 "{{elapsed_precise}}{RULE}[{{bar:28.cyan/blue}}]{RULE}{{pct}}{RULE}{{msg}}"
@@ -453,6 +458,18 @@ impl Progress {
             let _ = h.join();
         }
         self.bar.finish_and_clear();
+    }
+}
+
+/// The run's bar, for the one caller that cannot reach the `Progress`: an
+/// interrupt, which exits from a thread of its own without unwinding `run`.
+static BAR: std::sync::OnceLock<ProgressBar> = std::sync::OnceLock::new();
+
+/// Clear the bar, so that a process exiting on a signal leaves its last word
+/// on a clean line rather than after half a bar.
+pub fn clear_for_exit() {
+    if let Some(bar) = BAR.get() {
+        bar.finish_and_clear();
     }
 }
 

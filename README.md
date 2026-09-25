@@ -382,9 +382,13 @@ full re-analysis on every run until someone notices. A cache directory that
 cannot be created is reported for the same reason, and the run goes on without
 one — the pairs are the pairs either way.
 
-`130` is the shell's convention for a Ctrl-C, and this process gets there by
-dying on the signal rather than handling it: an interrupted run writes nothing,
-so there is nothing to clean up.
+`130` is the shell's convention for a Ctrl-C. An interrupted run keeps
+every image it had finished describing, so the next run over the same files
+does not describe them again, and it exits at once: each description is
+written to the cache as soon as it is made, so there is nothing left to save
+when the key is pressed. What the cache holds is the descriptions and nothing
+else — matching is about the corpus as a whole, so a run interrupted while
+matching keeps every description and does the matching again.
 
 ## Cost
 
