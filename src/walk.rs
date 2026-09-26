@@ -1,4 +1,7 @@
 //! Turning the roots on the command line into the list of files to analyse.
+//! The roots are the paths named, plus any read from a list — `--from-file`,
+//! or `-` for stdin — one a line, or NUL-separated under `-0`; a listed path
+//! is exactly a named one from then on.
 //!
 //! A root that is a file is taken whatever it is called: naming it is asking
 //! for it. A root that is a directory is walked — the images directly inside
@@ -37,6 +40,7 @@
 
 use crate::extensions::Wanted;
 use crate::problems::Problems;
+use anyhow::Context;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -272,6 +276,116 @@ fn leads_into(path: &Path, canonical_guess: &Path, excludes: &[PathBuf], through
         return true;
     }
     through_links && std::fs::canonicalize(path).is_ok_and(|real| is_excluded(&real, excludes))
+}
+
+/// Where the roots come from: the command line, and the lists it points at.
+pub struct Sources<'a> {
+    /// The positional paths. `-` among them reads a list from stdin.
+    pub named: &'a [PathBuf],
+    /// `--from-file`: a list of paths, `-` for stdin.
+    pub from_file: Option<&'a Path>,
+    /// `-0`: the lists are NUL-separated rather than one path a line.
+    pub null_separated: bool,
+}
+
+/// Every root the user asked for, with `-` and `--from-file` expanded, and
+/// where each list came from with how many paths it held, for the header.
+///
+/// Stdin is read at most once however many times it is asked for: `img-fp - -`,
+/// or `-` with `--from-file -`, is a typo rather than a request to read the
+/// pipe twice. A list that cannot be opened or read is fatal — it is the whole
+/// of what the run was asked to scan, and a run over nothing would exit 0.
+pub fn requested_roots(sources: &Sources, problems: &mut Problems) -> anyhow::Result<(Vec<PathBuf>, Vec<(String, usize)>)> {
+    let stdin = Path::new("-");
+    let mut roots = Vec::new();
+    let mut lists = Vec::new();
+    let mut stdin_taken = false;
+    let mut take_stdin = |roots: &mut Vec<PathBuf>, lists: &mut Vec<(String, usize)>, problems: &mut Problems| -> anyhow::Result<()> {
+        if std::mem::replace(&mut stdin_taken, true) {
+            return Ok(());
+        }
+        let paths = read_stdin(sources.null_separated, problems)?;
+        lists.push(("stdin".to_string(), paths.len()));
+        roots.extend(paths);
+        Ok(())
+    };
+    for path in sources.named {
+        if path == stdin {
+            take_stdin(&mut roots, &mut lists, problems)?;
+        } else {
+            roots.push(path.clone());
+        }
+    }
+    if let Some(list) = sources.from_file {
+        if list == stdin {
+            take_stdin(&mut roots, &mut lists, problems)?;
+        } else {
+            let file = std::fs::File::open(list)
+                .with_context(|| format!("could not open the path list {}", list.display()))?;
+            let paths = read_path_list(file, sources.null_separated, problems)
+                .with_context(|| format!("could not read the path list {}", list.display()))?;
+            lists.push((list.display().to_string(), paths.len()));
+            roots.extend(paths);
+        }
+    }
+    Ok((roots, lists))
+}
+
+fn read_stdin(null_separated: bool, problems: &mut Problems) -> anyhow::Result<Vec<PathBuf>> {
+    use std::io::IsTerminal;
+    // Without this, `img-fp -` at a prompt looks exactly like a hang.
+    if std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "asked to read paths from stdin, but stdin is a terminal. \
+             Pipe a list in (e.g. `fd -e jpg | img-fp -`), or name folders as arguments."
+        );
+    }
+    read_path_list(std::io::stdin().lock(), null_separated, problems).context("could not read the path list from stdin")
+}
+
+/// Read a whole path list.
+///
+/// Read as bytes, and on Unix a path is its bytes: a filename that is not
+/// UTF-8 is still a filename, and the roots are paths rather than strings, so
+/// nothing here has to turn one away. (`vid-fp` holds its paths as strings and
+/// skips such an entry; img-fp never had to.)
+fn read_path_list<R: std::io::Read>(mut reader: R, null_separated: bool, problems: &mut Problems) -> std::io::Result<Vec<PathBuf>> {
+    let mut raw = Vec::new();
+    reader.read_to_end(&mut raw)?;
+    Ok(split_path_list(&raw, null_separated).into_iter().filter_map(|entry| path_of(entry, problems)).collect())
+}
+
+#[cfg(unix)]
+fn path_of(entry: &[u8], _: &mut Problems) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(entry)))
+}
+
+#[cfg(not(unix))]
+fn path_of(entry: &[u8], problems: &mut Problems) -> Option<PathBuf> {
+    match std::str::from_utf8(entry) {
+        Ok(s) => Some(PathBuf::from(s)),
+        Err(e) => {
+            problems.unscannable(&String::from_utf8_lossy(entry), &e);
+            None
+        }
+    }
+}
+
+/// Split a list on newlines, or on NUL bytes when asked. Blank entries are
+/// dropped.
+///
+/// A trailing carriage return is trimmed in newline mode. A list authored on
+/// Windows would otherwise fail every single path with "No such file", and the
+/// byte responsible is invisible in the message — the worst kind of failure to
+/// debug. `-0` exists for anyone who needs the bytes untouched, and it is the
+/// only way to pass a filename containing a newline.
+fn split_path_list(raw: &[u8], null_separated: bool) -> Vec<&[u8]> {
+    let separator = if null_separated { b'\0' } else { b'\n' };
+    raw.split(|&b| b == separator)
+        .map(|entry| if null_separated { entry } else { entry.strip_suffix(b"\r").unwrap_or(entry) })
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -540,5 +654,71 @@ mod tests {
         s.file("elsewhere/c.jpg");
         symlink(s.0.join("elsewhere"), s.0.join("scan/linkdir")).unwrap();
         assert_eq!(run(&[s.0.join("scan")], &[], false, true).files, vec![a]);
+    }
+
+    #[test]
+    fn a_list_is_split_on_newlines_and_blanks_are_ignored() {
+        assert_eq!(split_path_list(b"/imgs/a.jpg\n\n/imgs/b.png\n", false), vec![&b"/imgs/a.jpg"[..], &b"/imgs/b.png"[..]]);
+    }
+
+    #[test]
+    fn a_carriage_return_is_trimmed_rather_than_kept_in_the_path() {
+        // A list authored on Windows. Keeping the \r fails every path with "No
+        // such file", and the byte responsible does not show up in the message.
+        assert_eq!(split_path_list(b"/imgs/a.jpg\r\n/imgs/b.png\r\n", false), vec![&b"/imgs/a.jpg"[..], &b"/imgs/b.png"[..]]);
+    }
+
+    #[test]
+    fn a_null_separated_list_keeps_every_byte_of_the_filename() {
+        // The reason -0 exists: both of these are legal Linux filenames.
+        let raw = b"/imgs/two\nlines.jpg\0/imgs/trailing\r.jpg\0";
+        assert_eq!(split_path_list(raw, true), vec![&b"/imgs/two\nlines.jpg"[..], &b"/imgs/trailing\r.jpg"[..]]);
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_is_still_a_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let log = Log::default();
+        let mut problems = Problems::new(&log);
+        let paths = read_path_list(&b"/imgs/good.jpg\n/imgs/\xFF\xFEodd.jpg\n"[..], false, &mut problems).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[1].as_os_str().as_bytes(), b"/imgs/\xFF\xFEodd.jpg");
+        assert_eq!(problems.count(), 0);
+    }
+
+    #[test]
+    fn a_listed_file_is_walked_as_if_it_were_named() {
+        let s = Scratch::new();
+        let a = s.file("scan/a.jpg");
+        let b = s.file("other/b.jpg");
+        let odd = s.file("other/new\nline.jpg");
+        let list = s.0.join("list");
+        let raw = [a.as_os_str(), s.0.join("other").as_os_str(), odd.as_os_str()]
+            .map(|p| p.to_str().unwrap().to_string())
+            .join("\0");
+        fs::write(&list, raw).unwrap();
+
+        let log = Log::default();
+        let mut problems = Problems::new(&log);
+        let named = [a.clone()];
+        let (roots, lists) = requested_roots(
+            &Sources { named: &named, from_file: Some(&list), null_separated: true },
+            &mut problems,
+        )
+        .unwrap();
+        assert_eq!(lists, vec![(list.display().to_string(), 3)]);
+        // `a` is named and listed: one file, listed once.
+        let mut want = vec![a, b, odd];
+        want.sort();
+        assert_eq!(run(&roots, &[], false, false).files, want);
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_opened_is_fatal() {
+        let log = Log::default();
+        let mut problems = Problems::new(&log);
+        let missing = Path::new("/nonexistent/img-fp/list");
+        let err = requested_roots(&Sources { named: &[], from_file: Some(missing), null_separated: false }, &mut problems);
+        assert!(err.is_err(), "a run over nothing would exit 0 and say nothing was found");
     }
 }

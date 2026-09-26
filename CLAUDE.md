@@ -86,8 +86,9 @@ src/
   index.rs            vocabulary tree, inverted file, containment scoring
   verify.rs           correspondence, geometry, pixel agreement, the policy
   group.rs            pairs -> groups, around a representative
-  walk.rs             roots -> files: -x, --exclude, --follow-symlinks, and
-                      one path per (device, inode)
+  walk.rs             roots -> files: --from-file / -0 / `-` lists, -x,
+                      --exclude, --follow-symlinks, and one path per
+                      (device, inode)
   cache.rs            on-disk cache of the per-image analysis: where it lives
                       when nothing says, and how a record is packed
   report.rs           the results as text, CSV or JSON (vid-fp's three), and

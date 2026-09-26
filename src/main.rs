@@ -46,9 +46,25 @@ use verify::{Affine, Thumb, Variant, Verdict};
 #[derive(Parser, Debug)]
 #[command(name = "img-fp", about = "Find duplicate and near-duplicate images.", version)]
 struct Args {
-    /// Directories or files to scan.
-    #[arg(required = true)]
+    /// Directories or files to scan. `-` reads a list of paths from stdin.
+    ///
+    /// Example: `fd -e jpg | img-fp -`. A file named `-` is `./-`.
+    #[arg(required_unless_present = "from_file", value_name = "PATH")]
     roots: Vec<PathBuf>,
+
+    /// Read the paths to scan from a file, one per line (`-` = stdin).
+    ///
+    /// Entries may be folders or files, are treated exactly as paths named on
+    /// the command line, and combine with them. Blank lines are ignored and a
+    /// trailing carriage return is trimmed.
+    #[arg(long = "from-file", value_name = "FILE")]
+    from_file: Option<PathBuf>,
+
+    /// Paths in the list are NUL-separated, for `find -print0` or `fd -0`.
+    ///
+    /// The only way to pass a filename containing a newline.
+    #[arg(short = '0', long = "null")]
+    null: bool,
 
     /// Descend into subdirectories. Without it a directory means the images
     /// directly inside it and nothing below.
@@ -600,6 +616,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // Before anything else: a `-x` that can match no file is a mistake to
     // stop on, not a walk to take.
     let (wanted, extensions_note) = extensions::normalize(&args.extensions)?;
+    // So is a path list that cannot be read, and it is read before anything
+    // has a side effect: `--clear-cache` with a mistyped `--from-file` must
+    // not delete the cache and then stop.
+    let (roots, lists) = walk::requested_roots(
+        &walk::Sources {
+            named: &args.roots,
+            from_file: args.from_file.as_deref(),
+            null_separated: args.null,
+        },
+        problems,
+    )?;
     prof::start();
     let t_start = Instant::now();
     few_arenas();
@@ -674,14 +701,20 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         None if args.no_cache => say!("Cache: off (--no-cache)"),
         None => say!("Cache: off"),
     }
-    say!("Scanning: {:?}", args.roots);
+    let named: Vec<&PathBuf> = args.roots.iter().filter(|p| p.as_os_str() != "-").collect();
+    if !named.is_empty() || lists.is_empty() {
+        say!("Scanning: {:?}", named);
+    }
+    for (from, n) in &lists {
+        say!("Scanning: {n} path(s) read from {from}");
+    }
     if !args.exclude.is_empty() {
         say!("Excluding: {:?}", args.exclude);
     }
     say!("{}", wanted.describe());
     let files = walk::walk(
         &walk::Request {
-            roots: &args.roots,
+            roots: &roots,
             exclude: &args.exclude,
             wanted: &wanted,
             recursive: args.recursive,

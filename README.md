@@ -344,6 +344,8 @@ win the second.
 | `--no-cache` | do not read or write it at all. |
 | `--prune-cache` | drop cached analyses of images this scan did not find. |
 | `--clear-cache` | delete the cache before running. |
+| `--from-file FILE` | read the paths to scan from a file, one per line; `-` is stdin, and so is a `-` among the paths (`fd -e jpg \| img-fp -`). Entries are folders or files, treated exactly as if named, and combine with any named paths. |
+| `-0`, `--null` | the list is NUL-separated, for `find -print0` or `fd -0` — the only way to pass a filename containing a newline. |
 | `-r` | descend into subdirectories. Default: only the images directly in each directory named. |
 | `-e PATH` | leave this folder or file out, even if it is named as a root. Repeatable. It excludes the file rather than the name, so a file reached through a symlink or a second root is left out too; a path that does not exist is reported, since it excluded nothing. |
 | `--follow-symlinks` | follow symlinks met while walking: a link to a file is that file, a link to a directory is walked, a link back into a folder already being walked is skipped. Each file is listed once however many names reach it, so a link and its target are never a duplicate pair. |
