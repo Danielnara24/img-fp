@@ -102,6 +102,14 @@ pub struct Record {
     pub thumb: Thumb,
 }
 
+/// What the loaded cache says about one path: its key, its analysis — only
+/// for a path this run walks, see `open` — and where its record sits in the
+/// file.
+pub type Entry = (Key, Option<Record>, Span);
+
+/// Which paths this run walks, asked of every record as it is read.
+pub type Walked<'a> = &'a (dyn Fn(&str) -> bool + Sync);
+
 #[derive(Clone, Copy)]
 pub struct Key {
     pub len: u64,
@@ -522,10 +530,22 @@ pub struct Store {
 /// second time as `Record`s; holding the bytes as well, for the length of the
 /// parse, is a copy the run does not have to make.
 ///
+/// **Only the records for paths this run walks are unpacked.** The file is one
+/// per machine, so it holds every folder ever scanned, and a record for a path
+/// this run is not looking at is wanted for one thing: to be carried into the
+/// file this run leaves behind, which needs its key, its span and nothing
+/// else. Unpacking it anyway made every other corpus's analysis exist in full
+/// for the length of this run's own — about 900 MB for a nine-thousand-image
+/// folder, held while a five-thousand-image one was being analysed. Such a
+/// record is framed and skipped, and comes back with no `Record`. What that
+/// gives up is noticing a record whose compressed body is damaged before a run
+/// that walks its path: the framing is still checked here, and the body is
+/// checked the first time anything unpacks it.
+///
 /// A file that is stale or damaged is replaced by an empty one straight away,
 /// rather than at the end of the run, since this run's records go into
 /// whatever file it holds from here on.
-pub fn open(path: &Path, want: Settings, problems: &mut Problems) -> (HashMap<String, (Key, Record, Span)>, Store) {
+pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<String, Entry>, Store) {
     let mut out = HashMap::new();
     let mut store = Store {
         path: path.to_path_buf(),
@@ -536,7 +556,7 @@ pub fn open(path: &Path, want: Settings, problems: &mut Problems) -> (HashMap<St
     };
     match OpenOptions::new().read(true).append(true).open(path) {
         Ok(f) => {
-            if let Some(tail) = read_file(&f, path, want, &mut out, problems) {
+            if let Some(tail) = read_file(&f, path, want, walked, &mut out, problems) {
                 // A partial record at the end would sit in front of every
                 // record appended after it, and turn a lost record into a
                 // damaged file.
@@ -559,7 +579,7 @@ pub fn open(path: &Path, want: Settings, problems: &mut Problems) -> (HashMap<St
             // run. It just keeps nothing new, and that is worth saying.
             problems.cache(format!("could not open {} for writing: {e}", path.display()));
             if let Ok(f) = File::open(path) {
-                read_file(&f, path, want, &mut out, problems);
+                read_file(&f, path, want, walked, &mut out, problems);
             }
             return (out, store);
         }
@@ -577,10 +597,11 @@ fn read_file(
     f: &File,
     path: &Path,
     want: Settings,
-    out: &mut HashMap<String, (Key, Record, Span)>,
+    walked: Walked,
+    out: &mut HashMap<String, Entry>,
     problems: &mut Problems,
 ) -> Option<Tail> {
-    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), want, out) {
+    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), want, walked, out) {
         Ok(tail) => Some(tail),
         Err(Reject::Stale) => {
             out.clear();
@@ -768,7 +789,7 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     Ok(Some((head, blob)))
 }
 
-fn read_stream<R: Read>(r: R, want: Settings, out: &mut HashMap<String, (Key, Record, Span)>) -> Result<Tail, Reject> {
+fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<String, Entry>) -> Result<Tail, Reject> {
     let mut r = Rd { r, pos: 0, ended: false };
     let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
     if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
@@ -794,7 +815,7 @@ fn read_stream<R: Read>(r: R, want: Settings, out: &mut HashMap<String, (Key, Re
                 tail.end = r.pos;
                 tail.count += 1;
                 if batch.len() == BATCH {
-                    unpack_batch(&mut batch, out)?;
+                    unpack_batch(&mut batch, walked, out)?;
                 }
             }
             Err(_) if r.ended => {
@@ -804,7 +825,7 @@ fn read_stream<R: Read>(r: R, want: Settings, out: &mut HashMap<String, (Key, Re
             Err(e) => return Err(e.into()),
         }
     }
-    unpack_batch(&mut batch, out)?;
+    unpack_batch(&mut batch, walked, out)?;
     Ok(tail)
 }
 
@@ -815,20 +836,24 @@ fn read_stream<R: Read>(r: R, want: Settings, out: &mut HashMap<String, (Key, Re
 /// changed, and was described again and appended.
 fn unpack_batch(
     batch: &mut Vec<(Head, Vec<u8>, Span)>,
-    out: &mut HashMap<String, (Key, Record, Span)>,
+    walked: Walked,
+    out: &mut HashMap<String, Entry>,
 ) -> Result<(), Reject> {
-    let done: Vec<Result<(String, (Key, Record, Span))>> = batch
+    let done: Vec<Result<(String, Entry)>> = batch
         .par_iter()
         .map(|(h, blob, span)| {
+            if !walked(&h.path) {
+                return Ok((h.path.clone(), (h.key, None, *span)));
+            }
             let (kps, desc, px) = unpack(blob, h.n, h.tw, h.th)?;
             Ok((
                 h.path.clone(),
                 (
                     h.key,
-                    Record {
+                    Some(Record {
                         feats: Features { w: h.w, h: h.h, kps, desc },
                         thumb: Thumb::new(h.tw, h.th, h.scale, px),
-                    },
+                    }),
                     *span,
                 ),
             ))
@@ -863,7 +888,7 @@ fn unpack_batch(
 /// dropped by mistake — an unmounted drive, say — costs a re-analysis rather
 /// than an afternoon, and that is a cheap enough mistake to make
 /// automatically.
-pub fn carry_over(cached: &HashMap<String, (Key, Record, Span)>) -> Vec<(&str, Span)> {
+pub fn carry_over(cached: &HashMap<String, Entry>) -> Vec<(&str, Span)> {
     cached
         .iter()
         .filter(|(path, _)| Path::new(path.as_str()).exists())
@@ -981,10 +1006,7 @@ mod tests {
 
         let record = || (
             Key { len: 1, mtime: 2 },
-            Record {
-                feats: Features { w: 1, h: 1, kps: Vec::new(), desc: Vec::new() },
-                thumb: Thumb::new(1, 1, 1.0, vec![0]),
-            },
+            None,
             Span { at: 0, len: 0 },
         );
         let mut cached = HashMap::new();
@@ -1015,11 +1037,37 @@ mod tests {
         (Features { w: 64, h: 48, kps, desc }, Thumb::new(8, 6, 0.125, vec![seed; 48]))
     }
 
-    fn reopen(path: &Path) -> (HashMap<String, (Key, Record, Span)>, Store, bool) {
+    fn reopen(path: &Path) -> (HashMap<String, Entry>, Store, bool) {
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = open(path, SETTINGS, &mut problems);
+        let (got, store) = open(path, SETTINGS, &|_| true, &mut problems);
         (got, store, problems.any())
+    }
+
+    /// A record for a path the run does not walk is read for its key and its
+    /// span, and not unpacked — and a later one still supersedes an earlier.
+    #[test]
+    fn records_this_run_does_not_walk_are_framed_not_unpacked() {
+        let dir = scratch("walked");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f1, t1) = analysis(3, 1);
+        let (f2, t2) = analysis(5, 2);
+        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3 }, &f2, &t2).unwrap();
+        drop(store);
+        let (all, _, _) = reopen(&path);
+
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let (got, store) = open(&path, SETTINGS, &|p| p == "a.jpg", &mut problems);
+        assert!(!problems.any() && store.records() == 3 && got.len() == 2);
+        assert_eq!(got["a.jpg"].1.as_ref().unwrap().feats.desc, f1.desc);
+        let b = &got["b.jpg"];
+        assert!(b.1.is_none());
+        assert_eq!((b.0.len, b.2.at, b.2.len), (3, all["b.jpg"].2.at, all["b.jpg"].2.len));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// What a worker appends, the next run reads — and a later record for the
@@ -1043,8 +1091,8 @@ mod tests {
         assert_eq!(store.records(), 3, "the superseded record is still in the file");
         assert_eq!(got.len(), 2);
         let a = &got["a.jpg"];
-        assert_eq!((a.0.len, a.1.feats.kps.len()), (3, 5));
-        assert_eq!(a.1.feats.desc, f2.desc);
+        assert_eq!((a.0.len, a.1.as_ref().unwrap().feats.kps.len()), (3, 5));
+        assert_eq!(a.1.as_ref().unwrap().feats.desc, f2.desc);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1098,13 +1146,13 @@ mod tests {
         let mut names: Vec<_> = got.keys().cloned().collect();
         names.sort();
         assert_eq!(names, ["a.jpg", "c.jpg"]);
-        assert_eq!(got["a.jpg"].1.feats.desc, f.desc);
+        assert_eq!(got["a.jpg"].1.as_ref().unwrap().feats.desc, f.desc);
         drop(store);
 
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
         let other = Settings { work_size: 640, ..SETTINGS };
-        let (got, store) = open(&path, other, &mut problems);
+        let (got, store) = open(&path, other, &|_| true, &mut problems);
         assert!(got.is_empty() && !problems.any() && store.records() == 0);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), HEADER_LEN);
         std::fs::remove_dir_all(&dir).ok();

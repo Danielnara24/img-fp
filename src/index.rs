@@ -303,14 +303,15 @@ impl Vocabulary {
             let j = i + rng.below(n - i);
             idx.swap(i, j);
         }
-        let sample: Vec<f32> = idx[..take]
+        // Kept as bytes. k-means widens each member to floats as it reads it,
+        // which is exact, so every distance and every sum is the float it was
+        // when the sample was widened here — and the sample is 20 MB rather
+        // than 82 at the moment the whole tree is being built on top of it.
+        let sample: Vec<u8> = idx[..take]
             .iter()
-            .flat_map(|&i| {
-                descriptors[i as usize * DESC_LEN..(i as usize + 1) * DESC_LEN]
-                    .iter()
-                    .map(|&v| v as f32)
-            })
+            .flat_map(|&i| descriptors[i as usize * DESC_LEN..(i as usize + 1) * DESC_LEN].iter().copied())
             .collect();
+        drop(idx);
 
         let mut levels: Vec<Vec<u8>> = Vec::with_capacity(p.depth);
         let mut norms: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
@@ -329,14 +330,20 @@ impl Vocabulary {
             for (i, &a) in assign.iter().enumerate() {
                 groups[a as usize].push(i as u32);
             }
-            let results: Vec<(usize, Vec<f32>, Vec<bool>, Vec<(u32, u32)>)> = groups
+            // Each parent's centres come back already rounded to the byte they
+            // are kept as (see below). Rounding them here rather than after the
+            // whole level is in means the level is never held as floats: at the
+            // deepest one that was some seventy megabytes, alive at the same
+            // moment as everything the run had analysed.
+            let results: Vec<(usize, Vec<u8>, Vec<bool>, Vec<(u32, u32)>)> = groups
                 .par_iter()
                 .enumerate()
                 .map(|(g, members)| {
                     let (c, l, a) = kmeans(&sample, members, p.branching, p.iters, p.seed ^ (g as u64 + 1));
-                    (g, c, l, a)
+                    (g, c.iter().map(|&v| quantise_centre(v)).collect(), l, a)
                 })
                 .collect();
+            drop(groups);
             for (g, c, l, a) in results {
                 let base = g * p.branching;
                 // One parent's live children go down together, each one's
@@ -352,12 +359,7 @@ impl Vocabulary {
                 // which is what makes the descent's reads a quarter of what
                 // they were. The deepest level loses nothing at all by it —
                 // a node with one member hands that member's own bytes down.
-                centres.reserve(live.len() * DESC_LEN);
-                for k in 0..live.len() {
-                    for i in 0..DESC_LEN {
-                        centres.push(quantise_centre(c[k * DESC_LEN + i]));
-                    }
-                }
+                centres.extend_from_slice(&c[..live.len() * DESC_LEN]);
                 for (i, child) in a {
                     assign[i as usize] = (base + child as usize) as u32;
                 }
@@ -853,7 +855,14 @@ fn dists_dyn(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
 /// k-means on a subset, with k-means++ seeding. Empty clusters are marked
 /// dead rather than re-seeded: a vocabulary with fewer live nodes is correct,
 /// one with a centre nobody uses is noise.
-fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (Vec<f32>, Vec<bool>, Vec<(u32, u32)>) {
+/// One sample descriptor, widened to floats. Exact: every byte is a float.
+#[inline(always)]
+fn widen(data: &[u8], m: u32) -> [f32; DESC_LEN] {
+    let d = &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN];
+    std::array::from_fn(|i| d[i] as f32)
+}
+
+fn kmeans(data: &[u8], members: &[u32], k: usize, iters: usize, seed: u64) -> (Vec<f32>, Vec<bool>, Vec<(u32, u32)>) {
     assert!(k <= MAX_BRANCH);
     let mut live = vec![false; k];
     let mut assign: Vec<(u32, u32)> = Vec::with_capacity(members.len());
@@ -863,7 +872,7 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
     if members.len() <= k {
         let mut centres = Vec::with_capacity(members.len() * DESC_LEN);
         for (c, &m) in members.iter().enumerate() {
-            centres.extend_from_slice(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]);
+            centres.extend_from_slice(&widen(data, m));
             live[c] = true;
             assign.push((m, c as u32));
         }
@@ -874,15 +883,8 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
     // k-means++
     let mut chosen: Vec<u32> = Vec::with_capacity(k);
     chosen.push(members[rng.below(members.len())]);
-    let mut best_d: Vec<f32> = members
-        .par_iter()
-        .map(|&m| {
-            d2(
-                &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN],
-                &data[chosen[0] as usize * DESC_LEN..(chosen[0] as usize + 1) * DESC_LEN],
-            )
-        })
-        .collect();
+    let first = widen(data, chosen[0]);
+    let mut best_d: Vec<f32> = members.par_iter().map(|&m| d2(&widen(data, m), &first)).collect();
     while chosen.len() < k {
         let total: f64 = best_d.iter().map(|&v| v as f64).sum();
         if total <= 0.0 {
@@ -903,12 +905,12 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
         // other's. The first level of the tree has one k-means over the whole
         // sample, so this is the one place in the build with no parallelism of
         // its own to fall back on.
-        let cd = &data[c as usize * DESC_LEN..(c as usize + 1) * DESC_LEN];
+        let cd = widen(data, c);
         best_d
             .par_iter_mut()
             .zip(members.par_iter())
             .for_each(|(b, &m)| {
-                let d = d2(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN], cd);
+                let d = d2(&widen(data, m), &cd);
                 if d < *b {
                     *b = d;
                 }
@@ -916,8 +918,7 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
     }
     let kk = chosen.len();
     for (c, &m) in chosen.iter().enumerate() {
-        centres[c * DESC_LEN..(c + 1) * DESC_LEN]
-            .copy_from_slice(&data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]);
+        centres[c * DESC_LEN..(c + 1) * DESC_LEN].copy_from_slice(&widen(data, m));
     }
     let mut owner = vec![0u32; members.len()];
     let mut tc = vec![0f32; kk * DESC_LEN];
@@ -936,9 +937,9 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
             .par_iter_mut()
             .zip(members.par_iter())
             .map(|(own, &m)| {
-                let dv = &data[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN];
+                let dv = widen(data, m);
                 let mut acc = [0f32; MAX_BRANCH];
-                child_dists(kk, dv, &tc, &mut acc);
+                child_dists(kk, &dv, &tc, &mut acc);
                 let mut best = (f32::MAX, 0u32);
                 for c in 0..kk {
                     if acc[c] < best.0 {
@@ -1004,11 +1005,16 @@ fn kmeans(data: &[f32], members: &[u32], k: usize, iters: usize, seed: u64) -> (
 // ------------------------------------------------------------ inverted file
 
 /// Words of one image, sorted, with the keypoint each came from.
+///
+/// The keypoint index is sixteen bits because an image holds at most
+/// `max_features` keypoints, which is hundreds. The lists are held for every
+/// image through the whole of matching, which is where a found corpus's peak
+/// is, and at twelve million entries the two bytes are twenty-five megabytes.
 #[derive(Clone, Debug, Default)]
 pub struct WordList {
     /// Parallel arrays sorted by `word`.
     pub word: Vec<u32>,
-    pub kp: Vec<u32>,
+    pub kp: Vec<u16>,
 }
 
 impl WordList {
@@ -1486,7 +1492,7 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
             }
             for x in i0..i {
                 for y in j0..j {
-                    let e = (a.kp[x], b.kp[y]);
+                    let e = (a.kp[x] as u32, b.kp[y] as u32);
                     hi |= e.0 | e.1;
                     out.push(e);
                 }
@@ -1619,7 +1625,7 @@ mod tests {
                     }
                     for x in i0..i {
                         for y in j0..j {
-                            out.push((a.kp[x], b.kp[y]));
+                            out.push((a.kp[x] as u32, b.kp[y] as u32));
                         }
                     }
                     if out.len() > cap {
@@ -1648,7 +1654,7 @@ mod tests {
             pairs.sort_unstable();
             WordList {
                 word: pairs.iter().map(|p| p.0).collect(),
-                kp: pairs.iter().map(|p| p.1).collect(),
+                kp: pairs.iter().map(|p| p.1 as u16).collect(),
             }
         };
         let mut got = Vec::new();
@@ -1799,7 +1805,7 @@ mod tests {
                 })
                 .collect();
             pairs.sort_unstable();
-            WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1).collect() }
+            WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1 as u16).collect() }
         };
         for &(n_imgs, span) in [(3usize, 50u32), (40, 400), (200, 3000)].iter() {
             let lists: Vec<WordList> =
@@ -1910,7 +1916,7 @@ mod bench {
                     pairs.sort_unstable();
                     WordList {
                         word: pairs.iter().map(|p| p.0).collect(),
-                        kp: pairs.iter().map(|p| p.1).collect(),
+                        kp: pairs.iter().map(|p| p.1 as u16).collect(),
                     }
                 })
                 .collect();
@@ -1961,7 +1967,7 @@ mod bench {
                     pairs.sort_unstable();
                     WordList {
                         word: pairs.iter().map(|p| p.0).collect(),
-                        kp: pairs.iter().map(|p| p.1).collect(),
+                        kp: pairs.iter().map(|p| p.1 as u16).collect(),
                     }
                 })
                 .collect();
@@ -2034,7 +2040,7 @@ mod bench {
                     }
                     let mk = |mut w: Vec<u32>| {
                         w.sort_unstable();
-                        let kp: Vec<u32> = (0..w.len() as u32).collect();
+                        let kp: Vec<u16> = (0..w.len() as u16).collect();
                         WordList { word: w, kp }
                     };
                     (mk(wa), mk(wb))
@@ -2091,7 +2097,7 @@ mod bench {
                     pairs.sort_unstable();
                     WordList {
                         word: pairs.iter().map(|p| p.0).collect(),
-                        kp: pairs.iter().map(|p| p.1).collect(),
+                        kp: pairs.iter().map(|p| p.1 as u16).collect(),
                     }
                 })
                 .collect();

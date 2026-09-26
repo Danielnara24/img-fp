@@ -376,6 +376,16 @@ fn jxl_size(r: &mut impl std::io::Read) -> Option<(u32, u32)> {
 }
 
 fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32, Gray)> {
+    if fmt == ImageFormat::Png {
+        if let Some(done) = decode_png_rows(bytes, work) {
+            return Ok(done);
+        }
+    }
+    decode_whole(bytes, fmt, work)
+}
+
+/// Any format `image` reads, decoded whole and then reduced.
+fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32, Gray)> {
     let reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -408,6 +418,83 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
     let (w, h) = (img.width(), img.height());
     let gray = timed!(2, dynamic_to_gray(&img, work));
     Ok((w, h, gray))
+}
+
+/// A PNG decoded a row at a time straight into the box reduction, so that the
+/// picture never exists whole.
+///
+/// It is the largest transient the benchmark corpus has. A forty-megapixel PNG
+/// is 133 MB of RGB, or 177 of RGBA, held only long enough to be reduced to a
+/// working plane of a megabyte; there are a hundred PNGs past four megapixels
+/// in that corpus and nothing in the analysis needs any row but the one it is
+/// reading. The `png` crate unfilters a row at a time anyway — `next_frame` is
+/// a loop over the same rows into one big buffer — so asking for them one by
+/// one yields the same bytes, and the reduction sums them exactly as it sums a
+/// whole buffer's rows (see `Reducer`).
+///
+/// `None` means "take the general path", and it is what this says about
+/// anything it is not sure it would read identically: an interlaced or
+/// animated file, sixteen bits a channel, an EXIF chunk that might rotate the
+/// picture, a frame the general path's allocation limit would refuse — and
+/// any error at all, so that a broken file fails with the message the general
+/// path gives it. That costs a truncated file a second decode, which is a
+/// price only broken files pay.
+fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
+    // What `image` asks of the `png` crate, so that the rows are the rows it
+    // would have got: its default allocation limit, text chunks read, and
+    // EXPAND, which widens palettes and low bit depths to eight bits and a
+    // transparency chunk to an alpha channel.
+    const IMAGE_MAX_ALLOC: usize = 512 << 20;
+    let mut dec = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: IMAGE_MAX_ALLOC });
+    dec.set_ignore_text_chunk(false);
+    dec.set_transformations(png::Transformations::EXPAND);
+    let mut reader = dec.read_info().ok()?;
+    let info = reader.info();
+    if info.interlaced || info.animation_control.is_some() || info.exif_metadata.is_some() {
+        return None;
+    }
+    let (w, h) = (info.width, info.height);
+    let (color, depth) = reader.output_color_type();
+    if depth != png::BitDepth::Eight || reader.output_buffer_size()? > IMAGE_MAX_ALLOC {
+        return None;
+    }
+    let (wu, hu) = (w as usize, h as usize);
+    // What this holds: the file, the working plane, and a row or two of the
+    // decoder's own. The frame the general path would claim is not among them.
+    let _permit = reserve(bytes.len() as u64 + working_bytes(wu, hu, work) + 2 * reader.output_line_size(w)? as u64);
+    let reduced = timed!(1, match color {
+        png::ColorType::Rgb => png_rows::<_, 3, false>(&mut reader, wu, hu, work)?,
+        png::ColorType::Rgba => png_rows::<_, 4, true>(&mut reader, wu, hu, work)?,
+        png::ColorType::Grayscale => png_rows::<_, 1, false>(&mut reader, wu, hu, work)?,
+        png::ColorType::GrayscaleAlpha => png_rows::<_, 2, true>(&mut reader, wu, hu, work)?,
+        png::ColorType::Indexed => return None,
+    });
+    Some((w, h, timed!(3, fit_to(reduced, work))))
+}
+
+fn png_rows<R: std::io::BufRead + std::io::Seek, const CH: usize, const ALPHA: bool>(
+    reader: &mut png::Reader<R>,
+    w: usize,
+    h: usize,
+    work: usize,
+) -> Option<Gray> {
+    let mut r = Reducer::<CH, ALPHA>::new(w, h, work);
+    // Every row, including the edge the reduction drops: the general path
+    // decodes those too, and a file that breaks in its last rows has to fail
+    // here as it fails there.
+    for _ in 0..h {
+        let row = reader.next_row().ok()??;
+        if row.data().len() != w * CH {
+            return None;
+        }
+        r.push(row.data());
+    }
+    // What `next_frame` does after its last row: the rest of the image data is
+    // read and checked, and an error there is an error.
+    if reader.next_row().ok()?.is_some() {
+        return None;
+    }
+    Some(r.finish())
 }
 
 /// Mean of RGB, alpha flattened onto mid-grey, box-reduced towards the
@@ -454,6 +541,41 @@ pub fn reduce_to_gray(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, w
     timed!(3, fit_to(g, work))
 }
 
+/// `reduce_to_gray` over rows a decoder hands out one at a time, in order, so
+/// that the picture never has to exist whole. `row` fills the line it is given
+/// with the next row's `w * ch` bytes.
+///
+/// Only the rows the reduction reads are asked for — the edge the floor
+/// division drops is not — and a layout the reduction has no specialisation
+/// for is gathered whole and reduced the general way, as it always was.
+fn reduce_rows(w: usize, h: usize, ch: usize, alpha: bool, work: usize, row: impl FnMut(&mut [u8])) -> Gray {
+    fn rows<const CH: usize, const ALPHA: bool>(w: usize, h: usize, work: usize, mut row: impl FnMut(&mut [u8])) -> Gray {
+        let mut r = Reducer::<CH, ALPHA>::new(w, h, work);
+        let mut line = vec![0u8; w * CH];
+        for _ in 0..r.rows_read() {
+            row(&mut line);
+            r.push(&line);
+        }
+        r.finish()
+    }
+    let g = match (ch, alpha) {
+        (3, false) => rows::<3, false>(w, h, work, row),
+        (4, true) => rows::<4, true>(w, h, work, row),
+        (1, false) => rows::<1, false>(w, h, work, row),
+        (2, true) => rows::<2, true>(w, h, work, row),
+        (4, false) => rows::<4, false>(w, h, work, row),
+        _ => {
+            let mut row = row;
+            let mut data = vec![0u8; w * h * ch];
+            for line in data.chunks_exact_mut((w * ch).max(1)) {
+                row(line);
+            }
+            return reduce_to_gray(w, h, &data, ch, alpha, work);
+        }
+    };
+    timed!(3, fit_to(g, work))
+}
+
 /// One grey sample from one source pixel: the mean of the colour channels,
 /// alpha flattened onto mid-grey.
 #[inline(always)]
@@ -494,42 +616,100 @@ fn grey_of<const CH: usize, const ALPHA: bool>(p: &[u8]) -> f32 {
 }
 
 fn reduce<const CH: usize, const ALPHA: bool>(w: usize, h: usize, data: &[u8], work: usize) -> Gray {
-    let k = box_factor(w, h, work);
-    let ow = (w / k).max(1);
-    let oh = (h / k).max(1);
-    let inv = 1.0 / (255.0 * (k * k) as f32);
-    let mut px: Vec<f32> = Vec::with_capacity(ow * oh);
-    // One source row's grey values, so that the interleaved bytes are undone
-    // once per row rather than once per box. See `grey_row`.
-    let mut grey: Vec<f32> = vec![0.0; w];
-    if k == 1 {
-        // No box reduction: every output pixel is one source pixel, so there
-        // is nothing to accumulate and nothing to zero first.
-        //
-        // The plane this writes is read straight back by the area resample
-        // below, and handing that resample a row at a time instead — so the
-        // grey values never leave the first-level cache — is slower, not
-        // faster: the resample reads the plane sequentially, which the
-        // prefetcher serves for nothing, and a row at a time costs a loop
-        // boundary per row of the picture. Measured at +25% on RGB.
-        for y in 0..oh {
-            let line = &data[y * w * CH..(y + 1) * w * CH];
-            grey_row::<CH, ALPHA>(line, &mut grey[..w]);
-            px.extend(grey[..ow].iter().map(|g| g * inv));
-        }
-        return Gray { w: ow, h: oh, px };
+    let mut r = Reducer::<CH, ALPHA>::new(w, h, work);
+    // Rows past the last whole box are never read; `push` would drop them.
+    for y in 0..r.rows_read() {
+        r.push(&data[y * w * CH..(y + 1) * w * CH]);
     }
-    let mut row = vec![0.0f32; ow];
-    for oy in 0..oh {
-        row.fill(0.0);
-        for sy in oy * k..(oy * k + k).min(h) {
-            let line = &data[sy * w * CH..(sy + 1) * w * CH];
-            grey_row::<CH, ALPHA>(line, &mut grey[..w]);
-            box_row(k, &grey[..w], &mut row);
+    r.finish()
+}
+
+/// The box reduction, fed one source row at a time and in order.
+///
+/// The whole-buffer path hands it the rows of a decoded picture and the
+/// streaming PNG path hands it rows as the decoder unfilters them, so the two
+/// are one piece of arithmetic rather than two that must be kept in step: the
+/// same grey values, summed into the same boxes in the same order.
+struct Reducer<const CH: usize, const ALPHA: bool> {
+    w: usize,
+    h: usize,
+    k: usize,
+    ow: usize,
+    oh: usize,
+    inv: f32,
+    px: Vec<f32>,
+    /// One source row's grey values, so that the interleaved bytes are undone
+    /// once per row rather than once per box. See `grey_row`.
+    grey: Vec<f32>,
+    /// The output row being summed into, when there is a box to sum.
+    row: Vec<f32>,
+    /// The next source row `push` expects.
+    sy: usize,
+}
+
+impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
+    fn new(w: usize, h: usize, work: usize) -> Self {
+        let k = box_factor(w, h, work);
+        let ow = (w / k).max(1);
+        let oh = (h / k).max(1);
+        Reducer {
+            w,
+            h,
+            k,
+            ow,
+            oh,
+            inv: 1.0 / (255.0 * (k * k) as f32),
+            px: Vec::with_capacity(ow * oh),
+            grey: vec![0.0; w],
+            row: if k == 1 { Vec::new() } else { vec![0.0f32; ow] },
+            sy: 0,
         }
-        px.extend(row.iter().map(|v| v * inv));
     }
-    Gray { w: ow, h: oh, px }
+
+    /// How many source rows the reduction reads: the rest are the edge the
+    /// floor division drops.
+    fn rows_read(&self) -> usize {
+        (self.oh * self.k).min(self.h)
+    }
+
+    fn push(&mut self, line: &[u8]) {
+        let (w, k, sy) = (self.w, self.k, self.sy);
+        self.sy += 1;
+        if sy >= self.rows_read() {
+            return;
+        }
+        if k == 1 {
+            // No box reduction: every output pixel is one source pixel, so
+            // there is nothing to accumulate and nothing to zero first.
+            //
+            // The plane this writes is read straight back by the area
+            // resample, and handing that resample a row at a time instead — so
+            // the grey values never leave the first-level cache — is slower,
+            // not faster: the resample reads the plane sequentially, which the
+            // prefetcher serves for nothing, and a row at a time costs a loop
+            // boundary per row of the picture. Measured at +25% on RGB.
+            grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
+            let inv = self.inv;
+            self.px.extend(self.grey[..self.ow].iter().map(|g| g * inv));
+            return;
+        }
+        if sy % k == 0 {
+            self.row.fill(0.0);
+        }
+        grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
+        box_row(k, &self.grey[..w], &mut self.row);
+        // The last row of a box: `k` rows in, or the picture's last row when
+        // the picture is shorter than one box.
+        if sy % k == k - 1 || sy + 1 == self.h {
+            let inv = self.inv;
+            self.px.extend(self.row.iter().map(|v| v * inv));
+        }
+    }
+
+    fn finish(self) -> Gray {
+        debug_assert_eq!(self.px.len(), self.ow * self.oh);
+        Gray { w: self.ow, h: self.oh, px: self.px }
+    }
 }
 
 /// Add one source row's boxes into the output row.
@@ -840,14 +1020,16 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
         .pool(jxl_oxide::JxlThreadPool::none())
         .read(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("jxl: {e}"))?;
-    // The rendered frame, the float buffer it is streamed into and the bytes
-    // packed out of that: four bytes a sample twice over, then one. Claimed
-    // from the header, before the render that allocates the first of them.
+    // What the render holds: two frames' worth of float planes at its widest,
+    // measured — the decoded frame and the one the colour transform writes.
+    // Claimed from the header, before the render that allocates them. The
+    // rows are streamed out of the render into the reduction, so nothing of
+    // the picture is held beside it.
     let header = image.image_header();
     let nch = if header.metadata.grayscale() { 1 } else { 3 } + header.metadata.alpha().is_some() as u64;
     let _permit = reserve(
         bytes.len() as u64
-            + (image.width() as u64) * (image.height() as u64) * nch * 9
+            + (image.width() as u64) * (image.height() as u64) * nch * 8
             + working_bytes(image.width() as usize, image.height() as usize, work),
     );
     let render = image
@@ -855,22 +1037,32 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
         .map_err(|e| anyhow::anyhow!("jxl render: {e}"))?;
     let mut stream = render.stream();
     let (w, h, ch) = (stream.width() as usize, stream.height() as usize, stream.channels() as usize);
-    let mut buf = vec![0f32; w * h * ch];
-    stream.write_to_buffer(&mut buf);
     // Colour channels come first; a trailing channel is alpha if the header
     // says there is one. Anything else (black, spot) is ignored.
     let color = if image.image_header().metadata.grayscale() { 1 } else { 3 };
     let has_alpha = image.image_header().metadata.alpha().is_some();
-    let mut u8buf = Vec::with_capacity(w * h * (color + has_alpha as usize));
-    for px in buf.chunks_exact(ch) {
-        for c in 0..color {
-            u8buf.push((px[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    let out_ch = color + has_alpha as usize;
+    // A row at a time: the stream remembers where it stopped, so a buffer one
+    // row long reads the picture in the order a whole-picture buffer did, and
+    // each byte is the one that buffer's conversion made. That buffer was a
+    // float per sample — 154 MB for a 13.5-megapixel file, on top of the
+    // render's own 306 and a byte copy of 38 — and it was the largest single
+    // thing the benchmark corpus's run ever held.
+    let mut rowf = vec![0f32; w * ch];
+    let g = reduce_rows(w, h, out_ch, has_alpha, work, |line| {
+        let got = stream.write_to_buffer(&mut rowf);
+        // A stream shorter than its own header says reads as zeros, which is
+        // what the whole buffer's unwritten tail held.
+        rowf[got..].fill(0.0);
+        for (px, out) in rowf.chunks_exact(ch).zip(line.chunks_exact_mut(out_ch)) {
+            for c in 0..color {
+                out[c] = (px[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+            if has_alpha {
+                out[color] = (px[color].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
         }
-        if has_alpha {
-            u8buf.push((px[color].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-        }
-    }
-    let g = reduce_to_gray(w, h, &u8buf, color + has_alpha as usize, has_alpha, work);
+    });
     Ok((w as u32, h as u32, g))
 }
 
@@ -881,7 +1073,10 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
     let has_alpha = handle.has_alpha_channel();
     let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
-    // The decoded interleaved plane, and the copy packed out of it.
+    // The decoded interleaved plane, and as much again. The second half used
+    // to be a copy of the plane with its stride padding packed out; the rows
+    // now go to the reduction from where they lie, and the claim is left as it
+    // was rather than guessed down to what libheif holds while it converts.
     let _permit = reserve(
         bytes.len() as u64
             + (handle.width() as u64) * (handle.height() as u64) * if has_alpha { 8 } else { 6 }
@@ -894,13 +1089,11 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let plane = planes.interleaved.context("heif: no interleaved plane")?;
     let (w, h) = (plane.width as usize, plane.height as usize);
     let ch = if has_alpha { 4 } else { 3 };
-    // Re-pack rows to remove the stride padding.
-    let mut packed = Vec::with_capacity(w * h * ch);
-    for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * ch];
-        packed.extend_from_slice(row);
-    }
-    let g = reduce_to_gray(w, h, &packed, ch, has_alpha, work);
+    let mut y = 0;
+    let g = reduce_rows(w, h, ch, has_alpha, work, |line| {
+        line.copy_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * ch]);
+        y += 1;
+    });
     Ok((w as u32, h as u32, g))
 }
 
@@ -933,7 +1126,7 @@ mod tests {
             // twice the working size take the `k == 1` branch, which scales the
             // grey values where the other accumulates them.
             for &(w, h, work) in
-                &[(37usize, 23usize, 64usize), (200, 150, 32), (64, 64, 0), (100, 80, 64), (121, 97, 64)]
+                &[(37usize, 23usize, 64usize), (200, 150, 32), (64, 64, 0), (100, 80, 64), (121, 97, 64), (900, 5, 64), (5, 900, 64), (301, 7, 32)]
             {
                 let data: Vec<u8> = (0..w * h * ch)
                     .map(|i| ((i * 37 + i / 17 * 11) % 251) as u8)
@@ -942,6 +1135,91 @@ mod tests {
                 let slow = reduce_dyn(w, h, &data, ch, alpha, work);
                 assert_eq!((fast.w, fast.h), (slow.w, slow.h), "{ch} {alpha} {w}x{h}@{work}");
                 assert_eq!(fast.px, slow.px, "{ch} {alpha} {w}x{h}@{work}");
+            }
+        }
+    }
+
+    /// Rows handed over one at a time reduce to the plane the whole buffer
+    /// does, for every layout a decoder produces and one none does.
+    #[test]
+    fn reduce_rows_matches_the_whole_buffer() {
+        for &(ch, alpha) in &[(1, false), (2, true), (3, false), (4, true), (4, false), (5, false)] {
+            for &(w, h, work) in &[(37usize, 23usize, 64usize), (200, 150, 32), (64, 64, 0), (121, 97, 64), (900, 5, 64), (5, 900, 64)] {
+                let data: Vec<u8> = (0..w * h * ch).map(|i| ((i * 37 + i / 17 * 11) % 251) as u8).collect();
+                let want = reduce_to_gray(w, h, &data, ch, alpha, work);
+                let mut y = 0;
+                let got = reduce_rows(w, h, ch, alpha, work, |line| {
+                    line.copy_from_slice(&data[y * w * ch..(y + 1) * w * ch]);
+                    y += 1;
+                });
+                assert_eq!((got.w, got.h), (want.w, want.h), "{ch} {alpha} {w}x{h}@{work}");
+                assert!(got.px.iter().zip(want.px.iter()).all(|(a, b)| a.to_bits() == b.to_bits()), "{ch} {alpha} {w}x{h}@{work}");
+            }
+        }
+    }
+
+    /// A PNG of the given layout, `w` by `h`, from a pattern with some texture
+    /// and, where there is alpha, some transparency.
+    fn png_of(w: u32, h: u32, color: png::ColorType, depth: png::BitDepth) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut out, w, h);
+            e.set_color(color);
+            e.set_depth(depth);
+            if color == png::ColorType::Indexed {
+                e.set_palette((0..256u32).flat_map(|i| [i as u8, (i * 7) as u8, (255 - i) as u8]).collect::<Vec<u8>>());
+                e.set_trns((0..256u32).map(|i| (i * 3) as u8).collect::<Vec<u8>>());
+            }
+            let mut wr = e.write_header().unwrap();
+            let bits = color.samples() * depth as usize;
+            let row = (w as usize * bits).div_ceil(8);
+            let data: Vec<u8> = (0..row * h as usize).map(|i| ((i * 37 + i / 13 * 11 + i / 997) % 251) as u8).collect();
+            wr.write_image_data(&data).unwrap();
+        }
+        out
+    }
+
+    /// The streaming PNG path gives the general path's grey plane to the bit,
+    /// or declines — over every layout, at sizes that take each branch of the
+    /// reduction. (Interlaced files are declined by one test on the header;
+    /// the encoder here cannot write one to check it with.) And a file it declines or cannot finish still decodes, or
+    /// fails, exactly as the general path does.
+    #[test]
+    fn png_rows_decode_exactly_as_the_whole_picture_does() {
+        use png::{BitDepth as D, ColorType as C};
+        let layouts = [
+            (C::Rgb, D::Eight, true),
+            (C::Rgba, D::Eight, true),
+            (C::Grayscale, D::Eight, true),
+            (C::GrayscaleAlpha, D::Eight, true),
+            (C::Grayscale, D::One, true),
+            (C::Grayscale, D::Four, true),
+            (C::Indexed, D::Eight, true),
+            (C::Indexed, D::Two, true),
+            (C::Rgb, D::Sixteen, false),
+            (C::Rgba, D::Sixteen, false),
+        ];
+        for &(color, depth, streams) in layouts.iter() {
+            for &(w, h, work) in &[(37u32, 23u32, 64usize), (300, 200, 64), (257, 511, 64), (900, 5, 64), (5, 700, 64), (64, 64, 0)] {
+                let bytes = png_of(w, h, color, depth);
+                let tag = format!("{color:?} {depth:?} {w}x{h}@{work}");
+                assert_eq!(decode_png_rows(&bytes, work).is_some(), streams, "{tag}");
+                let got = decode_image_crate(&bytes, ImageFormat::Png, work).unwrap().2;
+                let want = decode_whole(&bytes, ImageFormat::Png, work).unwrap().2;
+                assert_eq!((got.w, got.h), (want.w, want.h), "{tag}");
+                assert!(got.px.iter().zip(want.px.iter()).all(|(a, b)| a.to_bits() == b.to_bits()), "{tag}");
+            }
+        }
+        // Truncated anywhere — in the header, in the rows, in the last chunk —
+        // the result is the general path's, error message and all.
+        let bytes = png_of(300, 200, C::Rgb, D::Eight);
+        for cut in [40, 200, bytes.len() / 2, bytes.len() - 20, bytes.len() - 5] {
+            let got = decode_image_crate(&bytes[..cut], ImageFormat::Png, 64).map(|r| r.2.px);
+            let want = decode_whole(&bytes[..cut], ImageFormat::Png, 64).map(|r| r.2.px);
+            match (got, want) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "cut {cut}"),
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "cut {cut}"),
+                (a, b) => panic!("cut {cut}: {:?} against {:?}", a.is_ok(), b.is_ok()),
             }
         }
     }

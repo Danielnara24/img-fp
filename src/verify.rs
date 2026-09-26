@@ -765,8 +765,14 @@ fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
 /// plain bilinear taps samples whichever side is finer far below its Nyquist
 /// rate, and an aliased view does not correlate with a properly filtered one —
 /// so the check reported disagreement for a difference the *sampling* had
-/// introduced. The pyramid is derived from `px` and is not serialised; the
-/// cache rebuilds it on load.
+/// introduced. The pyramid is derived from `px` and is not serialised.
+///
+/// It is built the first time a comparison reads it, not with the thumbnail.
+/// A third again of every thumbnail, held from the analysis to the end of the
+/// run, is fifty megabytes on a nine-thousand-image corpus — where almost no
+/// image ever reaches a pixel check, and one that does may only ever be read
+/// at level zero. The levels are a pure function of `px`, so when they are
+/// made cannot change what they hold.
 #[derive(Clone, Debug, Default)]
 pub struct Thumb {
     pub w: u16,
@@ -775,7 +781,7 @@ pub struct Thumb {
     pub scale: f32,
     pub px: Vec<u8>,
     /// Half-resolution levels above `px`: level i has been halved i+1 times.
-    mips: Vec<(u16, u16, Vec<u8>)>,
+    mips: std::sync::OnceLock<Vec<(u16, u16, Vec<u8>)>>,
 }
 
 impl Thumb {
@@ -802,15 +808,24 @@ impl Thumb {
         )
     }
 
-    /// Build a thumbnail and its pyramid. Used by `build` and by the cache,
-    /// which stores only level zero.
+    /// A thumbnail from its level zero. Used by `build` and by the cache,
+    /// which stores only that; the pyramid waits for `mips`.
     pub fn new(w: u16, h: u16, scale: f32, px: Vec<u8>) -> Thumb {
+        Thumb { w, h, scale, px, mips: std::sync::OnceLock::new() }
+    }
+
+    /// The pyramid, built on first use.
+    fn mips(&self) -> &[(u16, u16, Vec<u8>)] {
+        self.mips.get_or_init(|| Thumb::pyramid(self.w, self.h, &self.px))
+    }
+
+    fn pyramid(w: u16, h: u16, px: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
         let mut mips: Vec<(u16, u16, Vec<u8>)> = Vec::new();
         let (mut cw, mut ch) = (w as usize, h as usize);
         while cw >= 4 && ch >= 4 {
             let (nw, nh) = (cw / 2, ch / 2);
             let cur: &[u8] = match mips.last() {
-                None => &px,
+                None => px,
                 Some((_, _, p)) => p,
             };
             let mut next = Vec::with_capacity(nw * nh);
@@ -828,7 +843,7 @@ impl Thumb {
             cw = nw;
             ch = nh;
         }
-        Thumb { w, h, scale, px, mips }
+        mips
     }
 
     /// Where a coordinate lands in a level: the pixel below it and the
@@ -897,23 +912,27 @@ impl Thumb {
             hi: None,
             t: 0.0,
         };
-        if !(footprint > 1.0) || self.mips.is_empty() {
+        if !(footprint > 1.0) {
+            return whole;
+        }
+        let mips = self.mips();
+        if mips.is_empty() {
             return whole;
         }
         let l = footprint.log2();
-        let li = (l as usize).min(self.mips.len());
+        let li = (l as usize).min(mips.len());
         let lo: (&[u8], usize, usize, f32) = if li == 0 {
             (&self.px[..], self.w as usize, self.h as usize, 1.0)
         } else {
-            let (w, h, ref p) = self.mips[li - 1];
+            let (w, h, ref p) = mips[li - 1];
             (&p[..], w as usize, h as usize, 1.0 / (1 << li) as f32)
         };
-        if li >= self.mips.len() {
+        if li >= mips.len() {
             return Lod { lo, hi: None, t: 0.0 };
         }
         // Blending into the next level keeps a footprint that drifts across a
         // power of two from stepping the measurement.
-        let (w, h, ref p) = self.mips[li];
+        let (w, h, ref p) = mips[li];
         Lod {
             lo,
             hi: Some((&p[..], w as usize, h as usize, 1.0 / (1 << (li + 1)) as f32)),

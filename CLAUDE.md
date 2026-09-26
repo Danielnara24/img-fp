@@ -1657,6 +1657,78 @@ Tried in this pass and rejected, each measured:
   has no mirrored negative. It costs **3.2 points of recall** (F1 0.9547 ->
   0.9368, 44 perfect transforms against 47) — see *What the second look costs*.
 
+**A memory pass, and where each corpus's peak really was.** Every change is
+byte-identical: the same 216,009 pairs and 140 groups here and the same 3,778
+and 794 on the found corpus, every verdict field compared — and, more strictly,
+**all 5,637 per-image cache records byte-identical** between the two builds on
+this corpus, which is the grey plane, the keypoints, the descriptors and the
+thumbnail of every file. Measured cold, cooled and cache-evicted, with
+`bench.py`'s own PSS sampler:
+
+| | peak PSS before | after | CPU-seconds, slot-matched pairs |
+|---|---|---|---|
+| benchmark corpus | 812 / 776 / 775 / 759 / 751 MB | 709 / 716 / 738 / 695 / 689 MB | 327 → 312, 318 ← 368, 318 → 307, 329 ← 314, 335 → 317 |
+| found corpus | 1,140 / 1,140 MB | 1,052 / 1,052 MB | 784 → 823, 823 ← 824 |
+| benchmark, cached, one machine cache holding both | 1,233 MB | **488 MB** | 12.9 s → 10.1 s wall |
+
+About **-90 MB (-12%) cold here, -88 MB (-8%) on the found corpus**, and -60%
+for a cached run whose cache also holds another corpus — which, since the cache
+is one file per machine, is the ordinary way to run this. CPU is level to
+better: four of the five pairs here are the new build faster by 3-6%, the fifth
+the other way by 16% on a run 170 MHz slower; the found corpus's matched pair is
+level. The pass is not aimed at the clock; where it is faster it is because
+less memory was moved.
+
+The finding that decided what was worth doing: **the two corpora peak in
+different places, and neither was where the paragraph on peak memory above
+said.** Measured with a sampler reading `mallinfo2` every quarter-second:
+
+- **This corpus peaked inside a single JXL decode.** jxl-oxide's render holds
+  six float planes at its widest — 306 MB for a 13.5-megapixel file — and
+  `decode_jxl` then streamed the result into a second whole-picture float
+  buffer (154 MB) and packed a byte copy of that (38 MB). At ~500 MB it was
+  larger than the decode budget it had claimed 364 of, and it ran alone on top
+  of four hundred megabytes of analysis. The render now streams a row at a time
+  straight into the reduction (`reduce_rows`), and the claim is the render's
+  own 8 bytes a sample. HEIF lost its packed copy the same way.
+- **PNGs are decoded a row at a time** (`decode_png_rows`), straight from the
+  `png` crate into the box reduction. The corpus has 114 PNGs past four
+  megapixels and a 44-megapixel one is 177 MB of RGBA; now it is a row. The
+  reduction became a row-fed `Reducer` that the whole-buffer path uses too, so
+  the two are one piece of arithmetic, and anything the stream is not sure it
+  reads identically — interlaced, animated, sixteen-bit, an EXIF chunk, an
+  error of any kind — takes the old path, error message and all.
+  `png_rows_decode_exactly_as_the_whole_picture_does` holds them together.
+  JPEG has no equivalent: zune-jpeg has no row API.
+- **The found corpus peaked twice, at the same height**: during the vocabulary
+  build and during the second look. The build widened its 160,000-descriptor
+  sample to floats (82 MB) and carried each level's k-means centres back as
+  floats before rounding them to bytes (~70 MB at the deepest level). The
+  sample stays bytes now and each member is widened as k-means reads it —
+  exact, so every distance and sum is the same float — and the centres are
+  rounded inside the parallel map. The spike is gone.
+- **The second look's peak** lost the word lists' keypoint index (`u32` to
+  `u16`, 25 MB), the million candidate pairs held through it for nothing, and
+  the thumbnails' mip pyramids, which are now built on the first pixel check
+  that needs one (`Thumb::mips`) — a third of every thumbnail, most of which a
+  found corpus never reads.
+- **And a cached run unpacked the whole machine's cache.** `cache::open`
+  inflated every record in the file, including every record for a path this
+  run was not walking, and held them through the analysis so that their spans
+  could be carried over — which needs a key and a span and nothing else. With
+  the found corpus in the same cache that was 900 MB of someone else's
+  analysis; that record is now framed and skipped. What is given up is
+  noticing a damaged compressed body before a run that walks its path.
+
+What is left, so that nobody goes looking for it: on the found corpus the peak
+is **875 MB of analysis** — descriptors 625, thumbnails 152, keypoints 98 — plus
+the index, and none of that can shrink without being lossy. Packing a word and
+its keypoint into one `u32` would take another 25 MB off the word lists, at the
+price of shifts inside `shared`'s block filter, the matcher's hottest loop; not
+tried. Here the peak is now the JXL render itself on top of the analysis, and
+past that the decode budget, which is `MemAvailable / 8` and so is a choice
+about the machine rather than a property of the build.
+
 ### What the second look costs, and the seven ways not to fix it
 
 It is **41% of a found corpus's run** and 1.5% of this one's. Profiled on the
@@ -2651,7 +2723,7 @@ a warmer day than the question was asked on — 55.8 s total):
 | stage | wall |
 |---|---|
 | walk, exact-duplicate hash | 0.2 s |
-| **cache load** (660 MB, inflate + mip pyramids, parallel) | **2.0 s** |
+| **cache load** (660 MB, inflate + mip pyramids, parallel; the pyramids are now built on first use) | **2.0 s** |
 | decode and describe | **0 — this is what the cache buys** |
 | vocabulary built from the corpus's own descriptors | 1.7 s |
 | quantise 4.88 M descriptors into words | 4.6 s |

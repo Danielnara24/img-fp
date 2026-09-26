@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "img-fp"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -634,6 +634,7 @@ dependencies = [
  "indicatif",
  "jxl-oxide",
  "libheif-rs",
+ "png",
  "rayon",
  "serde",
  "serde_json",

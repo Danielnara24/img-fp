@@ -449,15 +449,16 @@ fifths of that work is the analysis and the analysis is kept.
 
 Peak memory is two things added together. The steady part is the analysis
 itself — a few hundred kilobytes of descriptors and one thumbnail per image,
-which is what the matching stages read — and comes to about 650 MB on this
-corpus. The rest is decoded picture in flight: decoding a photograph costs far
-more than keeping it (a 44-megapixel file is 133 MB of RGB and reduces to
-1.2 MB), so the workers share a budget and wait for room in it rather than
+which is what the matching stages read — and comes to about 300 MB on this
+corpus at the default work size. The rest is decoded picture in flight: decoding a photograph costs far
+more than keeping it (a 36-megapixel JPEG is 105 MB of RGB and reduces to
+1.2 MB; a PNG is streamed into the reduction a row at a time and never exists
+whole), so the workers share a budget and wait for room in it rather than
 letting the peak be decided by how many large files happen to sit next to each
 other in the directory. That budget is a fraction of what the machine reports
-free, so the total lands between 850 MB and 1,050 MB depending on how much
-memory the machine had to spare — and a run that reports a bigger number is
-not necessarily doing anything differently.
+free, so the total depends on how much memory the machine had to spare — 690
+to 740 MB measured here with about 2.2 GB free — and a run that reports a
+bigger number is not necessarily doing anything differently.
 
 For scale: the best-scoring competitor takes 1,949 s on the same corpus, and
 the fastest thing that finds anything at all beyond byte-identical copies

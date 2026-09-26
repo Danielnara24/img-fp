@@ -439,7 +439,10 @@ fn quantise(vocab: &Vocabulary, f: &Features) -> WordList {
         }
     }
     pairs.sort_unstable();
-    WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1).collect() }
+    // A keypoint index fits the list's sixteen bits: `retain_best` holds an
+    // image to `FEATURES`.
+    debug_assert!(f.len() <= u16::MAX as usize + 1);
+    WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1 as u16).collect() }
 }
 
 /// The same features as seen in a mirrored (and/or inverted) copy of the
@@ -754,10 +757,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         features: FEATURES as u32,
         thumb: THUMB_LONG as u32,
     };
+    let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
     let (mut cached, mut store) = match &cache_path {
         Some(p) => {
             progress.begin(Stage::CacheRead);
-            let (cached, store) = cache::open(p, settings, problems);
+            // Only this run's paths are unpacked; the rest of the machine's
+            // cache is read for where it is, not for what it says. See
+            // `cache::open`.
+            let walked: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+            let (cached, store) = cache::open(p, settings, &|path| walked.contains(path), problems);
             (cached, Some(store))
         }
         None => Default::default(),
@@ -768,7 +776,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     if !cached.is_empty() {
         stage!(t_start, "cache: {} usable records", cached.len());
     }
-    let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
     // Every walked file's record comes *out* of the map rather than being
     // copied from it. The analysis is the largest thing the run holds, and
     // cloning it here made it exist twice over — once in the map and once in
@@ -792,7 +799,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
                 return None;
             }
             same_key += 1;
-            Some((got.1, got.2))
+            // A walked path's record is always unpacked.
+            Some((got.1?, got.2))
         })
         .collect();
     // Where each file's record sits in the cache file, for the ones that have
@@ -1159,6 +1167,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         )
         .flatten()
         .collect();
+    // Every candidate has its verdict now, and the second look below is where
+    // a found corpus's run peaks: a million pairs held through it for nothing.
+    drop(cand_pairs);
     // Anchors only: a pair believed on its own evidence. These are what decide
     // which files end up in one cluster.
     let edges: Vec<Edge> = all_direct.iter().filter(|(_, _, _, _, v)| v.accepted(&policy.anchor)).cloned().collect();

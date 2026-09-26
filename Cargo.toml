@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
@@ -19,6 +19,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 flate2 = "1.1.10"
 indicatif = "0.17"
 image = "0.25"
+# The decoder `image` itself uses for PNG, asked directly so that a PNG can be
+# read a row at a time into the reduction; see `decode_png_rows`. Kept at the
+# version `image` resolves to, so there is one copy of it in the build.
+png = "0.18"
 jxl-oxide = "0.12.6"
 libheif-rs = { version = "3.0.0", default-features = false, features = ["v1_17"] }
 rayon = "1.12.0"
