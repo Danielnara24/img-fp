@@ -123,9 +123,12 @@ pub struct Problems<'a> {
     not_an_image: Tally,
     not_image_content: Tally,
     symlink: Tally,
+    symlink_loop: Tally,
     listed_twice: Tally,
+    excluded: Tally,
 
     // Problems: what was asked for and did not happen.
+    unresolved_exclude: Tally,
     unscannable: Tally,
     unreadable: Tally,
     featureless: Tally,
@@ -139,7 +142,10 @@ impl<'a> Problems<'a> {
             not_an_image: Tally::default(),
             not_image_content: Tally::default(),
             symlink: Tally::default(),
+            symlink_loop: Tally::default(),
             listed_twice: Tally::default(),
+            excluded: Tally::default(),
+            unresolved_exclude: Tally::default(),
             unscannable: Tally::default(),
             unreadable: Tally::default(),
             featureless: Tally::default(),
@@ -160,13 +166,25 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.not_an_image, "skip/not-an-image", path.into());
     }
 
-    /// A symlink met during the walk. They are not followed — a link and its
-    /// target are one set of bytes, and reading both would claim a duplicate
-    /// pair that is really one file — but a folder that is *all* symlinks
-    /// therefore scans as empty, which is worth saying rather than leaving to
-    /// be deduced.
+    /// A symlink met during a walk that does not follow them. A folder that
+    /// is *all* symlinks scans as empty without `--follow-symlinks`, which is
+    /// worth saying rather than leaving to be deduced.
     pub fn symlink(&mut self, path: &str) {
         record(self.log, &mut self.symlink, "skip/symlink", path.into());
+    }
+
+    /// A followed link leading back into a folder the walk is already inside.
+    /// Everything behind it is being walked by the other route, so nothing is
+    /// missing and this is not a problem.
+    pub fn symlink_loop(&mut self, path: &str) {
+        record(self.log, &mut self.symlink_loop, "skip/symlink-loop", path.into());
+    }
+
+    /// A root named on the command line that `--exclude` covers. Only named
+    /// roots are counted: an excluded subtree met during a walk is pruned
+    /// whole, and a count of it would depend on which route reached it.
+    pub fn excluded(&mut self, path: &str) {
+        record(self.log, &mut self.excluded, "skip/excluded", path.into());
     }
 
     /// A file a wildcard walk (`-x '*'`, `-x '!gif'`) handed over whose bytes
@@ -177,14 +195,20 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.not_image_content, "skip/not-image-content", path.into());
     }
 
-    /// The same file reached twice, because it was named twice or because two
-    /// roots overlap. It is analysed once; the count is what explains a file
-    /// total smaller than the paths that were handed in.
+    /// A second name for a file already listed: named twice, reached by two
+    /// overlapping roots, a symlink to it, a hard link. It is analysed once;
+    /// the count is what explains a file total smaller than the names found.
     pub fn listed_twice(&mut self, path: &str) {
         record(self.log, &mut self.listed_twice, "skip/listed-twice", path.into());
     }
 
     // ---- problems
+
+    /// An `--exclude` path that does not resolve, and so excludes nothing. A
+    /// typo in the one flag whose job is "leave this alone" is not a detail.
+    pub fn unresolved_exclude(&mut self, path: &str, err: &dyn std::fmt::Display) {
+        record(self.log, &mut self.unresolved_exclude, "problem/unresolved-exclude", format!("{path}: {err}"));
+    }
 
     /// A directory — or a root that is not there at all — the walk could not
     /// read. Its contents are absent from the run entirely, which is the
@@ -223,17 +247,20 @@ impl<'a> Problems<'a> {
 
     // ---- reporting
 
-    fn skips(&self) -> [(&Tally, &'static str); 4] {
+    fn skips(&self) -> [(&Tally, &'static str); 6] {
         [
             (&self.not_an_image, "file(s) whose extension is not searched (see -x)"),
             (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
-            (&self.symlink, "symlink(s), which are not followed"),
-            (&self.listed_twice, "path(s) reached twice (named twice, or overlapping roots)"),
+            (&self.symlink, "symlink(s), which are not followed (see --follow-symlinks)"),
+            (&self.symlink_loop, "symlink(s) leading back into a folder already being walked"),
+            (&self.listed_twice, "path(s) already listed under another name (named twice, overlapping roots, a symlink or a hard link)"),
+            (&self.excluded, "named path(s) skipped because --exclude covers them"),
         ]
     }
 
-    fn problems(&self) -> [(&Tally, &'static str); 4] {
+    fn problems(&self) -> [(&Tally, &'static str); 5] {
         [
+            (&self.unresolved_exclude, "--exclude path(s) could not be resolved; nothing was excluded for them"),
             (&self.unscannable, "path(s) could not be scanned"),
             (&self.unreadable, "image(s) could not be read"),
             // Not "failed": the analysis ran and came back empty-handed. The
@@ -345,7 +372,9 @@ mod tests {
         p.not_an_image("/notes.txt");
         p.not_image_content("/README");
         p.symlink("/link.jpg");
+        p.symlink_loop("/a/up");
         p.listed_twice("/a.jpg");
+        p.excluded("/keep");
         assert_eq!(p.count(), 0, "skips are not failures");
         assert!(!p.any(), "so a scan of a home directory still exits 0");
     }
@@ -358,7 +387,8 @@ mod tests {
         p.unreadable("/a.jpg", "unsupported");
         p.featureless("/blank.png");
         p.cache("could not write /tmp/c".into());
-        assert_eq!(p.count(), 4);
+        p.unresolved_exclude("/kepe", &"No such file or directory");
+        assert_eq!(p.count(), 5);
     }
 
     #[test]

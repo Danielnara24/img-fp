@@ -345,6 +345,8 @@ win the second.
 | `--prune-cache` | drop cached analyses of images this scan did not find. |
 | `--clear-cache` | delete the cache before running. |
 | `-r` | descend into subdirectories. Default: only the images directly in each directory named. |
+| `-e PATH` | leave this folder or file out, even if it is named as a root. Repeatable. It excludes the file rather than the name, so a file reached through a symlink or a second root is left out too; a path that does not exist is reported, since it excluded nothing. |
+| `--follow-symlinks` | follow symlinks met while walking: a link to a file is that file, a link to a directory is walked, a link back into a folder already being walked is skipped. Each file is listed once however many names reach it, so a link and its target are never a duplicate pair. |
 | `-x EXT,...` | extensions a directory walk takes, as in `vid-fp`. Default: every format below. `-x '*'` takes every file, including those with no extension; `-x '!gif'` every file but those; `-x 'jpg,png,!png'` a list with one removed. |
 | `-t N` | worker threads. Default: all cores. |
 | `-o PATH` | write the results here; `-` is stdout. Text, CSV or JSON by the extension. |
@@ -382,10 +384,14 @@ extension is not an image format (which is what makes pointing it at a home
 directory reasonable, and is also the one thing that can hide a photograph — a
 JPEG named `.txt`, or with no extension, is invisible unless `-x '*'` asks for
 every file; a file that walk reaches and that turns out not to be a picture is
-a skip too, and is never reported as an identical pair), a symlink met during a walk (a link and its
-target are one set of bytes, so following both would manufacture a duplicate
-pair out of one file — a path *named* on the command line is followed), or a
-file reached twice through overlapping roots. None of those touch the exit
+a skip too, and is never reported as an identical pair), a symlink met during a walk
+without `--follow-symlinks` (a path *named* on the command line is followed
+either way), a followed link that loops back into a folder already being
+walked, a root `-e` covers, or a second name for a file already listed —
+named twice, two overlapping roots, a symlink and its target, two hard links.
+Files are listed once per set of bytes, because two names for one file are
+byte-identical by construction and would otherwise be reported as a duplicate
+pair that deleting either half of frees nothing. None of those touch the exit
 code. A problem is something the run was asked for and did not get, and each
 one does.
 

@@ -28,6 +28,7 @@ use progress::Stage;
 mod report;
 mod sift;
 mod verify;
+mod walk;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -53,6 +54,24 @@ struct Args {
     /// directly inside it and nothing below.
     #[arg(short, long)]
     recursive: bool,
+
+    /// Leave this folder or file out, even where it is named as a root.
+    ///
+    /// Repeatable. It excludes the file, not the name: a file reached through
+    /// a symlink, or through a second root, is left out just the same. A path
+    /// that does not exist excludes nothing and is reported as a problem.
+    #[arg(short = 'e', long = "exclude", value_name = "PATH")]
+    exclude: Vec<PathBuf>,
+
+    /// Follow symbolic links met while walking a directory.
+    ///
+    /// A link to a file is that file, a link to a directory is walked, and a
+    /// link back into a folder already being walked is skipped. Files are
+    /// listed once per set of bytes however many names reach them, so a link
+    /// and its target are never reported as a duplicate pair. A link named on
+    /// the command line is followed either way.
+    #[arg(long)]
+    follow_symlinks: bool,
 
     /// Extensions a directory walk treats as images, comma-separated or repeated.
     ///
@@ -201,78 +220,6 @@ struct Args {
     /// this run.
     #[arg(long, value_name = "PATH")]
     log_file: Option<PathBuf>,
-}
-
-// ---------------------------------------------------------------- walking
-
-/// Every file in `roots` that `wanted` takes, sorted and deduplicated —
-/// directly inside each directory root, or anywhere below it when `recursive`.
-/// A root that is a file is taken whatever it is called: naming it is asking
-/// for it.
-///
-/// Everything it passes over it counts, in one of two senses that must not be
-/// confused. What it cannot *read* is a problem: a root that does not exist
-/// arrives here as a single walk error — `is_file` is false for it, and
-/// `WalkDir` yields the `ENOENT` rather than an empty listing — so a mistyped
-/// path is loud instead of being a run that quietly scans one directory of the
-/// two it was given. A directory refused part-way through is the same failure
-/// with more at stake, since what is missing is everything under it and there
-/// is no telling from here how much that was.
-///
-/// What it was never going to read is a skip, and there are three. A file
-/// whose extension `-x` does not take — by default, one that is not an image
-/// format or has no extension at all — is passed over without being sniffed, which is what makes pointing this at a home directory reasonable
-/// and is also the one thing that can hide a photograph — a JPEG named `.txt`
-/// is invisible unless `-x '*'` asks for everything. A symlink met during the walk is not followed, because a link
-/// and its target are one set of bytes and reading both would manufacture a
-/// duplicate pair out of one file; a path named on the command line *is*
-/// followed, because naming it is asking for it by name. And a file reached
-/// twice, by two overlapping roots or by being typed twice, is analysed once.
-///
-/// None of the three is a failure, so none of them touches the exit code —
-/// which is the whole reason the summary keeps two lists.
-fn walk(roots: &[PathBuf], recursive: bool, wanted: &extensions::Wanted, problems: &mut Problems) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for root in roots {
-        if root.is_file() {
-            files.push(root.clone());
-            continue;
-        }
-        let depth = if recursive { usize::MAX } else { 1 };
-        for entry in walkdir::WalkDir::new(root).follow_links(false).max_depth(depth) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    let at = e.path().unwrap_or(root.as_path()).display().to_string();
-                    problems.unscannable(&at, &e);
-                    continue;
-                }
-            };
-            let kind = entry.file_type();
-            if kind.is_symlink() {
-                problems.symlink(&entry.path().display().to_string());
-                continue;
-            }
-            if !kind.is_file() {
-                continue;
-            }
-            let p = entry.into_path();
-            if !wanted.accepts(&p) {
-                problems.not_an_image(&p.display().to_string());
-                continue;
-            }
-            files.push(p);
-        }
-    }
-    files.sort();
-    files.dedup_by(|later, first| {
-        let same = later == first;
-        if same {
-            problems.listed_twice(&later.display().to_string());
-        }
-        same
-    });
-    files
 }
 
 // ---------------------------------------------------------------- exact pass
@@ -696,14 +643,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
     // it does any of it, so a run's log says which settings produced it.
     say!(
         "Settings -> Work size: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
-         Min pixel correlation: {}, Threads: {}, Recursive: {}",
+         Min pixel correlation: {}, Threads: {}, Recursive: {}, Follow symlinks: {}",
         args.work_size,
         args.candidates,
         args.min_aligned_points,
         args.min_frame_overlap,
         args.min_pixel_correlation,
         rayon::current_num_threads(),
-        args.recursive
+        args.recursive,
+        args.follow_symlinks
     );
     if let Some(note) = &extensions_note {
         say!("{note}");
@@ -727,8 +675,20 @@ fn run(args: &Args, log: &Log, problems: &mut Problems) -> Result<()> {
         None => say!("Cache: off"),
     }
     say!("Scanning: {:?}", args.roots);
+    if !args.exclude.is_empty() {
+        say!("Excluding: {:?}", args.exclude);
+    }
     say!("{}", wanted.describe());
-    let files = walk(&args.roots, args.recursive, &wanted, problems);
+    let files = walk::walk(
+        &walk::Request {
+            roots: &args.roots,
+            exclude: &args.exclude,
+            wanted: &wanted,
+            recursive: args.recursive,
+            follow_symlinks: args.follow_symlinks,
+        },
+        problems,
+    );
     stage!(t_start, "{} files", files.len());
     if files.is_empty() {
         say!("No images found.");

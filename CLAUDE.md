@@ -86,6 +86,8 @@ src/
   index.rs            vocabulary tree, inverted file, containment scoring
   verify.rs           correspondence, geometry, pixel agreement, the policy
   group.rs            pairs -> groups, around a representative
+  walk.rs             roots -> files: -x, --exclude, --follow-symlinks, and
+                      one path per (device, inode)
   cache.rs            on-disk cache of the per-image analysis: where it lives
                       when nothing says, and how a record is packed
   report.rs           the results as text, CSV or JSON (vid-fp's three), and
@@ -2524,11 +2526,23 @@ photograph — a JPEG named `.txt` is passed over without being sniffed); under
 a wildcard `-x`, a file whose bytes are no picture and whose name never said
 they were (it is also dropped from the exact groups, so two copies of a README
 are not a pair);
-a symlink met during a walk (a link and its target are one set of bytes; a path
-*named* on the command line is still followed), a file reached twice through
-overlapping roots. Problems: an image that would not decode, a path the walk
-could not read (a mistyped root arrives as one `ENOENT`, which is what stops a
-two-root run silently scanning one of them), an image that described to **no
+a symlink met during a walk without `--follow-symlinks` (a path *named* on the
+command line is still followed), a followed link looping back into a folder
+already being walked, a root `--exclude` covers, and a second name for a file
+already listed — named twice, overlapping roots, a symlink, a hard link. The
+walk keys files on (device, inode), not on the path: two names for one file
+are byte-identical and would otherwise be an exact pair of one file. A real
+name beats a symlink whatever order they arrive in, then the smaller path wins
+(`walk::settle`); `vid-fp` let readdir order pick, and a link stood in for the
+file it pointed at. `--exclude` compares canonical paths and, when links are
+followed, asks where a path *leads* — `vid-fp`'s `2fba2f7` is the bug that
+prevents, and `walk.rs`'s tests are ported from its.
+
+Problems: an image that would not decode, a path the walk could not read (a
+mistyped root arrives as one `ENOENT`, which is what stops a two-root run
+silently scanning one of them; a followed link to nothing is one too, since it
+is the shape of a link into an unmounted drive, and it stops `--prune-cache`),
+an `--exclude` path that does not resolve and so excluded nothing, an image that described to **no
 features at all**, and a cache that could not be read, written or created.
 
 None of them changes a pair, which is the point — the results line reads the
