@@ -67,7 +67,9 @@ that zero should be read as "none survived", not as a guarantee.
 
 `benchmark/BASELINE.md` holds the competition's numbers,
 `benchmark/VALIDATION.md` records the held-out experiment that shaped the
-parameter surface, `README.md` explains the design.
+parameter surface. `README.md` is for users only: how to install and run it,
+with no benchmark figures, comparisons or local measurements, and the same
+holds for the `--help` text and man page generated from `Args`.
 
 What is left is not accuracy-critical: decode is ~35% of the runtime and has no
 downscaled JPEG path (`zune-jpeg` exposes none, and the arithmetic for adding a
@@ -243,7 +245,7 @@ Each derived file records `region` (rectangle of the original that survives),
 
 ## How img-fp works, and why each piece is there
 
-`README.md` is the readable version. The parts that are easy to get wrong:
+The parts that are easy to get wrong:
 
 - **Local features, not a global descriptor.** This is the whole reason
   containment works. Do not add a global-embedding shortcut in front of the

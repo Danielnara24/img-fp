@@ -31,7 +31,8 @@ mod verify;
 mod walk;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
 use index::{InvertedFile, Vocabulary, WordList};
 use problems::{Log, Problems};
 use rayon::prelude::*;
@@ -45,60 +46,50 @@ use verify::{Affine, Thumb, Variant, Verdict};
 
 #[derive(Parser, Debug)]
 #[command(name = "img-fp", about = "Find duplicate and near-duplicate images.", version)]
+// The doc comments below are the `--help` text and the man page, so they say
+// what a flag does and nothing about how its default was chosen. That is in
+// CLAUDE.md, which the binary cannot point to.
 struct Args {
-    /// Directories or files to scan. `-` reads a list of paths from stdin.
+    /// Folders or image files to scan. `-` reads a list of paths from stdin.
     ///
-    /// Example: `fd -e jpg | img-fp -`. A file named `-` is `./-`.
-    #[arg(required_unless_present = "from_file", value_name = "PATH")]
+    /// A file named `-` is `./-`.
+    #[arg(required_unless_present_any = ["completions", "man", "from_file"], value_name = "PATH")]
     roots: Vec<PathBuf>,
 
     /// Read the paths to scan from a file, one per line (`-` = stdin).
     ///
-    /// Entries may be folders or files, are treated exactly as paths named on
-    /// the command line, and combine with them. Blank lines are ignored and a
-    /// trailing carriage return is trimmed.
+    /// Entries may be folders or files and combine with any paths given as
+    /// arguments. Blank lines are ignored.
     #[arg(long = "from-file", value_name = "FILE")]
     from_file: Option<PathBuf>,
 
     /// Paths in the list are NUL-separated, for `find -print0` or `fd -0`.
-    ///
-    /// The only way to pass a filename containing a newline.
     #[arg(short = '0', long = "null")]
     null: bool,
 
-    /// Descend into subdirectories. Without it a directory means the images
-    /// directly inside it and nothing below.
+    /// Include subfolders.
     #[arg(short, long)]
     recursive: bool,
 
-    /// Leave this folder or file out, even where it is named as a root.
+    /// Leave out a folder or file. Repeat for several.
     ///
-    /// Repeatable. It excludes the file, not the name: a file reached through
-    /// a symlink, or through a second root, is left out just the same. A path
-    /// that does not exist excludes nothing and is reported as a problem.
+    /// A file reached through a symlink or a second root is left out too.
     #[arg(short = 'e', long = "exclude", value_name = "PATH")]
     exclude: Vec<PathBuf>,
 
-    /// Follow symbolic links met while walking a directory.
+    /// Follow symlinks met while walking a folder.
     ///
-    /// A link to a file is that file, a link to a directory is walked, and a
-    /// link back into a folder already being walked is skipped. Files are
-    /// listed once per set of bytes however many names reach them, so a link
-    /// and its target are never reported as a duplicate pair. A link named on
-    /// the command line is followed either way.
+    /// A link named on the command line is followed either way. A file
+    /// reached by several names is scanned once.
     #[arg(long)]
     follow_symlinks: bool,
 
-    /// Extensions a directory walk treats as images, comma-separated or repeated.
+    /// Extensions a folder walk treats as images, comma-separated or repeated.
     ///
-    /// Case-insensitive; a leading dot or `*.` is optional. The default is
-    /// every format img-fp decodes. `-x '*'` takes every file whatever it is
-    /// called, the only way to reach files with no extension; each is
-    /// identified by its bytes, and one that is not a picture is skipped. An
-    /// entry prefixed with `!` is an exception: `-x '!gif'` is every file but
-    /// those, `-x 'jpg,png,!png'` is the list with one removed. Quote both
-    /// forms, since a shell eats a bare `*` or `!`. A file named on the
-    /// command line is taken whatever it is called.
+    /// `-x '*'` takes every file, including ones with no extension. An entry
+    /// starting with `!` is an exception: `-x '!gif'` takes every file but
+    /// GIFs. A file named on the command line is scanned whatever its
+    /// extension.
     #[arg(
         short = 'x',
         long = "extensions",
@@ -108,134 +99,95 @@ struct Args {
     )]
     extensions: Vec<String>,
 
-    /// Write the results here instead of stdout; `-` is stdout.
-    ///
-    /// The format follows the extension — `.txt`, `.csv`, `.json`, and
-    /// anything else is text — unless `--format` says otherwise. A file
-    /// really named `-` is `./-`.
+    /// Write the report to this file: `.txt`, `.csv` or `.json`. `-` is stdout.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// Write the results in this format whatever `--output` is called.
-    ///
-    /// Text is the groups for reading, CSV the same rows for sorting, JSON the
-    /// complete record: every pair asserted and what it rests on. Needed on
-    /// stdout, which has no extension to read.
+    /// Write the report as txt, csv or json, whatever `--output` is called.
     #[arg(long, value_enum, value_name = "FORMAT")]
     format: Option<report::Format>,
 
-    /// Worker threads (default: all cores).
-    #[arg(short = 't', long, default_value_t = 0)]
+    /// Worker threads. `0` uses all cores.
+    #[arg(short = 't', long, value_name = "N", default_value_t = 0)]
     threads: usize,
 
-    /// Long side the analysis runs at. Lower is faster and blinder.
+    /// Long side, in pixels, the images are analysed at.
     ///
-    /// The one knob that really moves the clock, because it scales the first
-    /// four fifths of the pipeline: cost is near enough linear in the long
-    /// side. Accuracy is a ramp with a knee at 640, and the default is below
-    /// the knee on purpose, trading recall for time and memory. Going *down*
-    /// does not trade precision — it holds 99.5-99.6% from 384 to 768, so a
-    /// lower setting finds fewer duplicates rather than wronger ones, and what
-    /// it finds fewer of is mostly images embedded in bigger images. Going up
-    /// eventually does: 896 merges two families on the benchmark corpus.
-    /// The table is in `CLAUDE.md`; 640 is the setting to ask for when recall
-    /// matters more than the wait, and nothing above it is worth asking for.
-    #[arg(long, default_value_t = 384)]
+    /// Higher finds more, especially small images inside larger ones such as
+    /// slides, screenshots and collages, but is slower and uses more memory.
+    /// 640 is a good choice when that matters.
+    #[arg(long, value_name = "PX", default_value_t = 384)]
     work_size: usize,
 
-    /// Candidates verified per image.
-    #[arg(short = 'k', long, default_value_t = 150)]
+    /// Candidate matches checked per image.
+    #[arg(short = 'k', long, value_name = "N", default_value_t = 150)]
     candidates: usize,
 
-    /// Keypoint correspondences that must agree on one transform before a
-    /// pair can be claimed — the inlier count, under a name that does not
-    /// need RANSAC to read.
+    /// Matching points two images must share before they count as duplicates.
     ///
-    /// One number, used by every tier. It was two: the claim-anchoring tier
-    /// silently added 2, which is the sort of offset that looks principled and
-    /// is really just a corpus talking.
-    #[arg(long, default_value_t = 10)]
+    /// Higher is stricter.
+    #[arg(long, value_name = "N", default_value_t = 10)]
     min_aligned_points: u32,
 
-    /// How much of one image's frame must lie inside the other, 0..1.
+    /// How much of one image must lie inside the other, from 0 to 1.
     ///
-    /// Geometry alone: what the fitted transform claims, with no pixel read.
-    /// Whether the claim is true is `--min-pixel-correlation`, which is a
-    /// different question and not a tighter version of this one.
-    #[arg(long, default_value_t = 0.85)]
+    /// Higher is stricter.
+    #[arg(long, value_name = "F", default_value_t = 0.85)]
     min_frame_overlap: f32,
 
-    /// How well the pixels of that overlap must correlate, 0..1.
+    /// How closely the pixels of that shared area must agree, from 0 to 1.
     ///
-    /// The mean of |r| over the blocks of the overlap that carry detail. 0.6
-    /// is chosen for what a user wants grouped, not for F1: at 0.5 the tool
-    /// makes no wrong pair but groups images that are merely similar enough.
-    /// Against the corpus it costs 0.6 points of recall at the default work
-    /// size and 0.8 at 640, mostly `tiled_watermark` and the warps, and buys
-    /// fewer trap pairs. The cliff, where wrong families start merging, is at
-    /// 0.40 at `--work-size 640` and absent at 384. At 0.7 a lone pair of
-    /// watermarked images from different photographs survives at 640.
-    #[arg(long, default_value_t = 0.6)]
+    /// Higher is stricter.
+    // 0.6 is set for what a user wants grouped rather than for F1; see
+    // CLAUDE.md for the sweep and the cliff.
+    #[arg(long, value_name = "F", default_value_t = 0.6)]
     min_pixel_correlation: f32,
 
-    /// Write every verdict considered, accepted or not, to this CSV. For
-    /// tuning the decision rule against a labelled corpus.
-    #[arg(long)]
+    /// Write every candidate pair considered, accepted or not, to this CSV.
+    #[arg(long, value_name = "FILE")]
     dump: Option<PathBuf>,
 
-    /// Keep the per-image analysis in this file instead of the default one.
+    /// Use this cache file instead of the default one.
     ///
-    /// The analysis is cached whether or not this is given; the default is
-    /// `$XDG_CACHE_HOME/img-fp/analysis.bin`, or `~/.cache/img-fp` for a
-    /// machine that does not set it. An existing directory, or a path written
-    /// with a trailing slash, gets the default filename inside it, and missing
-    /// parents are created. One cache serves every directory this machine
-    /// scans: a run writes back what it analysed plus whatever the file
-    /// already held about images it did not look at and that are still there.
-    /// It is one plain file and deleting it costs a re-analysis and nothing
-    /// else.
+    /// The default is `$XDG_CACHE_HOME/img-fp/analysis.bin`, or
+    /// `~/.cache/img-fp/analysis.bin`. A folder gets the default file name
+    /// inside it.
     #[arg(long, value_name = "PATH", conflicts_with = "no_cache")]
     cache: Option<PathBuf>,
 
-    /// Neither read nor write the cache.
-    ///
-    /// For measuring a cold run, and for a machine whose cache directory is
-    /// not somewhere hundreds of megabytes should go. Nothing about the result
-    /// changes: a cached record is the analysis this run would have done.
+    /// Don't read or write the cache.
     #[arg(long, conflicts_with = "prune_cache")]
     no_cache: bool,
 
-    /// Delete the whole cache before running.
+    /// Delete the cache before running.
     ///
-    /// The run then re-analyses everything and leaves a cache holding just
-    /// what it scanned. `--no-cache --clear-cache` deletes it and starts
-    /// nothing new.
+    /// With `--no-cache`, delete it and don't write a new one.
     #[arg(long)]
     clear_cache: bool,
 
-    /// Drop the cached analysis of every image this scan did not find.
+    /// Drop cached entries for images this scan did not find.
     ///
-    /// The cache serves every directory on the machine, so it grows with all
-    /// of them; this makes it hold exactly the corpus in front of it. A
-    /// record is ~50 KB of descriptors, so a large library is measured in
-    /// gigabytes and it is worth being able to say so. Skipped, loudly, when
-    /// the walk could not read something it was pointed at: pruning against a
-    /// partial scan would throw away records for files that are still there.
+    /// Skipped when the scan could not read everything it was given.
     #[arg(long)]
     prune_cache: bool,
 
-    /// Print timings per stage.
+    /// Print timings for each stage.
     #[arg(short, long)]
     verbose: bool,
 
-    /// Write everything the run had to say to this file, uncapped.
+    /// Write every skipped file, problem and stage timing to this file.
     ///
-    /// The console shows a count and up to ten examples per category; this is
-    /// the unabridged list, plus the stage timings whether or not `-v` asked
-    /// for them on screen. Truncated at the start of the run: it describes
-    /// this run.
+    /// Truncated at the start of each run.
     #[arg(long, value_name = "PATH")]
     log_file: Option<PathBuf>,
+
+    /// Print a completion script for bash, zsh, fish, elvish or powershell and exit.
+    #[arg(long = "completions", value_name = "SHELL", exclusive = true)]
+    completions: Option<Shell>,
+
+    /// Print the man page (roff) and exit.
+    #[arg(long = "man", exclusive = true)]
+    man: bool,
 }
 
 // ---------------------------------------------------------------- exact pass
@@ -519,6 +471,15 @@ use report::{OutGroup, OutPair, Output};
 /// anyhow's own `main` handling prints the error and supplies the code.
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(shell) = args.completions {
+        let mut cmd = Args::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+        return Ok(());
+    }
+    if args.man {
+        return print_man();
+    }
     // Opened before any work, so that a log file that cannot be written is an
     // ordinary fatal error at the top of the run rather than a discovery made
     // an hour into one.
@@ -539,6 +500,35 @@ fn main() -> Result<()> {
     if problems.any() {
         std::process::exit(EXIT_WITH_PROBLEMS);
     }
+    Ok(())
+}
+
+/// `--man`: clap's page, plus the exit codes, which clap knows nothing about
+/// and which are the part of a run a script can test. Same four as `vid-fp`.
+fn print_man() -> Result<()> {
+    let mut buf: Vec<u8> = Vec::new();
+    clap_mangen::Man::new(Args::command()).render(&mut buf)?;
+    if !buf.ends_with(b"\n") {
+        buf.push(b'\n');
+    }
+    buf.extend_from_slice(
+        b".SH EXIT STATUS
+.TP
+.B 0
+Ran clean.
+.TP
+.B 1
+Fatal error; the run did not complete.
+.TP
+.B 2
+Completed, but something failed, such as an image that would not decode. See
+the Problems summary.
+.TP
+.B 130
+Interrupted with Ctrl-C. Images analysed so far are kept in the cache.
+",
+    );
+    std::io::stdout().write_all(&buf)?;
     Ok(())
 }
 
