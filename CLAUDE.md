@@ -2577,6 +2577,10 @@ colour `decode::preview`, which only the window calls).
   class; the buttons act on it. Using focus instead broke every button for
   the mouse, since clicking a button moves focus to the button. (The user's
   stylesheet also left GTK's own focus ring invisible.)
+- **The scan log is not modal**, and there is one of it (`App::show_log`).
+  It fills in while a scan runs, so a modal log cost Cancel and the cards
+  its lines are about; the button raises the open one instead of stacking a
+  copy.
 - **Animations are off** (`gtk-enable-animations`), at the user's request.
 - **F1 opens the list of keys** (`show_shortcuts`), which is the only place
   the non-mnemonic keys are written down; the pages carry a one-line

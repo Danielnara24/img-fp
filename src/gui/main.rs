@@ -87,6 +87,8 @@ pub struct App {
     pub stack: gtk::Stack,
     /// Everything the scan said about itself, for the log on both pages.
     pub log: gtk::TextBuffer,
+    /// The log's window while it is open, so that asking again raises it.
+    log_window: Rc<RefCell<Option<gtk::Window>>>,
 }
 
 impl App {
@@ -114,7 +116,15 @@ impl App {
     }
 
     /// A window that says the log, for either page.
+    ///
+    /// Not modal: the log fills in while a scan runs, and watching it is no
+    /// reason to lose Cancel, or the cards its lines are about. One at a
+    /// time, so the button raises the open one rather than stacking copies.
     pub fn show_log(&self) {
+        if let Some(win) = self.log_window.borrow().as_ref() {
+            win.present();
+            return;
+        }
         let view = gtk::TextView::builder()
             .buffer(&self.log)
             .editable(false)
@@ -129,13 +139,18 @@ impl App {
         let win = gtk::Window::builder()
             .title("Scan log")
             .transient_for(&self.window)
-            .modal(true)
             .default_width(864)
             .default_height(608)
             .child(&scroll)
             .build();
         close_on_escape(&win);
         keep_mnemonics_visible(&win);
+        let open = self.log_window.clone();
+        win.connect_close_request(move |_| {
+            open.borrow_mut().take();
+            glib::Propagation::Proceed
+        });
+        *self.log_window.borrow_mut() = Some(win.clone());
         win.present();
         view.grab_focus();
         let mut end = self.log.end_iter();
@@ -285,7 +300,7 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
         .build();
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::None).build();
     window.set_child(Some(&stack));
-    let app = Rc::new(App { window: window.clone(), stack: stack.clone(), log: gtk::TextBuffer::new(None) });
+    let app = Rc::new(App { window: window.clone(), stack: stack.clone(), log: gtk::TextBuffer::new(None), log_window: Rc::default() });
 
     let mut settings = settings::Settings::load();
     for f in start {
