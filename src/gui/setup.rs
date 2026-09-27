@@ -261,9 +261,9 @@ impl Setup {
         // ---- General
         let folders = PathList::new(window, l::ADD_FOLDER, l::REMOVE_FOLDER, "No folders yet. Add one, or drop it here.", 130);
         let recursive = gtk::CheckButton::with_mnemonic(l::RECURSIVE);
-        let work_size = spin(64.0, 4096.0, 32.0, 0);
+        let work_size = spin(0.0, 4096.0, 32.0, 0);
         let candidates = spin(1.0, 2000.0, 10.0, 0);
-        let min_points = spin(3.0, 200.0, 1.0, 0);
+        let min_points = spin(1.0, 200.0, 1.0, 0);
         let min_overlap = spin(0.0, 1.0, 0.05, 2);
         let min_correlation = spin(0.0, 1.0, 0.05, 2);
         let report = gtk::CheckButton::with_mnemonic(l::REPORT);
@@ -281,7 +281,7 @@ impl Setup {
 
         g.attach(&section("What counts as a duplicate"), 0, 2, 3, 1);
         let rows: [(&str, &gtk::SpinButton, &str); 5] = [
-            (l::WORK_SIZE, &work_size, "Pixels on the long side each image is analysed at. Higher finds more, especially small pictures inside larger ones such as slides and collages, but is slower. 640 is a good choice when that matters."),
+            (l::WORK_SIZE, &work_size, "Pixels on the long side each image is analysed at. Higher finds more, especially small pictures inside larger ones such as slides and collages, but is slower. 640 is a good choice when that matters. 0 does not shrink images at all, which is much slower on large photos."),
             (l::MIN_POINTS, &min_points, "Matching points two images must share. Higher is stricter."),
             (l::MIN_OVERLAP, &min_overlap, "How much of one image must lie inside the other, from 0 to 1. Higher is stricter."),
             (l::MIN_CORRELATION, &min_correlation, "How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter."),

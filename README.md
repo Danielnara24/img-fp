@@ -214,7 +214,7 @@ to stderr.
 | `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file, including ones with no extension; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
-| `--work-size <PX>` | Long side, in pixels, the images are analysed at. Higher finds more embedded images but is slower and uses more memory | `384` |
+| `--work-size <PX>` | Long side, in pixels, the images are analysed at. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `384` |
 | `-k`, `--candidates <N>` | Candidate matches checked per image | `150` |
 | `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |

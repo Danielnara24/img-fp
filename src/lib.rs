@@ -120,7 +120,8 @@ struct Args {
     ///
     /// Higher finds more, especially small images inside larger ones such as
     /// slides, screenshots and collages, but is slower and uses more memory.
-    /// 640 is a good choice when that matters.
+    /// 640 is a good choice when that matters. `0` does not shrink images at
+    /// all, which is much slower on large photos.
     #[arg(long, value_name = "PX", default_value_t = 384)]
     work_size: usize,
 
