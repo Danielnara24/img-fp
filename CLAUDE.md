@@ -2595,6 +2595,24 @@ colour `decode::preview`, which only the window calls).
 - **Arrow keys on the cards are handled by hand** (`Results::move_to`):
   GtkFlowBox moves its cursor only after a click or Tab has set it, and not
   after `grab_focus` from code, which is how the page hands it the keyboard.
+- **The results toolbar wraps** (a `FlowBox`, `tools`), and the pane under it
+  may not shrink (`set_shrink_end_child(false)`). As a plain `Box` in a
+  shrinkable pane, a wide font or larger text cut "Show in folder" off at the
+  window's edge: seen with Arch's default font, and with any font at 14 pt.
+  Two settings in it are load-bearing. `halign(Start)`, because a filling
+  flow box hands the spare width to the buttons. And `min_children_per_line(2)`,
+  because with one a non-homogeneous flow box reports its natural width as its
+  widest child's, and GTK 4.14 then allocates a start-packed box exactly that:
+  one button per row, drawn over the cards (the 4.16 source has the same
+  code; 4.22 did not show it). Check any change here on 4.14, which is what
+  Ubuntu 24.04 and Mint 22 ship.
+- **A marked card's label is `mix(@error_color, @theme_fg_color, 0.6)`**, not
+  `@error_color`. Plain error red on its own tint measured 2.1:1 under GTK's
+  dark Adwaita, which is what a GTK 4 app gets in GNOME's dark mode; the mix
+  is 4.9:1 or better across Adwaita light and dark, dark high contrast,
+  Mint-Y, Mint-Y-Dark, Yaru, Yaru-dark, Breeze-Dark and the Mint-L-Dark
+  stylesheet. It darkens on light themes and lightens on dark ones, which no
+  single colour can.
 - **Mnemonics live in `gui/labels.rs`** and a test checks each set of
   controls visible together for clashes. Add a label there, not inline.
 - **Nothing is pre-marked**, by the user's decision; marks are per *file*,
@@ -2610,6 +2628,31 @@ colour `decode::preview`, which only the window calls).
   with `xdotool` (after `windowfocus --sync`) and capture with `import -window
   root`. Point `XDG_DATA_HOME` into a scratch folder on the same filesystem
   before testing the Trash.
+- **Other distros, in Docker.** Build with `RUSTFLAGS="-C
+  target-cpu=x86-64-v3"` as the release does, mount the binary into
+  `ubuntu`, `debian`, `fedora`, `archlinux`, `opensuse/*`, `almalinux`
+  images, install that distro's GTK 4 and libheif, and drive it on an Xvfb
+  inside the container. Use `--network host`: the bridge has no IPv6 route
+  and the mirrors answer DNS with IPv6 first, so `apt-get update` hangs. With
+  the host's network the container shares X's abstract socket, so give each
+  one its own display number. `--no-install-recommends` leaves out the SVG
+  loader, which makes Breeze print `Gtk-CRITICAL` and lose its tick marks;
+  install `librsvg2-common` before blaming the app. Almalinux 10 has no Xvfb;
+  point its container at an Xvfb on the host instead.
+- **Wayland, in Docker.** sway: `WLR_BACKENDS=headless WLR_RENDERER=pixman`,
+  `setcap -r /usr/bin/sway` first (Docker will not exec a binary with file
+  capabilities), `grim` to capture, `wtype -s 400` to type (without the
+  pause the first key of each call is lost). GNOME: `gnome-shell --headless
+  --wayland --no-x11 --unsafe-mode --virtual-monitor WxH` inside
+  `dbus-run-session`, after starting a system `dbus-daemon`, removing
+  `/run/systemd` (or it asks logind) and turning hot corners off (the
+  virtual pointer starts at 0,0). Capture with `org.gnome.Shell.Screenshot`;
+  input through `org.gnome.Shell.Eval` with a virtual device from
+  `global.stage.context.get_backend().get_default_seat()`, created once and
+  kept on `globalThis`. It starts in the overview: hide it with
+  `import("resource:///org/gnome/shell/ui/main.js")`, then `activate` the
+  window. In the run that worked, a pointer click on Scan came before the
+  first key; whether keys alone are enough was not tested.
 
 ## Conventions
 

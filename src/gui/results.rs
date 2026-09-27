@@ -40,7 +40,8 @@ const CSS: &str = "
 flowboxchild.card { border-radius: 8px; padding: 6px; }
 flowboxchild.card.picked { outline: 3px solid @theme_selected_bg_color; outline-offset: -3px; }
 flowboxchild.card.marked { background-color: alpha(@error_color, 0.16); }
-flowboxchild.card.marked checkbutton label { color: @error_color; font-weight: bold; }
+flowboxchild.card.marked checkbutton label { color: mix(@error_color, @theme_fg_color, 0.6); font-weight: bold; }
+flowbox.tools > flowboxchild { padding: 0; }
 ";
 
 struct GroupState {
@@ -147,9 +148,29 @@ impl Results {
         let open = gtk::Button::with_mnemonic(l::OPEN);
         open.set_tooltip_text(Some("Open the outlined image in its usual application."));
         let folder = gtk::Button::with_mnemonic(l::SHOW_FOLDER);
-        let tools = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        // Wraps rather than setting the page's width. Six buttons in a row are
+        // about 780 pixels in GTK's own font and more in a wider one, which on
+        // a scaled screen is more than the window can have.
+        //
+        // Packed at the start, since a filling flow box shares the spare width
+        // out among the buttons. Two to a line at the least, because with one
+        // a flow box reports its natural width as its widest child's, and GTK
+        // 4.14 gives a box packed at the start exactly that: a column of
+        // buttons running into the images below it.
+        let tools = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .halign(gtk::Align::Start)
+            .row_spacing(6)
+            .column_spacing(6)
+            .min_children_per_line(2)
+            .max_children_per_line(6)
+            .css_classes(["tools"])
+            .build();
         for b in [&prev, &next, &mark_others, &unmark, &open, &folder] {
-            tools.append(b);
+            // The slot takes no focus of its own: Tab goes from button to
+            // button, as it did in a box.
+            let slot = gtk::FlowBoxChild::builder().child(b).focusable(false).build();
+            tools.append(&slot);
         }
 
         let right = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -163,6 +184,9 @@ impl Results {
 
         let paned = gtk::Paned::builder().orientation(gtk::Orientation::Horizontal).start_child(&left).end_child(&right).position(260).vexpand(true).build();
         paned.set_shrink_start_child(false);
+        // Nor the images side: squeezed below its minimum, a pane cuts off
+        // whatever is at its right edge instead of asking for a wider window.
+        paned.set_shrink_end_child(false);
 
         let status = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
         let hint = gtk::Label::builder()

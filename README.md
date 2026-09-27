@@ -28,22 +28,38 @@ shows each group and moves the images you choose to the Trash.
 ## Requirements
 
 Linux, x86_64 with AVX2 (Intel Haswell or newer, any AMD Zen), glibc 2.39 or
-newer and libheif 1.17 or newer (Ubuntu 24.04+, Debian 13+, Fedora 40+).
+newer and libheif 1.17 or newer: Ubuntu 24.04+, Debian 13+, Fedora 40+, Arch,
+openSUSE Tumbleweed and Leap 16, RHEL 10 and its rebuilds.
 
 ## Installation
 
 ### Prebuilt binary
 
+First install libheif and its decoders:
+
 ```bash
-sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d
+sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d  # Ubuntu, Debian
+sudo dnf install libheif                                                # Fedora, RHEL 10 (EPEL)
+sudo pacman -S libheif                                                  # Arch
+sudo zypper install libheif1 libheif-dav1d                              # openSUSE
+```
+
+Then the binary:
+
+```bash
 curl -L -o img-fp \
   https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-x86_64-linux-gnu
 chmod +x img-fp
 sudo install -m 755 img-fp /usr/local/bin/img-fp
 ```
 
-libheif must be installed for the binary to start. The two plugins are only
+libheif must be installed for the binary to start. The decoders are only
 needed to read HEIC and AVIF files.
+
+Fedora, openSUSE and RHEL leave out the HEIC decoder. Without it HEIC files are
+reported as unreadable and everything else works. On Fedora it is
+`libheif-freeworld` from RPM Fusion; on openSUSE, install `libheif1` and
+`libheif-HEIF` from Packman.
 
 Each release also ships a `.sha256` file if you want to verify the download:
 
@@ -56,7 +72,10 @@ sha256sum -c img-fp-x86_64-linux-gnu.sha256
 Requires the Rust toolchain and libheif's development package:
 
 ```bash
-sudo apt install libheif-dev pkg-config
+sudo apt install libheif-dev pkg-config                  # Ubuntu, Debian
+sudo dnf install libheif-devel pkgconf-pkg-config        # Fedora, RHEL 10 (EPEL)
+sudo pacman -S libheif pkgconf                           # Arch
+sudo zypper install libheif-devel pkg-config             # openSUSE
 RUSTFLAGS="-C target-cpu=native" cargo install img-fp --locked
 ```
 
@@ -104,7 +123,7 @@ img-fp ~/Pictures ~/Downloads -e ~/Downloads/keep -r
 img-fp ~/Pictures -r -o dupes.csv
 
 # Find more images embedded in slides, screenshots and collages, at some cost in speed
-img-fp ~/Pictures -r --work-size 640 --min-pixel-correlation 0.5
+img-fp ~/Pictures -r --work-size 640
 ```
 
 By default the scan is **not** recursive. Add `-r` to include subfolders.
@@ -127,10 +146,13 @@ scanned once. Symlinks met inside a folder are skipped unless you pass
 `img-fp-gui` is a window over the same scan: pick folders and options, watch
 the progress, then go through the groups and choose which images to move to the
 Trash. Nothing is marked for you. It has the same requirements as `img-fp`,
-plus GTK 4.10 or newer:
+plus GTK 4.10 or newer. With the libheif packages above installed:
 
 ```bash
-sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d libgtk-4-1
+sudo apt install libgtk-4-1          # Ubuntu, Debian
+sudo dnf install gtk4                # Fedora, RHEL 10
+sudo pacman -S gtk4                  # Arch
+sudo zypper install libgtk-4-1       # openSUSE
 curl -L -o img-fp-gui \
   https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-gui-x86_64-linux-gnu
 chmod +x img-fp-gui
@@ -141,7 +163,10 @@ From source, with the `gui` feature, which installs both `img-fp` and
 `img-fp-gui`:
 
 ```bash
-sudo apt install libgtk-4-dev libheif-dev pkg-config
+sudo apt install libgtk-4-dev libheif-dev pkg-config                # Ubuntu, Debian
+sudo dnf install gtk4-devel libheif-devel pkgconf-pkg-config        # Fedora, RHEL 10 (EPEL)
+sudo pacman -S gtk4 libheif pkgconf                                 # Arch
+sudo zypper install gtk4-devel libheif-devel pkg-config             # openSUSE
 RUSTFLAGS="-C target-cpu=native" cargo install img-fp --locked --features gui
 ```
 
@@ -158,26 +183,10 @@ Folders given on its command line are added to the list: `img-fp-gui ~/Pictures`
 Every control can be reached from the keyboard; the underlined letter of each
 button and field is its Alt shortcut. F1 lists every key.
 
-| Key | Action |
-| --- | --- |
-| Alt + underlined letter | Use that button or field |
-| F1 | List the keyboard shortcuts |
-| Ctrl+Enter | Start the scan |
-| Escape | Cancel the scan |
-| Arrow keys, Home, End | Move between the images of a group |
-| Space or Delete | Mark or unmark the outlined image for the Trash |
-| Enter | Open the image large; there, Left and Right move through the group |
-| Ctrl+Page Down, Ctrl+Page Up | Next or previous group |
-| Ctrl+Q | Quit |
-
-Cancelling works like Ctrl-C on the command line: the scan stops at once and
-every image analysed so far is kept in the cache. The window's settings are
-saved in `~/.config/img-fp/gui.json`.
-
 ## Output
 
-Each group has one representative, the file to keep, followed by every file
-that matched it:
+Each group has one representative, followed by every file
+that matched it (don't interpret the representative as the source image):
 
 ```
 group_1: 4 files
