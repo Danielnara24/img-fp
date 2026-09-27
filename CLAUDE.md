@@ -2595,9 +2595,11 @@ colour `decode::preview`, which only the window calls).
 - **Arrow keys on the cards are handled by hand** (`Results::move_to`):
   GtkFlowBox moves its cursor only after a click or Tab has set it, and not
   after `grab_focus` from code, which is how the page hands it the keyboard.
-- **The results toolbar wraps** (a `FlowBox`, `tools`), and the pane under it
-  may not shrink (`set_shrink_end_child(false)`). As a plain `Box` in a
-  shrinkable pane, a wide font or larger text cut "Show in folder" off at the
+- **The groups list is as wide as its longest row and no wider**; only the
+  images grow with the window. It is a horizontal `Box`, not a `Paned`, with
+  `propagate_natural_width` on the list's scroller.
+- **The results toolbar wraps** (a `FlowBox`, `tools`), and the side under it
+  may not shrink below its minimum. As a plain `Box` in a shrinkable pane, a wide font or larger text cut "Show in folder" off at the
   window's edge: seen with Arch's default font, and with any font at 14 pt.
   Two settings in it are load-bearing. `halign(Start)`, because a filling
   flow box hands the spare width to the buttons. And `min_children_per_line(2)`,

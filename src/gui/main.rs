@@ -130,8 +130,8 @@ impl App {
             .title("Scan log")
             .transient_for(&self.window)
             .modal(true)
-            .default_width(760)
-            .default_height(480)
+            .default_width(864)
+            .default_height(608)
             .child(&scroll)
             .build();
         close_on_escape(&win);

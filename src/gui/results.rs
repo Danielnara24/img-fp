@@ -105,7 +105,9 @@ impl Results {
             .child(&list)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .min_content_width(220)
+            // As wide as the longest row and no wider: the images take the
+            // rest of the window, however wide it gets.
+            .propagate_natural_width(true)
             .build();
         let groups_label = gtk::Label::with_mnemonic(l::GROUPS);
         groups_label.set_mnemonic_widget(Some(&list));
@@ -182,11 +184,16 @@ impl Results {
         right.append(&tools);
         right.append(&flow_scroll);
 
-        let paned = gtk::Paned::builder().orientation(gtk::Orientation::Horizontal).start_child(&left).end_child(&right).position(260).vexpand(true).build();
-        paned.set_shrink_start_child(false);
-        // Nor the images side: squeezed below its minimum, a pane cuts off
-        // whatever is at its right edge instead of asking for a wider window.
-        paned.set_shrink_end_child(false);
+        // A box, not a pane: the groups keep the width their text needs and
+        // only the images grow with the window. Neither side can be squeezed
+        // below its minimum, so a wide font asks for a wider window instead
+        // of cutting off whatever is at the right edge.
+        left.set_hexpand(false);
+        right.set_hexpand(true);
+        let panes = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).vexpand(true).build();
+        panes.append(&left);
+        panes.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        panes.append(&right);
 
         let status = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
         let hint = gtk::Label::builder()
@@ -210,7 +217,7 @@ impl Results {
         bottom.append(&trash);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&paned);
+        root.append(&panes);
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.append(&bottom);
 
