@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
@@ -38,6 +38,21 @@ walkdir = "2.5.0"
 # take a lock and print. "termination" is SIGTERM and SIGHUP as well, as in
 # vid-fp.
 ctrlc = { version = "3.5", features = ["termination"] }
+# `img-fp-gui` only; see `[features]`. GTK is linked from the system, so the
+# window adds little to its own binary and nothing at all to `img-fp`'s.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_10"], optional = true }
+async-channel = { version = "2.5", optional = true }
+
+[[bin]]
+name = "img-fp"
+path = "src/main.rs"
+
+# The window. It runs the same scan as `img-fp`, in a child process of its own;
+# see `src/gui/scan.rs`.
+[[bin]]
+name = "img-fp-gui"
+path = "src/gui/main.rs"
+required-features = ["gui"]
 
 # One codegen unit and cross-crate inlining. The pipeline is a handful of tight
 # loops calling into `image`'s decoders and `rayon`; nothing here changes what
@@ -52,3 +67,6 @@ codegen-units = 1
 # nothing for it.
 [features]
 prof = []
+# Builds `img-fp-gui` as well. Off by default, so that `cargo install img-fp`
+# builds the command line alone and needs no GTK to build or to run.
+gui = ["dep:gtk", "dep:async-channel"]

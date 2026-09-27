@@ -82,7 +82,10 @@ a few thousand images.
 
 ```
 src/
-  main.rs             CLI, pipeline, propagation, bridge pruning
+  lib.rs              the pipeline, propagation, bridge pruning, and the two
+                      entry points: `cli_main` and the window's `worker_main`
+  main.rs             `img-fp`: three lines calling `cli_main`
+  gui/                `img-fp-gui` (feature `gui`, GTK 4.10+); see *The window*
   decode.rs           format sniffing and decode to one grayscale plane
   sift.rs             scale-invariant local features
   index.rs            vocabulary tree, inverted file, containment scoring
@@ -2536,6 +2539,77 @@ The knee is below 100, so the shipped 150 is not merely past it but half the
 range clear of it, and even starving the thing to 25 costs 0.001. Worth
 remembering before reaching for `-k` to fix anything: on this corpus it is not
 connected to a result.
+
+## The window
+
+`img-fp-gui`, behind the `gui` feature so that `cargo install img-fp` needs no
+GTK. The CLI binary is unchanged by it: output, `--help` and pairs are
+byte-identical to the build before the split, and its size moved 15 KB (the
+colour `decode::preview`, which only the window calls).
+
+- **The scan is a child process, not a thread**, so that Cancel is exactly
+  Ctrl-C: the window re-runs its own binary as `img-fp-gui --worker RESULT
+  <img-fp argv>`, which is `execute` with the progress line spoken as JSON on
+  stdout (`progress::speak_json`) and the report also written as JSON to
+  `RESULT`. Cancel sends SIGINT; the worker's existing handler answers it in
+  **30-60 ms** measured, keeping the cache. A thread could not be stopped from
+  inside libheif or a large decode. Exit hands back all the scan's memory.
+  `PR_SET_PDEATHSIG` makes a dying window take the worker with it (checked
+  with SIGKILL). It fires on the death of the *thread* that spawned, which
+  is the GTK main thread; keep spawning there.
+- **The GTK base follows the desktop's text colour** (`follow_dark_text`).
+  A plain GTK 4 app gets GTK's light default plus the user's
+  `~/.config/gtk-4.0/gtk.css`, and desktops that theme libadwaita put a whole
+  dark theme there, which leaves buttons light under light text: unreadable,
+  as it was on the author's Mint-L-Dark. The window asks for the dark variant
+  when its styled text is light or the theme name says dark. The same file's
+  `--accent-bg-color` warnings are GTK 4.14 not knowing CSS variables, and
+  harmless. The window's own CSS goes in at USER priority so the marked-card
+  highlight survives such a stylesheet.
+- **Mnemonics are always underlined** (`keep_mnemonics_visible`). Cinnamon
+  holds a passive X grab on the left Alt key (found with `xdotool key
+  XF86LogGrabInfo` and `/var/log/Xorg.0.log`), so a bare Alt press never
+  reaches any app there and GTK's show-while-Alt-is-held cannot work. GTK
+  applies the flag only to labels that exist when it is set, so it is set
+  after the pages are built, and on each secondary window after its child.
+- **The picked card is not the focused card.** `Results::picked` is the
+  last card clicked or reached with the keyboard, outlined by a `picked`
+  class; the buttons act on it. Using focus instead broke every button for
+  the mouse, since clicking a button moves focus to the button. (The user's
+  stylesheet also left GTK's own focus ring invisible.)
+- **Animations are off** (`gtk-enable-animations`), at the user's request.
+- **F1 opens the list of keys** (`show_shortcuts`), which is the only place
+  the non-mnemonic keys are written down; the pages carry a one-line
+  "F1 keyboard shortcuts" and nothing more.
+- **"Theme parser error" warnings from GTK are dropped** (`quiet_theme_errors`):
+  they are about the user's own `gtk.css`, printed on every start, and
+  nothing here can act on them. Every other log message passes through.
+- **Released beside the CLI** by `release.yml`: the CLI is built first and
+  without the feature, the window after it, and the DT_NEEDED check holds the
+  CLI to no GTK. The worker is smoke-tested headless on an empty folder.
+- **Rendered with cairo by default** (`GSK_RENDERER` still overrides). The GL
+  renderer loads Mesa's libLLVM: idle PSS 100 MB against 73 MB.
+- **Thumbnails are decoded again, in colour**, on two threads at most, only
+  for the group on screen (a group change drops the queue) plus the next
+  group's first 16; 160 textures are kept.
+- **Arrow keys on the cards are handled by hand** (`Results::move_to`):
+  GtkFlowBox moves its cursor only after a click or Tab has set it, and not
+  after `grab_focus` from code, which is how the page hands it the keyboard.
+- **Mnemonics live in `gui/labels.rs`** and a test checks each set of
+  controls visible together for clashes. Add a label there, not inline.
+- **Nothing is pre-marked**, by the user's decision; marks are per *file*,
+  since groups overlap. Trash is `gio::File::trash`, never a delete.
+- Window settings persist in `$XDG_CONFIG_HOME/img-fp/gui.json`, written
+  when a scan starts: folders, excludes and every option, except clear/prune
+  cache, which are one-off.
+- **Testing on the real display:** Cinnamon's focus-stealing prevention
+  ignores `xdotool windowactivate`, and keys then go to whatever window has
+  focus. Activate with `wmctrl -i -a`, and check `xdotool getactivewindow`
+  before every key sent.
+- To see it without a desktop: `Xvfb :99`, run with `DISPLAY=:99`, drive it
+  with `xdotool` (after `windowfocus --sync`) and capture with `import -window
+  root`. Point `XDG_DATA_HOME` into a scratch folder on the same filesystem
+  before testing the Trash.
 
 ## Conventions
 

@@ -22,7 +22,8 @@ reported.
 - An image embedded in a larger one: a slide, a collage, a PDF page, a
   screenshot
 
-It only reports. Nothing is moved or deleted.
+The command line only reports; nothing is moved or deleted. The desktop app
+shows each group and moves the images you choose to the Trash.
 
 ## Requirements
 
@@ -120,6 +121,58 @@ img-fp --from-file paths.txt
 A file reached through a symlink, a hard link or two overlapping folders is
 scanned once. Symlinks met inside a folder are skipped unless you pass
 `--follow-symlinks`.
+
+## Desktop app
+
+`img-fp-gui` is a window over the same scan: pick folders and options, watch
+the progress, then go through the groups and choose which images to move to the
+Trash. Nothing is marked for you. It has the same requirements as `img-fp`,
+plus GTK 4.10 or newer:
+
+```bash
+sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d libgtk-4-1
+curl -L -o img-fp-gui \
+  https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-gui-x86_64-linux-gnu
+chmod +x img-fp-gui
+sudo install -m 755 img-fp-gui /usr/local/bin/img-fp-gui
+```
+
+From source, with the `gui` feature, which installs both `img-fp` and
+`img-fp-gui`:
+
+```bash
+sudo apt install libgtk-4-dev libheif-dev pkg-config
+RUSTFLAGS="-C target-cpu=native" cargo install img-fp --locked --features gui
+```
+
+To add it to the applications menu, install the desktop entry from the extras
+archive (or from this repository):
+
+```bash
+install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
+  ~/.local/share/applications/io.github.danielnara24.img-fp.desktop
+```
+
+Folders given on its command line are added to the list: `img-fp-gui ~/Pictures`.
+
+Every control can be reached from the keyboard; the underlined letter of each
+button and field is its Alt shortcut. F1 lists every key.
+
+| Key | Action |
+| --- | --- |
+| Alt + underlined letter | Use that button or field |
+| F1 | List the keyboard shortcuts |
+| Ctrl+Enter | Start the scan |
+| Escape | Cancel the scan |
+| Arrow keys, Home, End | Move between the images of a group |
+| Space or Delete | Mark or unmark the outlined image for the Trash |
+| Enter | Open the image large; there, Left and Right move through the group |
+| Ctrl+Page Down, Ctrl+Page Up | Next or previous group |
+| Ctrl+Q | Quit |
+
+Cancelling works like Ctrl-C on the command line: the scan stops at once and
+every image analysed so far is kept in the cache. The window's settings are
+saved in `~/.config/img-fp/gui.json`.
 
 ## Output
 

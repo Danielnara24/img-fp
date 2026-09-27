@@ -1097,6 +1097,96 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     Ok((w as u32, h as u32, g))
 }
 
+/// A picture for a person to look at rather than for the analysis: colour,
+/// the right way up, and no larger than `long` on its long side, as RGBA.
+///
+/// Only `img-fp-gui` asks for one, to show a group; nothing in a scan does.
+/// It reads every format a scan reads, through the same decoders, but holds
+/// the whole decoded picture for a moment — a window decoding two of these at
+/// a time does not need the scan's budget.
+pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let img = match sniff(&bytes) {
+        Kind::Image(fmt) => preview_image_crate(&bytes, fmt)?,
+        Kind::Jxl => preview_jxl(&bytes)?,
+        Kind::Heif => preview_heif(&bytes)?,
+        Kind::Unknown => match image::guess_format(&bytes) {
+            Ok(fmt) => preview_image_crate(&bytes, fmt)?,
+            Err(_) => bail!(NOT_AN_IMAGE),
+        },
+    };
+    drop(bytes);
+    let long = long.max(1);
+    let img = if img.width().max(img.height()) > long { img.thumbnail(long, long) } else { img };
+    let rgba = img.into_rgba8();
+    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+fn preview_image_crate(bytes: &[u8], fmt: ImageFormat) -> Result<DynamicImage> {
+    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), fmt).into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
+fn preview_jxl(bytes: &[u8]) -> Result<DynamicImage> {
+    // Its own pool, for the reason `decode_jxl` gives.
+    let image = jxl_oxide::JxlImage::builder()
+        .pool(jxl_oxide::JxlThreadPool::none())
+        .read(Cursor::new(bytes))
+        .map_err(|e| anyhow::anyhow!("jxl: {e}"))?;
+    let render = image.render_frame(0).map_err(|e| anyhow::anyhow!("jxl render: {e}"))?;
+    let mut stream = render.stream();
+    let (w, h, ch) = (stream.width() as usize, stream.height() as usize, stream.channels() as usize);
+    let grey = image.image_header().metadata.grayscale();
+    let color = if grey { 1 } else { 3 };
+    let mut rgba = vec![255u8; w * h * 4];
+    let mut rowf = vec![0f32; w * ch];
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    for row in rgba.chunks_exact_mut(w * 4) {
+        let got = stream.write_to_buffer(&mut rowf);
+        rowf[got..].fill(0.0);
+        for (px, out) in rowf.chunks_exact(ch).zip(row.chunks_exact_mut(4)) {
+            if grey {
+                out[..3].fill(byte(px[0]));
+            } else {
+                for c in 0..3 {
+                    out[c] = byte(px[c]);
+                }
+            }
+            if ch > color {
+                out[3] = byte(px[color]);
+            }
+        }
+    }
+    let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba).context("jxl: frame size")?;
+    Ok(DynamicImage::ImageRgba8(buf))
+}
+
+fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
+    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
+    let lib = LibHeif::new();
+    let ctx = HeifContext::read_from_bytes(bytes).map_err(|e| anyhow::anyhow!("heif: {e}"))?;
+    let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
+    let has_alpha = handle.has_alpha_channel();
+    let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
+    let img = lib.decode(&handle, ColorSpace::Rgb(chroma), None).map_err(|e| anyhow::anyhow!("heif decode: {e}"))?;
+    let planes = img.planes();
+    let plane = planes.interleaved.context("heif: no interleaved plane")?;
+    let (w, h) = (plane.width as usize, plane.height as usize);
+    let ch = if has_alpha { 4 } else { 3 };
+    let mut packed = Vec::with_capacity(w * h * ch);
+    for y in 0..h {
+        packed.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * ch]);
+    }
+    Ok(if has_alpha {
+        DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w as u32, h as u32, packed).context("heif: frame size")?)
+    } else {
+        DynamicImage::ImageRgb8(image::RgbImage::from_raw(w as u32, h as u32, packed).context("heif: frame size")?)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

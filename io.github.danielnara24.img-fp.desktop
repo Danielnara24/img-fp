@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=img-fp
+GenericName=Duplicate Image Finder
+Comment=Find duplicate and near-duplicate images
+Exec=img-fp-gui %F
+Icon=image-x-generic
+Terminal=false
+Categories=Graphics;
+Keywords=duplicate;duplicates;images;photos;pictures;
+StartupNotify=true

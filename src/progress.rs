@@ -39,6 +39,11 @@
 //!
 //! Drawn only when stderr is a terminal: indicatif hides itself otherwise, so
 //! `bench.py`, a pipe and a log file see exactly what they saw before.
+//!
+//! **Under `img-fp-gui` the line is spoken rather than drawn** (`speak_json`):
+//! the same position and message, one JSON object a frame on stdout, and every
+//! line the run would have printed above the bar as another. The window reads
+//! them from the pipe; nothing else about the run changes.
 
 use crate::decode::{Kind, Probe};
 use image::ImageFormat;
@@ -58,6 +63,32 @@ const LEN: u64 = 1_000_000;
 
 /// How often the drawing thread moves the bar.
 const FRAME: Duration = Duration::from_millis(50);
+
+/// Set once, before the run starts, by the window's worker.
+static JSON: AtomicBool = AtomicBool::new(false);
+
+/// Speak the progress line as JSON on stdout instead of drawing it on stderr.
+///
+/// Two kinds of line, one object each: `{"p": 0.431, "m": "describing ..."}`
+/// for where the bar stands, sent when it moves, and `{"l": "..."}` for a line
+/// the run says about itself.
+pub fn speak_json() {
+    JSON.store(true, Ordering::Relaxed);
+}
+
+fn speaking() -> bool {
+    JSON.load(Ordering::Relaxed)
+}
+
+/// One line to the window. A window that has gone away is not the run's
+/// problem: the worker is told to stop by a signal, not by a broken pipe.
+fn speak(v: serde_json::Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = serde_json::to_writer(&mut out, &v);
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
+}
 
 /// The stages of a run, in the order they run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -366,7 +397,8 @@ impl Progress {
     pub fn new() -> Progress {
         // Cleared when dropped, whatever path the run takes out of `run`: a
         // fatal error should read as the error, not as a bar frozen above it.
-        let bar = ProgressBar::new(LEN).with_finish(ProgressFinish::AndClear);
+        let bar = if speaking() { ProgressBar::hidden() } else { ProgressBar::new(LEN) };
+        let bar = bar.with_finish(ProgressFinish::AndClear);
         let _ = BAR.set(bar.clone());
         bar.set_style(
             ProgressStyle::with_template(&format!(
@@ -393,11 +425,20 @@ impl Progress {
         let drawer = {
             let (bar, state, stop) = (bar.clone(), state.clone(), stop.clone());
             std::thread::spawn(move || {
+                let mut said = (u64::MAX, String::new());
                 while !stop.load(Ordering::Relaxed) {
                     std::thread::sleep(FRAME);
                     let frame = state.lock().unwrap().frame();
                     if let Some((at, msg)) = frame {
-                        bar.set_position((at * LEN as f64) as u64);
+                        let pos = (at * LEN as f64) as u64;
+                        if speaking() {
+                            if (pos, &msg) != (said.0, &said.1) {
+                                speak(serde_json::json!({"p": at, "m": msg}));
+                                said = (pos, msg);
+                            }
+                            continue;
+                        }
+                        bar.set_position(pos);
                         bar.set_message(msg);
                     }
                 }
@@ -408,6 +449,9 @@ impl Progress {
 
     /// Print a line above the bar rather than through it.
     pub fn println(&self, line: &str) {
+        if speaking() {
+            return speak(serde_json::json!({"l": line}));
+        }
         self.bar.suspend(|| eprintln!("{line}"));
     }
 
