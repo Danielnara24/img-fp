@@ -2458,7 +2458,7 @@ direction, and the sizes to re-check after any change to
 
 
 **Below the table, swept to one pixel, and why there is no floor.** Every size
-from 1 to 384 on both corpora, 0.18.2's binary, cold, one session; IMGS scored,
+from 1 to 384 on both corpora, and 0, 0.18.2's binary, cold, one session; IMGS scored,
 the found corpus counted (it has no ground truth, so its column is pairs, not
 accuracy):
 
@@ -2475,6 +2475,7 @@ accuracy):
 | 192 | 0.9522 | 91.19% | 1 | 1 | 49 | 3,748 |
 | **256** | **0.9721** | **94.96%** | **0** | **0** | **58** | 3,771 |
 | **384 (default)** | **0.9518** | **91.12%** | **0** | **0** | **46** | 3,771 |
+| 0 (full size) | 0.9755 | 95.66% | **14** | 1 | 57 | 3,771 |
 
 Every row also holds the byte-identical pairs, which no work size touches:
 233 on IMGS and 7 on the found corpus, and those are *all* that sizes 1 to 4
@@ -2503,6 +2504,17 @@ sweep, single runs, and level on the found corpus, whose output is identical
 at the two sizes. Worth a like-for-like cost comparison before anyone moves the
 default — and note the interaction runs both ways: any change to
 `upsample_below` moves which work sizes get enlarged.
+
+**0 is the best recall measured and not a safe setting.** Every file at its
+own resolution: F1 0.9755, recall 95.66%, 57 perfect — and 14 cross-family
+pairs in one merge, which the same corpus does not make at 256, 384 or 640.
+That is the cliff at the top of the table above (896 merged two families)
+reached from further up. It cost 694 s of wall and a 2,180 MB peak at `-t 2`,
+which it was run at because a 44-megapixel scale space is two to three
+gigabytes and the decode budget does not cover it; the pairs do not depend on
+the thread count, the clock does, so that figure is not comparable with the
+column above. On the found corpus 0 is the 384 run again, pair for pair and
+group for group, since nothing there is larger than 224 pixels.
 
 **Small sizes are unsafe, not merely weak.** 48 makes 1,689 cross-family pairs
 across five merges, which is the family-merge failure the occupancy note in
