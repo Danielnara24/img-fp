@@ -11,8 +11,11 @@
 //!   moment — 133 MB for a 44-megapixel photograph — and a window that spikes
 //!   a gigabyte to draw a grid of thumbnails is not light.
 //!
-//! What is kept is the textures of the last few groups looked at, a quarter of
-//! a megabyte each, so paging back is instant.
+//! What is kept is the textures most recently shown, up to a fixed number of
+//! bytes, so paging back is instant. Bytes and not a count: a card's texture
+//! is a tenth of a megabyte and the large view's is seven or more, and a count
+//! of 160 that suited the cards held over a gigabyte once the large view had
+//! been paged through.
 
 use gtk::gdk;
 use gtk::glib;
@@ -23,8 +26,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Textures kept once nothing on screen shows them.
-const KEEP: usize = 160;
+/// Bytes of texture kept once nothing on screen shows them: some six hundred
+/// cards, or a dozen large views, or any mixture.
+const KEEP_BYTES: usize = 96 << 20;
 
 type Key = (PathBuf, u32);
 type Decoded = Result<(u32, u32, Vec<u8>), String>;
@@ -43,8 +47,8 @@ pub enum Shown {
 pub struct Thumbs {
     queue: Arc<(Mutex<Queue>, Condvar)>,
     done: RefCell<HashMap<Key, Result<gdk::Texture, String>>>,
-    /// Oldest first, for dropping.
-    order: RefCell<VecDeque<Key>>,
+    /// What `done` holds, oldest first, for dropping.
+    order: RefCell<Budget<Key>>,
     waiting: RefCell<HashMap<Key, Vec<Shown>>>,
 }
 
@@ -75,7 +79,7 @@ impl Thumbs {
         let thumbs = Rc::new(Thumbs {
             queue,
             done: RefCell::new(HashMap::new()),
-            order: RefCell::new(VecDeque::new()),
+            order: RefCell::new(Budget::new(KEEP_BYTES)),
             waiting: RefCell::new(HashMap::new()),
         });
         let weak = Rc::downgrade(&thumbs);
@@ -122,7 +126,7 @@ impl Thumbs {
     /// Forget a file, which is on its way to the Trash.
     pub fn forget(&self, path: &Path) {
         self.done.borrow_mut().retain(|k, _| k.0 != path);
-        self.order.borrow_mut().retain(|k| k.0 != path);
+        self.order.borrow_mut().remove_where(|k| k.0 == path);
     }
 
     fn arrived(&self, key: Key, got: Decoded) {
@@ -135,27 +139,130 @@ impl Thumbs {
                 deliver(s, r.clone());
             }
         }
+        let bytes = r.as_ref().map_or(0, |t| t.width() as usize * t.height() as usize * 4);
         self.done.borrow_mut().insert(key.clone(), r);
-        let mut order = self.order.borrow_mut();
-        order.push_back(key);
-        while order.len() > KEEP {
-            if let Some(old) = order.pop_front() {
-                self.done.borrow_mut().remove(&old);
+        for old in self.order.borrow_mut().insert(key, bytes) {
+            self.done.borrow_mut().remove(&old);
+        }
+    }
+}
+
+/// Keys oldest first, each with its size, held to a total.
+///
+/// Inserting a key it already holds moves it to the newest end rather than
+/// holding it twice — which a picture decoded again after its queue was
+/// cleared used to do, and the older copy's eviction then dropped the newer
+/// texture. The newest key is always kept, however large.
+pub struct Budget<K> {
+    order: VecDeque<(K, usize)>,
+    held: usize,
+    limit: usize,
+}
+
+impl<K: PartialEq> Budget<K> {
+    pub fn new(limit: usize) -> Self {
+        Budget { order: VecDeque::new(), held: 0, limit }
+    }
+
+    /// Hold `key`, and hand back the keys dropped to make room for it.
+    pub fn insert(&mut self, key: K, bytes: usize) -> Vec<K> {
+        self.remove_where(|k| *k == key);
+        self.order.push_back((key, bytes));
+        self.held += bytes;
+        let mut dropped = Vec::new();
+        while self.held > self.limit && self.order.len() > 1 {
+            let (k, b) = self.order.pop_front().expect("more than one");
+            self.held -= b;
+            dropped.push(k);
+        }
+        dropped
+    }
+
+    pub fn remove_where(&mut self, gone: impl Fn(&K) -> bool) {
+        let held = &mut self.held;
+        self.order.retain(|(k, b)| {
+            let drop = gone(k);
+            if drop {
+                *held -= *b;
             }
+            !drop
+        });
+    }
+}
+
+/// Which of several requests for one widget is the one it should show.
+///
+/// The large view asks for a picture each time it moves, and every answer is
+/// for the same widget. Two decoders finish in whatever order they finish, so
+/// a slow picture the view has already moved past could arrive after the one
+/// it moved to, and be shown under the other's title and mark. Each request
+/// takes a ticket; an answer is shown only while its ticket is the latest.
+#[derive(Clone, Default)]
+pub struct Latest(Rc<std::cell::Cell<u64>>);
+
+impl Latest {
+    /// A new request, which makes every earlier one stale. The closure says
+    /// whether this one still is the latest.
+    pub fn next(&self) -> impl Fn() -> bool + 'static {
+        let t = self.0.get() + 1;
+        self.0.set(t);
+        let now = self.0.clone();
+        move || now.get() == t
+    }
+}
+
+/// Show a decoded picture, or why there is none, in `p`.
+pub fn show_on(p: &gtk::Picture, r: Result<gdk::Texture, String>) {
+    match r {
+        Ok(t) => p.set_paintable(Some(&t)),
+        Err(e) => {
+            p.set_paintable(None::<&gdk::Paintable>);
+            p.set_alternative_text(Some(&format!("Could not show this image: {e}")));
+            p.set_tooltip_text(Some(&format!("Could not show this image: {e}")));
         }
     }
 }
 
 fn deliver(shown: &Shown, r: Result<gdk::Texture, String>) {
     match shown {
-        Shown::Picture(p) => match r {
-            Ok(t) => p.set_paintable(Some(&t)),
-            Err(e) => {
-                p.set_paintable(None::<&gdk::Paintable>);
-                p.set_alternative_text(Some(&format!("Could not show this image: {e}")));
-                p.set_tooltip_text(Some(&format!("Could not show this image: {e}")));
-            }
-        },
+        Shown::Picture(p) => show_on(p, r),
         Shown::Callback(f) => f(r),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Held to bytes, oldest out first, and never two entries for one key.
+    #[test]
+    fn the_cache_is_held_to_bytes_not_to_a_count() {
+        let mut b = Budget::new(100);
+        assert!(b.insert("card1", 10).is_empty());
+        assert!(b.insert("card2", 10).is_empty());
+        // A large view evicts the oldest until the whole fits.
+        assert_eq!(b.insert("large1", 85), vec!["card1"]);
+        assert_eq!(b.held, 95);
+        // The same key again moves, rather than doubling.
+        assert!(b.insert("card2", 10).is_empty());
+        assert_eq!(b.order.iter().map(|e| e.0).collect::<Vec<_>>(), ["large1", "card2"]);
+        assert_eq!(b.held, 95);
+        // Something larger than the whole budget is kept on its own.
+        assert_eq!(b.insert("huge", 500), vec!["large1", "card2"]);
+        assert_eq!(b.held, 500);
+        b.remove_where(|k| *k == "huge");
+        assert_eq!(b.held, 0);
+    }
+
+    /// Only the latest request's answer is shown, whatever order the answers
+    /// arrive in.
+    #[test]
+    fn only_the_latest_request_is_shown() {
+        let latest = Latest::default();
+        let first = latest.next();
+        assert!(first());
+        let second = latest.next();
+        assert!(!first(), "a later request makes the earlier one stale");
+        assert!(second());
     }
 }

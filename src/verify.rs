@@ -242,6 +242,24 @@ impl Policy {
 }
 
 impl Verdict {
+    /// The same verdict read from B to A: the transform inverted and every
+    /// figure that has a direction turned round with it. `None` when the
+    /// transform has no inverse.
+    ///
+    /// The counts, the correlations and `centred` — which passes on either
+    /// frame — say the same thing both ways.
+    pub fn reversed(&self) -> Option<Verdict> {
+        let m = invert_affine(&self.m)?;
+        Some(Verdict {
+            m,
+            ov_a: self.ov_b,
+            ov_b: self.ov_a,
+            scale: (m[0] * m[4] - m[1] * m[3]).abs().sqrt(),
+            rot_deg: m[3].atan2(m[0]).to_degrees(),
+            ..self.clone()
+        })
+    }
+
     /// Every bar this verdict has to clear, under one tier's rules.
     ///
     /// Two of these are the CLI's `--min-frame-overlap` and
@@ -1751,5 +1769,30 @@ mod bench {
             println!("pixel_check {name:14}: {:7.2} us per call", t * 1000.0 / POOL as f64);
         }
         println!("pixel_check checksum {sum:016x}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A verdict read the other way round is the same claim about the same two
+    /// files: the overlaps swap, the scale is the reciprocal, the rotation is
+    /// undone, and reversing twice gives back what it started from.
+    #[test]
+    fn a_reversed_verdict_describes_the_same_pair_from_the_other_side() {
+        let (s, t) = (0.5f32, 30f32.to_radians());
+        let m: Affine = [s * t.cos(), -s * t.sin(), 12.0, s * t.sin(), s * t.cos(), -4.0];
+        let v = Verdict { m, ov_a: 0.9, ov_b: 0.3, scale: s, rot_deg: 30.0, n_in: 17, blk: 0.8, centred: true, ..Default::default() };
+        let r = v.reversed().unwrap();
+        assert_eq!((r.ov_a, r.ov_b), (0.3, 0.9));
+        assert!((r.scale - 2.0).abs() < 1e-4, "{}", r.scale);
+        assert!((r.rot_deg + 30.0).abs() < 1e-3, "{}", r.rot_deg);
+        assert_eq!((r.n_in, r.blk, r.centred), (17, 0.8, true));
+        let back = r.reversed().unwrap();
+        for (a, b) in back.m.iter().zip(m.iter()) {
+            assert!((a - b).abs() < 1e-4);
+        }
+        assert!(Verdict { m: [0.0; 6], ..Default::default() }.reversed().is_none());
     }
 }

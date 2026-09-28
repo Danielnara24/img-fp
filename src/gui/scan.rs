@@ -191,6 +191,11 @@ fn parse(line: &str) -> Option<Event> {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct Member {
     pub path: PathBuf,
+    /// The path's own bytes, which the report carries beside `path` when the
+    /// name is not UTF-8 and `path` is only its readable form; see
+    /// `read_report`.
+    #[serde(default)]
+    path_bytes: Option<Vec<u8>>,
     pub role: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -223,8 +228,14 @@ pub struct Found {
 
 /// The groups from a finished scan's report.
 ///
-/// No file is a finished scan that found no images at all: img-fp stops there
-/// and writes no report.
+/// No file is treated as a scan that found no images at all. img-fp writes a
+/// report for that case too, so this is for a worker that ended before
+/// writing one.
+///
+/// A member whose name is not UTF-8 takes its path from its bytes. The
+/// readable form names no file, and the Trash, asked to move a file that is
+/// not there, answers "not found" — which the results page counts as already
+/// gone. So the window reported the file moved and left it where it was.
 pub fn read_report(path: &Path) -> Result<Found, String> {
     let f = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -232,5 +243,40 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
         Err(e) => return Err(format!("could not read the scan's results: {e}")),
     };
     let r: Report = serde_json::from_reader(std::io::BufReader::new(f)).map_err(|e| format!("could not read the scan's results: {e}"))?;
-    Ok(Found { groups: r.groups, analysed: r.files_analysed })
+    let mut groups = r.groups;
+    for m in groups.iter_mut().flat_map(|g| g.files.iter_mut()) {
+        if let Some(bytes) = m.path_bytes.take() {
+            use std::os::unix::ffi::OsStringExt;
+            m.path = PathBuf::from(OsString::from_vec(bytes));
+        }
+    }
+    Ok(Found { groups, analysed: r.files_analysed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window reads the report img-fp writes, and a name that is not
+    /// UTF-8 comes back as the file's own name rather than its readable form.
+    #[test]
+    fn a_member_is_the_file_itself_whatever_its_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("img-fp-gui-report-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("r.json");
+        std::fs::write(
+            &report,
+            r#"{"files_analysed": 2, "groups": [{"files": [
+                {"path": "/p/a.jpg", "role": "representative", "width": 4, "height": 3, "size_bytes": 10},
+                {"path": "/p/b\ufffd.jpg", "path_bytes": [47,112,47,98,255,46,106,112,103], "role": "match"}]}]}"#,
+        )
+        .unwrap();
+        let found = read_report(&report).unwrap();
+        let files = &found.groups[0].files;
+        assert_eq!(files[0].path, PathBuf::from("/p/a.jpg"));
+        assert_eq!(files[1].path.as_os_str().as_bytes(), b"/p/b\xff.jpg");
+        assert_eq!(found.analysed, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

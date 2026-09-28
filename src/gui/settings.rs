@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReportFormat {
@@ -137,6 +137,24 @@ impl Settings {
         }
     }
 
+    /// The same settings with every file path the scan will write made
+    /// absolute: `~/` is the home folder, and so is the start of any other
+    /// relative path.
+    ///
+    /// A relative path was left for the worker to resolve against its working
+    /// directory, which is whatever the window was started from — the home
+    /// folder from a desktop menu, anywhere at all from a terminal — so
+    /// `results.txt` went somewhere the window never said. Home is where a
+    /// person typing a bare file name would look for it, and the window shows
+    /// the path it chose in the field before the scan starts.
+    pub fn with_absolute_paths(mut self) -> Settings {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        for p in [&mut self.report_path, &mut self.log_path, &mut self.cache_path] {
+            *p = absolute(p, home.as_deref());
+        }
+        self
+    }
+
     /// The img-fp command line these settings are, program name first.
     ///
     /// Every option the window shows is passed, default or not, so the log
@@ -196,9 +214,33 @@ impl Settings {
     }
 }
 
+/// `p` made absolute against `home`, as `with_absolute_paths` describes. An
+/// empty path is left empty: it means "not set".
+fn absolute(p: &str, home: Option<&Path>) -> String {
+    let t = p.trim();
+    let Some(home) = home.filter(|h| h.is_absolute()) else { return t.to_string() };
+    if t.is_empty() || Path::new(t).is_absolute() {
+        return t.to_string();
+    }
+    let rest = if t == "~" { "" } else { t.strip_prefix("~/").unwrap_or(t) };
+    home.join(rest).display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_path_is_made_absolute_against_home() {
+        let home = Some(Path::new("/home/u"));
+        assert_eq!(absolute("results.txt", home), "/home/u/results.txt");
+        assert_eq!(absolute(" out/r.csv ", home), "/home/u/out/r.csv");
+        assert_eq!(absolute("~/r.json", home), "/home/u/r.json");
+        assert_eq!(absolute("~", home), "/home/u/");
+        assert_eq!(absolute("/tmp/r.txt", home), "/tmp/r.txt");
+        assert_eq!(absolute("", home), "");
+        assert_eq!(absolute("r.txt", None), "r.txt", "with no home there is nothing better to do");
+    }
 
     /// Whatever the window can be set to, the command line it makes is one
     /// img-fp accepts: the scan must never fail on its own arguments.

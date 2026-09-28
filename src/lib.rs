@@ -126,7 +126,7 @@ struct Args {
     work_size: usize,
 
     /// Candidate matches checked per image.
-    #[arg(short = 'k', long, value_name = "N", default_value_t = 150)]
+    #[arg(short = 'k', long, value_name = "N", default_value_t = 150, value_parser = parse_candidates)]
     candidates: usize,
 
     /// Matching points two images must share before they count as duplicates.
@@ -138,7 +138,7 @@ struct Args {
     /// How much of one image must lie inside the other, from 0 to 1.
     ///
     /// Higher is stricter.
-    #[arg(long, value_name = "F", default_value_t = 0.85)]
+    #[arg(long, value_name = "F", default_value_t = 0.85, value_parser = parse_fraction)]
     min_frame_overlap: f32,
 
     /// How closely the pixels of that shared area must agree, from 0 to 1.
@@ -146,7 +146,7 @@ struct Args {
     /// Higher is stricter.
     // 0.6 is set for what a user wants grouped rather than for F1; see
     // CLAUDE.md for the sweep and the cliff.
-    #[arg(long, value_name = "F", default_value_t = 0.6)]
+    #[arg(long, value_name = "F", default_value_t = 0.6, value_parser = parse_fraction)]
     min_pixel_correlation: f32,
 
     /// Write every candidate pair considered, accepted or not, to this CSV.
@@ -196,22 +196,85 @@ struct Args {
     man: bool,
 }
 
+// ---------------------------------------------------------------- arguments
+//
+// The thresholds are refused outside the range they are measured on. An
+// overlap of 7, a correlation of NaN or no candidates at all is accepted by
+// the types and finds nothing, and a run that finds nothing and exits 0 reads
+// as a folder with no duplicates in it.
+//
+// `--work-size` has no floor, deliberately. Swept from 1 to 384 on both
+// corpora, a working image under 8 pixels a side describes to no features at
+// all, and the run says so — exit 2, every file listed as featureless — so it
+// is never silent. Above that nothing is a threshold: 96 merged no families
+// where 128 and 192 each merged one, and a floor anywhere would be a guess.
+
+/// `--min-frame-overlap` and `--min-pixel-correlation`: both are fractions.
+fn parse_fraction(s: &str) -> std::result::Result<f32, String> {
+    let v: f32 = s.trim().parse().map_err(|e| format!("{e}"))?;
+    // `contains` is false for NaN, which is the point.
+    if !(0.0..=1.0).contains(&v) {
+        return Err("must be a number from 0 to 1".into());
+    }
+    Ok(v)
+}
+
+/// `-k`: at least one, or nothing past the byte-identical pass is compared.
+fn parse_candidates(s: &str) -> std::result::Result<usize, String> {
+    match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
+        0 => Err("must be at least 1".into()),
+        v => Ok(v),
+    }
+}
+
 // ---------------------------------------------------------------- exact pass
 
 /// FNV-1a over the file's bytes. Only files sharing a size are read, so on a
 /// normal corpus this touches almost nothing.
+///
+/// Read a piece at a time rather than whole. Files that share a size are the
+/// ones read here, and those include exactly the large ones — uncompressed
+/// TIFFs or BMPs from one scanner are all one size, and so are two copies of
+/// a disk image under `-x '*'` — so reading each whole, eight at once, held
+/// eight of them in memory for a hash.
 fn content_hash(path: &Path) -> Option<u128> {
-    let data = std::fs::read(path).ok()?;
+    hash_reader(std::fs::File::open(path).ok()?, 1 << 20)
+}
+
+/// The hash of everything `r` yields, `piece` bytes at a time. `piece` is a
+/// multiple of eight, so every full read ends on a word boundary and the
+/// words are the words of the whole stream.
+fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
+    debug_assert!(piece % 8 == 0 && piece > 0);
     let mut h: u128 = 0x6c62272e07bb0142_62b821756295c58d;
-    for chunk in data.chunks(8) {
-        let mut v = 0u64;
-        for (i, &b) in chunk.iter().enumerate() {
-            v |= (b as u64) << (i * 8);
+    let mut buf = vec![0u8; piece];
+    let mut total = 0u64;
+    loop {
+        // Fill the piece whole unless the file ends: a short read in the
+        // middle would split a word across two reads.
+        let mut got = 0;
+        while got < piece {
+            match r.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(k) => got += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
         }
-        h ^= v as u128;
-        h = h.wrapping_mul(0x0000000001000000_000000000000013B);
+        for chunk in buf[..got].chunks(8) {
+            let mut v = 0u64;
+            for (i, &b) in chunk.iter().enumerate() {
+                v |= (b as u64) << (i * 8);
+            }
+            h ^= v as u128;
+            h = h.wrapping_mul(0x0000000001000000_000000000000013B);
+        }
+        total += got as u64;
+        if got < piece {
+            break;
+        }
     }
-    h ^= data.len() as u128;
+    h ^= total as u128;
     Some(h)
 }
 
@@ -297,6 +360,12 @@ const FEATURES: usize = 600;
 /// nothing — which on every corpus tried has been the second or third. The
 /// constant only exists so a pathological graph cannot spin forever.
 const PROPAGATE_MAX_ROUNDS: usize = 8;
+
+/// The largest component propagation works inside. A round tests every
+/// unmatched pair in a component, which is quadratic in it: two thousand files
+/// are two million pixel checks a round, about a minute of CPU, and
+/// the cost goes up fourfold with every doubling after that.
+const PROPAGATE_MAX_COMPONENT: usize = 2000;
 
 static T_DECODE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static T_SIFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -465,6 +534,7 @@ use report::{OutGroup, OutPair, Output};
 
 /// The command line: `img-fp`.
 pub fn cli_main() -> Result<()> {
+    check_cpu()?;
     let args = Args::parse();
     if let Some(shell) = args.completions {
         let mut cmd = Args::command();
@@ -476,6 +546,40 @@ pub fn cli_main() -> Result<()> {
         return print_man();
     }
     execute(&args, None)
+}
+
+/// Refuse to run on a CPU that lacks what this binary was compiled for.
+///
+/// The release is built for x86-64-v3 (AVX2, FMA, BMI2), and the fast kernels
+/// are chosen at compile time. On an older CPU the first of those instructions
+/// ends the process with SIGILL — "Illegal instruction" and nothing else,
+/// which reads as a crash rather than as the wrong build. Asked first, it is a
+/// sentence that says which build to use instead.
+///
+/// It checks exactly the features this binary was compiled with, so a build
+/// for the machine it runs on (`target-cpu=native`) always passes, and a
+/// portable one (`x86-64`) checks nothing.
+pub fn check_cpu() -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut missing: Vec<&str> = Vec::new();
+        macro_rules! need {
+            ($($f:tt),*) => {$(
+                if cfg!(target_feature = $f) && !std::arch::is_x86_feature_detected!($f) {
+                    missing.push($f);
+                }
+            )*};
+        }
+        need!("sse4.2", "popcnt", "avx", "avx2", "fma", "bmi1", "bmi2", "lzcnt", "movbe", "f16c");
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "this build of img-fp needs a CPU with {}, which this one does not have. \
+                 Build it for this machine instead: cargo install img-fp --locked",
+                missing.join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The scan `img-fp-gui` runs: the command line's own, in a child process, with
@@ -785,7 +889,24 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     );
     stage!(t_start, "{} files", files.len());
     if files.is_empty() {
-        say!("No images found.");
+        // Still a finished run, and its report says so. Returning without one
+        // left whatever the last run wrote to `-o` in place, and a script
+        // reading it read the last run's groups as this one's.
+        progress.finish();
+        let out = Output {
+            tool: "img-fp",
+            config: run_config(args),
+            files_enumerated: 0,
+            files_analysed: 0,
+            failures: Vec::new(),
+            runtime_seconds: 0.0,
+            groups: Vec::new(),
+            pairs: Vec::new(),
+        };
+        match write_reports(args, gui, &out, &files)? {
+            Some(path) => say!("No images found. -> {}", path.display()),
+            None => say!("No images found."),
+        }
         return Ok(());
     }
 
@@ -815,14 +936,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         features: FEATURES as u32,
         thumb: THUMB_LONG as u32,
     };
-    let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+    // The cache is keyed on the paths themselves, not on their printable
+    // form: two names that are not UTF-8 can print the same and be two files.
     let (mut cached, mut store) = match &cache_path {
         Some(p) => {
             progress.begin(Stage::CacheRead);
             // Only this run's paths are unpacked; the rest of the machine's
             // cache is read for where it is, not for what it says. See
             // `cache::open`.
-            let walked: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+            let walked: std::collections::HashSet<&Path> = files.iter().map(|p| p.as_path()).collect();
             let (cached, store) = cache::open(p, settings, &|path| walked.contains(path), problems);
             (cached, Some(store))
         }
@@ -846,7 +968,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // run did not walk, which is what `carry_over` wants; the two counts taken
     // here are what tells the save below whether it has anything to write.
     let (mut in_cache, mut same_key) = (0usize, 0usize);
-    let mine: Vec<Option<(cache::Record, cache::Span)>> = names
+    let mine: Vec<Option<(cache::Record, cache::Span)>> = files
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -927,7 +1049,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         if !it.ok {
             return None;
         }
-        s.append(&names[i], key, &it.feats, &it.thumb)
+        s.append(&files[i], key, &it.feats, &it.thumb)
     };
     let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
         .into_par_iter()
@@ -969,12 +1091,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         if r == i {
             continue;
         }
-        // A copy whose original could not be read is described on its own, so
-        // that the failure is reported against the path that failed.
-        items[i] = if items[r].ok {
-            Item { feats: items[r].feats.clone(), thumb: items[r].thumb.clone(), ok: true, err: None }
-        } else {
-            analyse(&files[i], args.work_size, &sp)
+        // A copy of a file that would not decode fails as its original did, and
+        // is reported under its own path by the loop over `items` below. It
+        // used to be decoded again, here, on one thread, one copy after
+        // another — the same bytes through the same decoder, for the same
+        // error. (Both were read whole by the exact pass, so an original that
+        // could not be *opened* is never in a group to begin with.)
+        items[i] = Item {
+            feats: items[r].feats.clone(),
+            thumb: items[r].thumb.clone(),
+            ok: items[r].ok,
+            err: items[r].err.clone(),
         };
     }
     // A copy has a record of its own, under its own path, and its original's
@@ -1011,8 +1138,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             // which is exactly what a problem is here.
             problems.cache(format!("could not write {}: {e}", p.display()));
         }
-        let mut entries: Vec<(&str, cache::Span)> =
-            (0..n).filter(|&i| items[i].ok).filter_map(|i| Some((names[i].as_str(), span_of[i]?))).collect();
+        let mut entries: Vec<(&Path, cache::Span)> =
+            (0..n).filter(|&i| items[i].ok).filter_map(|i| Some((files[i].as_path(), span_of[i]?))).collect();
         // What the cache already knew about images this run never walked —
         // which, every walked file's record having been taken out of the map
         // above, is everything still in it. The cache is one file for the
@@ -1195,11 +1322,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let dumping = args.dump.is_some();
     // What a verdict must already have before its pixels are worth reading:
     // the weakest bar any tier applies, or everything a dump would record.
-    let gate = if dumping {
-        (3, 0.2)
-    } else {
-        (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap)
-    };
+    //
+    // A dump widens the gate and never narrows it: the bars the run's own
+    // tiers use still decide, so a run with `--dump` finds the pairs the same
+    // run without it finds. (It used to *set* the gate to (3, 0.2), which is
+    // tighter than a `--min-frame-overlap` below 0.2 and so lost pairs.)
+    let tier_gate = (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap);
+    let gate = if dumping { (tier_gate.0.min(3), tier_gate.1.min(0.2)) } else { tier_gate };
     progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
     let bar = progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs");
     let all_direct: Vec<Edge> = cand_pairs
@@ -1325,15 +1454,19 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                     };
                     let verdict = verify::verify(&p, cands, variants[v], gate, matches, scratch);
                     if verdict.accepted(&policy.anchor) {
-                        let (lo, hi, mm) = if i < j {
-                            (i, j, verdict.m)
+                        // Every edge runs from the lower index to the higher,
+                        // and its verdict with it: stored the other way round,
+                        // the report's `scale` for the pair was the reciprocal
+                        // of the scale between the files it names.
+                        let (lo, hi, verdict) = if i < j {
+                            (i, j, verdict)
                         } else {
-                            match verify::invert_affine(&verdict.m) {
-                                Some(mi) => (j, i, mi),
+                            match verdict.reversed() {
+                                Some(r) => (j, i, r),
                                 None => continue,
                             }
                         };
-                        out.push((lo, hi, mm, variants[v].invert, verdict));
+                        out.push((lo, hi, verdict.m, variants[v].invert, verdict));
                     }
                 }
                 bar.add(w);
@@ -1361,8 +1494,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     timed!(37, release_memory());
     stage!(t_start, "released the index and the descriptors");
 
-    let mut all: Vec<Edge> = edges;
-    all.extend(variant_edges.iter().cloned());
+    // One edge per pair of files. The mirrored and inverted pass can verify a
+    // pair the direct pass already anchored, and two lonely files can each
+    // find the other — and a pair counted twice is two links to the bridge
+    // test, so a lone match between two clusters stopped being a bridge by
+    // being found twice. The direct verdict is kept where there are two.
+    let all: Vec<Edge> = unique_pairs(edges.into_iter().chain(variant_edges.iter().cloned()));
 
     // Every anchor faces the bridge test, whichever pass produced it: a
     // mirrored match joining two clusters is exactly as consequential as a
@@ -1390,10 +1527,20 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let mut n_hypotheses = 0usize;
     // A composed pair is kept only if it clears the propagated tier's own
     // overlap floor; a dump wants every hypothesis the round considered.
-    let prop_min_ov = if dumping { 0.2 } else { policy.propagated.min_frame_overlap };
+    let prop_min_ov = if dumping { policy.propagated.min_frame_overlap.min(0.2) } else { policy.propagated.min_frame_overlap };
     let mut pool: Vec<Edge> = all.clone();
     for round in 0..PROPAGATE_MAX_ROUNDS {
-        let mut round_all = timed!(21, propagate(&items, &pool, n, prop_min_ov));
+        let (mut round_all, too_large) = timed!(21, propagate(&items, &pool, n, prop_min_ov));
+        // Said once, and on the console: pairs inside such a component rest on
+        // direct matches alone, and propagation is most of the tool's recall.
+        if round == 0 && !too_large.is_empty() {
+            let files: usize = too_large.iter().sum();
+            say!(
+                "Note: {} cluster(s) of more than {PROPAGATE_MAX_COMPONENT} files ({files} files in all) are too large to \
+                 propagate matches inside; pairs within them come from direct matches only.",
+                too_large.len()
+            );
+        }
         let before = propagated.len();
         let seen: std::collections::HashSet<(usize, usize)> =
             pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
@@ -1481,6 +1628,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                     out_pairs.push(OutPair {
                         a: files[a].display().to_string(),
                         b: files[b].display().to_string(),
+                        a_bytes: report::raw_bytes(&files[a]),
+                        b_bytes: report::raw_bytes(&files[b]),
                         aligned_points: 0,
                         frame_overlap: 1.0,
                         pixel_correlation: 1.0,
@@ -1507,6 +1656,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         out_pairs.push(OutPair {
             a: files[a].display().to_string(),
             b: files[b].display().to_string(),
+            a_bytes: report::raw_bytes(&files[a]),
+            b_bytes: report::raw_bytes(&files[b]),
             aligned_points: v.n_in,
             frame_overlap: round3(v.ov_a.max(v.ov_b)),
             pixel_correlation: round3(v.blk),
@@ -1553,7 +1704,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .enumerate()
         .filter_map(|(i, it)| {
             let e = it.err.as_ref().filter(|_| !not_asked[i])?;
-            Some(serde_json::json!({"path": files[i].display().to_string(), "error": e}))
+            let mut f = serde_json::json!({"path": files[i].display().to_string(), "error": e});
+            if let Some(b) = report::raw_bytes(&files[i]) {
+                f["path_bytes"] = b.into();
+            }
+            Some(f)
         })
         .collect();
 
@@ -1562,15 +1717,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let runtime = t_start.elapsed().as_secs_f64();
     let out = Output {
         tool: "img-fp",
-        config: serde_json::json!({
-            "work_size": args.work_size,
-            "features": FEATURES,
-            "candidates": args.candidates,
-            "min_aligned_points": args.min_aligned_points,
-            "min_frame_overlap": args.min_frame_overlap,
-            "min_pixel_correlation": args.min_pixel_correlation,
-            "stages": "anchor, propagate, corroborate",
-            }),
+        config: run_config(args),
         // A file a wildcard walk reached and that turned out not to be a
         // picture is a skip, like one the extension list turned away, and is
         // not counted by either.
@@ -1583,25 +1730,47 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     };
 
     let summary = format!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
-    // Under the window, stdout is the progress channel and the report goes
-    // there only if one was asked for by name.
-    let target = report::Target::of(args.output.as_deref(), args.format);
-    let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
-    if asked {
-        timed!(36, report::write(&target, &out, &files))?;
-        match &target.sink {
-            report::Sink::File(path) => say!("{summary} -> {}", path.display()),
-            report::Sink::Stdout => say!("{summary}"),
-        }
-    } else {
-        say!("{summary}");
-    }
-    if let Some(path) = gui {
-        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json };
-        report::write(&target, &out, &files)?;
+    match timed!(36, write_reports(args, gui, &out, &files))? {
+        Some(path) => say!("{summary} -> {}", path.display()),
+        None => say!("{summary}"),
     }
     prof::report();
     Ok(())
+}
+
+/// The settings a report records, which are the ones that decide its pairs.
+fn run_config(args: &Args) -> serde_json::Value {
+    serde_json::json!({
+        "work_size": args.work_size,
+        "features": FEATURES,
+        "candidates": args.candidates,
+        "min_aligned_points": args.min_aligned_points,
+        "min_frame_overlap": args.min_frame_overlap,
+        "min_pixel_correlation": args.min_pixel_correlation,
+        "stages": "anchor, propagate, corroborate",
+    })
+}
+
+/// Write the report where `-o` says, and the window's copy of it; the file
+/// the report went to, if it went to one.
+///
+/// Under the window, stdout is the progress channel and the report goes there
+/// only if one was asked for by name.
+fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf]) -> Result<Option<PathBuf>> {
+    let target = report::Target::of(args.output.as_deref(), args.format);
+    let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
+    let mut went = None;
+    if asked {
+        report::write(&target, out, files)?;
+        if let report::Sink::File(path) = &target.sink {
+            went = Some(path.clone());
+        }
+    }
+    if let Some(path) = gui {
+        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json };
+        report::write(&target, out, files)?;
+    }
+    Ok(went)
 }
 
 /// Keep the allocator's arenas few.
@@ -1656,6 +1825,12 @@ fn stdout_path() -> &'static Path {
 
 fn round3(v: f32) -> f32 {
     (v * 1000.0).round() / 1000.0
+}
+
+/// The first edge for each pair of files, in the order given.
+fn unique_pairs(edges: impl IntoIterator<Item = (usize, usize, Affine, bool, Verdict)>) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+    let mut seen = std::collections::HashSet::new();
+    edges.into_iter().filter(|e| seen.insert((e.0.min(e.1), e.0.max(e.1)))).collect()
 }
 
 /// Remove single matches that are the only thing joining two large clusters.
@@ -1764,7 +1939,11 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
 /// a crop of B and B is a crop of C, the A-C transform is known exactly and
 /// the only question is whether the pixels agree — which is cheap to answer
 /// and wrong to assume.
-fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n: usize, min_ov: f32) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+///
+/// Also returns the sizes of the components skipped for being larger than
+/// `PROPAGATE_MAX_COMPONENT`, so that the run can say so.
+#[allow(clippy::type_complexity)]
+fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n: usize, min_ov: f32) -> (Vec<(usize, usize, Affine, bool, Verdict)>, Vec<usize>) {
     let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); n];
     for (a, b, m, inv, v) in edges.iter() {
         adj[*a].push((*b, *m, *inv, v.n_in));
@@ -1785,16 +1964,17 @@ fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n:
     let known: std::collections::HashSet<(usize, usize)> =
         edges.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
 
+    let too_large: Vec<usize> = comps.values().map(|c| c.len()).filter(|&l| l > PROPAGATE_MAX_COMPONENT).collect();
     let comps: Vec<Vec<usize>> = comps
         .into_values()
-        .filter(|c| c.len() > 2 && c.len() <= 2000)
+        .filter(|c| c.len() > 2 && c.len() <= PROPAGATE_MAX_COMPONENT)
         .map(|mut c| {
             c.sort_unstable();
             c
         })
         .collect();
 
-    comps
+    let found = comps
         .par_iter()
         .flat_map(|comp| {
             // Pose of every member relative to the component's root.
@@ -1850,7 +2030,8 @@ fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n:
             }
             out
         })
-        .collect()
+        .collect();
+    (found, too_large)
 }
 
 #[cfg(test)]
@@ -1985,5 +2166,102 @@ mod tests {
         let mut got = vec![(3u32, 0.0f32), (1, 2.0), (2, 2.0)];
         super::rank_best(&mut got, 2);
         assert_eq!(got, vec![(1, 2.0), (2, 2.0)]);
+    }
+
+    /// The hash read a piece at a time is the hash of the whole: every length
+    /// around a piece boundary, a word boundary, and none at all.
+    #[test]
+    fn a_hash_read_in_pieces_is_the_hash_of_the_whole() {
+        fn whole(data: &[u8]) -> u128 {
+            let mut h: u128 = 0x6c62272e07bb0142_62b821756295c58d;
+            for chunk in data.chunks(8) {
+                let mut v = 0u64;
+                for (i, &b) in chunk.iter().enumerate() {
+                    v |= (b as u64) << (i * 8);
+                }
+                h ^= v as u128;
+                h = h.wrapping_mul(0x0000000001000000_000000000000013B);
+            }
+            h ^ data.len() as u128
+        }
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 131 % 251) as u8).collect();
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 100, 300] {
+            for piece in [8usize, 16, 24, 64, 1 << 20] {
+                assert_eq!(hash_reader(&data[..len], piece), Some(whole(&data[..len])), "len {len} piece {piece}");
+            }
+        }
+        // A reader that hands over a byte at a time still fills each piece.
+        struct Trickle<'a>(&'a [u8]);
+        impl std::io::Read for Trickle<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let Some((&b, rest)) = self.0.split_first() else { return Ok(0) };
+                if buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = b;
+                self.0 = rest;
+                Ok(1)
+            }
+        }
+        assert_eq!(hash_reader(Trickle(&data), 16), Some(whole(&data)));
+    }
+
+    /// A lone link between two clusters is a bridge however many times the
+    /// run found it. Two passes verifying the same pair used to be two links,
+    /// and the bridge test then kept a match it exists to drop.
+    #[test]
+    fn a_pair_found_twice_is_still_one_bridge() {
+        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let direct = Verdict { n_in: 40, ..Default::default() };
+        let mirrored = Verdict { n_in: 12, ..Default::default() };
+        // Two triangles {0,1,2} and {3,4,5}, joined only by 2-3: once from
+        // the direct pass and once more, the other way round, from the second
+        // look.
+        let mut edges: Vec<(usize, usize, Affine, bool, Verdict)> =
+            [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5), (2, 3)].iter().map(|&(a, b)| (a, b, id, false, direct.clone())).collect();
+        edges.push((3, 2, id, false, mirrored));
+        let unique = unique_pairs(edges);
+        assert_eq!(unique.len(), 7);
+        assert_eq!(unique[6].4.n_in, 40, "the first verdict for a pair is the one kept");
+        let kept = drop_weak_bridges(unique, 6);
+        assert!(!kept.iter().any(|e| (e.0, e.1) == (2, 3)), "the lone link is dropped");
+        assert_eq!(kept.len(), 6);
+    }
+
+    /// A component propagation cannot afford is named, not passed over in
+    /// silence; one it can is not.
+    #[test]
+    fn a_component_too_large_to_propagate_is_reported() {
+        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let star = |k: usize| (1..k).map(|b| (0, b, id, false, Verdict::default())).collect::<Vec<_>>();
+        let n = PROPAGATE_MAX_COMPONENT + 1;
+        let items: Vec<Item> = (0..n).map(|_| Item::default()).collect();
+        let (found, too_large) = propagate(&items, &star(n), n, 0.85);
+        assert!(found.is_empty());
+        assert_eq!(too_large, vec![n]);
+        let (_, too_large) = propagate(&items, &star(3), n, 0.85);
+        assert!(too_large.is_empty());
+    }
+
+    /// Values the thresholds are not measured on are refused by the parser,
+    /// not run and reported as a clean folder.
+    #[test]
+    fn thresholds_outside_their_range_are_refused() {
+        let ok = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).is_ok();
+        assert!(ok(&[]));
+        for good in [&["--min-frame-overlap", "0"][..], &["--min-frame-overlap", "1"], &["--min-pixel-correlation", "0.5"],
+            &["-k", "1"], &["--work-size", "0"], &["--work-size", "1"], &["--work-size", "4000"]] {
+            assert!(ok(good), "{good:?}");
+        }
+        for bad in [&["--min-frame-overlap", "7"][..], &["--min-frame-overlap", "NaN"], &["--min-pixel-correlation=-3"],
+            &["--min-pixel-correlation", "1.01"], &["-k", "0"]] {
+            assert!(!ok(bad), "{bad:?}");
+        }
+    }
+
+    /// A binary built for the machine it runs on passes its own check.
+    #[test]
+    fn this_machine_has_what_this_build_needs() {
+        assert!(check_cpu().is_ok());
     }
 }

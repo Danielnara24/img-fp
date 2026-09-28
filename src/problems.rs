@@ -67,7 +67,9 @@ impl Log {
         let Some(path) = path else { return Ok(Log(None)) };
         let mut f = std::fs::File::create(path)
             .with_context(|| format!("could not create the log file {}", path.display()))?;
-        let argv: Vec<String> = std::env::args().collect();
+        // `args_os`, not `args`: the latter panics on an argument that is not
+        // UTF-8, and a folder with such a name is an ordinary thing to scan.
+        let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
         let _ = writeln!(f, "# img-fp {}\n# {}", env!("CARGO_PKG_VERSION"), argv.join(" "));
         Ok(Log(Some(Mutex::new(f))))
     }

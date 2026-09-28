@@ -678,7 +678,12 @@ impl Setup {
         if self.scanning() {
             return;
         }
-        let settings = self.read();
+        let settings = self.read().with_absolute_paths();
+        // Shown where they were typed, so the path a file is written to is the
+        // path on screen.
+        self.report_path.set_text(&settings.report_path);
+        self.log_path.set_text(&settings.log_path);
+        self.cache_path.set_text(&settings.cache_path);
         if settings.folders.is_empty() {
             self.alert("Nothing to scan", "Add at least one folder to scan.");
             self.folders.add.grab_focus();

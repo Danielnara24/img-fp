@@ -20,7 +20,7 @@
 
 use crate::labels as l;
 use crate::scan::{Found, Group, Member};
-use crate::thumbs::{Shown, Thumbs};
+use crate::thumbs::{show_on, Latest, Shown, Thumbs};
 use crate::App;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -88,6 +88,12 @@ pub struct Results {
     picked: Cell<usize>,
     /// Set while code, not a person, is changing a check box.
     quiet: Cell<bool>,
+    /// Set while files are being moved to the Trash. Marking a card during
+    /// that used to turn Trash back on, and a second trash then ran beside
+    /// the first; New scan could replace the results the first was about to
+    /// edit.
+    trashing: Cell<bool>,
+    new_scan_button: gtk::Button,
     new_scan: RefCell<Option<Box<dyn Fn()>>>,
 }
 
@@ -239,6 +245,8 @@ impl Results {
             cards: RefCell::new(Vec::new()),
             picked: Cell::new(0),
             quiet: Cell::new(false),
+            trashing: Cell::new(false),
+            new_scan_button: new_scan.clone(),
             new_scan: RefCell::new(None),
         });
 
@@ -689,6 +697,11 @@ impl Results {
     }
 
     fn update_status(&self) {
+        // The trash in progress owns the status line and the button, and says
+        // how it went when it is done.
+        if self.trashing.get() {
+            return;
+        }
         let s = self.state.borrow();
         let n = s.marked.len();
         let bytes: u64 = s.marked.iter().filter_map(|p| s.sizes.get(p)).sum();
@@ -754,6 +767,7 @@ impl Results {
 
         let at = Rc::new(Cell::new(start));
         let quiet = Rc::new(Cell::new(false));
+        let latest = Latest::default();
         let show = {
             let (me, picture, info, mark, win, at, quiet) = (Rc::downgrade(self), picture.clone(), info.clone(), mark.clone(), win.clone(), at.clone(), quiet.clone());
             Rc::new(move || {
@@ -779,7 +793,17 @@ impl Results {
                 quiet.set(false);
                 picture.set_paintable(None::<&gdk::Paintable>);
                 let scale = win.scale_factor().max(1) as u32;
-                me.thumbs.request(&path, LARGE * scale, Shown::Picture(picture.clone()), true);
+                // Every picture this view asks for is for the same widget, and
+                // the answers come back in whatever order they are decoded; only
+                // the one asked for last is shown. See `Latest`.
+                let current = latest.next();
+                let pic = picture.downgrade();
+                let shown = Shown::Callback(Box::new(move |r| {
+                    if let (true, Some(p)) = (current(), pic.upgrade()) {
+                        show_on(&p, r);
+                    }
+                }));
+                me.thumbs.request(&path, LARGE * scale, shown, true);
             })
         };
         let go = {
@@ -857,6 +881,9 @@ impl Results {
     // ------------------------------------------------------------ the Trash
 
     fn confirm_trash(self: &Rc<Self>) {
+        if self.trashing.get() {
+            return;
+        }
         let (paths, bytes, whole) = {
             let s = self.state.borrow();
             let mut paths: Vec<PathBuf> = s.marked.iter().cloned().collect();
@@ -899,7 +926,11 @@ impl Results {
     }
 
     async fn trash(self: &Rc<Self>, paths: Vec<PathBuf>) {
+        if self.trashing.replace(true) {
+            return;
+        }
         self.trash.set_sensitive(false);
+        self.new_scan_button.set_sensitive(false);
         let n = paths.len();
         let mut gone: HashSet<PathBuf> = HashSet::new();
         let mut failed: Vec<String> = Vec::new();
@@ -916,6 +947,8 @@ impl Results {
                 Err(e) => failed.push(format!("{}: {}", p.display(), e.message())),
             }
         }
+        self.trashing.set(false);
+        self.new_scan_button.set_sensitive(true);
         for p in &gone {
             self.thumbs.forget(p);
             self.app.log_line(&format!("moved to the Trash: {}", p.display()));

@@ -244,9 +244,38 @@ fn reserve_inner(bytes: u64) -> Permit {
     Permit(want)
 }
 
+/// How much of a file's start decides whether it is a picture at all. `sniff`
+/// reads twelve bytes and `image::guess_format` no more than that.
+const HEAD: usize = 64;
+
+/// A file's bytes, if its first few say it is a picture; `NOT_AN_IMAGE`
+/// without reading the rest if they say it is not.
+///
+/// Whole files used to be read first and asked second. Under `-x '*'` a walk
+/// hands this every file in a folder, and a 1.5 GB video took 1.5 GB of memory
+/// to be found not to be a picture — eight at a time, and before the decode
+/// budget, which is claimed once a decoder knows the picture's size, could
+/// say anything about it. The answer is the same either way: both tests look
+/// only at the head of the file.
+fn read_if_image(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let ctx = || format!("read {}", path.display());
+    let mut f = std::fs::File::open(path).with_context(ctx)?;
+    let mut bytes = Vec::with_capacity(HEAD);
+    (&mut f).take(HEAD as u64).read_to_end(&mut bytes).with_context(ctx)?;
+    if sniff(&bytes) == Kind::Unknown && image::guess_format(&bytes).is_err() {
+        bail!(NOT_AN_IMAGE);
+    }
+    if let Ok(md) = f.metadata() {
+        bytes.reserve_exact((md.len() as usize).saturating_sub(bytes.len()));
+    }
+    f.read_to_end(&mut bytes).with_context(ctx)?;
+    Ok(bytes)
+}
+
 /// Decode a file to a working-resolution gray image.
 pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
-    let bytes = timed!(0, std::fs::read(path).with_context(|| format!("read {}", path.display()))?);
+    let bytes = timed!(0, read_if_image(path)?);
     let kind = sniff(&bytes);
     let (w, h, gray) = match kind {
         // The two formats that are almost all of a real corpus get their own
@@ -1363,5 +1392,32 @@ mod bench {
             std::hint::black_box(resize_area(&g, 640, 480));
         });
         println!("resize_area 1280x960 -> 640x480: {t:8.3} ms");
+    }
+
+    /// A file whose head is no picture is refused from its head: the rest is
+    /// never read. A picture's head is enough to be read whole.
+    #[test]
+    fn a_file_that_is_no_picture_is_refused_from_its_head() {
+        let dir = std::env::temp_dir().join(format!("img-fp-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Sparse: a gigabyte on paper and nothing on disk. Read whole, the
+        // test would allocate all of it.
+        let big = dir.join("video.bin");
+        std::fs::File::create(&big).unwrap().set_len(1 << 30).unwrap();
+        let e = decode(&big, 384).err().unwrap();
+        assert_eq!(e.to_string(), NOT_AN_IMAGE);
+        // Short files, and a picture's head followed by a body.
+        let tiny = dir.join("tiny");
+        std::fs::write(&tiny, b"P").unwrap();
+        assert_eq!(decode(&tiny, 384).err().unwrap().to_string(), NOT_AN_IMAGE);
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(40, 30, |x, y| image::Luma([(x * 5 + y * 3) as u8])))
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let pic = dir.join("pic");
+        std::fs::write(&pic, &png).unwrap();
+        assert_eq!(read_if_image(&pic).unwrap(), png);
+        assert!(decode(&pic, 384).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

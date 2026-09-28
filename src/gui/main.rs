@@ -36,6 +36,11 @@ use std::rc::Rc;
 const APP_ID: &str = "io.github.danielnara24.img-fp";
 
 fn main() -> glib::ExitCode {
+    // Before anything else, for the reason `check_cpu` gives.
+    if let Err(e) = img_fp::check_cpu() {
+        eprintln!("Error: {e:#}");
+        return glib::ExitCode::FAILURE;
+    }
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == scan::WORKER_FLAG) {
         return worker(args.split_off(2));

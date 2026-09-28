@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::decode;
@@ -80,10 +81,30 @@ pub fn check_writable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A path's bytes, when they are not UTF-8 and so cannot be a JSON string.
+///
+/// Every path in the JSON is written as text, and a name that is not UTF-8
+/// comes out of that with `U+FFFD` where its odd bytes were: readable, and the
+/// name of no file on disk. Anything that acts on the report — a script
+/// deleting the matches, or the window moving one to the Trash — needs the
+/// name itself, so such a path also carries its bytes beside it, as an array
+/// of numbers. A UTF-8 path, which is nearly every path, carries nothing.
+pub fn raw_bytes(p: &Path) -> Option<Vec<u8>> {
+    match p.to_str() {
+        Some(_) => None,
+        None => Some(p.as_os_str().as_bytes().to_vec()),
+    }
+}
+
 #[derive(Serialize)]
 pub struct OutPair {
     pub a: String,
     pub b: String,
+    /// `a` and `b` as bytes, for a name that is not UTF-8; see `raw_bytes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub a_bytes: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_bytes: Option<Vec<u8>>,
     pub aligned_points: u32,
     pub frame_overlap: f32,
     pub pixel_correlation: f32,
@@ -145,9 +166,9 @@ pub fn write(target: &Target, out: &Output, files: &[PathBuf]) -> Result<()> {
     let facts = facts(out, files);
     let body = |w: &mut dyn Write| -> std::io::Result<()> {
         match target.format {
-            Format::Json => write_json(w, out, &facts),
-            Format::Txt => write_txt(w, out, &facts),
-            Format::Csv => write_csv(w, out, &facts),
+            Format::Json => write_json(w, out, files, &facts),
+            Format::Txt => write_txt(w, out, files, &facts),
+            Format::Csv => write_csv(w, out, files, &facts),
         }
     };
     match &target.sink {
@@ -176,6 +197,8 @@ pub fn write(target: &Target, out: &Output, files: &[PathBuf]) -> Result<()> {
 struct JsonGroup<'a> {
     group: String,
     representative: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    representative_bytes: Option<Vec<u8>>,
     files: Vec<Row<'a>>,
 }
 
@@ -185,7 +208,7 @@ struct JsonGroup<'a> {
 /// was a megabyte-long line on a found corpus and fifty on the benchmark one,
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
-fn write_json(w: &mut dyn Write, out: &Output, facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
+fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
     fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
         write!(w, "  \"{key}\": [")?;
         for (i, x) in xs.iter().enumerate() {
@@ -202,7 +225,8 @@ fn write_json(w: &mut dyn Write, out: &Output, facts: &HashMap<usize, Facts>) ->
         .map(|(gi, g)| JsonGroup {
             group: group_name(gi),
             representative: &g.representative,
-            files: rows(g, &pairs, facts).collect(),
+            representative_bytes: raw_bytes(&files[g.rep]),
+            files: rows(g, files, &pairs, facts).collect(),
         })
         .collect();
     writeln!(w, "{{")?;
@@ -296,6 +320,12 @@ fn group_name(gi: usize) -> String {
 #[derive(Serialize)]
 struct Row<'a> {
     path: &'a str,
+    /// `path` as bytes, for a name that is not UTF-8; see `raw_bytes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_bytes: Option<Vec<u8>>,
+    /// The path itself, which the text and the CSV write as it is.
+    #[serde(skip)]
+    raw: &'a Path,
     role: &'static str,
     width: Option<u32>,
     height: Option<u32>,
@@ -314,6 +344,7 @@ struct Row<'a> {
 /// group's representative.
 fn rows<'a>(
     g: &'a OutGroup,
+    files: &'a [PathBuf],
     pairs: &'a HashMap<(usize, usize), &'a OutPair>,
     facts: &'a HashMap<usize, Facts>,
 ) -> impl Iterator<Item = Row<'a>> + 'a {
@@ -324,6 +355,8 @@ fn rows<'a>(
         let p = if i == g.rep { None } else { pairs.get(&(i.min(g.rep), i.max(g.rep))).copied() };
         Row {
             path: &g.files[k],
+            path_bytes: raw_bytes(&files[i]),
+            raw: &files[i],
             role: if i == g.rep { "representative" } else { "match" },
             width: f.dims.map(|d| d.0),
             height: f.dims.map(|d| d.1),
@@ -346,18 +379,22 @@ const ROLE_COLUMN: usize = 6;
 /// report has: the role leads at a fixed width so it forms a column, and the
 /// path trails because it is the one field with no bounded length. Every
 /// figure carries its name, since there is no header to say which is which.
-fn write_txt(w: &mut dyn Write, out: &Output, facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
+fn write_txt(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
     let pairs = pair_index(out);
     for (gi, g) in out.groups.iter().enumerate() {
         writeln!(w, "{}: {} files", group_name(gi), g.members.len())?;
-        for r in rows(g, &pairs, facts) {
+        for r in rows(g, files, &pairs, facts) {
             let role = if r.role == "representative" { "REP," } else { "MATCH," };
             let dims = match (r.width, r.height) {
                 (Some(w), Some(h)) => format!("{w}x{h}"),
                 _ => "-".into(),
             };
             let size = r.size.as_deref().unwrap_or("-");
-            writeln!(w, "\t{role:<ROLE_COLUMN$} {dims}, {size}, {}{}", evidence(&r), r.path)?;
+            // The path as its own bytes, as `ls` would print it: a name that
+            // is not UTF-8 is still the name of the file.
+            write!(w, "\t{role:<ROLE_COLUMN$} {dims}, {size}, {}", evidence(&r))?;
+            w.write_all(r.raw.as_os_str().as_bytes())?;
+            writeln!(w)?;
         }
         writeln!(w)?;
     }
@@ -405,31 +442,31 @@ const CSV_HEADER: [&str; 13] = [
 
 /// One row per file per group, `;`-separated as `vid-fp`'s is, an unmeasured
 /// figure an empty cell.
-fn write_csv(w: &mut dyn Write, out: &Output, facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
+fn write_csv(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
     fn cell<T: ToString>(x: Option<T>) -> String {
         x.map(|x| x.to_string()).unwrap_or_default()
     }
     let pairs = pair_index(out);
-    csv_row(w, &CSV_HEADER)?;
+    csv_row(w, &CSV_HEADER.map(str::as_bytes))?;
     for (gi, g) in out.groups.iter().enumerate() {
         let group = group_name(gi);
-        for r in rows(g, &pairs, facts) {
+        for r in rows(g, files, &pairs, facts) {
             csv_row(
                 w,
                 &[
-                    &group,
-                    r.role,
-                    r.path,
-                    &cell(r.width),
-                    &cell(r.height),
-                    r.size.as_deref().unwrap_or_default(),
-                    &cell(r.size_bytes),
-                    r.relation.unwrap_or_default(),
-                    &cell(r.aligned_points),
-                    &cell(r.frame_overlap),
-                    &cell(r.pixel_correlation),
-                    &cell(r.mirrored),
-                    &cell(r.inverted),
+                    group.as_bytes(),
+                    r.role.as_bytes(),
+                    r.raw.as_os_str().as_bytes(),
+                    cell(r.width).as_bytes(),
+                    cell(r.height).as_bytes(),
+                    r.size.as_deref().unwrap_or_default().as_bytes(),
+                    cell(r.size_bytes).as_bytes(),
+                    r.relation.unwrap_or_default().as_bytes(),
+                    cell(r.aligned_points).as_bytes(),
+                    cell(r.frame_overlap).as_bytes(),
+                    cell(r.pixel_correlation).as_bytes(),
+                    cell(r.mirrored).as_bytes(),
+                    cell(r.inverted).as_bytes(),
                 ],
             )?;
         }
@@ -439,16 +476,23 @@ fn write_csv(w: &mut dyn Write, out: &Output, facts: &HashMap<usize, Facts>) -> 
 
 /// A field is quoted when it holds the separator, a quote or a line break,
 /// with its quotes doubled — RFC 4180's rule, which is what every spreadsheet
-/// reads. Only a path can need it.
-fn csv_row(w: &mut dyn Write, fields: &[&str]) -> std::io::Result<()> {
+/// reads. Only a path can need it, and a path is written as its own bytes.
+fn csv_row(w: &mut dyn Write, fields: &[&[u8]]) -> std::io::Result<()> {
     for (k, f) in fields.iter().enumerate() {
         if k > 0 {
             w.write_all(b";")?;
         }
-        if f.contains([';', '"', '\n', '\r']) {
-            write!(w, "\"{}\"", f.replace('"', "\"\""))?;
+        if f.iter().any(|b| matches!(b, b';' | b'"' | b'\n' | b'\r')) {
+            w.write_all(b"\"")?;
+            for piece in f.split_inclusive(|&b| b == b'"') {
+                w.write_all(piece)?;
+                if piece.ends_with(b"\"") {
+                    w.write_all(b"\"")?;
+                }
+            }
+            w.write_all(b"\"")?;
         } else {
-            w.write_all(f.as_bytes())?;
+            w.write_all(f)?;
         }
     }
     w.write_all(b"\n")
@@ -462,6 +506,8 @@ mod tests {
         OutPair {
             a: format!("/{ia}.jpg"),
             b: format!("/{ib}.jpg"),
+            a_bytes: None,
+            b_bytes: None,
             aligned_points: 42,
             frame_overlap: 0.987,
             pixel_correlation: 0.912,
@@ -474,6 +520,10 @@ mod tests {
             ia,
             ib,
         }
+    }
+
+    fn files() -> Vec<PathBuf> {
+        ["/0.jpg", "/1.jpg", "/2;x.jpg"].map(PathBuf::from).to_vec()
     }
 
     fn output() -> Output {
@@ -518,7 +568,7 @@ mod tests {
         let facts: HashMap<usize, Facts> =
             [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000) })].into_iter().collect();
         let mut buf = Vec::new();
-        write_txt(&mut buf, &out, &facts).unwrap();
+        write_txt(&mut buf, &out, &files(), &facts).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "group_1: 3 files\n\
@@ -532,7 +582,7 @@ mod tests {
     fn a_csv_row_quotes_only_what_needs_it() {
         let out = output();
         let mut buf = Vec::new();
-        write_csv(&mut buf, &out, &HashMap::new()).unwrap();
+        write_csv(&mut buf, &out, &files(), &HashMap::new()).unwrap();
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], CSV_HEADER.join(";"));
@@ -547,7 +597,7 @@ mod tests {
         let mut buf = Vec::new();
         let facts: HashMap<usize, Facts> =
             [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000) })].into_iter().collect();
-        write_json(&mut buf, &out, &facts).unwrap();
+        write_json(&mut buf, &out, &files(), &facts).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         let g = &v["groups"][0];
         assert_eq!(g["group"], "group_1");
@@ -576,18 +626,60 @@ mod tests {
         out.pairs[1].pixel_correlation = 0.54;
         let facts = HashMap::new();
         let mut txt = Vec::new();
-        write_txt(&mut txt, &out, &facts).unwrap();
+        write_txt(&mut txt, &out, &files(), &facts).unwrap();
         assert!(String::from_utf8(txt)
             .unwrap()
             .contains("\tMATCH, -, -, corroborated, 9 points, overlap 0.99, correlation 0.54, mirrored, /2;x.jpg\n"));
         let mut csv = Vec::new();
-        write_csv(&mut csv, &out, &facts).unwrap();
+        write_csv(&mut csv, &out, &files(), &facts).unwrap();
         assert!(String::from_utf8(csv).unwrap().contains(";corroborated;9;0.987;0.54;true;false"));
         let mut json = Vec::new();
-        write_json(&mut json, &out, &facts).unwrap();
+        write_json(&mut json, &out, &files(), &facts).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(v["groups"][0]["files"][2]["relation"], "corroborated");
         assert_eq!(v["pairs"][1]["corroborated"], true);
         assert!(v["pairs"][0].get("corroborated").is_none());
+    }
+
+    /// A name that is not UTF-8 is written as itself by the text and the CSV,
+    /// and carried as bytes beside its readable form by the JSON, so that
+    /// whatever acts on a report acts on the file and not on a name no file
+    /// has.
+    #[test]
+    fn a_name_that_is_not_utf8_reaches_every_format_intact() {
+        use std::os::unix::ffi::OsStringExt;
+        let odd = b"/2;\xffx.jpg".to_vec();
+        let mut files = files();
+        files[2] = PathBuf::from(std::ffi::OsString::from_vec(odd.clone()));
+        let mut out = output();
+        out.groups[0].files[2] = files[2].display().to_string();
+        out.pairs[1].b = files[2].display().to_string();
+        out.pairs[1].b_bytes = raw_bytes(&files[2]);
+        let facts = HashMap::new();
+
+        let mut txt = Vec::new();
+        write_txt(&mut txt, &out, &files, &facts).unwrap();
+        assert!(txt.windows(odd.len()).any(|w| w == odd), "the text names the file itself");
+
+        let mut csv = Vec::new();
+        write_csv(&mut csv, &out, &files, &facts).unwrap();
+        let quoted = [b"\"".as_slice(), &odd, b"\""].concat();
+        assert!(csv.windows(quoted.len()).any(|w| w == quoted), "and so does the CSV, quoted for its ';'");
+
+        let mut json = Vec::new();
+        write_json(&mut json, &out, &files, &facts).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let bytes = |x: &serde_json::Value| x.as_array().unwrap().iter().map(|b| b.as_u64().unwrap() as u8).collect::<Vec<u8>>();
+        assert_eq!(bytes(&v["groups"][0]["files"][2]["path_bytes"]), odd);
+        assert_eq!(bytes(&v["pairs"][1]["b_bytes"]), odd);
+        assert!(v["groups"][0]["files"][0].get("path_bytes").is_none(), "a UTF-8 path carries nothing extra");
+        assert!(v["pairs"][1].get("a_bytes").is_none());
+    }
+
+    #[test]
+    fn a_quote_in_a_csv_field_is_doubled() {
+        let mut buf = Vec::new();
+        csv_row(&mut buf, &[b"a\"b;c", b"plain"]).unwrap();
+        assert_eq!(buf, b"\"a\"\"b;c\";plain\n");
     }
 }

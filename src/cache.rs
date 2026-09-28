@@ -68,6 +68,8 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
+use std::ffi::OsString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,7 +110,7 @@ pub struct Record {
 pub type Entry = (Key, Option<Record>, Span);
 
 /// Which paths this run walks, asked of every record as it is read.
-pub type Walked<'a> = &'a (dyn Fn(&str) -> bool + Sync);
+pub type Walked<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
 
 #[derive(Clone, Copy)]
 pub struct Key {
@@ -351,10 +353,16 @@ impl<W: Write> Buf<W> {
 }
 
 /// One whole record, as the file holds it.
-fn record(path: &str, k: Key, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
+///
+/// The path is written as its own bytes, not as text. A name that is not
+/// UTF-8 is still a name, and two of them that read the same once made
+/// printable — `x\xfe.jpg` and `x\xff.jpg` — are two files: keyed on the
+/// printable form, one was handed the other's analysis.
+fn record(path: &Path, k: Key, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     let blob = pack(f, t)?;
+    let path = path.as_os_str().as_bytes();
     let mut b = Buf(Vec::with_capacity(path.len() + 64 + blob.len()));
-    b.bytes(path.as_bytes())?;
+    b.bytes(path)?;
     b.u64(k.len)?;
     b.i64(k.mtime)?;
     b.u32(f.w)?;
@@ -545,7 +553,7 @@ pub struct Store {
 /// A file that is stale or damaged is replaced by an empty one straight away,
 /// rather than at the end of the run, since this run's records go into
 /// whatever file it holds from here on.
-pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<String, Entry>, Store) {
+pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<PathBuf, Entry>, Store) {
     let mut out = HashMap::new();
     let mut store = Store {
         path: path.to_path_buf(),
@@ -598,7 +606,7 @@ fn read_file(
     path: &Path,
     want: Settings,
     walked: Walked,
-    out: &mut HashMap<String, Entry>,
+    out: &mut HashMap<PathBuf, Entry>,
     problems: &mut Problems,
 ) -> Option<Tail> {
     match read_stream(std::io::BufReader::with_capacity(1 << 20, f), want, walked, out) {
@@ -619,12 +627,12 @@ impl Store {
     /// Put one analysis into the file, and say where it went. Called by the
     /// workers as they finish; the packing runs outside the lock, and only
     /// the write is inside it.
-    pub fn append(&self, path: &str, key: Key, f: &Features, t: &Thumb) -> Option<Span> {
+    pub fn append(&self, path: impl AsRef<Path>, key: Key, f: &Features, t: &Thumb) -> Option<Span> {
         let file = self.file.as_ref()?;
         if self.broken.load(Ordering::Relaxed) {
             return None;
         }
-        let wrote = record(path, key, f, t).and_then(|rec| {
+        let wrote = record(path.as_ref(), key, f, t).and_then(|rec| {
             let _held = lock(&WRITING);
             let mut w = file;
             w.write_all(&rec)?;
@@ -669,9 +677,11 @@ impl Store {
     /// Every entry is already in the file, so this is a copy: nothing is
     /// unpacked or deflated again, and an interrupt part-way through leaves
     /// the file it was copying from exactly as it was.
-    pub fn compact(&mut self, settings: Settings, entries: &mut [(&str, Span)]) -> Result<()> {
+    pub fn compact(&mut self, settings: Settings, entries: &mut [(&Path, Span)]) -> Result<()> {
         let Some(src) = &self.file else { return Ok(()) };
-        entries.sort_unstable_by_key(|e| e.0);
+        // By the path's bytes, which is the order the text sort gave before
+        // paths were kept as bytes.
+        entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()));
         let new = replace_with(&self.path, |f| {
             let mut b = Buf(std::io::BufWriter::with_capacity(1 << 20, f));
             b.header(settings)?;
@@ -693,7 +703,7 @@ impl Store {
 /// One record's fixed-size half, which is what the reader needs before it can
 /// make sense of the packed half.
 struct Head {
-    path: String,
+    path: PathBuf,
     key: Key,
     w: u32,
     h: u32,
@@ -775,7 +785,7 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
         bail!("record claims a {len}-byte path");
     }
     let head = Head {
-        path: String::from_utf8_lossy(&r.take(len)?).into_owned(),
+        path: PathBuf::from(OsString::from_vec(r.take(len)?)),
         key: Key { len: r.u64()?, mtime: r.i64()? },
         w: r.u32()?,
         h: r.u32()?,
@@ -789,7 +799,7 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     Ok(Some((head, blob)))
 }
 
-fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<String, Entry>) -> Result<Tail, Reject> {
+fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<PathBuf, Entry>) -> Result<Tail, Reject> {
     let mut r = Rd { r, pos: 0, ended: false };
     let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
     if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
@@ -837,9 +847,9 @@ fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<
 fn unpack_batch(
     batch: &mut Vec<(Head, Vec<u8>, Span)>,
     walked: Walked,
-    out: &mut HashMap<String, Entry>,
+    out: &mut HashMap<PathBuf, Entry>,
 ) -> Result<(), Reject> {
-    let done: Vec<Result<(String, Entry)>> = batch
+    let done: Vec<Result<(PathBuf, Entry)>> = batch
         .par_iter()
         .map(|(h, blob, span)| {
             if !walked(&h.path) {
@@ -888,11 +898,11 @@ fn unpack_batch(
 /// dropped by mistake — an unmounted drive, say — costs a re-analysis rather
 /// than an afternoon, and that is a cheap enough mistake to make
 /// automatically.
-pub fn carry_over(cached: &HashMap<String, Entry>) -> Vec<(&str, Span)> {
+pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
     cached
         .iter()
-        .filter(|(path, _)| Path::new(path.as_str()).exists())
-        .map(|(path, e)| (path.as_str(), e.2))
+        .filter(|(path, _)| path.exists())
+        .map(|(path, e)| (path.as_path(), e.2))
         .collect()
 }
 
@@ -1010,16 +1020,16 @@ mod tests {
             Span { at: 0, len: 0 },
         );
         let mut cached = HashMap::new();
-        cached.insert(here.display().to_string(), record());
-        cached.insert(gone.display().to_string(), record());
-        cached.insert("scanned-this-run.jpg".to_string(), record());
+        cached.insert(here.clone(), record());
+        cached.insert(gone.clone(), record());
+        cached.insert(PathBuf::from("scanned-this-run.jpg"), record());
 
         // The walked file's record is gone from the map before this is
         // called, so what is left is the untouched set.
-        cached.remove("scanned-this-run.jpg");
+        cached.remove(Path::new("scanned-this-run.jpg"));
         let kept = carry_over(&cached);
         assert_eq!(kept.len(), 1, "only the untouched file that still exists");
-        assert_eq!(kept[0].0, here.display().to_string());
+        assert_eq!(kept[0].0, here);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1037,7 +1047,7 @@ mod tests {
         (Features { w: 64, h: 48, kps, desc }, Thumb::new(8, 6, 0.125, vec![seed; 48]))
     }
 
-    fn reopen(path: &Path) -> (HashMap<String, Entry>, Store, bool) {
+    fn reopen(path: &Path) -> (HashMap<PathBuf, Entry>, Store, bool) {
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
         let (got, store) = open(path, SETTINGS, &|_| true, &mut problems);
@@ -1061,12 +1071,12 @@ mod tests {
 
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = open(&path, SETTINGS, &|p| p == "a.jpg", &mut problems);
+        let (got, store) = open(&path, SETTINGS, &|p| p == Path::new("a.jpg"), &mut problems);
         assert!(!problems.any() && store.records() == 3 && got.len() == 2);
-        assert_eq!(got["a.jpg"].1.as_ref().unwrap().feats.desc, f1.desc);
-        let b = &got["b.jpg"];
+        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f1.desc);
+        let b = &got[Path::new("b.jpg")];
         assert!(b.1.is_none());
-        assert_eq!((b.0.len, b.2.at, b.2.len), (3, all["b.jpg"].2.at, all["b.jpg"].2.len));
+        assert_eq!((b.0.len, b.2.at, b.2.len), (3, all[Path::new("b.jpg")].2.at, all[Path::new("b.jpg")].2.len));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1090,7 +1100,7 @@ mod tests {
         assert!(!bad);
         assert_eq!(store.records(), 3, "the superseded record is still in the file");
         assert_eq!(got.len(), 2);
-        let a = &got["a.jpg"];
+        let a = &got[Path::new("a.jpg")];
         assert_eq!((a.0.len, a.1.as_ref().unwrap().feats.kps.len()), (3, 5));
         assert_eq!(a.1.as_ref().unwrap().feats.desc, f2.desc);
         std::fs::remove_dir_all(&dir).ok();
@@ -1114,7 +1124,7 @@ mod tests {
             drop(file);
             let (got, store, bad) = reopen(&path);
             assert!(!bad, "a torn tail is not a damaged cache");
-            assert_eq!(got.keys().collect::<Vec<_>>(), ["a.jpg"]);
+            assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
             store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
             drop(store);
@@ -1137,7 +1147,7 @@ mod tests {
             .map(|p| store.append(p, Key { len: 7, mtime: 7 }, &f, &t).unwrap())
             .collect();
         let mut store = store;
-        let mut keep = vec![("c.jpg", spans[0]), ("a.jpg", spans[3])];
+        let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
         store.compact(SETTINGS, &mut keep).unwrap();
         drop(store);
         let (got, store, bad) = reopen(&path);
@@ -1145,8 +1155,8 @@ mod tests {
         assert_eq!(store.records(), 2);
         let mut names: Vec<_> = got.keys().cloned().collect();
         names.sort();
-        assert_eq!(names, ["a.jpg", "c.jpg"]);
-        assert_eq!(got["a.jpg"].1.as_ref().unwrap().feats.desc, f.desc);
+        assert_eq!(names, [PathBuf::from("a.jpg"), PathBuf::from("c.jpg")]);
+        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f.desc);
         drop(store);
 
         let log = crate::problems::Log::default();
@@ -1155,6 +1165,31 @@ mod tests {
         let (got, store) = open(&path, other, &|_| true, &mut problems);
         assert!(got.is_empty() && !problems.any() && store.records() == 0);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), HEADER_LEN);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two names that are not UTF-8 and read the same once made printable
+    /// are two files, and each keeps its own analysis. Keyed on the printable
+    /// form, the second record superseded the first, and the first file was
+    /// then handed the second's analysis on the next run.
+    #[test]
+    fn names_that_are_not_utf8_keep_their_own_records() {
+        let dir = scratch("bytes");
+        let path = dir.join(FILE_NAME);
+        let fe = PathBuf::from(OsString::from_vec(b"x\xfe.jpg".to_vec()));
+        let ff = PathBuf::from(OsString::from_vec(b"x\xff.jpg".to_vec()));
+        assert_eq!(fe.display().to_string(), ff.display().to_string());
+        let (_, store, _) = reopen(&path);
+        let (f1, t1) = analysis(3, 1);
+        let (f2, t2) = analysis(5, 2);
+        store.append(&fe, Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
+        store.append(&ff, Key { len: 1, mtime: 1 }, &f2, &t2).unwrap();
+        drop(store);
+        let (got, _, bad) = reopen(&path);
+        assert!(!bad);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[&fe].1.as_ref().unwrap().feats.desc, f1.desc);
+        assert_eq!(got[&ff].1.as_ref().unwrap().feats.desc, f2.desc);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

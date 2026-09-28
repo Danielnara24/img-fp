@@ -817,7 +817,7 @@ cost of going over the edge is not a corpus-independent quantity, so the
 distance to it should not be shaved to the minimum that happens to work here.
 
 **How all of that was measured, because it is reusable.** `--dump` sets the
-pixel-check gate to `(3, 0.2)`, so `blk` is a real measurement for every
+pixel-check gate to `(3, 0.2)` (or looser, if the run's own bars are), so `blk` is a real measurement for every
 verdict with three inliers or more and *any* bar at or above 3 can be replayed
 offline against one run — no rebuild, no re-run per value. Replaying the anchor
 tier this way reproduced the run's own count to **186,616 against 186,614**,
@@ -2456,6 +2456,58 @@ absorb against 640's three**. So the direction the default moved is the safe
 direction, and the sizes to re-check after any change to
 `VocabParams::for_corpus` are the large ones.
 
+
+**Below the table, swept to one pixel, and why there is no floor.** Every size
+from 1 to 384 on both corpora, 0.18.2's binary, cold, one session; IMGS scored,
+the found corpus counted (it has no ground truth, so its column is pairs, not
+accuracy):
+
+| `--work-size` | IMGS F1 | recall | cross-family | merges | perfect | found: matched pairs |
+|---|---|---|---|---|---|---|
+| 1, 2, 4 | 0.0020 | 0.10% | 0 | 0 | 1 | 0 |
+| 8 | 0.0086 | 0.43% | 0 | 0 | 1 | 4 |
+| 16 | 0.3149 | 18.69% | 2 | 1 | 1 | 118 |
+| 32 | 0.7289 | 57.39% | 43 | 3 | 1 | 1,513 |
+| 48 | 0.8318 | 71.74% | **1,689** | 5 | 34 | 2,950 |
+| 64 | 0.8997 | 81.93% | 54 | 2 | 40 | 4,116 |
+| 96 | 0.9114 | 83.90% | 0 | 0 | 45 | 3,573 |
+| 128 | 0.9431 | 89.49% | 1 | 1 | 39 | 3,884 |
+| 192 | 0.9522 | 91.19% | 1 | 1 | 49 | 3,748 |
+| **256** | **0.9721** | **94.96%** | **0** | **0** | **58** | 3,771 |
+| **384 (default)** | **0.9518** | **91.12%** | **0** | **0** | **46** | 3,771 |
+
+Every row also holds the byte-identical pairs, which no work size touches:
+233 on IMGS and 7 on the found corpus, and those are *all* that sizes 1 to 4
+find — `sift::extract` returns no features for an image under 8 pixels a side.
+So a remembered "0.18.2 found pairs at `--work-size 1`" is true and is the
+exact pass. The found corpus is identical from 224 up, because its files are
+224 pixels and nothing larger shrinks them.
+
+Three things to take from it. **There is no floor to set.** A run under 8
+pixels is never silent — it exits 2 and lists every file as featureless — and
+above that no size is a boundary: 96 merges nothing where 128 and 192 each
+merge one pair of families, and everything from 16 to 64 merges several. A
+floor of 128 shipped briefly on a justification (the pixel check's 128-pixel
+thumbnail) that `Thumb::build` does not bear out, and was taken back out; the
+comment above the argument parsers in `lib.rs` says so.
+
+**256 beats the shipped 384 on this corpus, by 2.0 points of F1, 3.8 of recall
+and twelve perfect transformations, with nothing cross-family.** It is not
+that less resolution is better. `extract` doubles an image while twice its
+long side still fits in `upsample_below` (512), so 256 is analysed at 512 and
+384 is not enlarged at all: the 0.9721 here is the 0.9724 the table above has
+for 512. (128 is enlarged x4 to 512 and 192 x2 to 384, but from a source with
+less detail in it, and neither lands on its analysed size's row.) What it costs
+is the 512 row's scale space: 104 s against 83 s of cold wall on IMGS in this
+sweep, single runs, and level on the found corpus, whose output is identical
+at the two sizes. Worth a like-for-like cost comparison before anyone moves the
+default — and note the interaction runs both ways: any change to
+`upsample_below` moves which work sizes get enlarged.
+
+**Small sizes are unsafe, not merely weak.** 48 makes 1,689 cross-family pairs
+across five merges, which is the family-merge failure the occupancy note in
+*How img-fp works* describes, reached from the other end: a descriptor from a
+blurred enlargement matches along whatever two pictures share.
 
 **What moving the default did to the other four, which is nothing.** Every
 result-changing option was re-swept at 384, on one extraction cached once, so
