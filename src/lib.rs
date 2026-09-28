@@ -131,8 +131,8 @@ struct Args {
 
     /// Matching points two images must share before they count as duplicates.
     ///
-    /// At least 3. Higher is stricter.
-    #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_aligned_points)]
+    /// Higher is stricter. Below 3 behaves as 3.
+    #[arg(long, value_name = "N", default_value_t = 10)]
     min_aligned_points: u32,
 
     /// How much of one image must lie inside the other, from 0 to 1.
@@ -219,15 +219,16 @@ fn parse_fraction(s: &str) -> std::result::Result<f32, String> {
     Ok(v)
 }
 
-/// `--min-aligned-points`: at least three, because that is the fewest the
-/// geometry can fit a transform through, and so the fewest a verdict ever
-/// carries. One and two used to be accepted and behave exactly as three; zero
-/// let a pair with no geometry at all through, given the other two bars at 0.
-fn parse_aligned_points(s: &str) -> std::result::Result<u32, String> {
-    match s.trim().parse::<u32>().map_err(|e| format!("{e}"))? {
-        v @ 0..=2 => Err(format!("{v} is below 3, the fewest points a match can be fitted through")),
-        v => Ok(v),
-    }
+/// The fewest aligned points a match can have: a transform is fitted through
+/// three, so every verdict that has any carries at least that many. A
+/// `--min-aligned-points` below it is taken as it, and the run says so — as
+/// given, 1 and 2 behaved as 3 already, and 0 let a pair with no geometry at
+/// all through once the other two bars were 0 as well.
+const MIN_ALIGNED_POINTS: u32 = 3;
+
+/// `--min-aligned-points` as the run applies it.
+fn aligned_points(args: &Args) -> u32 {
+    args.min_aligned_points.max(MIN_ALIGNED_POINTS)
 }
 
 /// `-k`: at least one, or nothing past the byte-identical pass is compared.
@@ -859,6 +860,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     if let Some(note) = &extensions_note {
         say!("{note}");
     }
+    if args.min_aligned_points < MIN_ALIGNED_POINTS {
+        say!(
+            "Note: --min-aligned-points {} behaves the same as {MIN_ALIGNED_POINTS}, the fewest points a match is fitted through.",
+            args.min_aligned_points
+        );
+    }
     if args.clear_cache {
         if let Some(p) = &cache_path {
             say!("Clearing all cache at {}...", p.display());
@@ -1286,7 +1293,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words(), max_posting));
     stage!(t_start, "inverted file");
 
-    let policy = verify::Policy::new(args.min_aligned_points, args.min_frame_overlap, args.min_pixel_correlation);
+    let policy = verify::Policy::new(aligned_points(args), args.min_frame_overlap, args.min_pixel_correlation);
 
 
     // ---- candidates, then verification
@@ -1806,7 +1813,7 @@ fn run_config(args: &Args) -> serde_json::Value {
         "work_size": args.work_size,
         "features": FEATURES,
         "candidates": args.candidates,
-        "min_aligned_points": args.min_aligned_points,
+        "min_aligned_points": aligned_points(args),
         "min_frame_overlap": args.min_frame_overlap,
         "min_pixel_correlation": args.min_pixel_correlation,
         "stages": "anchor, propagate, corroborate",
@@ -2335,12 +2342,11 @@ mod tests {
         let ok = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).is_ok();
         assert!(ok(&[]));
         for good in [&["--min-frame-overlap", "0"][..], &["--min-frame-overlap", "1"], &["--min-pixel-correlation", "0.5"],
-            &["-k", "1"], &["--min-aligned-points", "3"], &["--work-size", "0"], &["--work-size", "1"], &["--work-size", "4000"]] {
+            &["-k", "1"], &["--min-aligned-points", "0"], &["--min-aligned-points", "2"], &["--work-size", "0"], &["--work-size", "1"], &["--work-size", "4000"]] {
             assert!(ok(good), "{good:?}");
         }
         for bad in [&["--min-frame-overlap", "7"][..], &["--min-frame-overlap", "NaN"], &["--min-pixel-correlation=-3"],
-            &["--min-pixel-correlation", "1.01"], &["-k", "0"], &["--min-aligned-points", "0"],
-            &["--min-aligned-points", "2"]] {
+            &["--min-pixel-correlation", "1.01"], &["-k", "0"]] {
             assert!(!ok(bad), "{bad:?}");
         }
     }

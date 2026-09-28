@@ -27,7 +27,7 @@ indicatif = "0.17"
 # encodes; AVIF is decoded by libheif. `rayon` is kept because it is how the
 # EXR decoder runs, so pixels stay what they were.
 image = { version = "0.25", default-features = false, features = [
-    "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp", "rayon",
+    "bmp", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp", "rayon",
 ] }
 # The decoder `image` itself uses for PNG, asked directly so that a PNG can be
 # read a row at a time into the reduction; see `decode_png_rows`. Kept at the

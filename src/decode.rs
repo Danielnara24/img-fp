@@ -45,9 +45,9 @@ pub enum Kind {
 /// What a walk takes when `-x` is not given: every extension this can decode.
 /// A file with none at all is left out by default, as in `vid-fp`, and
 /// `-x '*'` is how to reach it; see `extensions.rs`.
-pub const EXTENSIONS: [&str; 25] = [
+pub const EXTENSIONS: [&str; 24] = [
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "bmp", "tif", "tiff", "avif", "heic",
-    "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "tga", "dds", "qoi", "exr", "ff",
+    "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "tga", "qoi", "exr", "ff",
 ];
 
 /// The error `decode` gives for bytes that are no picture format at all, as
@@ -273,6 +273,44 @@ fn read_if_image(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The PNG inside an icon, for an icon the image crate refuses.
+///
+/// An icon's entries may be PNGs, and the crate accepts only one in RGBA,
+/// which is what the format asks for. Pillow does not do that: saving a
+/// picture with no alpha channel as `.ico` — `Image.open("logo.jpg")
+/// .save("favicon.ico")`, which is how a great many favicons are made — writes
+/// an RGB PNG under a directory entry claiming 32 bits a pixel, and every one
+/// of them was "not in RGBA format". Browsers show them, so they are read:
+/// the entry the crate would have chosen — most bits a pixel, then most
+/// pixels, the last of equals — and, when it is a PNG, as a PNG. An entry
+/// that is a bitmap was the crate's to read and is not second-guessed.
+fn ico_png(bytes: &[u8]) -> Option<&[u8]> {
+    let u16_at = |i: usize| Some(u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?));
+    let u32_at = |i: usize| Some(u32::from_le_bytes(bytes.get(i..i + 4)?.try_into().ok()?));
+    if u16_at(0)? != 0 || !matches!(u16_at(2)?, 1 | 2) {
+        return None;
+    }
+    let side = |b: u8| if b == 0 { 256u32 } else { b as u32 };
+    let mut entries: Vec<((u16, u32), usize, usize)> = Vec::new();
+    for k in 0..u16_at(4)? as usize {
+        let e = 6 + 16 * k;
+        let (w, h) = (side(*bytes.get(e)?), side(*bytes.get(e + 1)?));
+        let score = (u16_at(e + 6)?, w * h);
+        entries.push((score, u32_at(e + 12)? as usize, u32_at(e + 8)? as usize));
+    }
+    // The crate's own choice, step for step: the last entry first, then each
+    // other one in order if it scores strictly higher.
+    let mut best = entries.pop()?;
+    for e in entries {
+        if e.0 > best.0 {
+            best = e;
+        }
+    }
+    let (_, at, len) = best;
+    let entry = bytes.get(at..at.checked_add(len)?)?;
+    entry.starts_with(b"\x89PNG\r\n\x1a\n").then_some(entry)
+}
+
 /// The format of a file `sniff` could not place: whatever the image crate
 /// recognises in its first bytes, and failing that, a format that has no
 /// signature to recognise, taken from the file's name.
@@ -300,6 +338,13 @@ pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
         Kind::Image(ImageFormat::Png) => timed!(23, decode_image_crate(&bytes, ImageFormat::Png, work_size)?),
         Kind::Image(ImageFormat::WebP) => timed!(24, decode_image_crate(&bytes, ImageFormat::WebP, work_size)?),
         Kind::Image(ImageFormat::Tiff) => timed!(25, decode_image_crate(&bytes, ImageFormat::Tiff, work_size)?),
+        Kind::Image(ImageFormat::Ico) => match decode_image_crate(&bytes, ImageFormat::Ico, work_size) {
+            Ok(done) => done,
+            Err(e) => match ico_png(&bytes) {
+                Some(png) => decode_image_crate(png, ImageFormat::Png, work_size)?,
+                None => return Err(e),
+            },
+        },
         Kind::Image(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
         Kind::Jxl => timed!(26, decode_jxl(&bytes, work_size)?),
         Kind::Heif => timed!(27, decode_heif(&bytes, work_size)?),
@@ -1155,6 +1200,13 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
 pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let img = match sniff(&bytes) {
+        Kind::Image(ImageFormat::Ico) => match preview_image_crate(&bytes, ImageFormat::Ico) {
+            Ok(img) => img,
+            Err(e) => match ico_png(&bytes) {
+                Some(png) => preview_image_crate(png, ImageFormat::Png)?,
+                None => return Err(e),
+            },
+        },
         Kind::Image(fmt) => preview_image_crate(&bytes, fmt)?,
         Kind::Jxl => preview_jxl(&bytes)?,
         Kind::Heif => preview_heif(&bytes)?,
@@ -1437,6 +1489,35 @@ mod bench {
         std::fs::write(&pic, &png).unwrap();
         assert_eq!(read_if_image(&pic).unwrap(), png);
         assert!(decode(&pic, 384).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An icon Pillow wrote from a picture with no alpha channel: an RGB PNG
+    /// under an entry that says 32 bits a pixel. The crate refuses it; it is
+    /// read as the PNG it holds, and a valid icon is the crate's as before.
+    #[test]
+    fn an_icon_holding_an_rgb_png_is_read() {
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(48, 32, |x, y| image::Rgb([(x * 5) as u8, (y * 7) as u8, 90])))
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let mut ico = vec![0, 0, 1, 0, 1, 0, 48, 32, 0, 0, 1, 0, 32, 0];
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&22u32.to_le_bytes());
+        ico.extend_from_slice(&png);
+        assert!(decode_image_crate(&ico, ImageFormat::Ico, 384).is_err(), "the crate still refuses it");
+        assert_eq!(ico_png(&ico), Some(&png[..]));
+        let dir = std::env::temp_dir().join(format!("img-fp-ico-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("favicon.ico");
+        std::fs::write(&path, &ico).unwrap();
+        assert!(decode(&path, 384).is_ok());
+        assert!(preview(&path, 64).is_ok());
+        let mut rgba_icon = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(16, 16, |x, _| image::Rgba([x as u8 * 9, 0, 0, 255])))
+            .write_to(&mut Cursor::new(&mut rgba_icon), ImageFormat::Ico)
+            .unwrap();
+        assert!(decode_image_crate(&rgba_icon, ImageFormat::Ico, 384).is_ok(), "a valid icon takes the crate's own path");
         std::fs::remove_dir_all(&dir).ok();
     }
 

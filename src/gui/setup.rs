@@ -263,7 +263,7 @@ impl Setup {
         let recursive = gtk::CheckButton::with_mnemonic(l::RECURSIVE);
         let work_size = spin(0.0, 4096.0, 32.0, 0);
         let candidates = spin(1.0, 2000.0, 10.0, 0);
-        let min_points = spin(3.0, 200.0, 1.0, 0);
+        let min_points = spin(0.0, 200.0, 1.0, 0);
         let min_overlap = spin(0.0, 1.0, 0.05, 2);
         let min_correlation = spin(0.0, 1.0, 0.05, 2);
         let report = gtk::CheckButton::with_mnemonic(l::REPORT);

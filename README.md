@@ -225,7 +225,7 @@ to stderr.
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--work-size <PX>` | Long side, in pixels, the images are analysed at. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `384` |
 | `-k`, `--candidates <N>` | Candidate matches checked per image | `150` |
-| `--min-aligned-points <N>` | Matching points two images must share, at least 3. Higher is stricter | `10` |
+| `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3 | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
@@ -244,10 +244,11 @@ different photographs together. The defaults are a safe starting point.
 
 ## Formats
 
-JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO, PNM, TGA, DDS,
+JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO, PNM, TGA,
 QOI, OpenEXR and farbfeld. Files are identified by their content, so a wrong
 extension doesn't matter, but a folder walk only picks up files whose extension
-is in `-x`.
+is in `-x`. TGA files have no signature and are recognised by the `.tga`
+extension.
 
 ## Cache
 

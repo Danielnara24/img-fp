@@ -2972,9 +2972,25 @@ so the binary is the same size either way. What it cost was the build: two
 cooled clean `--release` builds of each, alternated, 519 / 522 CPU-s and 141 /
 144 s with it against 425 / 416 CPU-s and 132 / 128 s without, and 161 crates
 compiled against 124. Every format IMGS holds, plus BMP, GIF, PNM, TGA, TIFF,
-WebP and QOI, decodes to the same `--dump` bytes. (DDS decodes in neither:
-`image` 0.25 has no DDS decoder behind its `dds` feature, so `.dds` in the
-default extension list is refused as TGA's used to be.)
+WebP and QOI, decodes to the same `--dump` bytes.
+
+**DDS is not in the default extensions.** `image` 0.25 has no DDS decoder
+behind its `dds` feature ("The image format `DDS` is not supported"), so every
+`.dds` a walk took was a problem and exit 2; it is a skip now, and the feature
+is gone from `Cargo.toml` with it. **An ICO holding an RGB PNG is read as that
+PNG** (`decode::ico_png`). The crate refuses one, as the format says it should,
+and Pillow writes one whenever a picture with no alpha channel is saved as
+`.ico` — `Image.open("logo.jpg").save("favicon.ico")` — under a directory entry
+claiming 32 bits a pixel; browsers show them. The fallback runs only after the
+crate has refused, on the entry the crate itself would have chosen, and only
+when that entry is a PNG. ImageMagick's icons hold bitmaps and were never
+affected.
+
+**`--min-aligned-points` below 3 is run as 3, and the run says so.** Three is
+the fewest a transform is fitted through, so 1 and 2 already behaved as 3, and
+0 let a pair with no geometry at all through once overlap and correlation were
+0 too. It is not refused; the header prints a note and the report's `config`
+records the 3 that was applied.
 
 **Two venvs.** `vendor/venv` is the general one. `vendor/venv-imagededup` has
 torch, so **SSCD and imagededup must run under it**; it also now has
