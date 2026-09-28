@@ -145,6 +145,8 @@ benchmark/
                       are 50 MB apiece and were not kept)
   out/v12-thumbstretch/ the thumbnail-stretch A/B at the shipped default,
                       correlation 0.6, three cold runs of each build (metrics)
+  out/v13-propagation-floor/ propagation honouring --min-frame-overlap: the
+                      same A/B at the default and at overlap 0.3 (metrics)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -675,6 +677,18 @@ produced that cleared this machine's noise floor. The overlap points did not:
 the same configuration measured 41.4 s and 33.1 s on two reps, which is the 25%
 swing *Speed and memory* warns about. Set both for what the tool should claim,
 never for what it costs.
+
+**Every overlap figure below 0.5 in the table above understates the setting**,
+because until 0.19.x propagation dropped every composed pair at overlap 0.5 or
+less whatever `--min-frame-overlap` said, so below 0.5 the flag applied to
+direct pairs only (and `--dump`'s propagated rows stopped at 0.5 too). It now
+keeps composed pairs against the tier's own floor. At the shipped 0.85 that is
+pair-for-pair identical and level on the clock, since acceptance and the pixel
+check were both already gated there; at 0.3, three cold alternating pairs at
+the default work size: +891 / -26 pairs, all 891 propagated, **TP 214,257 ->
+214,361, FP 9,852 -> 10,550, every one a trap, cross-family 0 -> 0**, F1 0.9377
+-> 0.9365, CPU 303-305 s either way (`out/v13-propagation-floor`). Which is the
+table's own conclusion again: loosening overlap buys traps and merges nothing.
 
 **`--min-aligned-points` is the third bar in that `if`, and the only one propagation
 can overrule.** `Policy::new` gives the propagated tier `min_aligned_points: 0`

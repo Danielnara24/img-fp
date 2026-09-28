@@ -2023,7 +2023,13 @@ fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n:
                         tb: &items[b].thumb,
                     };
                     let v = verify::verify_transform(&p, &m, var, min_ov);
-                    if v.ov_a.max(v.ov_b) > 0.5 {
+                    // Kept against the floor the caller asked for — the
+                    // propagated tier's own, or a dump's lower one — and no
+                    // other. This used to be a fixed 0.5, which quietly
+                    // overruled a `--min-frame-overlap` below it for every
+                    // composed pair, and threw away the dump's hypotheses
+                    // between 0.2 and 0.5.
+                    if v.ov_a.max(v.ov_b) >= min_ov {
                         out.push((a, b, m, var.invert, v));
                     }
                 }
