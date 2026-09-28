@@ -818,11 +818,24 @@ impl Thumb {
             &owned
         };
         let scale = t.w as f32 / g.w as f32;
+        // Stretched to the full byte range before it is rounded, so that the
+        // pixel check's flatness bar is measured against the picture's own
+        // contrast rather than against 255. A dim or foggy photograph spans a
+        // few dozen codes; rounded as it stood, every block of it fell under
+        // that bar, and an exact re-encode of it abstained its way to a score
+        // of nothing. Min and max commute with inversion, so an inverted match
+        // still compares like with like, and a picture that already spans the
+        // whole range is rounded exactly as before.
+        let (lo, hi) = t.px.iter().fold((1f32, 0f32), |(lo, hi), &v| {
+            let v = v.clamp(0.0, 1.0);
+            (lo.min(v), hi.max(v))
+        });
+        let (lo, inv) = if hi > lo { (lo, 1.0 / (hi - lo)) } else { (0.0, 1.0) };
         Thumb::new(
             t.w as u16,
             t.h as u16,
             scale,
-            t.px.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect(),
+            t.px.iter().map(|v| ((v.clamp(0.0, 1.0) - lo) * inv).clamp(0.0, 1.0) * 255.0 + 0.5).map(|v| v as u8).collect(),
         )
     }
 

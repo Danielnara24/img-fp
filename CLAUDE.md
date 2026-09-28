@@ -7,10 +7,20 @@ changing how anything is scored.
 
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
-every amount drawn per seed — F1 **0.955** at 99.6% precision and 91.7% recall
+every amount drawn per seed — F1 **0.952** at 99.6% precision and 91.2% recall
 at the shipped default, against SSCD's 0.762 / 92.6% / 64.8%, and under a
 minute against SSCD's 1,949 s. At `--work-size 640` it is F1 **0.978** at
 99.5% / 96.1%, for 44% more wall clock and 61% more CPU.
+
+**The shipped `--min-pixel-correlation` is 0.6, not the 0.50 every sweep table
+below calls shipped.** It was raised in 0.12.0 for what a user wants grouped
+rather than for F1: at 0.5 the tool made no false pair on real folders but did
+group merely similar photographs, a category the generated corpus has no
+negatives for, so the corpus can only show the cost — F1 0.955 -> 0.952 at the
+default work size, 47 -> 46 perfect transformations. The headline figures above
+and the default's rows below are at 0.6 (`out/v12-thumbstretch`); the figures at
+`--work-size 640`, the sweeps and the work-size table were taken at 0.50 and are
+left as measured.
 
 **The default sits below the accuracy knee on purpose, and 640 is the knee.**
 `--work-size` scales the first four fifths of the pipeline, so it is the only
@@ -28,8 +38,8 @@ containment rows. **Anyone who cares about that case should pass
 `--work-size 640`**; see *Measured trade-offs* for the full table.
 
 (**The cost figures are the soft ones here, and the accuracy figures are not.**
-Accuracy is a property of the build and the work size: F1 0.955 at the default
-and 0.978 at 640 are both reproducible to the pair. Wall clock is a property of
+Accuracy is a property of the build and the work size: F1 0.952 at the default
+and 0.978 at 640 (at correlation 0.50) are both reproducible to the pair. Wall clock is a property of
 the session — this laptop's idle temperature alone moves it 25% — and the
 numbers people want to compare were taken in five different sessions: the
 eleven competitors in `out/v5`, img-fp at 105 s in `out/v8`, the parameter pass
@@ -52,13 +62,13 @@ none of them moves. Where the new default changes a *conclusion* rather than a
 number there is exactly one place, and it is the `--min-pixel-correlation`
 cliff, which does not exist at 384.)
 
-**47 of 87 transformations are handled perfectly** at the default (every seed
+**46 of 87 transformations are handled perfectly** at the default (every seed
 found across the whole range of the amount), and **60 of 87** at
-`--work-size 640`. Every other tool manages **zero** at any setting.
+`--work-size 640` and correlation 0.50. Every other tool manages **zero** at any setting.
 
-Precision holds where it matters: of 871 false pairs at the default, **all 871
+Precision holds where it matters: of 829 false pairs at the default, **all 829
 are the deliberate rearrangement traps**, leaving **no wrong pair at all** in
-214,373 proposals against 15.65 million chances to be wrong — and so no wrong
+213,180 proposals against 15.65 million chances to be wrong — and so no wrong
 cluster merge. At 640 the same is true of all 1,088 of them in 224,868
 proposals. That is the number to watch: a merge's cost is every pair the two
 families imply, so it grows with the corpus while a lone bad pair does not.
@@ -133,6 +143,8 @@ benchmark/
   out/v11-worksize/   the one-session cold --work-size sweep behind the table
                       in *Measured trade-offs* (metrics only; the run JSONs
                       are 50 MB apiece and were not kept)
+  out/v12-thumbstretch/ the thumbnail-stretch A/B at the shipped default,
+                      correlation 0.6, three cold runs of each build (metrics)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -262,6 +274,25 @@ The parts that are easy to get wrong:
 - **Flat blocks abstain** in the pixel check, neither agreeing nor
   disagreeing. Counting them as agreement let a thumbnail matched into a tenth
   of a large image — where the large side is a smear — score 0.9.
+
+  **What "flat" is measured against is the picture's own contrast.** The bar
+  is a block standard deviation of 4 codes, and it used to be 4 codes out of
+  255 whatever the picture spanned — so a dim or foggy photograph, spanning a
+  few dozen codes, had every block abstain and scored 0 against an exact
+  re-encode of itself: 27-34 aligned points, overlap 1.0, whole-overlap
+  correlation 0.99, rejected. `Thumb::build` now stretches each thumbnail from
+  its own darkest to its own brightest value before rounding it to bytes. That
+  is not a new constant, it commutes with inversion, and a picture already
+  spanning the range rounds exactly as before. Four photographs dimmed to a
+  global spread of ~4 codes and saved as PNG and JPEG: three of the four pairs
+  went from missed to found (the fourth never reaches verification — too few
+  features). On the benchmark corpus, which has almost no dim pictures, it is
+  +198 / -50 pairs, **TP 212,205 -> 212,351, FP 831 -> 829, cross-family 0 ->
+  0**, F1 0.9518 -> 0.9521, both seed halves up by the same amount, and level
+  on the clock: three cold alternating pairs at 46.5 / 46.4 / 43.3 s and 308 /
+  308 / 304 CPU-s before, 44.9 / 45.1 / 43.9 s and 304 / 308 / 306 after, peak
+  PSS 626-769 MB either way (`out/v12-thumbstretch`). The cache format went to
+  `IMGFPC04` with it, since the stored thumbnails changed.
 - **The blocks that do not abstain are averaged, not counted.** `blk` is the
   mean of |r| over them. It used to be the *fraction* of them whose |r| cleared
   0.5, which takes two numbers to say one thing and throws away the difference

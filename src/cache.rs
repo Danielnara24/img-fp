@@ -79,7 +79,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// another version is a cache this build cannot read, which is a *stale* cache
 /// and not a damaged one: it was written by img-fp, it will be rewritten by
 /// img-fp, and there is nothing for anyone to do about it.
-const MAGIC: &[u8; 8] = b"IMGFPC03";
+///
+/// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
+const MAGIC: &[u8; 8] = b"IMGFPC04";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the
