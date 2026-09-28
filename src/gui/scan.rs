@@ -69,7 +69,7 @@ impl Scan {
     /// Start a scan of `argv`, an img-fp command line, and a channel of what
     /// it says. The channel ends with `Exited`.
     pub fn start(argv: &[OsString]) -> std::io::Result<(Scan, async_channel::Receiver<Event>)> {
-        let result = result_path();
+        let result = result_path()?;
         let exe = std::env::current_exe()?;
         let mut cmd = Command::new(exe);
         cmd.arg(WORKER_FLAG).arg(&result).args(argv);
@@ -82,7 +82,13 @@ impl Scan {
                 Ok(())
             });
         }
-        let mut child = cmd.spawn()?;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = result.parent().map(std::fs::remove_dir);
+                return Err(e);
+            }
+        };
         let pid = child.id() as i32;
         let (tx, rx) = async_channel::unbounded();
         let out = child.stdout.take().expect("piped");
@@ -165,14 +171,36 @@ impl Scan {
 impl Drop for Scan {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.result);
+        // And the private folder it was written in, which is this scan's alone.
+        if let Some(dir) = self.result.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
 }
 
-/// Where the worker writes its report: somewhere private to this user.
-fn result_path() -> PathBuf {
+/// Where the worker writes its report: a file in a folder only this user can
+/// open.
+///
+/// The folder is made by this process, mode 0700, and a name already taken is
+/// skipped rather than used. `$XDG_RUNTIME_DIR` is private already, but the
+/// fallback is `/tmp`, where the report used to go straight in under a name
+/// anyone could predict — and the worker writes it with an ordinary create,
+/// which follows a symlink planted there first.
+fn result_path() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
-    dir.join(format!("img-fp-gui-{}-{}.json", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    for _ in 0..100 {
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("img-fp-gui-{}-{n}-{nanos:x}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir.join("result.json")),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("no private folder could be made for the scan's results"))
 }
 
 fn parse(line: &str) -> Option<Event> {
@@ -256,6 +284,21 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each scan's report goes in a folder of its own that only this user can
+    /// open, never straight into a shared one under a name known in advance.
+    #[test]
+    fn a_result_is_written_in_a_private_folder_of_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (result_path().unwrap(), result_path().unwrap());
+        assert_ne!(a.parent(), b.parent());
+        for r in [&a, &b] {
+            let dir = r.parent().unwrap();
+            assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert!(!r.exists());
+            std::fs::remove_dir(dir).unwrap();
+        }
+    }
 
     /// The window reads the report img-fp writes, and a name that is not
     /// UTF-8 comes back as the file's own name rather than its readable form.

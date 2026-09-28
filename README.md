@@ -225,7 +225,7 @@ to stderr.
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--work-size <PX>` | Long side, in pixels, the images are analysed at. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `384` |
 | `-k`, `--candidates <N>` | Candidate matches checked per image | `150` |
-| `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter | `10` |
+| `--min-aligned-points <N>` | Matching points two images must share, at least 3. Higher is stricter | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |

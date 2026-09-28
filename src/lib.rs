@@ -131,8 +131,8 @@ struct Args {
 
     /// Matching points two images must share before they count as duplicates.
     ///
-    /// Higher is stricter.
-    #[arg(long, value_name = "N", default_value_t = 10)]
+    /// At least 3. Higher is stricter.
+    #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_aligned_points)]
     min_aligned_points: u32,
 
     /// How much of one image must lie inside the other, from 0 to 1.
@@ -217,6 +217,17 @@ fn parse_fraction(s: &str) -> std::result::Result<f32, String> {
         return Err("must be a number from 0 to 1".into());
     }
     Ok(v)
+}
+
+/// `--min-aligned-points`: at least three, because that is the fewest the
+/// geometry can fit a transform through, and so the fewest a verdict ever
+/// carries. One and two used to be accepted and behave exactly as three; zero
+/// let a pair with no geometry at all through, given the other two bars at 0.
+fn parse_aligned_points(s: &str) -> std::result::Result<u32, String> {
+    match s.trim().parse::<u32>().map_err(|e| format!("{e}"))? {
+        v @ 0..=2 => Err(format!("{v} is below 3, the fewest points a match can be fitted through")),
+        v => Ok(v),
+    }
 }
 
 /// `-k`: at least one, or nothing past the byte-identical pass is compared.
@@ -1424,13 +1435,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         f.edges = Some(edges.len());
     });
     let bar = progress.begin_counted(Stage::Variants, total_weight, lonely.len(), "images");
-    let variant_edges: Vec<Edge> = lonely
+    let variant_all: Vec<(Edge, bool)> = lonely
         .par_iter()
         .zip(lonely_weight.par_iter())
         .map_init(
             || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default(), Vec::new()),
             |(acc, scored, cands, matches, scratch, merged), (&i, &w)| timed!(38, {
-                let mut out: Vec<Edge> = Vec::new();
+                let mut out: Vec<(Edge, bool)> = Vec::new();
                 let vf: [Features; 3] = timed!(40, std::array::from_fn(|v| variant_features(&items[i].feats, variants[v])));
                 let wl: [WordList; 3] = std::array::from_fn(|v| timed!(39, quantise(&vocab, &vf[v])));
                 merged.clear();
@@ -1453,7 +1464,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                         tb: &items[j].thumb,
                     };
                     let verdict = verify::verify(&p, cands, variants[v], gate, matches, scratch);
-                    if verdict.accepted(&policy.anchor) {
+                    // An anchor, or — for `--dump`, which records every
+                    // verdict the geometry could fit, as the direct pass's
+                    // does — anything with three aligned points.
+                    let anchor = verdict.accepted(&policy.anchor);
+                    if anchor || (dumping && verdict.n_in >= 3) {
                         // Every edge runs from the lower index to the higher,
                         // and its verdict with it: stored the other way round,
                         // the report's `scale` for the pair was the reciprocal
@@ -1466,7 +1481,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                                 None => continue,
                             }
                         };
-                        out.push((lo, hi, verdict.m, variants[v].invert, verdict));
+                        out.push(((lo, hi, verdict.m, variants[v].invert, verdict), anchor));
                     }
                 }
                 bar.add(w);
@@ -1475,6 +1490,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         )
         .flatten()
         .collect();
+    let variant_edges: Vec<Edge> = variant_all.iter().filter(|e| e.1).map(|e| e.0.clone()).collect();
+    let variant_all: Vec<Edge> = if dumping { variant_all.into_iter().map(|e| e.0).collect() } else { Vec::new() };
     stage!(t_start, "variants: {} more pairs from {} unmatched images", variant_edges.len(), lonely.len());
 
     // Nothing after this point matches a descriptor against another. What is
@@ -1523,14 +1540,20 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // in the component and an order of magnitude more than it accepts, so the
     // rejected ones are dropped as soon as they have been judged unless
     // something is going to read them.
+    //
+    // A later round proposes again every pair an earlier one rejected, through
+    // a tree that may have changed. Each pair is one hypothesis however many
+    // rounds considered it, and the dump holds the last verdict on it: two
+    // rows for one pair was a dump claiming more than the run had asked.
     let mut all_propagated: Vec<Edge> = Vec::new();
-    let mut n_hypotheses = 0usize;
+    let mut row_of: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut hypotheses: std::collections::HashSet<(usize, usize)> = Default::default();
     // A composed pair is kept only if it clears the propagated tier's own
     // overlap floor; a dump wants every hypothesis the round considered.
     let prop_min_ov = if dumping { policy.propagated.min_frame_overlap.min(0.2) } else { policy.propagated.min_frame_overlap };
     let mut pool: Vec<Edge> = all.clone();
     for round in 0..PROPAGATE_MAX_ROUNDS {
-        let (mut round_all, too_large) = timed!(21, propagate(&items, &pool, n, prop_min_ov));
+        let (round_all, too_large) = timed!(21, propagate(&items, &pool, n, prop_min_ov));
         // Said once, and on the console: pairs inside such a component rest on
         // direct matches alone, and propagation is most of the tool's recall.
         if round == 0 && !too_large.is_empty() {
@@ -1549,9 +1572,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             .filter(|(a, b, _, _, v)| !seen.contains(&(*a, *b)) && v.accepted(&policy.propagated))
             .cloned()
             .collect();
-        n_hypotheses += round_all.len();
+        hypotheses.extend(round_all.iter().map(|e| (e.0, e.1)));
         if dumping {
-            all_propagated.append(&mut round_all);
+            for e in round_all {
+                match row_of.get(&(e.0, e.1)) {
+                    Some(&k) => all_propagated[k] = e,
+                    None => {
+                        row_of.insert((e.0, e.1), all_propagated.len());
+                        all_propagated.push(e);
+                    }
+                }
+            }
         } else {
             drop(round_all);
         }
@@ -1563,7 +1594,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
     }
 
-    stage!(t_start, "propagated: {} of {} composed hypotheses", propagated.len(), n_hypotheses);
+    stage!(t_start, "propagated: {} of {} composed hypotheses", propagated.len(), hypotheses.len());
+    drop(hypotheses);
+    drop(row_of);
 
     // Weaker matches, admitted only between files an anchor already put in the
     // same cluster. They cannot merge anything, so they cost recall to refuse
@@ -1591,15 +1624,30 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
         let mut w = std::io::BufWriter::new(f);
         writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted")?;
-        for (kind, set) in [("direct", &all_direct), ("variant", &variant_edges), ("propagated", &all_propagated)] {
+        for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
             for (a, b, _, iv, v) in set.iter() {
-                writeln!(
-                    w,
-                    "{:?},{:?},{},{},{},{:.4},{:.4},{:.5},{:.1},{:.4},{},{:.4},{},{}",
-                    files[*a].display().to_string(),
-                    files[*b].display().to_string(),
-                    kind, v.n_match, v.n_in, v.ov_a, v.ov_b, v.scale, v.rot_deg, v.blk, v.blk_n, v.ncc, v.centred as u8, *iv as u8
-                )?;
+                // The paths as their own bytes, quoted the way CSV quotes:
+                // written with `{:?}`, a name holding a quote or a comma split
+                // into two columns, and a tab or a non-UTF-8 byte came out as
+                // an escape that names no file.
+                use std::os::unix::ffi::OsStrExt;
+                let figures = [
+                    kind.to_string(),
+                    v.n_match.to_string(),
+                    v.n_in.to_string(),
+                    format!("{:.4}", v.ov_a),
+                    format!("{:.4}", v.ov_b),
+                    format!("{:.5}", v.scale),
+                    format!("{:.1}", v.rot_deg),
+                    format!("{:.4}", v.blk),
+                    v.blk_n.to_string(),
+                    format!("{:.4}", v.ncc),
+                    (v.centred as u8).to_string(),
+                    (*iv as u8).to_string(),
+                ];
+                let mut row: Vec<&[u8]> = vec![files[*a].as_os_str().as_bytes(), files[*b].as_os_str().as_bytes()];
+                row.extend(figures.iter().map(|f| f.as_bytes()));
+                report::csv_row_with(&mut w, &row, b',')?;
             }
         }
         w.flush()?;
@@ -2256,11 +2304,12 @@ mod tests {
         let ok = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).is_ok();
         assert!(ok(&[]));
         for good in [&["--min-frame-overlap", "0"][..], &["--min-frame-overlap", "1"], &["--min-pixel-correlation", "0.5"],
-            &["-k", "1"], &["--work-size", "0"], &["--work-size", "1"], &["--work-size", "4000"]] {
+            &["-k", "1"], &["--min-aligned-points", "3"], &["--work-size", "0"], &["--work-size", "1"], &["--work-size", "4000"]] {
             assert!(ok(good), "{good:?}");
         }
         for bad in [&["--min-frame-overlap", "7"][..], &["--min-frame-overlap", "NaN"], &["--min-pixel-correlation=-3"],
-            &["--min-pixel-correlation", "1.01"], &["-k", "0"]] {
+            &["--min-pixel-correlation", "1.01"], &["-k", "0"], &["--min-aligned-points", "0"],
+            &["--min-aligned-points", "2"]] {
             assert!(!ok(bad), "{bad:?}");
         }
     }

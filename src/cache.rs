@@ -588,8 +588,12 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             // A cache that can be read and not written still answers this
             // run. It just keeps nothing new, and that is worth saying.
             problems.cache(format!("could not open {} for writing: {e}", path.display()));
-            if let Ok(f) = File::open(path) {
-                read_file(&f, path, want, walked, &mut out, problems);
+            // What it holds is still counted, although nothing will be
+            // appended: the caller measures how many records a later one
+            // superseded against this, and a count of zero beside a full map
+            // was an underflow.
+            if let Some(tail) = File::open(path).ok().and_then(|f| read_file(&f, path, want, walked, &mut out, problems)) {
+                store.records = AtomicUsize::new(tail.count);
             }
             return (out, store);
         }
@@ -1105,6 +1109,31 @@ mod tests {
         let a = &got[Path::new("a.jpg")];
         assert_eq!((a.0.len, a.1.as_ref().unwrap().feats.kps.len()), (3, 5));
         assert_eq!(a.1.as_ref().unwrap().feats.desc, f2.desc);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cache that can be read and not written still answers the run, and
+    /// still counts what it holds: the run takes the records it superseded as
+    /// the difference between that count and the map, which was an underflow
+    /// when the count came back as zero.
+    #[test]
+    fn a_read_only_cache_counts_what_it_holds() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("readonly");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f1, t1) = analysis(3, 1);
+        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 2, mtime: 2 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3 }, &f1, &t1).unwrap();
+        drop(store);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let (got, store, bad) = reopen(&path);
+        assert!(bad, "not being able to write it is said");
+        assert!(!store.writable());
+        assert_eq!(got.len(), 2);
+        assert_eq!(store.records(), 3);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

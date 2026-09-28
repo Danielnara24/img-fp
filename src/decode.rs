@@ -263,7 +263,7 @@ fn read_if_image(path: &Path) -> Result<Vec<u8>> {
     let mut f = std::fs::File::open(path).with_context(ctx)?;
     let mut bytes = Vec::with_capacity(HEAD);
     (&mut f).take(HEAD as u64).read_to_end(&mut bytes).with_context(ctx)?;
-    if sniff(&bytes) == Kind::Unknown && image::guess_format(&bytes).is_err() {
+    if sniff(&bytes) == Kind::Unknown && unmarked_format(&bytes, path).is_none() {
         bail!(NOT_AN_IMAGE);
     }
     if let Ok(md) = f.metadata() {
@@ -271,6 +271,22 @@ fn read_if_image(path: &Path) -> Result<Vec<u8>> {
     }
     f.read_to_end(&mut bytes).with_context(ctx)?;
     Ok(bytes)
+}
+
+/// The format of a file `sniff` could not place: whatever the image crate
+/// recognises in its first bytes, and failing that, a format that has no
+/// signature to recognise, taken from the file's name.
+///
+/// TGA is the one that matters. It carries no magic at all, so
+/// `guess_format` can never name it, and every `.tga` — a default extension —
+/// was refused as "not an image" without its decoder being asked. The name is
+/// consulted only for formats like that, so a `.png` holding something else
+/// is still judged by its bytes.
+fn unmarked_format(bytes: &[u8], path: &Path) -> Option<ImageFormat> {
+    if let Ok(fmt) = image::guess_format(bytes) {
+        return Some(fmt);
+    }
+    ImageFormat::from_path(path).ok().filter(|f| *f == ImageFormat::Tga)
 }
 
 /// Decode a file to a working-resolution gray image.
@@ -287,14 +303,10 @@ pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
         Kind::Image(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
         Kind::Jxl => timed!(26, decode_jxl(&bytes, work_size)?),
         Kind::Heif => timed!(27, decode_heif(&bytes, work_size)?),
-        Kind::Unknown => {
-            // Last resort: let the image crate guess (covers TGA/DDS, which
-            // have no magic), then give up.
-            match image::guess_format(&bytes) {
-                Ok(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
-                Err(_) => bail!(NOT_AN_IMAGE),
-            }
-        }
+        Kind::Unknown => match unmarked_format(&bytes, path) {
+            Some(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
+            None => bail!(NOT_AN_IMAGE),
+        },
     };
     let _ = (w, h);
     Ok(Decoded { work: gray })
@@ -336,7 +348,14 @@ pub fn probe(path: &Path) -> Option<Probe> {
             let handle = ctx.primary_image_handle().ok()?;
             (handle.width(), handle.height())
         }
-        Kind::Unknown => image::ImageReader::new(r).with_guessed_format().ok()?.into_dimensions().ok()?,
+        Kind::Unknown => {
+            let mut rd = image::ImageReader::new(r).with_guessed_format().ok()?;
+            if rd.format().is_none() {
+                // Formats with no signature at all; see `unmarked_format`.
+                rd.set_format(ImageFormat::from_path(path).ok().filter(|f| *f == ImageFormat::Tga)?);
+            }
+            rd.into_dimensions().ok()?
+        }
     };
     Some(Probe { kind, w, h })
 }
@@ -1139,9 +1158,9 @@ pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
         Kind::Image(fmt) => preview_image_crate(&bytes, fmt)?,
         Kind::Jxl => preview_jxl(&bytes)?,
         Kind::Heif => preview_heif(&bytes)?,
-        Kind::Unknown => match image::guess_format(&bytes) {
-            Ok(fmt) => preview_image_crate(&bytes, fmt)?,
-            Err(_) => bail!(NOT_AN_IMAGE),
+        Kind::Unknown => match unmarked_format(&bytes, path) {
+            Some(fmt) => preview_image_crate(&bytes, fmt)?,
+            None => bail!(NOT_AN_IMAGE),
         },
     };
     drop(bytes);
@@ -1418,6 +1437,28 @@ mod bench {
         std::fs::write(&pic, &png).unwrap();
         assert_eq!(read_if_image(&pic).unwrap(), png);
         assert!(decode(&pic, 384).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// TGA has no signature, so it is known by its name; the same bytes under
+    /// another name are still not a picture.
+    #[test]
+    fn a_tga_is_decoded_by_its_name() {
+        let dir = std::env::temp_dir().join(format!("img-fp-tga-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut tga = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(40, 30, |x, y| image::Rgb([(x * 5) as u8, (y * 7) as u8, 90])))
+            .write_to(&mut Cursor::new(&mut tga), ImageFormat::Tga)
+            .unwrap();
+        let named = dir.join("pic.TGA");
+        std::fs::write(&named, &tga).unwrap();
+        assert!(decode(&named, 384).is_ok());
+        let p = probe(&named).unwrap();
+        assert_eq!((p.w, p.h), (40, 30));
+        assert!(preview(&named, 64).is_ok());
+        let other = dir.join("pic.bin");
+        std::fs::write(&other, &tga).unwrap();
+        assert_eq!(decode(&other, 384).err().unwrap().to_string(), NOT_AN_IMAGE);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

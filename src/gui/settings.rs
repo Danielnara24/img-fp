@@ -44,6 +44,7 @@ impl ReportFormat {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(with = "paths")]
     pub folders: Vec<PathBuf>,
     pub recursive: bool,
     pub work_size: usize,
@@ -59,6 +60,7 @@ pub struct Settings {
     pub threads: usize,
     /// As `-x` takes it: comma-separated.
     pub extensions: String,
+    #[serde(with = "paths")]
     pub exclude: Vec<PathBuf>,
     pub follow_symlinks: bool,
     pub use_cache: bool,
@@ -101,6 +103,48 @@ impl Default for Settings {
             log: false,
             log_path: String::new(),
         }
+    }
+}
+
+/// A list of folders as the settings file keeps it: each one as text, or as
+/// its bytes when its name is not UTF-8.
+///
+/// serde writes a `PathBuf` as a string and refuses one that is not UTF-8,
+/// and one such folder in the list made the whole save fail — silently, since
+/// a save that fails says nothing — so nothing at all was remembered.
+mod paths {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::PathBuf;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Text(String),
+        Bytes(Vec<u8>),
+    }
+
+    pub fn serialize<S: Serializer>(v: &[PathBuf], s: S) -> Result<S::Ok, S::Error> {
+        let stored: Vec<Stored> = v
+            .iter()
+            .map(|p| match p.to_str() {
+                Some(t) => Stored::Text(t.to_string()),
+                None => Stored::Bytes(p.as_os_str().as_bytes().to_vec()),
+            })
+            .collect();
+        stored.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<PathBuf>, D::Error> {
+        let stored: Vec<Stored> = Vec::deserialize(d)?;
+        Ok(stored
+            .into_iter()
+            .map(|x| match x {
+                Stored::Text(t) => PathBuf::from(t),
+                Stored::Bytes(b) => PathBuf::from(OsString::from_vec(b)),
+            })
+            .collect())
     }
 }
 
@@ -229,6 +273,23 @@ fn absolute(p: &str, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder whose name is not UTF-8 is remembered, and does not stop the
+    /// rest of the settings from being remembered with it.
+    #[test]
+    fn a_folder_that_is_not_utf8_is_saved_and_read_back() {
+        use std::os::unix::ffi::OsStringExt;
+        let odd = PathBuf::from(std::ffi::OsString::from_vec(b"/p/b\xff".to_vec()));
+        let s = Settings { folders: vec!["/p/a".into(), odd.clone()], exclude: vec![odd.clone()], work_size: 640, ..Default::default() };
+        let text = serde_json::to_string(&s).expect("saved");
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.folders, vec![PathBuf::from("/p/a"), odd.clone()]);
+        assert_eq!(back.exclude, vec![odd]);
+        assert_eq!(back.work_size, 640);
+        // A file written before this still reads.
+        let old: Settings = serde_json::from_str(r#"{"folders": ["/x"], "exclude": []}"#).unwrap();
+        assert_eq!(old.folders, vec![PathBuf::from("/x")]);
+    }
 
     #[test]
     fn a_relative_path_is_made_absolute_against_home() {

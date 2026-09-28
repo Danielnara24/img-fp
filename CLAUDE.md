@@ -2416,7 +2416,15 @@ build.
 ### Tuning discipline
 
 `--dump` writes every verdict considered, accepted or not, as CSV. Fit
-thresholds against that offline instead of re-running the tool per guess. The
+thresholds against that offline instead of re-running the tool per guess. Its
+paths are the files' own bytes, quoted as CSV quotes them (they were written
+with Rust's `{:?}` until 0.19.x, which split a name holding a comma or a quote
+into two columns); its `variant` rows are every mirrored or inverted verdict
+with three aligned points, as the `direct` rows are, where they used to be the
+accepted ones only; and a propagated pair is one row, holding the last round's
+verdict, where every round used to add one — 57 of 349 rows on
+`derived/Desktop` were repeats. A `variant` pair can still appear twice, once
+from each end, because those are two verdicts. The
 cache is on by default and is what makes tuning the matching stages practical:
 on the 5,638-image corpus a cold run at the default is ~57 s and a cached one
 ~12 s (at 640, ~82 s and ~17 s), and the cache is keyed on the extraction

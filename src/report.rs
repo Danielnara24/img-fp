@@ -72,13 +72,33 @@ pub fn check_writable(path: &Path) -> Result<()> {
     if path.is_dir() {
         return Err(anyhow::anyhow!("is a directory; name a file inside it")).with_context(fail);
     }
-    if path.exists() {
-        std::fs::OpenOptions::new().write(true).open(path).with_context(fail)?;
+    // The probe file goes where the report will: through a symlink, at the
+    // file it names. Created at `path` and removed at `path`, a link to a
+    // file not yet there had its target made and the *link* deleted, so the
+    // report was later written as a plain file in the link's place and an
+    // empty file was left where the link had pointed.
+    let dest = link_target(path);
+    if dest.exists() {
+        std::fs::OpenOptions::new().write(true).open(&dest).with_context(fail)?;
     } else {
-        std::fs::File::create(path).with_context(fail)?;
-        let _ = std::fs::remove_file(path);
+        std::fs::File::create(&dest).with_context(fail)?;
+        let _ = std::fs::remove_file(&dest);
     }
     Ok(())
+}
+
+/// Where writing to `path` would land: `path` itself, or the end of the chain
+/// of symlinks it starts, however far that is from existing.
+fn link_target(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf();
+    // The kernel's own limit on a chain, so a loop ends where `open` would.
+    for _ in 0..40 {
+        match std::fs::read_link(&p) {
+            Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
+            Err(_) => break,
+        }
+    }
+    p
 }
 
 /// A path's bytes, when they are not UTF-8 and so cannot be a JSON string.
@@ -478,11 +498,18 @@ fn write_csv(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
 /// with its quotes doubled — RFC 4180's rule, which is what every spreadsheet
 /// reads. Only a path can need it, and a path is written as its own bytes.
 fn csv_row(w: &mut dyn Write, fields: &[&[u8]]) -> std::io::Result<()> {
+    csv_row_with(w, fields, b';')
+}
+
+/// One CSV row with `sep` between the fields: a field holding the separator,
+/// a quote or a line break is quoted, its quotes doubled, and every field is
+/// written as its own bytes. `--dump` writes with commas.
+pub fn csv_row_with(w: &mut dyn Write, fields: &[&[u8]], sep: u8) -> std::io::Result<()> {
     for (k, f) in fields.iter().enumerate() {
         if k > 0 {
-            w.write_all(b";")?;
+            w.write_all(&[sep])?;
         }
-        if f.iter().any(|b| matches!(b, b';' | b'"' | b'\n' | b'\r')) {
+        if f.iter().any(|&b| b == sep || matches!(b, b'"' | b'\n' | b'\r')) {
             w.write_all(b"\"")?;
             for piece in f.split_inclusive(|&b| b == b'"') {
                 w.write_all(piece)?;
@@ -681,5 +708,22 @@ mod tests {
         let mut buf = Vec::new();
         csv_row(&mut buf, &[b"a\"b;c", b"plain"]).unwrap();
         assert_eq!(buf, b"\"a\"\"b;c\";plain\n");
+    }
+
+    /// Checking that `-o` can be written leaves a symlink a symlink, and
+    /// leaves nothing behind where it points.
+    #[test]
+    fn the_output_probe_writes_through_a_link_and_leaves_it_alone() {
+        let dir = std::env::temp_dir().join(format!("img-fp-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("out.json");
+        std::os::unix::fs::symlink("target.json", &link).unwrap();
+        check_writable(&link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(!dir.join("target.json").exists());
+        let deep = dir.join("deep.json");
+        std::os::unix::fs::symlink(dir.join("missing/x.json"), &deep).unwrap();
+        assert!(check_writable(&deep).is_err(), "a link into a folder that is not there cannot be written");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
