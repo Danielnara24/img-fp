@@ -357,6 +357,16 @@ The parts that are easy to get wrong:
   rate is seven points of F1 for six percent of the clock, and nothing else in
   the tool is close.
 
+  **A round after the first proposes again only in components that gained a
+  pair.** One that gained nothing has the same edges, tree and poses, so it
+  would propose the same hypotheses and get the same answers; components never
+  merge in propagation, since a composed pair joins two files already in one.
+  Pair-for-pair and group-for-group identical on IMGS; three alternating cached
+  pairs, cooled: `pixel_check:prop` 3.72 / 3.74 / 3.72 -> 3.30 / 3.34 / 3.45
+  CPU-s, the run 49.7 / 49.7 / 50.0 -> 49.0 / 48.8 / 49.0. Small, because five
+  rounds run on this corpus and most families gain something in each of the
+  first two.
+
   **Which is why `--no-propagate` is gone.** "Less time for less recall" is a
   legitimate thing to want, and this was the worst available way to buy it —
   not a worse point on the speed/accuracy frontier but nowhere near it, because
@@ -2705,6 +2715,11 @@ colour `decode::preview`, which only the window calls).
 - **"Theme parser error" warnings from GTK are dropped** (`quiet_theme_errors`):
   they are about the user's own `gtk.css`, printed on every start, and
   nothing here can act on them. Every other log message passes through.
+- **The window's copy of the report is written before `-o`'s**, and the
+  per-file facts both state are read once. A `-o` that failed used to end the
+  run first, so a finished scan came back as a failed one with nothing to
+  show; reading the facts once takes `main:output` from 0.30 to 0.27 s on a
+  cached IMGS scan with `-o`, identical reports either way.
 - **Released beside the CLI** by `release.yml`: the CLI is built first and
   without the feature, the window after it, and the DT_NEEDED check holds the
   CLI to no GTK. The worker is smoke-tested headless on an empty folder.
@@ -2949,6 +2964,17 @@ used to run over the whole corpus after the analysis runs on each worker as it
 finishes an image. Measured on `derived/Desktop`, interrupted twice and then
 finished, the pairs and groups are identical to a run that was never
 interrupted, and the resumed file is the same size to the byte.
+
+**`image` is built with its decoders only** (`Cargo.toml`). Its default set
+includes `avif`, which is the ravif/rav1e AV1 *encoder*; nothing here encodes,
+AVIF is read by libheif, and fat LTO was already dropping it from the binary,
+so the binary is the same size either way. What it cost was the build: two
+cooled clean `--release` builds of each, alternated, 519 / 522 CPU-s and 141 /
+144 s with it against 425 / 416 CPU-s and 132 / 128 s without, and 161 crates
+compiled against 124. Every format IMGS holds, plus BMP, GIF, PNM, TGA, TIFF,
+WebP and QOI, decodes to the same `--dump` bytes. (DDS decodes in neither:
+`image` 0.25 has no DDS decoder behind its `dds` feature, so `.dds` in the
+default extension list is refused as TGA's used to be.)
 
 **Two venvs.** `vendor/venv` is the general one. `vendor/venv-imagededup` has
 torch, so **SSCD and imagededup must run under it**; it also now has

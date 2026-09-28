@@ -182,8 +182,12 @@ pub struct Output {
 ///
 /// A reader that goes away early — `img-fp DIR | head` — is how a pipeline
 /// ends, not a failed run, so a broken pipe on stdout is not an error.
-pub fn write(target: &Target, out: &Output, files: &[PathBuf]) -> Result<()> {
-    let facts = facts(out, files);
+///
+/// The files' facts are read by the caller (`read_facts`), so that a run
+/// writing two reports — the window's copy and a `-o` — reads each header
+/// once, not once a report.
+pub fn write_with(target: &Target, out: &Output, files: &[PathBuf], facts: &FileFacts) -> Result<()> {
+    let facts = &facts.0;
     let body = |w: &mut dyn Write| -> std::io::Result<()> {
         match target.format {
             Format::Json => write_json(w, out, files, &facts),
@@ -274,6 +278,14 @@ fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMa
 struct Facts {
     dims: Option<(u32, u32)>,
     bytes: Option<u64>,
+}
+
+/// What `facts` read, for `write_with`.
+pub struct FileFacts(HashMap<usize, Facts>);
+
+/// Read the facts every report states about its grouped files.
+pub fn read_facts(out: &Output, files: &[PathBuf]) -> FileFacts {
+    FileFacts(facts(out, files))
 }
 
 fn facts(out: &Output, files: &[PathBuf]) -> HashMap<usize, Facts> {

@@ -22,7 +22,13 @@ clap_complete = "4.6"
 clap_mangen = "0.3"
 flate2 = "1.1.10"
 indicatif = "0.17"
-image = "0.25"
+# The decoders and nothing else. The default set adds `avif`, which is the
+# ravif/rav1e AV1 *encoder* and some sixty crates with it, and nothing here
+# encodes; AVIF is decoded by libheif. `rayon` is kept because it is how the
+# EXR decoder runs, so pixels stay what they were.
+image = { version = "0.25", default-features = false, features = [
+    "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp", "rayon",
+] }
 # The decoder `image` itself uses for PNG, asked directly so that a PNG can be
 # read a row at a time into the reduction; see `decode_png_rows`. Kept at the
 # version `image` resolves to, so there is one copy of it in the build.

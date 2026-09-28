@@ -1552,8 +1552,16 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // overlap floor; a dump wants every hypothesis the round considered.
     let prop_min_ov = if dumping { policy.propagated.min_frame_overlap.min(0.2) } else { policy.propagated.min_frame_overlap };
     let mut pool: Vec<Edge> = all.clone();
+    // Which files' components a round has to propose again: all of them in
+    // the first round, and after that only those holding a pair the round
+    // before accepted. A component that gained nothing has the same edges, so
+    // the same tree and the same poses, and proposes exactly the hypotheses it
+    // proposed last time — the accepted ones now known, the rest rejected
+    // again. Components never merge here, since a composed pair joins two
+    // files already in one.
+    let mut dirty: Option<Vec<bool>> = None;
     for round in 0..PROPAGATE_MAX_ROUNDS {
-        let (round_all, too_large) = timed!(21, propagate(&items, &pool, n, prop_min_ov));
+        let (round_all, too_large) = timed!(21, propagate(&items, &pool, n, prop_min_ov, dirty.as_deref()));
         // Said once, and on the console: pairs inside such a component rest on
         // direct matches alone, and propagation is most of the tool's recall.
         if round == 0 && !too_large.is_empty() {
@@ -1586,6 +1594,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         } else {
             drop(round_all);
         }
+        let mut next = vec![false; n];
+        for e in fresh.iter() {
+            next[e.0] = true;
+            next[e.1] = true;
+        }
+        dirty = Some(next);
         propagated.extend(fresh.iter().cloned());
         pool.extend(fresh);
         stage!(t_start, "  propagation round {}: +{} pairs", round + 1, propagated.len() - before);
@@ -1804,19 +1818,26 @@ fn run_config(args: &Args) -> serde_json::Value {
 ///
 /// Under the window, stdout is the progress channel and the report goes there
 /// only if one was asked for by name.
+///
+/// The window's copy is written first. It is what the window reads to show
+/// the scan at all, and a `-o` that failed — a disk full, a folder removed
+/// mid-scan — used to end the run before it, so a finished scan showed as a
+/// failed one with nothing to look at. The files' facts are read once for
+/// both.
 fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf]) -> Result<Option<PathBuf>> {
     let target = report::Target::of(args.output.as_deref(), args.format);
     let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
+    let facts = report::read_facts(out, files);
+    if let Some(path) = gui {
+        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json };
+        report::write_with(&target, out, files, &facts)?;
+    }
     let mut went = None;
     if asked {
-        report::write(&target, out, files)?;
+        report::write_with(&target, out, files, &facts)?;
         if let report::Sink::File(path) = &target.sink {
             went = Some(path.clone());
         }
-    }
-    if let Some(path) = gui {
-        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json };
-        report::write(&target, out, files)?;
     }
     Ok(went)
 }
@@ -1991,7 +2012,16 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
 /// Also returns the sizes of the components skipped for being larger than
 /// `PROPAGATE_MAX_COMPONENT`, so that the run can say so.
 #[allow(clippy::type_complexity)]
-fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n: usize, min_ov: f32) -> (Vec<(usize, usize, Affine, bool, Verdict)>, Vec<usize>) {
+///
+/// `dirty`, when given, limits the work to the components holding a file it
+/// marks; see the round loop in `run`.
+fn propagate(
+    items: &[Item],
+    edges: &[(usize, usize, Affine, bool, Verdict)],
+    n: usize,
+    min_ov: f32,
+    dirty: Option<&[bool]>,
+) -> (Vec<(usize, usize, Affine, bool, Verdict)>, Vec<usize>) {
     let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); n];
     for (a, b, m, inv, v) in edges.iter() {
         adj[*a].push((*b, *m, *inv, v.n_in));
@@ -2016,6 +2046,7 @@ fn propagate(items: &[Item], edges: &[(usize, usize, Affine, bool, Verdict)], n:
     let comps: Vec<Vec<usize>> = comps
         .into_values()
         .filter(|c| c.len() > 2 && c.len() <= PROPAGATE_MAX_COMPONENT)
+        .filter(|c| dirty.is_none_or(|d| c.iter().any(|&i| d[i])))
         .map(|mut c| {
             c.sort_unstable();
             c
@@ -2290,10 +2321,10 @@ mod tests {
         let star = |k: usize| (1..k).map(|b| (0, b, id, false, Verdict::default())).collect::<Vec<_>>();
         let n = PROPAGATE_MAX_COMPONENT + 1;
         let items: Vec<Item> = (0..n).map(|_| Item::default()).collect();
-        let (found, too_large) = propagate(&items, &star(n), n, 0.85);
+        let (found, too_large) = propagate(&items, &star(n), n, 0.85, None);
         assert!(found.is_empty());
         assert_eq!(too_large, vec![n]);
-        let (_, too_large) = propagate(&items, &star(3), n, 0.85);
+        let (_, too_large) = propagate(&items, &star(3), n, 0.85, None);
         assert!(too_large.is_empty());
     }
 
