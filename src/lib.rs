@@ -1008,14 +1008,27 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
     // second copy of a file is not a cheaper way to reach the same answer, it
-    // is the same work done twice: each group elects its first member and the
-    // rest are copied from it. Those groups are already claimed as duplicates
-    // in the output, so sharing one analysis between them asserts nothing the
+    // is the same work done twice: each group elects one member — one the
+    // cache already knows, if any does, and otherwise its first — and the rest
+    // are copied from it. Those groups are already claimed as duplicates in
+    // the output, so sharing one analysis between them asserts nothing the
     // run does not assert anyway.
+    //
+    // The same goes for everything after the analysis; see `with_copies`.
     let mut twin_of: Vec<usize> = (0..n).collect();
     for g in exact.iter() {
-        for &i in g[1..].iter() {
-            twin_of[i] = g[0];
+        let original = g.iter().copied().find(|&i| mine[i].is_some()).unwrap_or(g[0]);
+        for &i in g.iter() {
+            twin_of[i] = original;
+        }
+    }
+    // A copy keeps no record of its own: it is answered by its original on
+    // every run, cached or not, so a record under its name is the same
+    // analysis stored twice and never read. One written by an earlier build
+    // is left out of the file at the next compaction.
+    for i in 0..n {
+        if twin_of[i] != i {
+            span_of[i] = None;
         }
     }
     // What each file still to be analysed is expected to cost, for the bar
@@ -1025,7 +1038,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let todo = (0..n).filter(|&i| twin_of[i] == i && mine[i].is_none()).count();
     // Whether the save below will have anything to write, as far as it can be
     // told yet: something new to describe, or a record that no longer fitted.
-    let rewrite = cache_path.is_some() && (superseded > 0 || same_key != in_cache || args.prune_cache);
+    let rewrite = cache_path.is_some()
+        && (superseded > 0 || same_key != in_cache || args.prune_cache || (0..n).any(|i| twin_of[i] != i && mine[i].is_some()));
     progress.forecast(|f| {
         f.to_describe = Some(todo);
         f.cache_write = rewrite;
@@ -1122,16 +1136,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             err: items[r].err.clone(),
         };
     }
-    // A copy has a record of its own, under its own path, and its original's
-    // analysis is only now in `items`.
-    let late: Vec<(usize, cache::Span)> = (0..n)
-        .into_par_iter()
-        .filter(|&i| twin_of[i] != i && span_of[i].is_none())
-        .filter_map(|i| Some((i, keep(i, cache::key_of(&files[i]), &items[i])?)))
-        .collect();
-    for (i, s) in late {
-        span_of[i] = Some(s);
-    }
     // `--prune-cache` keeps only what this scan found, and gives that up when
     // the scan is not a complete account of what is out there: a root that
     // would not resolve or a directory that would not open leaves files
@@ -1145,8 +1149,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             false
         });
     progress.forecast(|f| {
-        f.images = Some(items.iter().filter(|i| i.ok).count());
-        f.descriptors = Some(items.iter().map(|i| i.feats.len()).sum());
+        // What the matching stages will be handed: originals, not copies.
+        f.images = Some((0..n).filter(|&i| items[i].ok && twin_of[i] == i).count());
+        f.descriptors = Some((0..n).filter(|&i| twin_of[i] == i).map(|i| items[i].feats.len()).sum());
     });
     if let (Some(p), Some(store)) = (&cache_path, store.as_mut()) {
         progress.begin(Stage::CacheWrite);
@@ -1250,17 +1255,30 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
 
-    // Vocabulary from the corpus itself, at a depth the corpus chooses.
+    // Everything from here to the assembly works on distinct contents: each
+    // set of byte-identical files is its original, and a copy is given its
+    // original's pairs at the end (`with_copies`). A copy used to be indexed,
+    // queried and verified like any other file — against its own original,
+    // among others, to find the identity the exact pass had already found —
+    // and it took a place in every candidate list its original was in.
+    let matched: Vec<bool> = (0..n).map(|i| items[i].ok && twin_of[i] == i).collect();
+    let n_match = matched.iter().filter(|&&m| m).count();
+    let n_desc_match: usize = (0..n).filter(|&i| matched[i]).map(|i| items[i].feats.len()).sum();
+
+    // Vocabulary from the corpus itself, at a depth the corpus chooses. A
+    // copy's descriptors are its original's, so counting them would weigh
+    // that picture twice in the sample and size the tree for words that are
+    // not there.
     say!("Analysis complete. Matching {n_ok} images...");
-    let vp = index::VocabParams::for_corpus(n_desc);
-    progress.forecast(|f| f.vocab_sample = Some(vp.sample.min(n_desc)));
+    let vp = index::VocabParams::for_corpus(n_desc_match);
+    progress.forecast(|f| f.vocab_sample = Some(vp.sample.min(n_desc_match)));
     progress.begin(Stage::Vocabulary);
-    let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc) * DESC_LEN);
+    let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc_match) * DESC_LEN);
     timed!(34, {
         // Even sampling across images, so one feature-rich image cannot own
         // the vocabulary.
-        let per = (vp.sample / n_ok.max(1)).max(8);
-        for it in items.iter() {
+        let per = (vp.sample / n_match.max(1)).max(8);
+        for it in (0..n).filter(|&i| matched[i]).map(|i| &items[i]) {
             let take = it.feats.len().min(per);
             let step = (it.feats.len() / take.max(1)).max(1);
             for i in (0..it.feats.len()).step_by(step).take(take) {
@@ -1270,17 +1288,21 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     });
     let vocab = timed!(12, Vocabulary::build(&pool, &vp));
     drop(pool);
-    stage!(t_start, "vocabulary: {} live words of {} from {} samples", vocab.n_live_words(), vocab.n_words(), vp.sample.min(n_desc));
+    stage!(t_start, "vocabulary: {} live words of {} from {} samples", vocab.n_live_words(), vocab.n_words(), vp.sample.min(n_desc_match));
 
     // Quantise. The word lists are built straight into the vector the inverted
     // file and every later stage read from: holding a second copy per image
     // costs as much again as the lists themselves.
     progress.forecast(|f| f.live_words = Some(vocab.n_live_words()));
-    let bar = progress.begin_counted(Stage::Quantise, n_desc as u64, n, "images");
-    let lists: Vec<WordList> = items
-        .par_iter()
-        .map(|it| {
-            let wl = if it.ok { timed!(11, quantise(&vocab, &it.feats)) } else { WordList::default() };
+    let bar = progress.begin_counted(Stage::Quantise, n_desc_match as u64, n_match, "images");
+    let lists: Vec<WordList> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            if !matched[i] {
+                return WordList::default();
+            }
+            let it = &items[i];
+            let wl = timed!(11, quantise(&vocab, &it.feats));
             bar.add(it.feats.len() as u64);
             wl
         })
@@ -1289,7 +1311,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
 
     // Inverted file. A word present in a fifth of the corpus says nothing.
     progress.begin(Stage::InvertedFile);
-    let max_posting = (n_ok / 5).max(32);
+    let max_posting = (n_match / 5).max(32);
     let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words(), max_posting));
     stage!(t_start, "inverted file");
 
@@ -1303,11 +1325,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // the crop finds the photograph much more readily than the reverse — so
     // both directions genuinely have to be asked.
     type Edge = (usize, usize, Affine, bool, Verdict);
-    let ok_desc: u64 = items.iter().filter(|it| it.ok).map(|it| it.feats.len() as u64).sum();
-    let bar = progress.begin_counted(Stage::Candidates, ok_desc, n_ok, "images");
+    let bar = progress.begin_counted(Stage::Candidates, n_desc_match as u64, n_match, "images");
     let mut cand_pairs: Vec<(u32, u32)> = (0..n)
         .into_par_iter()
-        .filter(|&i| items[i].ok)
+        .filter(|&i| matched[i])
         .map_init(
             || (vec![0f32; n], Vec::new()),
             |(acc, scored), i| {
@@ -1320,7 +1341,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                     // of 32 or fewer (see `query_touched`) — and on a folder
                     // of two it is every word a duplicate shares. Dropping it
                     // there found no pair at all; the second look never did.
-                    scored.retain(|&(j, _)| items[j as usize].ok);
+                    scored.retain(|&(j, _)| matched[j as usize]);
                     rank_best(scored, args.candidates);
                     scored
                         .iter()
@@ -1393,11 +1414,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         degree[a] += 1;
         degree[b] += 1;
     }
-    for g in exact.iter() {
-        for &i in g {
-            degree[i] += g.len() as u32 - 1;
-        }
-    }
+    // A byte-identical copy is not counted. It is the same picture, so it says
+    // nothing about whether the picture's other versions were found — and
+    // counted, it kept every file that has a copy from ever being asked
+    // again: in a library where each photograph is there twice over, no file
+    // was, and every mirrored and inverted version in it went unfound.
     // Ask again, mirrored and inverted, for images that no *pair* of matches
     // has anchored yet. A file with one match is not safely found: that match
     // may be the wrong one, and a mirrored query is cheap next to being wrong.
@@ -1406,7 +1427,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // place a count appears in either rule. Trying the tighter reading, "no
     // matches at all", costs a seed apiece on three of the held-out mirror
     // transforms.
-    let lonely: Vec<usize> = (0..n).filter(|&i| items[i].ok && degree[i] < 2).collect();
+    let lonely: Vec<usize> = (0..n).filter(|&i| matched[i] && degree[i] < 2).collect();
     let variants = [
         Variant { mirror: true, invert: false },
         Variant { mirror: false, invert: true },
@@ -1685,6 +1706,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // and it is not an all-pairs assertion either: two members that both
     // matched the representative were never compared with each other. The
     // argument and the numbers are in `group.rs`.
+    //
+    // Every pair so far is between originals. A copy is the same bytes as its
+    // original, so each pair is now stated for each copy of either file, with
+    // the verdict its original's pair was found on.
+    let (all, propagated, corroborated) = (with_copies(&all, &twin_of), with_copies(&propagated, &twin_of), with_copies(&corroborated, &twin_of));
     let mut out_pairs: Vec<OutPair> = Vec::new();
     let mut graph: Vec<(usize, usize)> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
@@ -1901,6 +1927,45 @@ fn stdout_path() -> &'static Path {
 
 fn round3(v: f32) -> f32 {
     (v * 1000.0).round() / 1000.0
+}
+
+/// `edges`, which run between originals, stated for every copy of either end
+/// as well: an edge from `a` to `b` becomes one from each file sharing `a`'s
+/// bytes to each file sharing `b`'s.
+///
+/// The verdict is the originals', which is the verdict the copies would have
+/// been given, since their analysis is the originals' own. Every edge still
+/// runs from the lower index to the higher, so a copy on the other side of
+/// the other end takes the verdict reversed — its scale is then the scale
+/// between the files it names.
+fn with_copies(edges: &[(usize, usize, Affine, bool, Verdict)], twin_of: &[usize]) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+    let mut copies: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &o) in twin_of.iter().enumerate() {
+        if o != i {
+            copies.entry(o).or_insert_with(|| vec![o]).push(i);
+        }
+    }
+    if copies.is_empty() {
+        return edges.to_vec();
+    }
+    let mut out = Vec::with_capacity(edges.len());
+    for (a, b, m, inv, v) in edges.iter() {
+        let one = |x: &usize| std::slice::from_ref(x).to_vec();
+        let (sa, sb) = (copies.get(a).cloned().unwrap_or_else(|| one(a)), copies.get(b).cloned().unwrap_or_else(|| one(b)));
+        for &x in sa.iter() {
+            for &y in sb.iter() {
+                if (x < y) == (a < b) {
+                    out.push((x, y, *m, *inv, v.clone()));
+                } else {
+                    match v.reversed() {
+                        Some(r) => out.push((y, x, r.m, *inv, r)),
+                        None => out.push((x, y, *m, *inv, v.clone())),
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The first edge for each pair of files, in the order given.
@@ -2318,6 +2383,33 @@ mod tests {
         let kept = drop_weak_bridges(unique, 6);
         assert!(!kept.iter().any(|e| (e.0, e.1) == (2, 3)), "the lone link is dropped");
         assert_eq!(kept.len(), 6);
+    }
+
+    /// A pair between originals is stated for every copy of either, each
+    /// running from the lower index to the higher with the verdict turned to
+    /// match — and a run with no copies is left exactly as it was.
+    #[test]
+    fn a_pair_is_stated_for_every_copy_of_either_file() {
+        let m: Affine = [2.0, 0.0, 5.0, 0.0, 2.0, 7.0];
+        let v = Verdict { m, n_in: 30, ov_a: 0.25, ov_b: 1.0, scale: 2.0, ..Default::default() };
+        let edges = vec![(1usize, 3usize, m, false, v)];
+        // 0 and 4 are copies of 1; 2 is a copy of 3.
+        let twin_of = vec![1, 1, 3, 3, 1];
+        let out = with_copies(&edges, &twin_of);
+        let mut names: Vec<(usize, usize)> = out.iter().map(|e| (e.0, e.1)).collect();
+        names.sort_unstable();
+        assert_eq!(names, [(0, 2), (0, 3), (1, 2), (1, 3), (2, 4), (3, 4)]);
+        for (a, b, em, _, ev) in out.iter() {
+            assert!(a < b);
+            // Files sharing 1's bytes are the small side: scale 2 from them.
+            let from_one = twin_of[*a] == 1;
+            assert_eq!(ev.scale, if from_one { 2.0 } else { 0.5 }, "{a}-{b}");
+            assert_eq!(*em, ev.m);
+            assert_eq!((ev.ov_a, ev.ov_b), if from_one { (0.25, 1.0) } else { (1.0, 0.25) });
+        }
+        let alone = with_copies(&edges, &[0, 1, 2, 3]);
+        assert_eq!(alone.len(), 1);
+        assert_eq!((alone[0].0, alone[0].1), (1, 3));
     }
 
     /// A component propagation cannot afford is named, not passed over in

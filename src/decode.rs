@@ -373,6 +373,13 @@ pub struct Probe {
 /// reads the whole file into memory before it will say how large the picture
 /// is — and a probe that reads every byte twice is not a probe. Walking the
 /// markers to the frame header touches a few kilobytes.
+///
+/// **The size is the picture's as it is shown**, with an EXIF orientation
+/// that turns it on its side already applied — which is what `decode` does to
+/// the pixels, and what a person looking at the file sees. It used to be the
+/// stored size, so a portrait photograph from a phone, stored landscape with
+/// an orientation of 6, was reported 4032x3024 beside an upright copy of
+/// itself at 3024x4032, in every report and on the window's cards.
 pub fn probe(path: &Path) -> Option<Probe> {
     use std::io::{BufRead, BufReader};
     let mut r = BufReader::with_capacity(16 << 10, std::fs::File::open(path).ok()?);
@@ -384,9 +391,10 @@ pub fn probe(path: &Path) -> Option<Probe> {
             // The signature, then IHDR's length and type, then its width and
             // height; the chunk is required to come first.
             let be = |i: usize| head.get(i..i + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
-            (be(16)?, be(20)?)
+            let (w, h) = (be(16)?, be(20)?);
+            if png_turned(&mut r) { (h, w) } else { (w, h) }
         }
-        Kind::Image(fmt) => image::ImageReader::with_format(r, fmt).into_dimensions().ok()?,
+        Kind::Image(fmt) => decoder_size(image::ImageReader::with_format(r, fmt))?,
         Kind::Jxl => jxl_size(&mut r)?,
         Kind::Heif => {
             let ctx = libheif_rs::HeifContext::read_from_file(path.to_str()?).ok()?;
@@ -399,14 +407,96 @@ pub fn probe(path: &Path) -> Option<Probe> {
                 // Formats with no signature at all; see `unmarked_format`.
                 rd.set_format(ImageFormat::from_path(path).ok().filter(|f| *f == ImageFormat::Tga)?);
             }
-            rd.into_dimensions().ok()?
+            decoder_size(rd)?
         }
     };
     Some(Probe { kind, w, h })
 }
 
+/// Whether an orientation turns the picture on its side, so that its shown
+/// width is its stored height.
+fn turns(o: image::metadata::Orientation) -> bool {
+    use image::metadata::Orientation::*;
+    matches!(o, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH)
+}
+
+/// A picture's shown size from the `image` crate's own decoder, which reads
+/// the header and whatever metadata comes before the pixels, and nothing else.
+fn decoder_size<R: std::io::BufRead + std::io::Seek>(rd: image::ImageReader<R>) -> Option<(u32, u32)> {
+    let mut d = rd.into_decoder().ok()?;
+    let (w, h) = d.dimensions();
+    Some(if d.orientation().is_ok_and(turns) { (h, w) } else { (w, h) })
+}
+
+/// The EXIF orientation tag (0x0112) from a TIFF structure: IFD0's entry, as
+/// the `image` crate reads it.
+fn exif_orientation(t: &[u8]) -> Option<u16> {
+    let le = match t.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16_at = |i: usize| -> Option<u16> {
+        let b: [u8; 2] = t.get(i..i.checked_add(2)?)?.try_into().ok()?;
+        Some(if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+    };
+    let u32_at = |i: usize| -> Option<u32> {
+        let b: [u8; 4] = t.get(i..i.checked_add(4)?)?.try_into().ok()?;
+        Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    };
+    let ifd = u32_at(4)? as usize;
+    for k in 0..u16_at(ifd)? as usize {
+        let e = ifd.checked_add(2 + 12 * k)?;
+        if u16_at(e)? == 0x0112 {
+            return u16_at(e + 8);
+        }
+    }
+    None
+}
+
+/// Whether an EXIF block turns the picture on its side: orientations 5 to 8.
+fn exif_turns(tiff: &[u8]) -> bool {
+    exif_orientation(tiff).and_then(|o| image::metadata::Orientation::from_exif(o as u8)).is_some_and(turns)
+}
+
+/// Whether a PNG's `eXIf` chunk turns it, read from the chunks between IHDR
+/// and the first IDAT — the ones the decoder reads before the pixels, and so
+/// the only ones `decode` applies.
+fn png_turned(r: &mut std::io::BufReader<std::fs::File>) -> bool {
+    use std::io::Read;
+    // The signature and IHDR, which `probe` has already read.
+    if r.seek_relative(8 + 8 + 13 + 4).is_err() {
+        return false;
+    }
+    loop {
+        let mut head = [0u8; 8];
+        if r.read_exact(&mut head).is_err() {
+            return false;
+        }
+        let len = u32::from_be_bytes(head[..4].try_into().unwrap()) as usize;
+        match &head[4..] {
+            b"IDAT" | b"IEND" => return false,
+            b"eXIf" => {
+                // A chunk is at most 2^31 bytes by the format; an EXIF block
+                // past a megabyte is not one a probe needs to read.
+                if len > 1 << 20 {
+                    return false;
+                }
+                let mut data = vec![0u8; len];
+                return r.read_exact(&mut data).is_ok() && exif_turns(&data);
+            }
+            _ => {
+                if r.seek_relative(len as i64 + 4).is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 /// The frame size from a JPEG's start-of-frame segment, skipping every
-/// segment before it by its length.
+/// segment before it by its length — and turned, when an EXIF segment ahead
+/// of the frame says the picture is shown on its side.
 fn jpeg_size(r: &mut std::io::BufReader<std::fs::File>) -> Option<(u32, u32)> {
     fn byte(r: &mut impl std::io::Read) -> Option<u8> {
         let mut b = [0u8];
@@ -415,6 +505,7 @@ fn jpeg_size(r: &mut std::io::BufReader<std::fs::File>) -> Option<(u32, u32)> {
     let be16 = |r: &mut std::io::BufReader<std::fs::File>| Some(u16::from_be_bytes([byte(r)?, byte(r)?]));
     // SOI, which `sniff` has already seen.
     be16(r)?;
+    let mut turned = None;
     loop {
         if byte(r)? != 0xFF {
             return None;
@@ -432,12 +523,21 @@ fn jpeg_size(r: &mut std::io::BufReader<std::fs::File>) -> Option<(u32, u32)> {
         // Every SOFn: C0-CF but for DHT (C4), JPG (C8) and DAC (CC).
         if (0xC0..=0xCF).contains(&m) && !matches!(m, 0xC4 | 0xC8 | 0xCC) {
             let _precision = byte(r)?;
-            let h = be16(r)?;
-            let w = be16(r)?;
-            return Some((w as u32, h as u32));
+            let (h, w) = (be16(r)? as u32, be16(r)? as u32);
+            return Some(if turned == Some(true) { (h, w) } else { (w, h) });
         }
         if len < 2 {
             return None;
+        }
+        // The first EXIF segment is the one the decoder reads its orientation
+        // from; a later one is ignored there, and so here.
+        if m == 0xE1 && turned.is_none() {
+            let mut seg = vec![0u8; len as usize - 2];
+            std::io::Read::read_exact(r, &mut seg).ok()?;
+            if let Some(tiff) = seg.strip_prefix(b"Exif\0\0") {
+                turned = Some(exif_turns(tiff));
+            }
+            continue;
         }
         r.seek_relative(len - 2).ok()?;
     }
@@ -1518,6 +1618,66 @@ mod bench {
             .write_to(&mut Cursor::new(&mut rgba_icon), ImageFormat::Ico)
             .unwrap();
         assert!(decode_image_crate(&rgba_icon, ImageFormat::Ico, 384).is_ok(), "a valid icon takes the crate's own path");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A picture stored on its side with an EXIF orientation is probed at the
+    /// size it is shown at, which is the size `decode` turns it to — for a
+    /// JPEG's APP1 segment and a PNG's `eXIf` chunk alike, in either byte
+    /// order. Orientations that do not turn it leave the size alone.
+    #[test]
+    fn a_turned_picture_is_probed_the_way_it_is_shown() {
+        fn tiff(o: u16, big: bool) -> Vec<u8> {
+            let (u16b, u32b): (fn(u16) -> [u8; 2], fn(u32) -> [u8; 4]) =
+                if big { (u16::to_be_bytes, u32::to_be_bytes) } else { (u16::to_le_bytes, u32::to_le_bytes) };
+            let mut t = if big { b"MM".to_vec() } else { b"II".to_vec() };
+            t.extend(u16b(42));
+            t.extend(u32b(8));
+            t.extend(u16b(1));
+            t.extend(u16b(0x0112));
+            t.extend(u16b(3));
+            t.extend(u32b(1));
+            t.extend(u16b(o));
+            t.extend([0, 0]);
+            t.extend(u32b(0));
+            t
+        }
+        let pic = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(48, 32, |x, y| image::Rgb([(x * 5) as u8, (y * 7) as u8, 90])));
+        let dir = std::env::temp_dir().join(format!("img-fp-orient-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (o, shown) in [(1u16, (48, 32)), (3, (48, 32)), (6, (32, 48)), (8, (32, 48)), (5, (32, 48))] {
+            let mut jpg = Vec::new();
+            pic.write_to(&mut Cursor::new(&mut jpg), ImageFormat::Jpeg).unwrap();
+            let seg = [b"Exif\0\0".to_vec(), tiff(o, true)].concat();
+            let mut app1 = vec![0xFF, 0xE1];
+            app1.extend(((seg.len() + 2) as u16).to_be_bytes());
+            app1.extend(seg);
+            jpg.splice(2..2, app1);
+            let path = dir.join(format!("o{o}.jpg"));
+            std::fs::write(&path, &jpg).unwrap();
+            let p = probe(&path).unwrap();
+            assert_eq!((p.w, p.h), shown, "jpeg, orientation {o}");
+            let d = decode(&path, 384).unwrap();
+            assert_eq!((d.work.w as u32, d.work.h as u32), shown, "and decode agrees, orientation {o}");
+
+            let mut png = Vec::new();
+            pic.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+            let data = tiff(o, false);
+            let mut crc = flate2::Crc::new();
+            crc.update(b"eXIf");
+            crc.update(&data);
+            let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+            chunk.extend(b"eXIf");
+            chunk.extend(&data);
+            chunk.extend(crc.sum().to_be_bytes());
+            png.splice(33..33, chunk);
+            let path = dir.join(format!("o{o}.png"));
+            std::fs::write(&path, &png).unwrap();
+            let p = probe(&path).unwrap();
+            assert_eq!((p.w, p.h), shown, "png, orientation {o}");
+            let d = decode(&path, 384).unwrap();
+            assert_eq!((d.work.w as u32, d.work.h as u32), shown, "and decode agrees, orientation {o}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -520,6 +520,30 @@ The parts that are easy to get wrong:
   both clean and 12 merges two families, so the shipped value sits a factor of
   four from the cliff. Do not raise it because 6 scores a hair better.
 
+- **Byte-identical copies are matched through their original, not beside
+  it.** Each exact group elects one member (one the cache already holds, if
+  any) and everything from the vocabulary to corroboration runs over the
+  originals alone; `with_copies` then states every pair for each copy of
+  either file, with its original's verdict. A copy used to be indexed,
+  queried and verified like any other file: against its own original, among
+  others, and taking a place in every candidate list its original was in. Two
+  more places counted copies and no longer do. `InvertedFile::build` measured
+  idf over every file rather than the files with words, and the second look's
+  degree counted a file's copies as matches, so in a library holding every
+  photograph twice over no file was ever re-asked mirrored or inverted.
+  Measured: on `derived/Desktop` copied three times over (1,908 files) the
+  output is **exactly the single-copy output tripled**, 24,435 pairs with none
+  missing and none extra, where `HEAD` was 3,072 short, at **9.6 CPU-s against
+  16.3**, peak 87 MB against 110, and a cache a third the size (a copy keeps
+  no record of its own). On IMGS, whose 170 copies are 3% of it, the cost is
+  level and F1 goes **0.9521 -> 0.9544**, FP 829 -> 762, cross-family 0 -> 0,
+  46 -> 50 perfect transformations; both seed halves move less than a tenth
+  of a point, one each way. That part is a changed vocabulary sample rather
+  than the copies themselves, and so is the found corpus's 3,731 -> 3,450
+  pairs: over 150k / 160k / 170k samples it reads 3,604 / 3,731 / 3,851
+  before and 3,782 / 3,450 / 3,715 after, a band of about five per cent that
+  either build lands anywhere in.
+
 ### What still misses
 
 **19,378 pairs at the default, 9,100 at `--work-size 640`** — the default's
@@ -2755,9 +2779,13 @@ colour `decode::preview`, which only the window calls).
   controls visible together for clashes. Add a label there, not inline.
 - **Nothing is pre-marked**, by the user's decision; marks are per *file*,
   since groups overlap. Trash is `gio::File::trash`, never a delete.
-- Window settings persist in `$XDG_CONFIG_HOME/img-fp/gui.json`, written
-  when a scan starts: folders, excludes and every option, except clear/prune
-  cache, which are one-off.
+- **Only paths persist** in `$XDG_CONFIG_HOME/img-fp/gui.json`, written when
+  a scan starts: folders, excludes, and the report, log and cache file names.
+  Every option opens at the command line's default. It used to save every
+  option on every scan, touched or not, which froze each default at whatever
+  it was on the user's first scan: a window from 0.17 kept asking for `.dds`
+  after 0.19 dropped it, and exited 2 on every one. The one deliberate
+  difference from the CLI is `recursive`, on by default in the window.
 - **Testing on the real display:** Cinnamon's focus-stealing prevention
   ignores `xdotool windowactivate`, and keys then go to whatever window has
   focus. Activate with `wmctrl -i -a`, and check `xdotool getactivewindow`
@@ -3088,6 +3116,16 @@ is corrupted, because the temporary file a save renames into place carries the
 process id. Two runs sharing one cache is not a case worth locking for — the
 cost of losing is one re-analysis — but two runs sharing one *temporary file*
 would be a damaged cache, which is a case worth a suffix.
+
+**Damage costs what it damaged.** A record whose body will not unpack, or
+whose shape these settings cannot produce, is left out and its image analysed
+again; the rest of the file is kept, and the next compaction drops it. A
+length that runs past the end of the file is a torn tail and is cut there, and
+damaged framing part-way through cuts the file at the last whole record and
+says so. Both used to cost more: one bad record rejected the whole file, every
+other folder's records with it, and a length damaged into a petabyte was
+handed to the allocator, which aborted the process on every run until the
+file was deleted by hand.
 
 ## Benchmarking discipline
 

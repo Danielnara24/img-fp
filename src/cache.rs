@@ -499,6 +499,15 @@ struct Tail {
     /// The file stops part-way through a record. That is what a process
     /// killed mid-append leaves, and it costs one record, not the cache.
     truncated: bool,
+    /// Records that were framed whole but will not unpack, or claim a shape no
+    /// record of these settings can have. Each costs itself: its image is
+    /// analysed again and the next compaction leaves it out.
+    damaged: usize,
+    /// Why the file stopped making sense part-way through, when it did for a
+    /// reason other than running out: a record's framing is damaged, so no
+    /// record after it can be found. The file is cut there, as a torn tail
+    /// is, and the records before it are kept.
+    broken_at: Option<String>,
 }
 
 /// The run's cache file, open for appending for as long as the run has
@@ -569,7 +578,8 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             if let Some(tail) = read_file(&f, path, want, walked, &mut out, problems) {
                 // A partial record at the end would sit in front of every
                 // record appended after it, and turn a lost record into a
-                // damaged file.
+                // damaged file. So would a record whose framing is damaged,
+                // which ends the part of the file that can be read.
                 if tail.truncated {
                     if let Err(e) = f.set_len(tail.end) {
                         problems.cache(format!("could not repair {}: {e}", path.display()));
@@ -615,8 +625,25 @@ fn read_file(
     out: &mut HashMap<PathBuf, Entry>,
     problems: &mut Problems,
 ) -> Option<Tail> {
-    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), want, walked, out) {
-        Ok(tail) => Some(tail),
+    let size = f.metadata().map_or(u64::MAX, |m| m.len());
+    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), size, want, walked, out) {
+        Ok(tail) => {
+            if let Some(why) = &tail.broken_at {
+                problems.cache(format!(
+                    "{} is damaged part-way through ({why}); the {} record(s) before the damage are kept",
+                    path.display(),
+                    tail.count
+                ));
+            }
+            if tail.damaged > 0 {
+                problems.cache(format!(
+                    "ignoring {} damaged record(s) in {}; their images are analysed again",
+                    tail.damaged,
+                    path.display()
+                ));
+            }
+            Some(tail)
+        }
         Err(Reject::Stale) => {
             out.clear();
             None
@@ -714,18 +741,33 @@ struct Head {
     w: u32,
     h: u32,
     n: usize,
-    tw: u16,
-    th: u16,
+    tw: u32,
+    th: u32,
     scale: f32,
 }
 
-/// A reader that knows where it is, and whether it ran out of file.
+/// A reader that knows where it is, how long the file is, and whether it ran
+/// out of file.
 struct Rd<R: Read> {
     r: R,
     pos: u64,
+    size: u64,
     ended: bool,
 }
 impl<R: Read> Rd<R> {
+    /// Whether `n` more bytes are in the file, asked before anything is
+    /// allocated to hold them. A length read from the file is only as good
+    /// as the file, and one damaged into a petabyte used to be handed to the
+    /// allocator, which aborts the process rather than fail — on every run,
+    /// until the cache was deleted by hand. One that runs past the end is
+    /// what a torn append leaves too, and it is treated the same way.
+    fn need(&mut self, n: u64) -> Result<()> {
+        if self.pos.checked_add(n).is_none_or(|end| end > self.size) {
+            self.ended = true;
+            bail!("cache truncated");
+        }
+        Ok(())
+    }
     fn fill(&mut self, v: &mut [u8]) -> Result<()> {
         match self.r.read_exact(v) {
             Ok(()) => {
@@ -790,23 +832,23 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     if len > MAX_PATH {
         bail!("record claims a {len}-byte path");
     }
-    let head = Head {
-        path: PathBuf::from(OsString::from_vec(r.take(len)?)),
-        key: Key { len: r.u64()?, mtime: r.i64()? },
-        w: r.u32()?,
-        h: r.u32()?,
-        n: r.u32()? as usize,
-        tw: r.u32()? as u16,
-        th: r.u32()? as u16,
-        scale: r.f32()?,
-    };
-    let packed = r.u64()? as usize;
-    let blob = r.take(packed)?;
+    r.need(len as u64)?;
+    let path = PathBuf::from(OsString::from_vec(r.take(len)?));
+    let key = Key { len: r.u64()?, mtime: r.i64()? };
+    let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
+    let (tw, th) = (r.u32()?, r.u32()?);
+    let scale = r.f32()?;
+    let packed = r.u64()?;
+    r.need(packed)?;
+    let blob = r.take(packed as usize)?;
+    // Held as read, not narrowed, so that `read_stream` can tell a thumbnail
+    // side of 65,600 from one of 64.
+    let head = Head { path, key, w, h, n, tw, th, scale };
     Ok(Some((head, blob)))
 }
 
-fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<PathBuf, Entry>) -> Result<Tail, Reject> {
-    let mut r = Rd { r, pos: 0, ended: false };
+fn read_stream<R: Read>(r: R, size: u64, want: Settings, walked: Walked, out: &mut HashMap<PathBuf, Entry>) -> Result<Tail, Reject> {
+    let mut r = Rd { r, pos: 0, size, ended: false };
     let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
     if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
         return Err(anyhow!("not a cache file").into());
@@ -820,28 +862,44 @@ fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<
     if got != want {
         return Err(Reject::Stale);
     }
-    let mut tail = Tail { end: r.pos, count: 0, truncated: false };
+    let mut tail = Tail { end: r.pos, count: 0, truncated: false, damaged: 0, broken_at: None };
     let mut batch: Vec<(Head, Vec<u8>, Span)> = Vec::with_capacity(BATCH);
     loop {
         let at = r.pos;
         match read_record(&mut r) {
             Ok(None) => break,
             Ok(Some((head, blob))) => {
-                batch.push((head, blob, Span { at, len: r.pos - at }));
                 tail.end = r.pos;
                 tail.count += 1;
+                // A record framed whole whose shape these settings cannot
+                // produce: its own bytes are damaged, and the records around
+                // it are not. It is counted, so that the run sees the file
+                // holds something to compact away, and not kept.
+                if head.n > want.features as usize || head.tw > want.thumb || head.th > want.thumb {
+                    tail.damaged += 1;
+                    continue;
+                }
+                batch.push((head, blob, Span { at, len: r.pos - at }));
                 if batch.len() == BATCH {
-                    unpack_batch(&mut batch, walked, out)?;
+                    tail.damaged += unpack_batch(&mut batch, walked, out);
                 }
             }
             Err(_) if r.ended => {
                 tail.truncated = true;
                 break;
             }
-            Err(e) => return Err(e.into()),
+            // The framing is damaged, so nothing after this point can be
+            // found. Everything before it is still good, and it used to be
+            // thrown away with the rest: the whole file was rejected and
+            // replaced, taking every other folder's records with it.
+            Err(e) => {
+                tail.truncated = true;
+                tail.broken_at = Some(e.to_string());
+                break;
+            }
         }
     }
-    unpack_batch(&mut batch, walked, out)?;
+    tail.damaged += unpack_batch(&mut batch, walked, out);
     Ok(tail)
 }
 
@@ -850,25 +908,26 @@ fn read_stream<R: Read>(r: R, want: Settings, walked: Walked, out: &mut HashMap<
 ///
 /// A later record for a path replaces an earlier one: that is a file which
 /// changed, and was described again and appended.
-fn unpack_batch(
-    batch: &mut Vec<(Head, Vec<u8>, Span)>,
-    walked: Walked,
-    out: &mut HashMap<PathBuf, Entry>,
-) -> Result<(), Reject> {
+///
+/// A record that will not unpack is left out and counted, and costs nothing
+/// but itself: its image is analysed again, as if it had never been cached.
+/// One such record used to reject the whole file — every folder the machine
+/// had scanned, for one damaged image.
+fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mut HashMap<PathBuf, Entry>) -> usize {
     let done: Vec<Result<(PathBuf, Entry)>> = batch
         .par_iter()
         .map(|(h, blob, span)| {
             if !walked(&h.path) {
                 return Ok((h.path.clone(), (h.key, None, *span)));
             }
-            let (kps, desc, px) = unpack(blob, h.n, h.tw, h.th)?;
+            let (kps, desc, px) = unpack(blob, h.n, h.tw as u16, h.th as u16)?;
             Ok((
                 h.path.clone(),
                 (
                     h.key,
                     Some(Record {
                         feats: Features { w: h.w, h: h.h, kps, desc },
-                        thumb: Thumb::new(h.tw, h.th, h.scale, px),
+                        thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px),
                     }),
                     *span,
                 ),
@@ -876,11 +935,16 @@ fn unpack_batch(
         })
         .collect();
     batch.clear();
+    let mut damaged = 0;
     for r in done {
-        let (path, rec) = r?;
-        out.insert(path, rec);
+        match r {
+            Ok((path, rec)) => {
+                out.insert(path, rec);
+            }
+            Err(_) => damaged += 1,
+        }
     }
-    Ok(())
+    damaged
 }
 
 /// What the loaded cache holds about files this run never looked at, and that
@@ -1162,6 +1226,90 @@ mod tests {
             let (got, _, bad) = reopen(&path);
             assert!(!bad && got.len() == 2);
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Where a record's packed length sits: after its path, the key, and the
+    /// six fields of its shape.
+    fn packed_len_at(s: Span, path: &str) -> u64 {
+        s.at + 8 + path.len() as u64 + 16 + 6 * 4
+    }
+
+    /// A length damaged into something the file cannot hold is a torn tail,
+    /// not an allocation: the records before it are kept and the run goes on.
+    /// It used to abort the process — "memory allocation of 1125899906842624
+    /// bytes failed" — on every run until the cache was deleted by hand.
+    #[test]
+    fn an_impossible_length_is_a_torn_tail_not_an_abort() {
+        let dir = scratch("absurd");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f, t) = analysis(4, 3);
+        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        store.append("c.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        drop(store);
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
+        drop(file);
+        let (got, store, _) = reopen(&path);
+        assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
+        assert_eq!(store.records(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at, "cut where the damage starts");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Damaged framing part-way through keeps what comes before it and says
+    /// so, rather than rejecting the whole file.
+    #[test]
+    fn damaged_framing_keeps_the_records_before_it() {
+        let dir = scratch("framing");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f, t) = analysis(4, 3);
+        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        drop(store);
+        // A path length past `MAX_PATH` but inside the file's size.
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(&((MAX_PATH as u64) + 1).to_le_bytes(), b.at).unwrap();
+        drop(file);
+        let (got, store, bad) = reopen(&path);
+        assert!(bad, "damage that is not a torn tail is said");
+        assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
+        assert_eq!(store.records(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One record whose body will not unpack costs that record and nothing
+    /// else — not the records of the other folders the same cache serves.
+    #[test]
+    fn a_damaged_record_costs_itself_and_not_the_cache() {
+        let dir = scratch("body");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f, t) = analysis(40, 3);
+        store.append("other/x.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        let shape = store.append("c.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        drop(store);
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        // b's first stream: its length is intact, its deflate is not.
+        let body = packed_len_at(b, "b.jpg") + 8 + 8;
+        file.write_all_at(&[0xff; 24], body).unwrap();
+        // c claims more keypoints than a run of these settings describes.
+        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 16 + 8).unwrap();
+        drop(file);
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let (got, store) = open(&path, SETTINGS, &|p| !p.starts_with("other"), &mut problems);
+        assert!(problems.any(), "a damaged record is worth saying");
+        let mut names: Vec<_> = got.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, [PathBuf::from("a.jpg"), PathBuf::from("other/x.jpg")]);
+        assert_eq!(store.records(), 4, "counted, so that the run compacts it away");
+        assert!(store.writable());
         std::fs::remove_dir_all(&dir).ok();
     }
 

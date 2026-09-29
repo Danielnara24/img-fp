@@ -1,5 +1,5 @@
-//! What the window has been asked to scan, and how: kept between runs, and
-//! turned into the img-fp command line the scan runs.
+//! What the window has been asked to scan, and how: the paths kept between
+//! runs, and all of it turned into the img-fp command line the scan runs.
 //!
 //! The window never passes the scan anything the command line could not: a
 //! scan from here is the scan those flags would run from a shell, and the log
@@ -41,37 +41,59 @@ impl ReportFormat {
     }
 }
 
+/// What the window shows, and what of it is kept between runs.
+///
+/// **Only the paths are kept: the folders, the exclusions and the three file
+/// names typed in.** Every option starts where the command line's does, each
+/// time the window opens, because a remembered option is a frozen default. The
+/// window used to save every option on every scan, whether or not anyone had
+/// touched it, so a default the command line changed never reached anyone who
+/// had used the window before: `.dds` left the extension list in 0.19 and a
+/// window from 0.17 went on asking for it, and exiting 2 on every `.dds` it
+/// met. Within a session the options stay as set; the Defaults button puts
+/// them back.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     #[serde(with = "paths")]
     pub folders: Vec<PathBuf>,
+    #[serde(skip)]
     pub recursive: bool,
+    #[serde(skip)]
     pub work_size: usize,
+    #[serde(skip)]
     pub candidates: usize,
+    #[serde(skip)]
     pub min_aligned_points: u32,
+    #[serde(skip)]
     pub min_frame_overlap: f32,
+    #[serde(skip)]
     pub min_pixel_correlation: f32,
 
+    #[serde(skip)]
     pub report: bool,
     pub report_path: String,
+    #[serde(skip)]
     pub report_format: ReportFormat,
 
+    #[serde(skip)]
     pub threads: usize,
     /// As `-x` takes it: comma-separated.
+    #[serde(skip)]
     pub extensions: String,
     #[serde(with = "paths")]
     pub exclude: Vec<PathBuf>,
+    #[serde(skip)]
     pub follow_symlinks: bool,
+    #[serde(skip)]
     pub use_cache: bool,
     /// Empty for img-fp's own default.
     pub cache_path: String,
-    /// One-off requests, never remembered: a cache emptied or pruned on every
-    /// scan because a box was ticked once would be a surprise.
     #[serde(skip)]
     pub clear_cache: bool,
     #[serde(skip)]
     pub prune_cache: bool,
+    #[serde(skip)]
     pub log: bool,
     pub log_path: String,
 }
@@ -280,15 +302,36 @@ mod tests {
     fn a_folder_that_is_not_utf8_is_saved_and_read_back() {
         use std::os::unix::ffi::OsStringExt;
         let odd = PathBuf::from(std::ffi::OsString::from_vec(b"/p/b\xff".to_vec()));
-        let s = Settings { folders: vec!["/p/a".into(), odd.clone()], exclude: vec![odd.clone()], work_size: 640, ..Default::default() };
+        let s = Settings { folders: vec!["/p/a".into(), odd.clone()], exclude: vec![odd.clone()], log_path: "/l".into(), ..Default::default() };
         let text = serde_json::to_string(&s).expect("saved");
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.folders, vec![PathBuf::from("/p/a"), odd.clone()]);
         assert_eq!(back.exclude, vec![odd]);
-        assert_eq!(back.work_size, 640);
+        assert_eq!(back.log_path, "/l");
         // A file written before this still reads.
         let old: Settings = serde_json::from_str(r#"{"folders": ["/x"], "exclude": []}"#).unwrap();
         assert_eq!(old.folders, vec![PathBuf::from("/x")]);
+    }
+
+    /// Options are not remembered, so a default the command line changes
+    /// reaches the window: a file saved by an older window, holding the
+    /// extension list and thresholds of its day, opens at today's defaults.
+    #[test]
+    fn a_saved_option_does_not_outlive_its_default() {
+        let saved = r#"{"folders": ["/x"], "work_size": 640, "min_pixel_correlation": 0.5, "use_cache": false,
+            "extensions": "jpg,png,dds", "threads": 3, "recursive": false, "report_path": "/r.csv"}"#;
+        let s: Settings = serde_json::from_str(saved).unwrap();
+        let d = Settings::default();
+        assert_eq!(s.folders, vec![PathBuf::from("/x")]);
+        assert_eq!(s.report_path, "/r.csv");
+        assert_eq!((s.work_size, s.min_pixel_correlation, s.use_cache), (d.work_size, d.min_pixel_correlation, d.use_cache));
+        assert_eq!((s.extensions.as_str(), s.threads, s.recursive), (d.extensions.as_str(), d.threads, d.recursive));
+        assert!(!s.extensions.split(',').any(|e| e == "dds"));
+        // And nothing but the paths is written.
+        let v: serde_json::Value = serde_json::to_value(&s).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cache_path", "exclude", "folders", "log_path", "report_path"]);
     }
 
     #[test]

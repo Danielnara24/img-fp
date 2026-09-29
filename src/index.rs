@@ -1146,6 +1146,14 @@ fn prefetch_postings(inv: &InvertedFile, words: &[u32], at: usize) {
 impl InvertedFile {
     pub fn build(lists: &[WordList], n_words: usize, max_posting: usize) -> InvertedFile {
         let n = lists.len();
+        // The documents a word's rarity is measured against: the images that
+        // have words at all. An image that would not decode, one that
+        // described to nothing, and a byte-identical copy — which is matched
+        // through its original and indexes nothing — hold empty lists, and
+        // counting them made every word look rarer by the same factor: a
+        // folder where each photograph is there three times weighed every
+        // word by ln(3n/d) rather than ln(n/d).
+        let docs = lists.iter().filter(|l| !l.word.is_empty()).count().max(1);
         let mut df = vec![0u32; n_words];
         for wl in lists.iter() {
             for (w, _) in wl.runs() {
@@ -1165,7 +1173,7 @@ impl InvertedFile {
             if d == 0 || d > max_posting {
                 continue;
             }
-            idf[w] = (n as f32 / d as f32).ln();
+            idf[w] = (docs as f32 / d as f32).ln();
             zero_idf |= idf[w] == 0.0;
             total += df[w];
         }
