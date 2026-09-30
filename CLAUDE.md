@@ -5,6 +5,13 @@ at `/home/daniel/Documents/Vscode_repositories/deduplicator/`, whose
 `benchmark/README.md` is where this methodology comes from — read it before
 changing how anything is scored.
 
+**Two more corpora now exist, and they changed what the headline means** —
+see *Near-miss families* under *How img-fp works*. IMGS has no photographs of
+one scene taken a moment apart, so its "no wrong pair at all" was a property
+of the corpus: on IMGS2 and IMGS3, which are made of such photographs, the
+build before the clean-anchor rule ran at 87-92% precision. The figures below
+are IMGS's and predate that rule and the derived vocabulary sample.
+
 **Status: the tool exists and beats every measured competitor by a wide
 margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
 every amount drawn per seed — F1 **0.952** at 99.6% precision and 91.2% recall
@@ -174,13 +181,20 @@ analysed, and almost no duplicates, which is what puts 46% of a run in the
 second look and 39% in the vocabulary descent. Quote it as a cost corpus and
 never as evidence about accuracy.
 
-**There is currently no held-out corpus.** There was one, and
-`benchmark/VALIDATION.md` records what it bought — it is why the parameter
-surface is as small as it is. Folding it in was a deliberate trade, taken on
-the grounds that per-seed variance plus a much smaller parameter surface make
-overfitting far less likely than it was. If a future change needs to be
-defended rather than merely measured, build a new one from fresh seeds: the
-machinery is still here, and the rule is in VALIDATION.md.
+**Two more corpora, built the same way from different seeds.**
+`/home/daniel/Documents/IMGS2` (71 seeds, 6,460 files) and
+`/home/daniel/Documents/IMGS3` (101 seeds, 9,191 files) are photographs from
+Wikimedia chosen in sets of the same scene at a slightly different moment,
+distance or angle — two busts of one statue, a boat's deck a minute apart,
+two Red Rocks entrance signs. The generator treats every seed as its own
+photograph, so each set is a family of **hard negatives**, the case IMGS has
+none of. Score them with `benchmark/analyse.py --corpus=DIR` (repeatable;
+seeds are named per corpus when there are several). IMGS2 is a design
+corpus. **IMGS3 was held out** and has been spent exactly once, to validate
+the clean-anchor rule after it was fixed; it is held out from anything else,
+and the next rule to be defended needs fresh seeds again. The old held-out set
+(`benchmark/VALIDATION.md`) was folded into IMGS long ago; its rule is still
+the rule.
 
 ## The corpus
 
@@ -520,6 +534,78 @@ The parts that are easy to get wrong:
   both clean and 12 merges two families, so the shipped value sits a factor of
   four from the cliff. Do not raise it because 6 scores a hair better.
 
+- **Near-miss families: clusters are made of clean anchors.** An anchor is
+  *clean* when no detailed block of its overlap correlates below 0.85
+  (`Verdict::blk_min`, `Policy::clean`), and `admit_anchors` lets the rest
+  join two clusters only when **every file of the smaller has a weak anchor
+  into the larger** — which a lone file does trivially, and a fragment of a
+  family does, and a family of ninety photographs of a scene a moment apart
+  does not. It is the bridge test carried from one edge to many: near-miss
+  families touch through dozens of weak anchors, none of them a bridge, and
+  the bridge test kept them all. At the shipped settings IMGS2 merged five
+  families, 22,201 false pairs; IMGS3 fifteen, 41,312.
+
+  The weak ones really are weak and not separable one at a time. 443 wrong
+  anchors on IMGS + IMGS2 against 351,812 true ones: 12 aligned points at the
+  median (true 77), mean correlation 0.82 (0.97), worst block 0.09 (0.89),
+  inlier residual 0.27 of the tolerance (0.07) — but the true tail is the
+  catalogue's warps (barrel, keystone, perspective, photo of a screen) and
+  overlays (watermark, redaction, QR sticker), which is what a photograph
+  from a step to the side *is*. And killing wrong anchors one by one does
+  not stop merges: at 18 left, two families still merged, because a merge
+  needs only a few that are not bridges. The structure is what differs, so
+  the rule is about structure.
+
+  Measured, the derived-sample build without the rule against with it, F1
+  (cross-family false pairs): IMGS 384 0.9527 -> 0.9481 (0 -> 0); IMGS2 384
+  0.9315 -> 0.9709 (22,201 -> 1); IMGS+IMGS2 384 0.9461 -> 0.9589; IMGS 640
+  0.9723 -> 0.9706; IMGS2 640 0.9411 -> 0.9835 (23,770 -> 0). **Held out,
+  IMGS3: 0.9208 -> 0.9714 at 384 (41,312 -> 222, recall 94.89% -> 94.80%)
+  and 0.9222 -> 0.9863 at 640 (52,079 -> 2)**; all three corpora together
+  0.9294 -> 0.9619 and 0.9409 -> 0.9799. The 222 are three lone files — a
+  micro-crop and two column-rolls — joining the sibling photograph's family,
+  which is the lone-file allowance working as designed; `game2`/`game3`,
+  which share most of a stadium, stay apart. The cost is IMGS's: about half a
+  point of recall and 45 -> 39 perfect transformations at 384. On the found
+  corpus it takes 3,249 pairs to 2,438, and every one of sixteen removed pairs
+  sampled at random was two different pinned butterflies.
+
+  **0.85 is fitted**, and it is the rule's one number. Replayed on each
+  corpus's own anchors (`--dump` now writes `blk_min`), merges climb below
+  0.8 and none happen from 0.8 to 0.95, while IMGS's reach falls as it rises.
+  Tried and worse: *never* joining two clusters on weak anchors (IMGS recall
+  -4, perfect transformations 45 -> 2, because two variants that match each
+  other cleanly make a cluster of two and a low-contrast family breaks up);
+  requiring twice the aligned points for a clean anchor (a dark or plain
+  picture has few features and clean pixels, and `low-light`'s family split
+  in three); holding propagated pairs to the clean bar too (recall -7 to -8).
+
+  **Open:** on the found corpus about half of a random sample of the pairs
+  still reported are different pinned specimens, most of them propagated at
+  correlation 0.60-0.79 inside a cluster. That leak is the propagated tier,
+  not the clusters, and the obvious fix above costs too much.
+- **The vocabulary sample is derived** (`DESC_PER_SAMPLE` in `index.rs` has
+  the argument): a tenth of the corpus's distinct descriptors, capped at
+  1.28 M. The fixed 160,000 held the *live* words near 150,000 whatever the
+  corpus, so descriptors per live word grew with the library, and swept on
+  IMGS, IMGS2 and both at two work sizes every curve merges families past
+  roughly 70-150. At today's corpus sizes the change is within noise (IMGS
+  0.9544 -> 0.9527 at 384, both corpora 6 -> 3 merges at 384 and 6 -> 7 at
+  640); it exists for a library of tens of thousands of photographs.
+
+  **What the two cost together**, the derived sample and the clean-anchor
+  rule, against `c1bf031`: `bench.py`'s protocol (cold page cache, cooled,
+  `--no-cache`, PSS over the process tree), in the order A B B A A B.
+  IMGS, CPU-seconds slot-matched: 333.9 -> 336.6 and 341.7 -> 341.1, wall
+  52.1 -> 52.7 and 53.0 -> 53.4 s, PSS inside its usual 640-710 MB band both
+  ways; the first pair is void, the "after" run having started at 82 C and
+  averaged 2,051 MHz against 2,947. Found corpus: CPU 916 / 928 / 926 before
+  against 910 / 914 / 910 after, wall 140-142 s both, peak PSS 1,052 MB three
+  times before against 1,090 / 1,090 / 1,130 after — the larger vocabulary
+  sample, 488 k descriptors against 160 k. All three benchmark corpora
+  together, one pair: 284.7 -> 283.3 s, 1,738 -> 1,732 CPU-s, 1,893 MB both.
+  So level on time everywhere, and 40-80 MB more peak where a corpus is large
+  enough for the sample to grow.
 - **Byte-identical copies are matched through their original, not beside
   it.** Each exact group elects one member (one the cache already holds, if
   any) and everything from the vocabulary to corroboration runs over the

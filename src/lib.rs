@@ -1553,9 +1553,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // merged two whole families into 3,002 false pairs.
     progress.forecast(|f| f.edges = Some(all.len()));
     progress.begin(Stage::Propagate);
-    let n_before = all.len();
-    let all = drop_weak_bridges(all, n);
-    stage!(t_start, "bridges: dropped {} lone links between clusters", n_before - all.len());
+    // Clusters are made from clean anchors, and an anchor that is only an
+    // anchor may add a file to one but never join two; see `admit_anchors`.
+    let (clean, weak): (Vec<Edge>, Vec<Edge>) = all.into_iter().partition(|e| e.4.accepted(&policy.clean));
+    let n_before = clean.len();
+    let clean = drop_weak_bridges(clean, n);
+    stage!(t_start, "bridges: dropped {} lone links between clusters", n_before - clean.len());
+    let n_weak = weak.len();
+    let (all, refused) = admit_anchors(clean, weak, n);
+    stage!(t_start, "weak anchors: {} admitted, {refused} refused between clusters", n_weak - refused);
 
     // ---- propagate transforms inside each component
     // Propagation is iterated: each round's accepted pairs become edges the
@@ -1665,7 +1671,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     if let Some(path) = &args.dump {
         let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
         let mut w = std::io::BufWriter::new(f);
-        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted")?;
+        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min")?;
         for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
             for (a, b, _, iv, v) in set.iter() {
                 // The paths as their own bytes, quoted the way CSV quotes:
@@ -1686,6 +1692,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                     format!("{:.4}", v.ncc),
                     (v.centred as u8).to_string(),
                     (*iv as u8).to_string(),
+                    format!("{:.4}", v.blk_min),
                 ];
                 let mut row: Vec<&[u8]> = vec![files[*a].as_os_str().as_bytes(), files[*b].as_os_str().as_bytes()];
                 row.extend(figures.iter().map(|f| f.as_bytes()));
@@ -1974,6 +1981,105 @@ fn unique_pairs(edges: impl IntoIterator<Item = (usize, usize, Affine, bool, Ver
     edges.into_iter().filter(|e| seen.insert((e.0.min(e.1), e.0.max(e.1)))).collect()
 }
 
+/// Add the anchors that are not clean to the clusters the clean ones make.
+/// Two clusters join on weak anchors only when **every file of the smaller one
+/// has a weak anchor into the larger**; the weak anchors kept are the ones
+/// inside a cluster once no more joins are possible. The edges kept, and how
+/// many weak ones were refused.
+///
+/// **This is the bridge test's argument, carried from one edge to several.**
+/// A family is held together by many clean matches — the re-encodes, the
+/// resizes, the crops of one photograph agree with each other everywhere —
+/// and two families of photographs of one scene, taken a moment or a step
+/// apart, touch only through weak ones: a dozen aligned points and a patch of
+/// the overlap that does not agree, where someone moved or the background
+/// shifted with the viewpoint. Each such match is one of hundreds between the
+/// two families' copies, so there are always several, none is a bridge, and
+/// the bridge test kept them all. On IMGS2 four families merged that way at
+/// the shipped settings, for 21,458 false pairs.
+///
+/// **Why every file, and not "never join two clusters".** The stricter rule
+/// was tried first and cut families apart: two variants of one photograph
+/// that match each other cleanly and the family only weakly — a perspective
+/// warp and a photo of a screen, a tiny embed and a contact sheet — make a
+/// cluster of two, and a low-contrast family breaks into many. It cost IMGS
+/// four points of recall and 43 of 45 perfect transformations. A fragment of
+/// a family is matched, file by file, by the family it came from; a family of
+/// ninety files is not matched file by file by the photograph taken a moment
+/// later. And a lone file is the case of one: its one file has an anchor, so
+/// it joins, strongest first, the cluster it matches best — after which a
+/// weak anchor into a second cluster is a join of two clusters like any other.
+fn admit_anchors(
+    clean: Vec<(usize, usize, Affine, bool, Verdict)>,
+    mut weak: Vec<(usize, usize, Affine, bool, Verdict)>,
+    n: usize,
+) -> (Vec<(usize, usize, Affine, bool, Verdict)>, usize) {
+    let mut dsu = Dsu::new(n);
+    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    fn join(dsu: &mut Dsu, members: &mut [Vec<usize>], a: usize, b: usize) {
+        let (mut ra, mut rb) = (dsu.find(a), dsu.find(b));
+        if ra == rb {
+            return;
+        }
+        if members[ra].len() > members[rb].len() {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        dsu.0[ra] = rb;
+        let moved = std::mem::take(&mut members[ra]);
+        members[rb].extend(moved);
+    }
+    for e in clean.iter() {
+        join(&mut dsu, &mut members, e.0, e.1);
+    }
+    weak.sort_by(|x, y| {
+        y.4.n_in.cmp(&x.4.n_in).then(y.4.blk.total_cmp(&x.4.blk)).then((x.0, x.1).cmp(&(y.0, y.1)))
+    });
+    let mut near: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for e in weak.iter() {
+        near[e.0].push(e.1);
+        near[e.1].push(e.0);
+    }
+    // Clusters only grow, so a join refused now can be granted after another
+    // has made one side larger; the pass repeats until nothing joins.
+    // Cluster pairs already found wanting, forgotten at every join since a
+    // join is what can change the answer.
+    let mut refused_pairs: std::collections::HashSet<(usize, usize)> = Default::default();
+    loop {
+        let mut joined = false;
+        for e in weak.iter() {
+            let (ra, rb) = (dsu.find(e.0), dsu.find(e.1));
+            if ra == rb {
+                continue;
+            }
+            let (small, big) = if members[ra].len() <= members[rb].len() { (ra, rb) } else { (rb, ra) };
+            if refused_pairs.contains(&(small, big)) {
+                continue;
+            }
+            let covered = members[small].iter().all(|&x| near[x].iter().any(|&y| dsu.find(y) == big));
+            if covered {
+                join(&mut dsu, &mut members, small, big);
+                refused_pairs.clear();
+                joined = true;
+            } else {
+                refused_pairs.insert((small, big));
+            }
+        }
+        if !joined {
+            break;
+        }
+    }
+    let mut out = clean;
+    let mut refused = 0;
+    for e in weak {
+        if dsu.find(e.0) == dsu.find(e.1) {
+            out.push(e);
+        } else {
+            refused += 1;
+        }
+    }
+    (out, refused)
+}
+
 /// Remove single matches that are the only thing joining two large clusters.
 ///
 /// A wrong pair does not cost one pair. If it is the *only* edge between two
@@ -2232,6 +2338,24 @@ mod tests {
         assert!((words(2_100_000) as f64 / words(2_000_000) as f64) < 2.0);
     }
 
+    /// The words a corpus really gets are bounded by the sample the tree is
+    /// trained on, so the sample follows the corpus: a tenth of it, up to the
+    /// cap. A fixed sample held the live words constant and let descriptors
+    /// per word climb with the library towards the size that merges families.
+    #[test]
+    fn the_vocabulary_sample_follows_the_corpus() {
+        use crate::index::VocabParams;
+        let sample = |n| VocabParams::for_corpus(n).sample;
+        assert_eq!(sample(1_447_607), 144_760, "IMGS at the default work size: about the old 160,000");
+        assert_eq!(sample(5_367_534), 536_753);
+        assert_eq!(sample(90_000_000), 1_280_000, "capped");
+        assert_eq!(sample(7), 1);
+        // Descriptors per sample are held from a folder to the cap.
+        for n in [20_000usize, 1_447_607, 5_367_534, 12_000_000] {
+            assert_eq!(n / sample(n), 10, "n={n}");
+        }
+    }
+
     use super::*;
 
     /// The mirrored-descriptor permutation must agree with actually mirroring
@@ -2410,6 +2534,30 @@ mod tests {
         let alone = with_copies(&edges, &[0, 1, 2, 3]);
         assert_eq!(alone.len(), 1);
         assert_eq!((alone[0].0, alone[0].1), (1, 3));
+    }
+
+    /// Weak anchors join a cluster only when every file of the smaller side has
+    /// one into the larger: a lone file and a family's fragment join, a group
+    /// with a file that does not vouch for the join does not.
+    #[test]
+    fn weak_anchors_join_clusters_only_when_every_file_vouches() {
+        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let e = |a: usize, b: usize, n_in: u32| (a, b, id, false, Verdict { n_in, ..Default::default() });
+        // Two clean clusters, {0,1,2,7} and {3,4,5}.
+        let clean = vec![e(0, 1, 50), e(1, 2, 50), e(2, 7, 50), e(3, 4, 50), e(4, 5, 50)];
+        // Weak links between them from three files of each, a lone file 6
+        // matching both (the stronger into the second), a weak link inside
+        // the first, and a fragment {8,9} of the second family, clean between
+        // its two files and weakly matched by the family from both.
+        let weak = vec![e(2, 3, 12), e(1, 4, 11), e(0, 6, 11), e(3, 6, 15), e(0, 2, 10), e(3, 8, 11), e(4, 9, 11)];
+        let clean = [clean, vec![e(8, 9, 50)]].concat();
+        let (kept, refused) = admit_anchors(clean, weak, 10);
+        let mut pairs: Vec<(usize, usize)> = kept.iter().map(|x| (x.0, x.1)).collect();
+        pairs.sort_unstable();
+        // 7 has no weak anchor into the second cluster, so the first cluster
+        // never joins it however many of its other files do.
+        assert_eq!(pairs, [(0, 1), (0, 2), (1, 2), (2, 7), (3, 4), (3, 6), (3, 8), (4, 5), (4, 9), (8, 9)]);
+        assert_eq!(refused, 3);
     }
 
     /// A component propagation cannot afford is named, not passed over in

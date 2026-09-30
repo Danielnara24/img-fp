@@ -67,6 +67,10 @@ pub struct Verdict {
     /// Mean correlation over the blocks of the overlap that carry detail.
     pub blk: f32,
     pub blk_n: u32,
+    /// The lowest of those blocks' correlations: whether any part of the
+    /// overlap disagrees, where `blk` says how much it agrees on the whole.
+    /// See `Policy::clean`.
+    pub blk_min: f32,
     pub ncc: f32,
 }
 
@@ -84,6 +88,7 @@ impl Default for Verdict {
             rot_deg: 0.0,
             blk: 0.0,
             blk_n: 0,
+            blk_min: 0.0,
             ncc: 0.0,
         }
     }
@@ -110,6 +115,9 @@ pub struct Rules {
     /// fails here is therefore demoted rather than discarded: it cannot create
     /// a cluster, but it can still join one.
     pub centred_evidence: bool,
+    /// The lowest correlation any one detailed block of the overlap may have.
+    /// Zero everywhere but `Policy::clean`.
+    pub min_worst_block: f32,
 }
 
 /// The three tests, and why they differ.
@@ -135,6 +143,9 @@ pub struct Policy {
     pub anchor: Rules,
     pub propagated: Rules,
     pub corroborated: Rules,
+    /// An anchor strong enough to join two clusters. See `admit_anchors` in
+    /// `lib.rs` for what an anchor that clears `anchor` but not this may do.
+    pub clean: Rules,
 }
 
 const GRID: usize = 48;
@@ -166,6 +177,7 @@ impl Default for Rules {
             // the smaller image is a few hundred pixels against a wall.
             max_scale: 16.0,
             centred_evidence: false,
+            min_worst_block: 0.0,
         }
     }
 }
@@ -226,6 +238,16 @@ impl Policy {
         };
         Policy {
             anchor,
+            // An anchor whose every detailed block agrees: no block of the
+            // overlap below 0.85. **This number is fitted**, and it is the one
+            // number the near-miss rule has. Replayed over the anchors of
+            // IMGS, IMGS2 and both, families of photographs of one scene
+            // taken a moment apart merge below 0.8 and none do from 0.8 to
+            // 0.95, while IMGS's reach falls as it rises; 0.85 is the plateau's
+            // lower middle. A count of aligned points was tried beside it and
+            // is worse: a dark or plain picture has few features and good
+            // pixels, and its family fell apart. See CLAUDE.md.
+            clean: Rules { min_worst_block: 0.85, ..anchor },
             propagated: Rules {
                 min_aligned_points: 0,
                 centred_evidence: false,
@@ -302,6 +324,7 @@ impl Verdict {
             && (!r.centred_evidence || self.centred)
             && self.ov_a.max(self.ov_b) >= r.min_frame_overlap
             && self.blk >= r.min_pixel_correlation
+            && self.blk_min >= r.min_worst_block
     }
 }
 
@@ -1317,7 +1340,7 @@ fn pixel_check(
     bw: f32,
     bh: f32,
     invert: bool,
-) -> (f32, u32, f32) {
+) -> (f32, u32, f32, f32) {
     // Bounding box, in A's frame, of the part of A that lands inside B.
     //
     // A probe's column depends on `ix` alone and its row on `iy` alone, and so
@@ -1359,7 +1382,7 @@ fn pixel_check(
         }
     }
     if !(x1 > x0 && y1 > y0) {
-        return (0.0, 0, 0.0);
+        return (0.0, 0, 0.0, 0.0);
     }
     let mut va = [0f32; GRID * GRID];
     let mut vb = [0f32; GRID * GRID];
@@ -1432,6 +1455,7 @@ fn pixel_check(
     }
     let mut agree = 0f32;
     let mut total = 0u32;
+    let mut worst = f32::INFINITY;
     // Whole-overlap correlation, summed as the blocks go by rather than in a
     // pass of its own. The blocks tile the grid exactly and every sample is in
     // one of them, so the same samples are summed; only the order is a block
@@ -1489,7 +1513,9 @@ fn pixel_check(
             // takes two numbers to say one thing, and throws away the
             // difference between a block that just failed and one that matched
             // nothing at all. The mean keeps it, and needs no cut.
-            agree += (cov / (vara * varb).sqrt()).abs() as f32;
+            let r = (cov / (vara * varb).sqrt()).abs() as f32;
+            agree += r;
+            worst = worst.min(r);
         }
     }
     // Whole-overlap correlation, for reporting.
@@ -1505,7 +1531,10 @@ fn pixel_check(
     } else {
         0.0
     };
-    (if total > 0 { agree / total as f32 } else { 0.0 }, total, ncc)
+    if total == 0 {
+        return (0.0, 0, ncc, 0.0);
+    }
+    (agree / total as f32, total, ncc, worst)
 }
 
 // ------------------------------------------------------------ entry points
@@ -1580,10 +1609,11 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     v.ov_a = oa;
     v.ov_b = ob;
     if v.ov_a.max(v.ov_b) >= gate.1 {
-        let (blk, n, ncc) = timed!(20, pixel_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert));
+        let (blk, n, ncc, worst) = timed!(20, pixel_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert));
         v.blk = blk;
         v.blk_n = n;
         v.ncc = ncc;
+        v.blk_min = worst;
     }
     v
 }
@@ -1605,10 +1635,11 @@ pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verd
     v.ov_a = oa;
     v.ov_b = ob;
     if v.ov_a.max(v.ov_b) >= min_ov {
-        let (blk, n, ncc) = timed!(43, pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert));
+        let (blk, n, ncc, worst) = timed!(43, pixel_check(p.ta, p.tb, m, aw, ah, bw, bh, var.invert));
         v.blk = blk;
         v.blk_n = n;
         v.ncc = ncc;
+        v.blk_min = worst;
     }
     v
 }
@@ -1770,7 +1801,7 @@ mod bench {
         for (name, m) in cases.iter() {
             for inv in [false, true] {
                 for k in 0..POOL {
-                    let (b, n, c) = pixel_check(&ta[k], &tb[k], m, aw, ah, bw, bh, inv);
+                    let (b, n, c, _) = pixel_check(&ta[k], &tb[k], m, aw, ah, bw, bh, inv);
                     sum = sum.wrapping_mul(0x100000001b3).wrapping_add(b.to_bits() as u64 ^ (n as u64) << 32 ^ c.to_bits() as u64);
                 }
             }

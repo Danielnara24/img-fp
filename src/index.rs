@@ -34,6 +34,8 @@ pub struct VocabParams {
     /// folder of eighty photographs and a drive of eighty thousand both get a
     /// vocabulary of the right grain.
     pub depth: usize,
+    /// Descriptors the tree is trained on. Derived too, and it is the one that
+    /// decides how many words the corpus actually gets; see `DESC_PER_SAMPLE`.
     pub sample: usize,
     pub iters: usize,
     /// Extra descent paths kept when a child is nearly as close as the best.
@@ -65,6 +67,44 @@ pub struct VocabParams {
 /// families — which is why `for_corpus` now narrows the branching instead of
 /// rounding the depth up and living with whatever occupancy that lands on.
 const DESC_PER_WORD: usize = 3;
+
+/// Descriptors of the corpus per descriptor the tree is trained on.
+///
+/// **This is what really sizes the vocabulary**, and `DESC_PER_WORD` only
+/// sizes the tree it is grown in. k-means can make a leaf only where a
+/// training sample landed, so the words a corpus actually uses — its *live*
+/// words — are about nine tenths of the sample, whatever the tree's nominal
+/// size: 139,691 live of 537,824 nominal on IMGS. The sample used to be a
+/// fixed 160,000, which held the live words near 150,000 at every corpus size
+/// and let descriptors per live word grow with the library: 10 on IMGS at the
+/// default work size, 22 on IMGS and IMGS2 together, 36 on those at
+/// `--work-size 640`, and something past 100 for a library of forty thousand
+/// photographs.
+///
+/// Past about a hundred it merges families. Swept from 1,000 samples to every
+/// descriptor on three corpora (IMGS, IMGS2, both) at two work sizes, every
+/// curve's merges climb steeply from somewhere between 60-80 and 120-160
+/// descriptors per live word, and the location does not move with the corpus
+/// or the work size — which is what makes this the quantity to hold. (On
+/// IMGS2, whose seeds are photographs of one scene at different moments, the
+/// climb starts earlier and gentler: 6 merges at 12 per word, 8 at 46.) Ten is not fitted: it is what the
+/// shipped build already ran at on IMGS at the default work size, the one
+/// point every published figure was measured at, and it sits seven to fifteen
+/// times below the cliff on every curve. Finer is better against photographs
+/// of one scene at different moments (IMGS and IMGS2 together: 6 merges at 22
+/// per word, 3 at 6) and costs recall on IMGS; ten is where the corpora do
+/// not disagree.
+const DESC_PER_SAMPLE: usize = 10;
+
+/// The most descriptors the tree is trained on, which is a limit on cost and
+/// not a statement about accuracy.
+///
+/// Training on every descriptor of IMGS and IMGS2 together (3.2 M) took the
+/// run's peak from 1.07 GB to 1.83 GB; 1.28 M was +120 MB. Past the cap the
+/// occupancy climbs again, one step per doubling of the corpus, and reaches
+/// the cliff around 90 M descriptors — two hundred thousand photographs,
+/// beyond anything this has been run on, and past the depth cap below as well.
+const SAMPLE_CAP: usize = 1_280_000;
 
 impl VocabParams {
     /// The smallest tree that still holds `n_desc/DESC_PER_WORD` leaves.
@@ -98,7 +138,8 @@ impl VocabParams {
         while branching < p.branching && branching.pow(depth as u32) < target {
             branching += 1;
         }
-        VocabParams { depth, branching, ..p }
+        let sample = (n_desc / DESC_PER_SAMPLE).clamp(1, SAMPLE_CAP);
+        VocabParams { depth, branching, sample, ..p }
     }
 }
 
@@ -261,9 +302,9 @@ impl Vocabulary {
     /// Words are the leaves: `branching^depth` of them.
     ///
     /// This is the *node numbering*, not the count of words that exist. Almost
-    /// none of them do: the tree is trained on a sample of 160,000
-    /// descriptors, so at most that many nodes of the deepest level can be
-    /// live, out of the two or three million this returns. See
+    /// none of them do: the tree is trained on a sample of a tenth of the
+    /// corpus (`DESC_PER_SAMPLE`), so at most that many nodes of the deepest
+    /// level can be live, out of the millions this can return. See
     /// `n_live_words`, which is what the inverted file is built over.
     pub fn n_words(&self) -> usize {
         self.branching.pow(self.depth as u32)
@@ -274,9 +315,9 @@ impl Vocabulary {
     /// A word is the *centre slot* of a live leaf, not its node number, and on
     /// a real corpus the two differ by an order of magnitude: the found corpus
     /// numbers its leaves up to 1,771,561 and 156,519 of them are live, the
-    /// benchmark corpus 537,824 and 139,691. A tree is trained on a sample of
-    /// 160,000 descriptors, so no more than that many leaves can ever be live,
-    /// however large the numbering grows. Everything downstream is indexed by
+    /// benchmark corpus 537,824 and 139,691 (both measured when the sample
+    /// was a fixed 160,000). A tree is trained on a sample, so no more leaves
+    /// than that can ever be live, however large the numbering grows. Everything downstream is indexed by
     /// word — the document frequencies, the idf, the posting offsets — so
     /// numbering them densely takes those three arrays from twenty-one
     /// megabytes read at random to two, which is the difference between a
@@ -725,7 +766,7 @@ impl Query {
 ///
 /// The rounding is worth a word, since it is the one lossy step in the
 /// vocabulary. A centre is the mean of a cluster of descriptors drawn from a
-/// *sample* of the corpus — 160,000 of several million — so its own sampling
+/// *sample* of the corpus — a tenth of it, at most 1.28 M — so its own sampling
 /// error is on the order of a whole unit, a hundred times the half-unit this
 /// rounding adds. And it adds nothing at all where it would matter most: the
 /// deepest level of the tree is mostly nodes of one member, whose centre is
