@@ -116,13 +116,15 @@ struct Args {
     #[arg(short = 't', long, value_name = "N", default_value_t = 0)]
     threads: usize,
 
-    /// Long side, in pixels, the images are analysed at.
+    /// Long side, in pixels, the images are analysed at. Larger images are
+    /// shrunk to it; small ones are enlarged, up to it, so their details can
+    /// be found.
     ///
     /// Higher finds more, especially small images inside larger ones such as
     /// slides, screenshots and collages, but is slower and uses more memory.
     /// 640 is a good choice when that matters. `0` does not shrink images at
     /// all, which is much slower on large photos.
-    #[arg(long, value_name = "PX", default_value_t = 384)]
+    #[arg(long, value_name = "PX", default_value_t = 512)]
     work_size: usize,
 
     /// Candidate matches checked per image.
@@ -382,6 +384,20 @@ const PROPAGATE_MAX_COMPONENT: usize = 2000;
 static T_DECODE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static T_SIFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How far a small picture may be enlarged: up to `upsample_below`, but never
+/// past the working size, so that nothing is analysed above `--work-size` and
+/// the option bounds what every picture costs. It used to enlarge anything
+/// under 256 pixels to between 257 and 512 whatever the working size said,
+/// which made a 120-pixel thumbnail cost what a 480-pixel photograph costs at
+/// `--work-size 140`, and made a picture the working size had just shrunk —
+/// at `--work-size 128`, every photograph — cost what 512 costs from a
+/// sixteenth of the detail. A picture shrunk to the working size is never
+/// enlarged under this limit, since one doubling would take it past it. `0`,
+/// which shrinks nothing, keeps the whole of `upsample_below`.
+fn enlarge_below(work: usize, upsample_below: usize) -> usize {
+    if work == 0 { upsample_below } else { upsample_below.min(work) }
+}
+
 fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
     let t0 = Instant::now();
     let r = decode::decode(path, work);
@@ -389,7 +405,8 @@ fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
     match r {
         Ok(d) => {
             let t1 = Instant::now();
-            let feats = sift::extract(&d.work, p);
+            let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
+            let feats = sift::extract(&d.work, &p);
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
             let thumb = timed!(4, Thumb::build(&d.work, THUMB_LONG));
             Item { feats: feats.into(), thumb: thumb.into(), ok: true, err: None }

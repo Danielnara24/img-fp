@@ -9,78 +9,82 @@ changing how anything is scored.
 see *Near-miss families* under *How img-fp works*. IMGS has no photographs of
 one scene taken a moment apart, so its "no wrong pair at all" was a property
 of the corpus: on IMGS2 and IMGS3, which are made of such photographs, the
-build before the clean-anchor rule ran at 87-92% precision. The figures below
-are IMGS's and predate that rule and the derived vocabulary sample.
+build before the clean-anchor rule ran at 87-92% precision.
 
 **Status: the tool exists and beats every measured competitor by a wide
-margin.** On the current corpus — 5,638 files, 62 seeds, 90 transformations,
-every amount drawn per seed — F1 **0.952** at 99.6% precision and 91.2% recall
-at the shipped default, against SSCD's 0.762 / 92.6% / 64.8%, and under a
-minute against SSCD's 1,949 s. At `--work-size 640` it is F1 **0.978** at
-99.5% / 96.1%, for 44% more wall clock and 61% more CPU.
+margin.** On IMGS — 5,638 files, 62 seeds, 90 transformations, every amount
+drawn per seed — img-fp scores F1 **0.967** at 99.6% precision and 94.0%
+recall at the shipped default, `--work-size 512`, against SSCD's 0.762 /
+92.6% / 64.8%, in under two minutes against SSCD's half hour. At `--work-size
+640` it is F1 **0.971** at 99.6% / 94.7%. IMGS2 and IMGS3 score 0.980 and
+0.984 at the default and 0.984 and 0.986 at 640. **47 of 87 transformations
+are handled perfectly** on IMGS at the default (every seed found across the
+whole range of the amount) and 48 at 640; every other tool manages **zero** at
+any setting. Accuracy figures are `out/v14-fullsweep` and `out/v15-enlargement`;
+the competitors' are `out/v5`, on IMGS only.
 
-**The shipped `--min-pixel-correlation` is 0.6, not the 0.50 every sweep table
-below calls shipped.** It was raised in 0.12.0 for what a user wants grouped
-rather than for F1: at 0.5 the tool made no false pair on real folders but did
-group merely similar photographs, a category the generated corpus has no
-negatives for, so the corpus can only show the cost — F1 0.955 -> 0.952 at the
-default work size, 47 -> 46 perfect transformations. The headline figures above
-and the default's rows below are at 0.6 (`out/v12-thumbstretch`); the figures at
-`--work-size 640`, the sweeps and the work-size table were taken at 0.50 and are
-left as measured.
+**The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
+what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
+similar photographs on real folders, a category IMGS has no negatives for.
+Tables in this file older than `out/v14-fullsweep` call 0.50 shipped and were
+taken there; they are left as measured.
 
-**The default sits below the accuracy knee on purpose, and 640 is the knee.**
-`--work-size` scales the first four fifths of the pipeline, so it is the only
-knob really connected to the clock, and what it trades is recall for time:
-384 gives up **4.4 points of recall** and buys **30% of the wall, 38% of the
-CPU and 18% of the peak memory**. Precision is not part of that trade — it
-moves 0.07 points the *right* way, and every false pair at either size is a
-deliberate rearrangement trap. But the recall it gives up is not spread
-evenly, and it comes out of the one capability nothing else in the field has
-at all: a photograph embedded in a bigger canvas. `embed_tiny` goes 55/62 to
-**27/62** and `contact_sheet` 55 to **29**, because shrinking the canvas to 384
-shrinks the photograph inside it below what the detector can describe. Fifteen
-transformations leave the perfect column, and nine of the fifteen are
-containment rows. **Anyone who cares about that case should pass
-`--work-size 640`**; see *Measured trade-offs* for the full table.
+**The default is 512, one step below the knee at 640.** `--work-size` scales
+the first four fifths of the pipeline, so it is the only knob really connected
+to the clock, and since enlargement stopped at the working size it bounds what
+every picture costs (*Measured trade-offs*). 512 is where that limit stops
+binding: a small picture gets the whole of the enlargement the sweep chose, so
+a library of 224-pixel photographs is analysed as fully at 512 as at 640. 640
+buys 0.7 points of IMGS recall more for about 40% more CPU; 384, the default
+until this change, gave up 3.6 points of recall for a third less CPU on
+photographs and four fifths less on small images, and lost 30% of the found
+corpus's pairs. Precision is not part of that trade. The recall the default
+gives up is concentrated in the one capability nothing else in the field has
+at all, a photograph embedded in a bigger canvas: `embed_tiny` 47/62 against
+52 at 640, `contact_sheet` 43 against 53. **Anyone who cares about that case
+should pass `--work-size 640`.**
 
-(**The cost figures are the soft ones here, and the accuracy figures are not.**
-Accuracy is a property of the build and the work size: F1 0.952 at the default
-and 0.978 at 640 (at correlation 0.50) are both reproducible to the pair. Wall clock is a property of
-the session — this laptop's idle temperature alone moves it 25% — and the
-numbers people want to compare were taken in five different sessions: the
-eleven competitors in `out/v5`, img-fp at 105 s in `out/v8`, the parameter pass
-at 122 s in `out/v9`, the fifth optimisation pass at 103 s in `out/v10`, all
-four at `--work-size 640`, and the default's own row in `out/v11`. Only
-like-for-like pairs within one session mean anything: the work-size table in
-*Measured trade-offs* is one such session and is the right place to read the
-default against 640, and the optimisation passes were each measured by
-alternating cold runs of the two builds. So quote "under a minute, against
-SSCD's half hour" and do not put weight on the third significant figure. See
-*Speed and memory*.
+**Open, and the next thing to work on: the weak-anchor join needs a
+structural fix.** At the default `--min-aligned-points` is one step from a
+merge. On IMGS3 at 512 the two `Segovia` photographs' families merge at a bar
+of 9 and below (about 6,700 false pairs) and are clean from 10; at 384 the same
+merge starts at 7, at 640 the nearest one (IMGS2's busts) at 8. It is the
+thinnest margin any shipped value has, and a threshold is the wrong tool to
+widen it: 11 costs 0.3 points of IMGS F1 per step bought. The anchor replays
+say where the weakness is. At 384 and 512 no *clean* cross-family anchor
+survives the bridge test at any bar — every Segovia merge is made by
+`admit_anchors` joining two clusters on weak anchors, because some fragment of
+one family ends up with a weak anchor from every one of its files into the
+other. The same rule is why `--min-pixel-correlation` at 640 merges on *both*
+sides of the shipped 0.6 (0.55-0.58 and 0.69-0.70): its joins are not monotone
+in the weak anchors they are given, so removing anchors can create a merge.
+What a fix has to do is decide joins on the clusters' structure rather than on
+whether a fragment happens to be fully covered: for instance require the
+weak anchors to cover the larger side too, refuse a join between two clusters
+that each have clean structure of their own, or make the result independent
+of the order fragments form in. The test cases are written down: Segovia at
+512 bar 9, at 384 bar 7, and at 640 correlation 0.55 and 0.70, each of which
+must come out clean without losing IMGS's recall (`replay_ap.py` and
+`replay_corr.py` in `out/v14-fullsweep` replay a candidate rule offline off one
+`--dump`). Fresh seeds are needed to defend whatever is chosen, since IMGS3 is
+spent. See *Parameters* for the tables.
 
-**Every parameter sweep and every figure in *Speed and memory* was measured at
-`--work-size 640`**, which was the default when they were taken, and they are
-left as measured rather than half-rewritten: they are measurements of
-particular changes against particular builds, and re-running two hundred lines
-of them at a new work size would not make any of them more true. The four
-options were re-swept at 384 — the tables are under *Measured trade-offs* — and
-none of them moves. Where the new default changes a *conclusion* rather than a
-number there is exactly one place, and it is the `--min-pixel-correlation`
-cliff, which does not exist at 384.)
+(**The cost figures are the soft ones here, and the accuracy figures are
+not.** Accuracy is a property of the build and the work size and reproduces to
+the pair. Wall clock is a property of the session — this laptop's idle
+temperature alone moves it 25% — so only like-for-like pairs within one
+session mean anything. Do not put weight on the third significant figure. The
+per-change figures in *Speed and memory* were measured at `--work-size 640`,
+the default when they were taken, and are left as measured.)
 
-**46 of 87 transformations are handled perfectly** at the default (every seed
-found across the whole range of the amount), and **60 of 87** at
-`--work-size 640` and correlation 0.50. Every other tool manages **zero** at any setting.
-
-Precision holds where it matters: of 829 false pairs at the default, **all 829
-are the deliberate rearrangement traps**, leaving **no wrong pair at all** in
-213,180 proposals against 15.65 million chances to be wrong — and so no wrong
-cluster merge. At 640 the same is true of all 1,088 of them in 224,868
-proposals. That is the number to watch: a merge's cost is every pair the two
-families imply, so it grows with the corpus while a lone bad pair does not.
-The previous rule left two of them, and the count is small enough either way
-that zero should be read as "none survived", not as a guarantee.
+Precision holds where it matters. Every false pair on IMGS at the default is a
+deliberate rearrangement trap — 937 of them — and so there is no wrong cluster
+merge. IMGS2 makes one cross-family pair at the default and IMGS3 164: stray
+files joining the sibling photograph's family, which is the lone-file
+allowance of the clean-anchor rule. Watch merges, not pairs: a merge's cost is
+every pair the two families imply, so it grows with the corpus while a lone
+bad pair does not. Zero should be read as "none survived", not as a guarantee
+— *Parameters* has how close each option sits to one.
 
 `benchmark/BASELINE.md` holds the competition's numbers,
 `benchmark/VALIDATION.md` records the held-out experiment that shaped the
@@ -146,14 +150,23 @@ benchmark/
   out/v10/            img-fp at the old default of --work-size 640
                       (out/v5/DAMAGED.md records a file overwritten there;
                        give bench.py a fresh --out, it merges into the old one)
-  out/v11/            img-fp at the shipped default, --work-size 384
-  out/v11-worksize/   the one-session cold --work-size sweep behind the table
-                      in *Measured trade-offs* (metrics only; the run JSONs
-                      are 50 MB apiece and were not kept)
+  out/v11/            img-fp at the then default, --work-size 384
+  out/v11-worksize/   the previous build's one-session cold --work-size sweep
+                      (metrics only; the run JSONs were not kept)
   out/v12-thumbstretch/ the thumbnail-stretch A/B at the shipped default,
                       correlation 0.6, three cold runs of each build (metrics)
   out/v13-propagation-floor/ propagation honouring --min-frame-overlap: the
                       same A/B at the default and at overlap 0.3 (metrics)
+  out/v14-fullsweep/  0.20.0: every option swept on IMGS, IMGS2, IMGS3 and
+                      all three together (results.jsonl, tables.txt), the
+                      anchor replays (replay_ap.py, replay_corr.py), the
+                      cooled work-size cost session (cost-worksize/), and the
+                      scripts that made them
+  out/v15-enlargement/ the enlargement rule swept (results.jsonl, tables.txt);
+                      work-size-limit/ is the shipped rule, enlargement no
+                      further than --work-size: accuracy at every size it
+                      changes, every threshold at 512, the IMGS3 anchor replay
+                      at 512, and the one-session cost table (cost/)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -165,7 +178,7 @@ seeds that were once a separate validation set and are now folded in; it keeps
 no derived tree.
 
 **The found corpus is `/home/daniel/Downloads/archive`** — the "found corpus"
-every cost table above is measured against, 9,285 files of the kind a camera
+every cost table here is measured against, 9,285 files of the kind a camera
 roll holds. The path is the whole of it: run it on `~/Downloads` instead and
 one stray image from a neighbouring folder joins in, which reads 9,286 images
 and **4,875 pairs against the real corpus's 4,581**, because that one file
@@ -190,9 +203,9 @@ two Red Rocks entrance signs. The generator treats every seed as its own
 photograph, so each set is a family of **hard negatives**, the case IMGS has
 none of. Score them with `benchmark/analyse.py --corpus=DIR` (repeatable;
 seeds are named per corpus when there are several). IMGS2 is a design
-corpus. **IMGS3 was held out** and has been spent exactly once, to validate
-the clean-anchor rule after it was fixed; it is held out from anything else,
-and the next rule to be defended needs fresh seeds again. The old held-out set
+corpus. **IMGS3 was held out** and is now spent: once to validate the
+clean-anchor rule, then in every run of the `out/v14-fullsweep` sweep. The
+next rule to be defended needs fresh seeds. The old held-out set
 (`benchmark/VALIDATION.md`) was folded into IMGS long ago; its rule is still
 the rule.
 
@@ -385,25 +398,12 @@ The parts that are easy to get wrong:
   legitimate thing to want, and this was the worst available way to buy it —
   not a worse point on the speed/accuracy frontier but nowhere near it, because
   propagation lives in the last fifth of the pipeline while `--work-size`
-  scales the first four fifths. The two knobs' own tables share their shipped
-  row, so they compare directly:
-
-  | at `--work-size 640` | F1 | recall | cold wall | cold CPU |
-  |---|---|---|---|---|
-  | **640, propagation on** | **0.9777** | **96.09%** | **82.4 s** | **579 s** |
-  | no propagation | 0.9061 | 83.11% | — | -7 to -11 CPU-s |
-  | `--work-size 512` | 0.9724 | 95.03% | 69.4 s | 476 s |
-  | `--work-size 448` | 0.9658 | 93.75% | 60.7 s | 413 s |
-  | **`--work-size 384` (now the default)** | **0.9547** | **91.68%** | **57.4 s** | **360 s** |
-
-  (The `--no-propagate` row is the one line here still carried from the earlier
-  build; the work-size rows are the one-session sweep in *Measured trade-offs*.
-  Nothing about the argument depends on the difference.)
-
-  Every work-size row **dominates** it: 384 gives back 4.9 points of F1 and 8.6
-  points of recall *and* saves 219 CPU-seconds where turning propagation off
-  saves 9. There is no corpus and no setting on which a user wants the flag, so
-  the pass is now unconditional. To re-measure the table above, put the `if`
+  scales the first four fifths. Measured at 640 on earlier builds, no
+  propagation was F1 0.9061 and recall 83.11% for 7-11 CPU-seconds saved;
+  every work-size row of `out/v11-worksize` **dominates** it — 384 gave back 2.3
+  points of F1 and 4.4 of recall *and* saved 219 CPU-seconds. There is no
+  corpus and no setting on which a user wants the flag, so
+  the pass is now unconditional. To re-measure it, put the `if`
   back around the propagation loop in `main.rs`; that is a two-line edit and a
   rebuild, and it is the right price for something no run should be doing.
 - **Three acceptance tests** (`verify::Policy`): `anchor` decides clustering,
@@ -632,34 +632,28 @@ The parts that are easy to get wrong:
 
 ### What still misses
 
-**19,378 pairs at the default, 9,100 at `--work-size 640`** — the default's
-extra 10,278 misses are what the speed is bought with, and they are not spread
-evenly. The worst rows, out of 62 seeds, with 640 in brackets: `embed_tiny` 27
-(55), `contact_sheet` 29 (55), `crop_micro` 39 (41), `picture_in_picture` 45
-(60), `crop_strip_top` 54 (57), `magazine_spread` 54 (60), `halftone` 55 (56),
-`tiled_watermark` 55 (59), `wall_poster` 55 (61), `pdf_page` 56 (62),
-`slide_deck` 56 (62), `wave_vertical` 56 (59).
+**13,940 pairs at the default, 12,372 at `--work-size 640`** on IMGS. The
+worst rows, out of 62 seeds, with 640 in brackets: `crop_micro` 39 (40),
+`contact_sheet` 43 (53), `embed_tiny` 47 (52), `tiled_watermark` 54 (55),
+`picture_in_picture` 55 (58), `crop_strip_top` and `wave_vertical` 56 (56,
+57), `scale_small` and `halftone` 57 (57, 55).
 
-Two patterns, and only one of them is new. The old one is what it has always
-been — very small crops, heavy downscales, and warps that break a fitted affine
-model, though the warps are much less of it than they were, because the pixel
-check no longer aliases across a scale gap. The new one is **containment**, and
-it is the default's doing: the rows that fall furthest are the ones where the
-photograph is a small part of a larger canvas, because 384 is the long side of
-the *canvas* and the photograph inside it is a fraction of that. Nine of the
-fifteen transformations that leave the perfect column between 640 and 384 are
-containment rows. This is the cost worth knowing about before recommending the
-default to anyone whose corpus is screenshots, slides or contact sheets.
+Two patterns. The old one is very small crops, heavy downscales, and warps
+that break a fitted affine model. The other is **containment**: the work size
+is the long side of the *canvas*, and the photograph inside it is a fraction
+of that, which is what every size below 640 pays for first. This is the cost
+worth knowing about before recommending the default to anyone whose corpus is
+screenshots, slides or contact sheets.
 
-**One row where a competitor still leads**, at either work size, and it is the
-same row: PDQ takes `halftone` 58/62 against 55 at the default and 56 at 640.
-Checked against all nine competitor columns from `out/v5`, no other row changes
-hands at 384 — the margin narrows, and on the containment rows it narrows a
-lot, but 27/62 against SSCD's 0/62 is still the whole field. `rot180` was the other, and is now 62/62 against SSCD's 61 —
-it had been a cost of the anchor's enclosure test, and the mean-correlation
-block score pays it back. img-fp now leads on every warp row, `perspective_top`
-and `keystone_side` included at 62 against SSCD's 61, having been level before;
-`barrel_distort` is 61 against 48 and `wave_vertical` 59 against 49.
+**Rows where a competitor leads: two at the default.** Checked against every
+competitor column of `out/v5`: `halftone` is PDQ's, 58/62 against 57, and
+`keystone_side` SSCD's, 61 against 60. At 640 it is four rows, each by a
+single seed (`halftone`, `crop_half`, `motion_blur`, `scale_mid`), and at 384
+it was eight. Before 0.20.0 only `halftone` was; which of that release's
+changes (the clean-anchor rule, the derived vocabulary sample) each row is
+owed to has not been separated. The lead on the rows nobody else can do is
+untouched: `embed_tiny` 47/62 (52 at 640) against SSCD's 0, `barrel_distort`
+60 against 48, `wave_vertical` 56 against 49.
 
 A note on the traps, since they are now the *whole* FP count and will keep
 growing as recall does:
@@ -671,324 +665,273 @@ real errors separately, the way `BASELINE.md` does for SSCD.
 
 ### Parameters, and the rule about them
 
-There is one corpus now, and no held-out one, so the discipline has to come
-from somewhere else: **a number earns its place by being derived from
-something, not by being the value that scored best.** Every amount in the
-catalogue varies per seed, so a threshold can no longer be parked just past a
-fixed transformation parameter — but it can still be fitted to these 62 seeds,
-and with no second corpus nothing will catch that. `benchmark/VALIDATION.md`
-records how the parameter surface was cut and what the held-out corpus proved
-while it existed; read it before adding a knob back.
+**A number earns its place by being derived from something, not by being the
+value that scored best.** A threshold can no longer be parked just past a fixed
+transformation parameter, since every amount in the catalogue varies per seed,
+but it can still be fitted to the seeds in front of it. `benchmark/VALIDATION.md`
+records how the parameter surface was cut and what the first held-out corpus
+proved; read it before adding a knob back. Applying the rule took the CLI from
+13 result-changing options to 5, the acceptance policy from 9 fitted numbers to
+2, and the bridge test from 3 to 0, at equal or better F1 every time. Removing
+a parameter is the cheap experiment; run it before adding one.
 
-Applying that rule took the CLI from 13 result-changing options to 5, the
-acceptance policy from 9 fitted numbers to 2, and the bridge test from 3 to 0,
-at equal or better F1 every time. Removing a parameter is the cheap experiment;
-run it before adding one.
-
-**Every sweep table below was measured on the build before the fifth
-optimisation pass**, whose byte-rounded vocabulary centres moved the shipped
-point from F1 0.9775 to 0.9777 — 224,779 proposals to 224,868, the same 1,088
-false pairs, the same zero cross-family — and the tables are left as measured
-rather than half-rewritten. Nothing in them is a shape a tenth of a point of
-recall could change, and the two that matter, the *distance to the cliff* for
-`--min-pixel-correlation` and `--min-aligned-points`, are properties of the
-acceptance rule and not of the vocabulary. Re-sweeping either is a run per
-value; do it when a threshold is actually in question.
-
-**And the names are load-bearing too.** `--min-frame-overlap` and
+**The names are load-bearing too.** `--min-frame-overlap` and
 `--min-pixel-correlation` were `--min-overlap` and `--min-agreement`, which
-read as a loose and a tight version of one bar — a misreading `verify.rs` used
-to spend fourteen lines of comment trying to prevent. The nouns now carry it:
-one is **frames**, pure geometry with no pixel read, and the other is the
-**pixels** in them. `--min-aligned-points` was `--min-inliers`, which is RANSAC
-jargon for "correspondences that agree on one transform". A name that needs a
-comment to stop a misreading is the wrong name; the comment got shorter.
+read as a loose and a tight version of one bar. The nouns now carry the
+difference: one is **frames**, pure geometry with no pixel read, the other the
+**pixels** in them. `--min-aligned-points` was `--min-inliers`, RANSAC jargon
+for "correspondences that agree on one transform". A name that needs a comment
+to stop a misreading is the wrong name.
 
-**How to tell whether a number is fitted, with no held-out corpus.** Two
-measurements, and they answer different questions. *Sweep it and look at the
-shape*: a value sitting on a plateau is not carrying corpus-specific
-information, one balanced on a peak is. *Score the same runs on two disjoint
-halves of the seeds* (`pair_relation` is per-seed, so a half is exactly the
-corpus you would have had with only those seeds) and check that the shape
-reproduces. Every knob swept this way reproduced its shape on both halves under
-two different splits — so the parameter surface is not balanced on these 62
-photographs, which is the thing that was worth knowing.
+**How to tell whether a number is fitted.** *Sweep it and look at the shape*:
+a value on a plateau carries no corpus-specific information, one balanced on a
+peak does. *Score the same runs on two disjoint halves of the seeds*
+(`pair_relation` is per-seed, so a half is exactly the corpus those seeds would
+have given) and check that the shape reproduces. Every knob reproduces its
+shape on both halves under two different splits. What the halves cannot catch
+is a value chosen because it topped the F1 column — both halves prefer the
+same over-fitted value — and they are **blind to merges**: a merge lands in one
+half (at correlation 0.30 on the old build, half A 0.8990 against half B's
+0.9785), and a near-miss merge usually lands in *neither*, because the two
+sibling photographs are split between the halves and the pairs joining them
+belong to no half at all. At bar 7 on IMGS3 the whole corpus scores 0.9747
+while both halves score about 0.985. Halves test whether a *shape*
+generalises, not whether a value is safe.
 
-It also says what the sweeps are *not* evidence for. A value chosen because it
-topped the F1 column is still fitted, plateau or no, and the halves cannot
-catch that: both halves prefer the same over-fitted value. That is why the
-thresholds below moved only where something other than F1 moved with them.
+**What a threshold sweep hides: the cliff.** Every acceptance threshold is
+monotone in F1 over the usable range — looser is always better — right up to
+the point where two families merge and thousands of false pairs arrive at
+once. So sweep for the *cliff*, not the peak, quote the distance to it, and
+split false pairs into rearrangement traps and cross-family errors, because
+loosening a bar buys traps long before it buys a merge.
 
-**What a threshold sweep hides: the cliff.** F1 is a poor guide here because
-every acceptance threshold is monotone in it over the usable range — looser is
-always better — right up to the point where two families merge and thousands of
-false pairs arrive at once. So sweep for the *cliff*, not the peak, and quote
-the distance to it. Measured on this corpus: `--min-aligned-points` is clean at 8 and
-catastrophic at 7 (8,148 cross-family pairs, 9 merges); `--min-pixel-correlation` is
-clean at 0.45 and merges at 0.40. The shipped values keep the same margin the
-previous build had, which is why neither of them moved to the value that
-scored best.
+**The sweep of 0.20.0** (`out/v14-fullsweep` at 384 and 640, `out/v15-enlargement`
+at 512, the default since): every option on IMGS, IMGS2 and IMGS3 alone and on
+all three together, everything else at the shipped value (correlation 0.6),
+about 600 runs. F1 at 512 and 640 below — the 384 tables are in
+`v14-fullsweep/tables.txt` — and **†** marks a run with a family merge, a pair
+of seeds with 300 or more false pairs between them. (A single stray file
+joining its sibling's family is about 80 pairs and is not a merge; IMGS3 has a
+few at every setting.) The `tables.txt` files have precision, recall, trap and
+cross-family counts, the seed halves and the clean-anchor rule's joins and
+refusals for every row.
 
-**`--min-frame-overlap` and `--min-pixel-correlation` are not two strengths of one bar.**
-They sit one line apart in `Verdict::accepted`, which is why they read like a
-loose and a tight version of the same idea, and they are not: each is the only
-defence against a failure mode the other cannot see at any setting. The note on
-that function carries the per-mode numbers — the two Excel screenshots match at
-median overlap **1.000** and median agreement **0.000**, a `column_roll` against
-a crop of its own original at median overlap **0.562** and median agreement
-**0.971**. Swept on the full corpus, everything else at stock, false pairs split
-into rearrangement traps and cross-family errors:
+| `--min-aligned-points` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
+|---|---|---|---|---|---|---|---|---|
+| 3 | 0.9823 | **0.9733†** | **0.9797†** | **0.9822†** | 0.9828 | **0.9747†** | **0.9822†** | **0.9823†** |
+| 5 | 0.9805 | **0.9729†** | **0.9799†** | **0.9807†** | 0.9812 | **0.9740†** | 0.9889 | **0.9818†** |
+| 6 | 0.9781 | 0.9842 | **0.9790†** | **0.9799†** | 0.9771 | **0.9737†** | 0.9887 | **0.9808†** |
+| 7 | 0.9761 | 0.9832 | **0.9786†** | 0.9827 | 0.9772 | **0.9726†** | 0.9881 | **0.9791†** |
+| 8 | 0.9727 | 0.9825 | **0.9779†** | 0.9808 | 0.9750 | **0.9723†** | 0.9880 | **0.9785†** |
+| 9 | 0.9697 | 0.9814 | **0.9770†** | 0.9792 | 0.9736 | 0.9838 | 0.9871 | 0.9810 |
+| **10** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
+| 11 | 0.9640 | 0.9794 | 0.9828 | 0.9763 | 0.9686 | 0.9823 | 0.9863 | 0.9790 |
+| 12 | 0.9593 | 0.9779 | 0.9822 | 0.9736 | 0.9650 | 0.9811 | 0.9860 | 0.9775 |
+| 14 | 0.9539 | 0.9738 | 0.9772 | 0.9681 | 0.9624 | 0.9795 | 0.9844 | 0.9754 |
+| 16 | 0.9463 | 0.9706 | 0.9728 | 0.9630 | 0.9559 | 0.9784 | 0.9822 | 0.9719 |
+| 20 | 0.9317 | 0.9624 | 0.9642 | 0.9526 | 0.9449 | 0.9733 | 0.9773 | 0.9643 |
 
-| `--min-frame-overlap` | F1 | precision | recall | FP | trap | cross | merges |
-|---|---|---|---|---|---|---|---|
-| 0.50 | 0.9638 | 95.91% | 96.85% | 9,626 | 9,625 | **1** | 1 |
-| 0.60 | 0.9724 | 97.72% | 96.76% | 5,261 | 5,261 | 0 | 0 |
-| 0.70 | 0.9763 | 98.84% | 96.44% | 2,626 | 2,626 | 0 | 0 |
-| 0.75 | 0.9763 | 98.88% | 96.40% | 2,535 | 2,535 | 0 | 0 |
-| 0.80 | 0.9777 | 99.39% | 96.20% | 1,368 | 1,368 | 0 | 0 |
-| **0.85** | **0.9775** | **99.52%** | **96.05%** | **1,088** | **1,088** | **0** | **0** |
-| 0.90 | 0.9741 | 99.61% | 95.31% | 871 | 871 | 0 | 0 |
-| 0.95 | 0.9642 | 99.65% | 93.40% | 770 | 770 | 0 | 0 |
+| `--min-frame-overlap` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
+|---|---|---|---|---|---|---|---|---|
+| 0.3 | 0.9506 | 0.9635 | **0.9574†** | **0.9563†** | 0.9541 | 0.9664 | **0.9601†** | **0.9592†** |
+| 0.4 | 0.9506 | 0.9638 | 0.9660 | 0.9607 | 0.9545 | 0.9673 | **0.9604†** | **0.9596†** |
+| 0.5 | 0.9509 | 0.9644 | 0.9666 | 0.9612 | 0.9549 | 0.9675 | **0.9612†** | 0.9635 |
+| 0.6 | 0.9605 | 0.9749 | 0.9782 | 0.9723 | 0.9646 | 0.9781 | **0.9790†** | 0.9742 |
+| 0.7 | 0.9646 | 0.9794 | 0.9834 | 0.9766 | 0.9690 | 0.9821 | 0.9856 | 0.9787 |
+| 0.8 | 0.9669 | 0.9810 | 0.9844 | 0.9782 | 0.9708 | 0.9840 | 0.9866 | 0.9803 |
+| **0.85** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
+| 0.9 | 0.9635 | 0.9767 | 0.9797 | 0.9738 | 0.9650 | 0.9801 | 0.9831 | 0.9761 |
+| 0.95 | 0.9528 | 0.9662 | 0.9687 | 0.9629 | 0.9550 | 0.9695 | 0.9710 | 0.9652 |
 
-| `--min-pixel-correlation` | F1 | precision | recall | FP | trap | cross | merges |
-|---|---|---|---|---|---|---|---|
-| 0.30 | 0.8945 | 83.39% | 96.45% | 44,725 | 1,185 | **43,540** | 12 |
-| 0.35 | 0.9683 | 97.23% | 96.42% | 6,387 | 1,158 | **5,229** | 2 |
-| 0.40 | 0.9732 | 98.30% | 96.36% | 3,879 | 1,129 | **2,750** | 1 |
-| 0.45 | 0.9785 | 99.49% | 96.26% | 1,146 | 1,146 | 0 | 0 |
-| **0.50** | **0.9775** | **99.52%** | **96.05%** | **1,088** | **1,088** | **0** | **0** |
-| 0.55 | 0.9758 | 99.54% | 95.70% | 1,020 | 1,020 | 0 | 0 |
-| 0.60 | 0.9729 | 99.59% | 95.09% | 920 | 920 | 0 | 0 |
-| 0.70 | 0.9600 | 99.61% | 92.64% | 849 | 849 | 0 | 0 |
+| `--min-pixel-correlation` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
+|---|---|---|---|---|---|---|---|---|
+| 0.2 | 0.9713 | 0.9863 | 0.9878 | 0.9819 | 0.9740 | 0.9878 | **0.9799†** | 0.9835 |
+| 0.4 | 0.9712 | 0.9855 | 0.9877 | 0.9819 | 0.9741 | 0.9878 | **0.9801†** | 0.9836 |
+| 0.5 | 0.9701 | 0.9842 | 0.9870 | 0.9811 | 0.9733 | 0.9871 | **0.9796†** | 0.9829 |
+| 0.55 | 0.9690 | 0.9833 | 0.9857 | 0.9799 | 0.9721 | 0.9861 | **0.9787†** | 0.9819 |
+| **0.6** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
+| 0.65 | 0.9634 | 0.9749 | 0.9808 | 0.9740 | 0.9670 | 0.9782 | 0.9830 | 0.9758 |
+| 0.7 | 0.9584 | 0.9687 | 0.9730 | 0.9678 | 0.9618 | 0.9719 | **0.9685†** | 0.9697 |
+| 0.8 | 0.9365 | 0.9445 | 0.9482 | 0.9444 | 0.9422 | 0.9471 | 0.9522 | 0.9466 |
 
-Four things to read off those, and the first is why the pair is worth this much
-text. **Loosening overlap merges nothing and adds traps; loosening agreement
-merges families and adds almost no traps.** Of the 2,847 pairs that are false at
-agreement 0.40 and were not at 0.50, **2,750 are a single family merge** — the
-two Excel screenshots. Of the 1,544 that are false at overlap 0.70 and were not
-at 0.85, the transforms naming them are led by `column_roll` and `tile_shuffle`,
-and **none of them crosses a family at all**.
-**Their margins are not comparable**: agreement's cliff is one step below
-shipped, where overlap has none in the usable range and 0.35 of clear air below
-it. **Both score best one step loose** — overlap 0.80 by 0.0002, agreement 0.45
-by 0.0010 — and neither should move, because that is buying F1 with the distance
-to a cliff, which is the whole of the rule above. And **the seed halves cannot
-see this cliff**: they track each other everywhere on the safe side, but at
-agreement 0.30 half A is 0.8990 against half B's 0.9785, because the merges all
-land in one half. Halves test whether a *shape* generalises, not whether a value
-is safe.
+| `-k` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
+|---|---|---|---|---|---|---|---|---|
+| 10 | 0.9387 | 0.9510 | **0.9519†** | 0.9444 | 0.9364 | 0.9454 | 0.9544 | 0.9483 |
+| 25 | 0.9587 | 0.9699 | 0.9768 | 0.9698 | 0.9645 | 0.9757 | 0.9769 | 0.9723 |
+| 50 | 0.9631 | 0.9733 | 0.9788 | 0.9730 | 0.9666 | 0.9781 | 0.9793 | 0.9745 |
+| 100 | 0.9671 | 0.9799 | 0.9841 | 0.9778 | 0.9705 | 0.9834 | 0.9862 | 0.9797 |
+| **150** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
+| 300 | 0.9672 | 0.9803 | 0.9843 | 0.9779 | 0.9707 | 0.9835 | 0.9864 | 0.9800 |
+| 500 | 0.9672 | 0.9803 | 0.9843 | 0.9779 | 0.9707 | 0.9835 | 0.9864 | 0.9800 |
+
+**Every merge in those tables is two photographs of one scene** — `Segovia1` /
+`Segovia2`, `docks1` / `docks2`, `field2` / `field3`, `Acueducto3` /
+`Acueducto4` and `Henares1` / `Henares2` on IMGS3, `bust1` / `bust2` on IMGS2
+— most at 5,000-7,000 false pairs. None is two unrelated families, and none is
+on IMGS. That is the finding of the sweep, and it reverses the tables that
+stood here: **every cliff measured on IMGS alone is gone**.
+`--min-aligned-points` merged nine families at 7 (8,148 cross-family pairs),
+`--min-pixel-correlation` merged the two Excel screenshots at 0.40 and twelve
+families at 0.30 (43,540 pairs), `--work-size 896` merged `beach` with
+`panoramic3`; under the clean-anchor rule IMGS makes no merge at bar 3, at
+correlation 0.2 or at any work size. The cliffs did not go away, they moved to
+the corpora that have near misses, and most of them moved **closer** to the
+shipped values than the old ones were:
+
+| option | distance from shipped to the nearest merge, 384 | **512 (default)** | 640 | documented before (IMGS, 640) |
+|---|---|---|---|---|
+| `--min-aligned-points` 10 | 3 steps (IMGS3 at 7) | **1 step** (IMGS3 at 9) | 2 steps (IMGS2 at 8) | 3 steps (at 7) |
+| `--min-frame-overlap` 0.85 | 0.35 (IMGS3 at 0.5) | **0.55** (IMGS3 at 0.3) | 0.25 (IMGS3 at 0.6) | none in the usable range |
+| `--min-pixel-correlation` 0.6 | none from 0.2 to 0.8 | **none from 0.2 to 0.8** | 0.01 below (IMGS3 at 0.58), 0.09 above (at 0.69) | 0.1 (at 0.40, when 0.50 shipped) |
+| `-k` 150 | 140 (all three at 10) | **140** (IMGS3 at 10) | none from 10 up | none |
+
+The combined corpus does not simply add its parts: it merges `bust` at bar 8
+at 640 as IMGS2 does, but not `Segovia` at 384 as IMGS3 does, and `docks` at
+overlap 0.4 where IMGS3 alone merges at 0.6. A merge of near-miss siblings
+depends on which anchors happen to exist, and the vocabulary a corpus builds
+changes that — which is also why the three work sizes do not line up. Read the
+margins as the distance to *a* merge, not to a fixed edge.
+
+**`--min-aligned-points` at the default is the thin one, and it is open.**
+Recall is still a ramp and F1 still falls at every step above the cliff, so F1
+still prefers the lowest safe bar, and the reason not to follow it is the
+margin — which at 512 is a single step. Replayed off one `--dump` per corpus
+(`replay_ap.py`, reproducing the runs' merges and stray-file counts exactly),
+counting cross-family anchors *before* the clusters are made:
+
+| bar | IMGS3 384: cross anchors | clean | merges | IMGS3 512: cross anchors | clean | merges | IMGS2 640: cross anchors | clean, kept by the bridge test | merges |
+|---|---|---|---|---|---|---|---|---|---|
+| 6 | 15,492 | 1 | **1** | 17,438 | 0 | **1** | 4,334 | 3 | **1** |
+| 7 | 14,499 | 1 | **1** | 17,134 | 0 | **1** | 3,741 | 3 | **1** |
+| 8 | 13,410 | 1 | 0 | 16,645 | 0 | **1** | 3,114 | 2 | **1** |
+| 9 | 12,027 | 0 | 0 | 16,019 | 0 | **1** | 2,504 | 0 | 0 |
+| **10** | **10,797** | **0** | **0** | **15,205** | **0** | **0** | **1,992** | **0** | **0** |
+| 12 | 8,873 | 0 | 0 | 13,032 | 0 | 0 | 1,255 | 0 | 0 |
+
+Two different mechanisms. On IMGS2 at 640 two or three *clean* anchors
+between the two busts survive the bridge test — the photographs agree block
+for block, so nothing about the anchor is weak — and the clusters join on
+them. On IMGS3, at 384 and at 512, no clean cross-family anchor survives, so
+the merge can only come through the weak-anchor rule: some cluster of one
+Segovia family ends up with a weak anchor from every one of its files into the
+other. At the shipped bar there is no clean cross-family anchor on any corpus
+at any of the three sizes, and on IMGS none at any bar above 3.
+
+So the margin at the default is held by `admit_anchors`, and a threshold is
+the wrong tool to widen it: 11 at 512 costs 0.3 points of IMGS F1 for one more
+step, 12 costs 0.8 for two, and the merge is not a property of the bar but of
+which weak anchors a Segovia fragment happens to have. The structural fix —
+something about how much of a cluster must vouch, or about joining clusters
+that each have clean structure of their own — is the next thing to try, and
+the Segovia pair at 512 bar 9, at 640 correlation 0.55 and 0.70, and at 384
+bar 7 is the test case for it. Until then 10 stays, with the margin stated.
+
+**`--min-pixel-correlation` at 640 is not monotone.** Swept by hundredths on
+IMGS3: `Segovia` merges at 0.55-0.58 (7,028-7,058 false pairs), is clean from
+**0.59 to 0.68**, merges again at 0.69 and 0.70 (6,128 and 5,938), and is clean
+at 0.75 and 0.8. At 512 and 384 no corpus merges anywhere from 0.2 to 0.8, the
+hundredths around 0.6 included. So *tightening* this bar can merge two
+families, which no other curve in this file does. Replayed off one `--dump`
+(`replay_corr.py`), the band reproduces exactly, and says why. The clean
+anchors are the same 157,258 at every bar, none of them cross-family — a clean
+anchor's worst block is 0.85, so no correlation bar below that touches it — and
+so the clusters are the same too; the bar moves only *weak* anchors, and every
+Segovia merge is made by `admit_anchors` joining clusters on them. Those joins
+are not monotone in the weak anchors they are given. One more anchor can
+complete the cover of a Segovia fragment into its sibling; one fewer can leave
+a fragment unjoined to its own family and small enough that every file of it
+has a weak anchor into the other. Which of the two happens depends on which
+anchors exist, so a bar that only removes anchors can create a merge. It is the
+same weakness as the aligned-points margin above, seen through another bar.
+
+**`--min-frame-overlap` has a cliff on IMGS3**, and it is the near-miss one:
+`docks1` / `docks2`, one quay framed slightly differently, join at 0.6 and
+below at 640 and at 0.5 and below at 384, and `Acueducto3` / `Acueducto4` at
+0.3 at 512 (5,000-7,000 false pairs); the mechanism has not been replayed. On
+IMGS and IMGS2 the shape is exactly the documented one — no cliff anywhere,
+loosening buys trap pairs by the thousand (937 at 0.85 to 10,839 at 0.3 on
+IMGS at 512), and F1 is flat to a thousandth between 0.80 and 0.85, so the
+step loose would buy nothing but the distance to a cliff. It does not move.
+
+**`-k` is unchanged**: identical to within a handful of pairs from 100 to 500
+on every corpus at every size, the knee between 50 and 100, and the shipped 150
+half the range clear of it. At 10 it merges `Segovia` (322-384 pairs), where a
+candidate list shorter than a family is the whole story. It is not connected
+to a result above 100; do not reach for it to fix anything.
+
+**`--min-frame-overlap` and `--min-pixel-correlation` are not two strengths of
+one bar.** They sit one line apart in `Verdict::accepted` and each is the only
+defence against a failure mode the other cannot see: the two Excel screenshots
+match at median overlap **1.000** and median agreement **0.000**, a
+`column_roll` against a crop of its own original at median overlap **0.562**
+and median agreement **0.971**. On IMGS, loosening overlap adds traps and
+loosening correlation (on the builds before the clean-anchor rule) merged
+families. Near misses are the case both can see: a photograph from a step to
+the side overlaps partially *and* agrees partially, which is why each has a
+cliff on IMGS3.
 
 **Neither of them is a cost knob, and the one cost effect runs backwards.**
-`--min-frame-overlap` looks like one: it gates `pixel_check`, the most expensive thing
-done per pair, at `verify.rs:1149` and again on propagation. It saves almost
-nothing, because the quantity it gates is bimodal — of 210,133 direct verdicts
-eligible on inliers, **189,439 (90.2%) already have an overlap of 0.9 or more**,
-so the floor turns away 193,430 checks at 0.85 against 196,462 at 0.70 and
-183,653 at 0.95. Measured with `--features prof` and propagation disabled, direct
-`pixel_check` is flat at 26.7-32.3 CPU-seconds across every setting of *either*
-knob. What does move is propagation, and it moves the wrong way: a round
-proposes every **unmatched** pair inside a component, so *tightening* a bar
-leaves more of them and makes more work. Composed hypotheses go 70,887 ->
-**75,986** -> 147,876 as agreement goes 0.35 -> 0.50 -> 0.70, and 57,562 ->
-**75,986** -> 131,989 as overlap goes 0.70 -> 0.85 -> 0.95. Agreement at 0.70
-doubles them and costs 8-10 CPU-seconds of `pixel_check` (42.4 and 43.6 against
-the shipped 35.3 and 32.8, two reps each) — the only cost signal either knob
-produced that cleared this machine's noise floor. The overlap points did not:
-the same configuration measured 41.4 s and 33.1 s on two reps, which is the 25%
-swing *Speed and memory* warns about. Set both for what the tool should claim,
-never for what it costs.
+Overlap gates `pixel_check`, but the quantity it gates is bimodal — 90% of
+direct verdicts eligible on inliers already overlap 0.9 or more — so direct
+`pixel_check` is flat at 27-32 CPU-seconds across every setting of either knob
+(measured with `--features prof`, propagation off). What moves is propagation,
+backwards: a round proposes every **unmatched** pair inside a component, so
+*tightening* a bar makes more work. Composed hypotheses go 70,887 -> 75,986 ->
+147,876 as correlation goes 0.35 -> 0.50 -> 0.70, and 57,562 -> 75,986 ->
+131,989 as overlap goes 0.70 -> 0.85 -> 0.95. Set both for what the tool
+should claim, never for what it costs. (Until 0.19.x propagation also dropped
+every composed pair at overlap 0.5 or less whatever the flag said; it now
+keeps them against the tier's own floor, pair-for-pair identical at 0.85 and
++891 propagated pairs, every one a trap, at 0.3 — `out/v13-propagation-floor`.)
 
-**Every overlap figure below 0.5 in the table above understates the setting**,
-because until 0.19.x propagation dropped every composed pair at overlap 0.5 or
-less whatever `--min-frame-overlap` said, so below 0.5 the flag applied to
-direct pairs only (and `--dump`'s propagated rows stopped at 0.5 too). It now
-keeps composed pairs against the tier's own floor. At the shipped 0.85 that is
-pair-for-pair identical and level on the clock, since acceptance and the pixel
-check were both already gated there; at 0.3, three cold alternating pairs at
-the default work size: +891 / -26 pairs, all 891 propagated, **TP 214,257 ->
-214,361, FP 9,852 -> 10,550, every one a trap, cross-family 0 -> 0**, F1 0.9377
--> 0.9365, CPU 303-305 s either way (`out/v13-propagation-floor`). Which is the
-table's own conclusion again: loosening overlap buys traps and merges nothing.
-
-**`--min-aligned-points` is the third bar in that `if`, and the only one propagation
-can overrule.** `Policy::new` gives the propagated tier `min_aligned_points: 0`
-(`verify.rs:228`) — no features vouch for a composed transform, so the count is
-not evidence about it — while overlap and agreement are inherited by all three
-tiers. A pair the inlier bar rejects can therefore come back through
-propagation; a pair the other two reject is gone. That asymmetry is most of why
-this knob behaves differently from the other two at the tight end.
-
-| `--min-aligned-points` | F1 | precision | recall | FP | trap | cross | merges | wall |
-|---|---|---|---|---|---|---|---|---|
-| 5 | 0.9535 | 93.19% | 97.61% | 16,620 | 1,263 | **15,357** | 55 | 69.2 s |
-| 6 | 0.9668 | 96.02% | 97.34% | 9,390 | 1,232 | **8,158** | 13 | 49.8 s |
-| 7 | 0.9654 | 96.02% | 97.07% | 9,361 | 1,213 | **8,148** | 10 | 32.1 s |
-| 8 | **0.9809** | 99.48% | 96.74% | 1,181 | 1,181 | 0 | 0 | 23.2 s |
-| 9 | 0.9795 | 99.51% | 96.44% | 1,101 | 1,101 | 0 | 0 | 21.5 s |
-| **10** | **0.9775** | **99.52%** | **96.05%** | **1,088** | **1,088** | **0** | **0** | ~25 s |
-| 11 | 0.9745 | 99.52% | 95.46% | 1,077 | 1,077 | 0 | 0 | 27.8 s |
-| 12 | 0.9714 | 99.55% | 94.84% | 1,002 | 1,002 | 0 | 0 | 20.3 s |
-| 13 | 0.9680 | 99.55% | 94.19% | 990 | 990 | 0 | 0 | 33.5 s |
-| 14 | 0.9655 | 99.55% | 93.71% | 983 | 983 | 0 | 0 | 20.2 s |
-| 15 | 0.9642 | 99.56% | 93.48% | 973 | 973 | 0 | 0 | 27.2 s |
-| 16 | 0.9623 | 99.56% | 93.11% | 968 | 968 | 0 | 0 | 20.4 s |
-| 17 | 0.9591 | 99.56% | 92.52% | 954 | 954 | 0 | 0 | 27.1 s |
-| 18 | 0.9563 | 99.56% | 92.01% | 945 | 945 | 0 | 0 | 25.1 s |
-| 20 | 0.9514 | 99.57% | 91.08% | 908 | 908 | 0 | 0 | 31.0 s |
-
-The cliff above reproduces to the pair — 8,148 cross-family pairs at 7 — and so
-does the reason not to move: **8 scores 0.0034 better than shipped with nothing
-cross-family**, and sits one step from catastrophe where 10 sits three. Unlike
-agreement, whose cliff arrives one family at a time (1, then 2, then 12), this
-one arrives whole. (Above the cliff the wall column is thermal noise; below it,
-it is the merge tax, and it scales with how bad the merge is.)
-
-**Cliff or plateau depends on which column you read, and that is the point.**
-Recall is a pure **ramp** — strictly monotone across all fifteen points, no knee,
-about 0.47 points per unit. Precision is a **step**: 7 -> 8 jumps 3.46 points,
-and then 8 -> 20 moves **0.09 points across twelve units**, a dead-flat plateau.
-F1 is the product of the two, so it inherits the cliff below 8 and the ramp
-above it: strictly monotone decreasing at every one of the twelve steps above
-the cliff, with its only inversion at 6 -> 7, inside the catastrophe where the
-ordering is meaningless.
-
-So **there is no F1 plateau anywhere in the safe range**, and the plateau test
-from the rule above returns an unambiguous verdict: 10 is not sitting on a
-plateau, it is sitting on a slope, and F1 says to move it to 8. Compare the
-geometric inlier tolerance, where every value from 0.010 to 0.025 is within
-0.001 of the same F1 — that is what a plateau looks like, and this knob has
-nothing resembling one. Two things make the answer *keep it at 10* anyway.
-**The F1-optimal safe value and the cliff edge are the same value**, so
-following F1 leaves not a thin margin but none at all. And above the cliff the
-knob buys nothing to begin with: 8 -> 20 removes 273 false pairs, **every one of
-them a trap**, for 0.09 points of precision and 5.66 points of recall. Whatever
-`--min-aligned-points` does for precision, it does entirely in the single step from 7
-to 8.
-
-The halves behave the way they did for agreement: identical to four places at 13
-and close everywhere above the cliff, wildly apart below it (at 5, half A is
-0.9855 against half B's 0.9422). They confirm the shape and cannot see the
-edge.
-
-**Its cost is the merge tax, not the gate.** As a gate it is the weakest of the
-three: `n_in` is even more skewed than overlap — 156,016 of 236,549 direct
-verdicts carry 50 inliers or more — so the shipped value turns away 193,430
-checks against 204,254 at 6 and 177,283 at 20, a band of ±6%. But it is the only
-one of the three whose *clock* moves, and it moves at the loose end only,
-because that is where the families merge: a merged component is enormous and a
-propagation round proposes every unmatched pair inside one.
-
-| `--min-aligned-points` | composed hypotheses | `pixel_check` CPU-s, 2 reps | no propagation |
-|---|---|---|---|
-| 6 | **340,008** | 57.0 / 44.9 | 44.2 / 29.4 |
-| **10** | **75,986** | **37.1 / 33.6** | **28.1 / 27.3** |
-| 20 | 81,742 | 31.8 / 34.0 | 25.3 / 26.2 |
-
-At 6 the hypothesis count is **4.5x** the shipped one and the sweep's run took
-49.8 s of wall against the usual ~25 s. At 20 it is +7.6% and the clock is level
-or better — which is where the propagated tier's `min_aligned_points: 0` shows up, since
-the pairs a tight inlier bar rejects are exactly the ones propagation gets back.
-Tightening `--min-pixel-correlation` to 0.70 doubles the hypotheses because nothing gets
-them back. So the rule for all three holds, with this one for a different
-reason: a setting that costs real time is telling you it has merged something.
+**`--min-aligned-points` is the only bar propagation can overrule.**
+`Policy::new` gives the propagated tier `min_aligned_points: 0` — no features
+vouch for a composed transform — while overlap and correlation are inherited
+by all three tiers, so a pair the inlier bar rejects can come back through
+propagation and a pair the other two reject is gone. Its cost is the merge
+tax, not the gate: `n_in` is skewed (156,016 of 236,549 direct verdicts carry
+50 inliers or more), so the bar turns away a band of ±6% of checks from 6 to
+20, but a merged component is enormous and a propagation round proposes every
+unmatched pair inside one. On the old build at 640, bar 6 proposed **340,008**
+composed hypotheses against the shipped 75,986 and took twice the wall clock.
+A setting that costs real time is telling you it has merged something.
 
 **Making it self-adjusting: derivable, measured, and worse.** The bar is a
-*count*, so unlike the other two it has no natural scale — which makes it the
-obvious candidate for deriving from the corpus instead of fitting. There is a
-clean derivation available. `from_single` builds a 4-DoF similarity from one
-correspondence and maps its own anchor exactly, so under a null model of
-randomly-placed correspondences an observed count is `1 + Binomial(n_match - 1,
-p)`, where `p` is the chance a random correspondence lands within tolerance:
+*count* with no natural scale, the obvious candidate for deriving from the
+corpus. `from_single` builds a 4-DoF similarity from one correspondence, so
+under a null model of randomly placed correspondences an observed count is
+`1 + Binomial(n_match - 1, p)`, with `p` the chance a random correspondence
+lands within tolerance:
 
 ```
 tau = max(0.015 * diag(B), 3)   p = pi*tau^2 / area(B) = pi * 2.25e-4 * (r + 1/r)
 ```
 
-That is 1.47e-3 at 4:3 and depends on aspect only through `r + 1/r` — 2.0
-square, 2.34 at 16:9 — so it varies by well under one step. Every
-correspondence is tried as a hypothesis, so the run's expected number of
-coincidental anchors is `V * min(n_match,600) * P(X >= k-1)`; set that below
-alpha and solve for k. Every term is known at runtime: `n_match` is already a
-`Verdict` field and `V` is the candidate-pair count.
-
-**It reproduces both numbers it should.** At a typical rich pair and this
-corpus's 236,549 verified pairs it returns **10**, the shipped value; at
-alpha=1, where coincidence stops being expected, it returns 8-9, which is the
-measured cliff. Two unrelated methods landing on the same two numbers is as
-much confirmation as this project gets without a held-out corpus. It is also
-insensitive in the right way: 1000x in alpha moves the bar two steps, and so
-does 1000x in corpus size (8 at six files, 12 at 5.6M).
-
-**And it is worse.** Replayed over the shipped build's own verdicts, carried
-through `drop_weak_bridges` and component assembly:
-
-| rule | anchors | cross-family anchors | after bridge test | families merged |
-|---|---|---|---|---|
-| flat 6 | 199,179 | 20 | 7 | **2** |
-| flat 8 | 195,820 | 6 | 0 | 0 |
-| **flat 10 (shipped)** | **192,390** | **3** | **0** | **0** |
-| flat 12 | 189,277 | 2 | 0 | 0 |
-| derived alpha=1 | 201,778 | 25 | 5 | **1** |
-| derived alpha=0.01 | 201,007 | 13 | 1 | **1** |
-| derived alpha=0.001 | 200,156 | 9 | 1 | **1** |
-
-It merges `13.webp` with `low-light.avif` at **every** alpha, including one
-where it is stricter in aggregate than the flat bar. Tightening cannot fix it,
-because alpha moves the bar one step per three decades while the offending
-pairs are sparse and the model discounts sparse pairs by construction.
-
-**Why, and this is the part worth keeping.** Every cross-family anchor it
-admits and the flat bar rejects is sparse — `n_match` 8 to 42, `n_in` 5 to 9,
-two of them screenshots. The null model bounds **coincidence**, and coincidence
-was never the binding constraint. Correspondences between two different
-photographs exist *because* the images share real structure — a logo, a
-horizon, page furniture — so conditioned on there being few of them they are
-*more* likely to be geometrically consistent, not less. The model is loosest
-exactly where the evidence is least random. So the bar is flat because the
-failure mode it defends against does not scale with `n_match`, and any rule
-that hands an individual pair a discount walks into it. A *per-corpus* scaling
-is untouched by this result, since it never discounts a single pair; it is
+Every correspondence is tried as a hypothesis, so the run's expected number
+of coincidental anchors is `V * min(n_match,600) * P(X >= k-1)`; set that
+below alpha and solve for k. It reproduces both numbers it should — **10** at
+a typical rich pair and IMGS's 236,549 verified pairs, 8-9 at alpha=1 — and
+1000x in alpha or in corpus size moves it two steps. **And it is worse**:
+replayed over the old build's verdicts it merged `13.webp` with
+`low-light.avif` at every alpha, including one stricter in aggregate than the
+flat bar (flat 8-12: no merge; derived alpha 1 / 0.01 / 0.001: one merge
+each). Every cross-family anchor it admits and the flat bar rejects is sparse
+— `n_match` 8 to 42, `n_in` 5 to 9. The null model bounds **coincidence**,
+and coincidence was never the binding constraint: correspondences between two
+different photographs exist *because* they share real structure, so
+conditioned on there being few of them they are *more* likely to be
+consistent, not less. Any rule that hands an individual pair a discount walks
+into it. A *per-corpus* scaling never discounts a single pair and is
 untested, not refuted.
 
-**What the same replay says about the margin.** Counting cross-family anchors
-*before* `drop_weak_bridges` shows something the output table above cannot: the
-precision plateau from 8 to 20 is real in the output, but the margin behind it
-is not flat. **8 leaves six cross-family anchors for the bridge test to absorb
-where 10 leaves three**, and the bridge test survives exactly one false edge.
-That is an argument against F1's preference for 8 that does not depend on F1 —
-and it is why the one merge that survives at alpha=0.001 gets through at all:
-its far side is a single file, which is the one shape `drop_weak_bridges` keeps
-by design.
-
-**Does the level transfer?** `--work-size 384` is a fair proxy for a
-keypoint-poor corpus — same ground truth, same content, about a third of the
-descriptors. Swept at both sizes:
-
-| bar | **ws 640** F1 | recall | cross | merges | **ws 384** F1 | recall | cross | merges |
-|---|---|---|---|---|---|---|---|---|
-| 6 | 0.9668 | 97.34% | **8,158** | 1 | 0.9755 | 95.60% | **4** | 2 |
-| 8 | **0.9809** | 96.74% | 0 | 0 | **0.9656** | 93.69% | 0 | 0 |
-| 10 | 0.9775 | 96.05% | 0 | 0 | 0.9553 | 91.78% | 0 | 0 |
-| 12 | 0.9714 | 94.84% | 0 | 0 | 0.9434 | 89.56% | 0 | 0 |
-
-Three readings. The **safe optimum is 8 at both** and the cliff sits between 6
-and 8 at both, so the level survived a 3x change in descriptor count — which
-was the specific worry, and it did not fire. The **price of the margin triples**:
-choosing 10 over 8 costs 0.69 points of recall at 640 and 1.91 at 384, buying
-nothing either time. And the **cliff's depth varies by three orders of
-magnitude** — one step below safe produces 8,158 cross-family pairs at 640 and
-4 at 384. That last one is the reason the margin is wider than F1 wants: the
-cost of going over the edge is not a corpus-independent quantity, so the
-distance to it should not be shaved to the minimum that happens to work here.
-
 **How all of that was measured, because it is reusable.** `--dump` sets the
-pixel-check gate to `(3, 0.2)` (or looser, if the run's own bars are), so `blk` is a real measurement for every
-verdict with three inliers or more and *any* bar at or above 3 can be replayed
-offline against one run — no rebuild, no re-run per value. Replaying the anchor
-tier this way reproduced the run's own count to **186,616 against 186,614**,
-the gap being the dump's four-decimal rounding. `drop_weak_bridges` is a
-sixty-line Tarjan and replays the same way, which is what turns an anchor count
-into a merge count. Sweeping a CLI flag costs a run per value; this costs one.
+pixel-check gate to `(3, 0.2)` (or looser, if the run's own bars are), so
+`blk` and `blk_min` are real measurements for every verdict with three inliers
+or more, and *any* bar at or above 3 can be replayed offline against one run:
+the anchor tier, `drop_weak_bridges` (a sixty-line Tarjan) and the clean-anchor
+rule's joins. `out/v14-fullsweep/replay_ap.py` does it for every
+`--min-aligned-points` bar. Sweeping a CLI flag costs a run per value; this
+costs one.
 
 **The fourth pass, and what it removed.** Five numbers, all verified by
 deleting each and measuring, then by re-measuring the survivors in the deleted
@@ -1149,8 +1092,8 @@ not moved across five passes, which is a coincidence rather than a law: the
 fifth pass took 16% off the matcher and 8% off decode, and the ratio came out
 where it started.)
 
-**Those three shares are at `--work-size 640` and the default is no longer
-there.** `--work-size` scales the first four fifths of the pipeline and the
+**Those three shares are at `--work-size 640`, and the default has been
+below it since.** `--work-size` scales the first four fifths of the pipeline and the
 decoders it scales the *least*, since a file is decoded at its own size
 whatever the working size is — so lowering the default raised decode's share
 rather than lowering it. Measured at 384: decode is about **48%** of a
@@ -2546,11 +2489,11 @@ verdict, where every round used to add one — 57 of 349 rows on
 `derived/Desktop` were repeats. A `variant` pair can still appear twice, once
 from each end, because those are two verdicts. The
 cache is on by default and is what makes tuning the matching stages practical:
-on the 5,638-image corpus a cold run at the default is ~57 s and a cached one
-~12 s (at 640, ~82 s and ~17 s), and the cache is keyed on the extraction
+on the 5,638-image corpus a cold run at 384 is ~57 s and a cached one ~12 s
+(at 640, ~82 s and ~17 s; the default, 512, sits between), and the cache is keyed on the extraction
 settings so changing `--work-size` invalidates it correctly — which also means one cached extraction serves a
-whole threshold sweep at a given work size, and that is how the 384 sweeps in
-*Measured trade-offs* were taken. A sweep's runs after the first also write
+whole threshold sweep at a given work size, and that is how
+`out/v14-fullsweep` was taken. A sweep's runs after the first also write
 nothing: an unchanged record set is not rewritten.
 
 Note that timings taken this way are warm-cache and run about 40% faster than
@@ -2581,201 +2524,148 @@ both of which caught something real in this pass:
   trap. A rule that only watches total FP would have rejected it.
 
 Measured trade-offs, so they need not be rediscovered. **`--work-size` is a
-knee, not a peak**, and the shipped default is deliberately below it. Re-swept
-on this build, all six sizes in **one session** on `bench.py`'s own protocol —
-cold page cache, cooled to measured idle + 3 C before each — and run in the
-order 384, 896, 448, 768, 512, 640, so that the session's thermal drift does
-not track the thing being measured:
+knee, not a peak**, and the shipped default, 512, sits one step below it.
+Accuracy on all three corpora (`out/v15-enlargement` up to 448, where the
+enlargement rule below changed the rows, and `out/v14-fullsweep` from 512,
+where it did not); pairs on the found corpus, which has no ground truth; cost
+on IMGS and the found corpus from one cold, cooled, cache-evicted session on
+`bench.py`'s protocol, on the final build (idle 69 C; the large sizes ran at
+1.5-1.9 GHz and the small ones at 2.5-2.8, which is the clock following the
+load rather than noise):
 
-| `--work-size` | F1 | precision | recall | wall | CPU | peak PSS | cross-family |
-|---|---|---|---|---|---|---|---|
-| **384 (default)** | **0.9547** | **99.59%** | **91.68%** | **57.4 s** | **360 s** | **697 MB** | **0** |
-| 448 | 0.9658 | 99.59% | 93.75% | 60.7 s | 413 s | 765 MB | 0 |
-| 512 | 0.9724 | 99.55% | 95.03% | 69.4 s | 476 s | 737 MB | 0 |
-| **640 (the knee)** | **0.9777** | **99.52%** | **96.09%** | **82.4 s** | **579 s** | **849 MB** | **0** |
-| 768 | 0.9783 | 99.55% | 96.18% | 95.7 s | 670 s | 896 MB | 0 |
-| 896 | 0.9729 | 98.52% | 96.09% | 126.4 s | 841 s | 1,041 MB | **2,207** |
+| `--work-size` | IMGS F1 | IMGS recall | IMGS2 F1 | IMGS3 F1 | all 3 F1 | IMGS CPU-s | IMGS wall | found pairs | found CPU-s |
+|---|---|---|---|---|---|---|---|---|---|
+| 64 | 0.0484 | 2.48% | 0.1056 | 0.0847 | 0.0763 | 145 | 24 s | 73 | |
+| 96 | 0.4915 | 32.58% | 0.5464 | 0.5953 | 0.5379 | | | 430 | |
+| 128 | 0.6803 | 51.56% | 0.7501 | 0.7647 | 0.7275 | 166 | 29 s | 830 | 78 |
+| 192 | 0.8461 | 73.39% | 0.8778 | 0.8794 | 0.8619 | 195 | 33 s | 1,279 | |
+| 256 | 0.9005 | 82.07% | 0.9311 | 0.9349 | 0.9209 | 237 | 39 s | 1,706 | 234 |
+| 320 | 0.9272 | 86.67% | 0.9544 | 0.9592 | 0.9454 | 278 | 45 s | 1,706 | |
+| 384 | 0.9466 | 90.17% | 0.9696 | 0.9700 | 0.9601 | 434 | 72 s | 1,706 | 225 |
+| 448 | 0.9566 | 92.02% | 0.9770 | 0.9800 | 0.9712 | 526 | 88 s | 2,438 | 1,179 |
+| **512 (default)** | **0.9671** | **94.01%** | **0.9803** | **0.9842** | **0.9778** | **678 / 618** | **113 / 103 s** | **2,438** | **1,159** |
+| **640 (the knee)** | **0.9706** | **94.69%** | **0.9835** | **0.9863** | **0.9799** | **905** | **150 s** | 2,438 | |
+| 768 | 0.9736 | 95.24% | 0.9818 | 0.9869 | 0.9802 | | | | |
+| 896 | 0.9738 | 95.33% | 0.9843 | 0.9876 | 0.9820 | | | | |
+| 1024 | 0.9733 | 95.23% | 0.9819 | 0.9871 | 0.9812 | | | | |
+| 1280 | 0.9751 | 95.58% | 0.9838 | 0.9871 | 0.9819 | | | | |
+| 0 (full size) | 0.9736 | 95.32% | 0.9823 | 0.9859 | – | | | | |
 
-CPU is the column to read: it is the steadier of the two, and the wall column
-carries the session — 896 ran second, at a mean 2,137 MHz against 384's 2,765,
-so some of its 126 s is the die rather than the work. Cost is near enough
-linear in the long side. F1 climbs steeply to 640 and then stops: 640 -> 768
-buys **0.0006** for 16% more CPU, and above that it goes backwards. Downwards
-it is expensive but bounded — 512 costs 0.005, 448 costs 0.012, 384 costs
-**0.023**, and every bit of it is recall.
+Precision is not in the table because it does not move: 99.5-100% at every
+size on every corpus, a little *higher* at the small sizes, which find fewer
+pairs and so fewer traps. What the work size trades is recall.
 
-**The default is 384 and the knee is 640, which is a choice rather than a
-measurement.** What 384 buys is 38% of the CPU, 30% of the wall and 18% of the
-peak memory; what it costs is 4.4 points of recall, concentrated in the
-containment rows — see the header. The knee is where to go when recall matters
-more than the wait, and nothing above the knee is ever worth asking for.
+**Every column is monotone, and up to 0.20.0 none was below 512.** A small
+picture is enlarged before it is described (`upsample_below`, below). Until
+0.20.0 that was decided from the picture `extract` was handed and up to 512
+whatever the working size, so two things went wrong. A picture the working size
+had shrunk was enlarged again: at 256 or 128 every photograph was analysed at
+512, at 512's cost, from a quarter or a sixteenth of the detail, so 256 cost
+43% more CPU than 384 and 128 cost what 448 costs and found less than 384
+does. And a picture already small was enlarged *past* the working size: a
+120-pixel thumbnail was analysed at 480 at `--work-size 140`, so on a library
+of small images the option did nothing at all — the found corpus gave the same
+pairs at the same cost at every size from 224 up. Now a picture is enlarged
+only up to the working size (`lib::enlarge_below`: `min(work, 512)`, and the
+whole 512 at `0`), which also means a picture the working size shrank is never
+enlarged, since one doubling would pass it. **Nothing is analysed above
+`--work-size`**, so the option bounds what every picture costs, and the found
+corpus now answers to it: 830 pairs at 128, 1,706 at 256-384, 2,438 from 448,
+where its 224-pixel photographs start being doubled — at five times the CPU.
+At 512 and above nothing changes, pair for pair and group for group against
+0.20.0 (222,879 pairs at 512, 224,488 at 640); below 512 every row is new. The
+cache format went to `IMGFPC05` with it. The old rows are in
+`out/v14-fullsweep`; their two small-size merges (256 joined `Segovia1` /
+`Segovia2` on IMGS3, 64 joined `game2` / `game3` on all three) were products of
+the enlargement and are gone — no size merges a family now.
 
-**There *is* a cliff, and it is at the top rather than the bottom.** This
-reverses what stood here before. `--work-size` sets the descriptor count, which
-sizes the vocabulary, and the note in *How img-fp works* says that route can
-merge families; the previous sweep found zero cross-family pairs at every size
-and concluded it had not fired. On this build **896 fires it**: precision
-98.52%, **2,207 cross-family pairs and two merged families** — `beach` with
-`panoramic3.jpg`, which is the "two different beaches match along what they
-share" failure exactly, plus one stray `city2.jpg`/`earth.jpeg` pair. It
-reproduces to the pair over two runs (230,196 pairs both times), and it is not
-the occupancy rule failing: `for_corpus` holds occupancy between 1.8 and 2.7
-across this whole range, so the extra descriptors are buying real matches
-between genuinely similar photographs rather than a coarser vocabulary. 768 is
-clean, 640 is clean, and everything below is clean — and by the one margin
-measurement that sees behind the output, 384 is the cleaner of the two sizes
-whose anchors were counted: **one cross-family anchor for the bridge test to
-absorb against 640's three**. So the direction the default moved is the safe
-direction, and the sizes to re-check after any change to
-`VocabParams::for_corpus` are the large ones.
+What the small sizes are worth is what they cost, and it is not much: the floor
+is decoding, about 145 CPU-seconds on IMGS whatever the size, and below 96
+there is too little picture left to describe. **There is still no floor to
+set**: nothing breaks, nothing merges, and the curve says plainly what each
+step buys. (`sift::extract` returns no features under 8 pixels a side, so
+sizes 1 to 4 exit 2 listing every file as featureless. A floor of 128 shipped
+briefly on a justification — the pixel check's 128-pixel thumbnail — that
+`Thumb::build` does not bear out; the comment above the argument parsers in
+`lib.rs` says so.)
 
+Above 512 recall saturates rather than growing in proportion, because what
+resolution buys is concentrated in one kind of row. From 640 to 1280, IMGS's
+misses fall from 12,372 to 10,282, and the rows that move are containment ones
+— `contact_sheet` 53 -> 61, `embed_tiny` 52 -> 57, `crop_micro` 40 -> 45,
+`picture_in_picture` 58 -> 61 — while `thumbnail` and `scale_small` lose a seed
+or two. A photograph that fills its frame is already described well at 640;
+one that is a small part of its canvas is not.
 
-**Below the table, swept to one pixel, and why there is no floor.** Every size
-from 1 to 384 on both corpora, and 0, 0.18.2's binary, cold, one session; IMGS scored,
-the found corpus counted (it has no ground truth, so its column is pairs, not
-accuracy):
+**The default is 512 and the knee is 640, which is a choice rather than a
+measurement.** 512 is where the enlargement limit stops binding, so a small
+picture is analysed exactly as it is at 640 and only large ones lose detail;
+640 buys 0.7 points of IMGS recall, nearly all of it in the containment rows,
+for about 40% more CPU. 384 now costs a third less on photographs and four
+fifths less on a library of small ones, and gives up 3.8 points of IMGS recall
+and 30% of the found corpus's pairs. Above 640,
+IMGS2 and IMGS3 are flat to 0.003 and IMGS gains 0.005 by 1280 for nearly twice
+the CPU; nothing there is worth asking for.
 
-| `--work-size` | IMGS F1 | recall | cross-family | merges | perfect | found: matched pairs |
-|---|---|---|---|---|---|---|
-| 1, 2, 4 | 0.0020 | 0.10% | 0 | 0 | 1 | 0 |
-| 8 | 0.0086 | 0.43% | 0 | 0 | 1 | 4 |
-| 16 | 0.3149 | 18.69% | 2 | 1 | 1 | 118 |
-| 32 | 0.7289 | 57.39% | 43 | 3 | 1 | 1,513 |
-| 48 | 0.8318 | 71.74% | **1,689** | 5 | 34 | 2,950 |
-| 64 | 0.8997 | 81.93% | 54 | 2 | 40 | 4,116 |
-| 96 | 0.9114 | 83.90% | 0 | 0 | 45 | 3,573 |
-| 128 | 0.9431 | 89.49% | 1 | 1 | 39 | 3,884 |
-| 192 | 0.9522 | 91.19% | 1 | 1 | 49 | 3,748 |
-| **256** | **0.9721** | **94.96%** | **0** | **0** | **58** | 3,771 |
-| **384 (default)** | **0.9518** | **91.12%** | **0** | **0** | **46** | 3,771 |
-| 0 (full size) | 0.9755 | 95.66% | **14** | 1 | 57 | 3,771 |
+**The cliff at the top is gone.** On the builds before the clean-anchor rule
+896 merged `beach` with `panoramic3.jpg` (2,207 cross-family pairs) and full
+size made 14 cross-family pairs; now no size merges a family on any corpus.
+Full size costs two to three gigabytes for a 44-megapixel scale space, which
+the decode budget does not cover — run it at `-t 2` (IMGS: 541 s, 2.9 GB
+peak).
 
-Every row also holds the byte-identical pairs, which no work size touches:
-233 on IMGS and 7 on the found corpus, and those are *all* that sizes 1 to 4
-find — `sift::extract` returns no features for an image under 8 pixels a side.
-So a remembered "0.18.2 found pairs at `--work-size 1`" is true and is the
-exact pass. The found corpus is identical from 224 up, because its files are
-224 pixels and nothing larger shrinks them.
+**How much a small picture is enlarged (`upsample_below`), swept.** `extract`
+doubles a picture while twice its long side still fits in 512 — and, since
+the change above, in the working size — so at the default a 224-pixel file is
+analysed at 448 and a 28-pixel crop at 448 too, sixteen times over. The 512 was
+in the first commit and had never been measured. Why
+enlarge at all, when it adds no detail: the detector's smallest scale is fixed
+in pixels — the pyramid starts at a blur of 1.6 — so structure at the pixel
+scale of a small picture is smoothed away before the search begins, and a
+picture of a few dozen pixels has almost no octaves to search. Enlarging moves
+that structure to where it can be found. Swept at 384 and 640 on the build
+that had stopped enlarging pictures the working size shrank but still enlarged
+small ones up to the target whatever the working size (`out/v15-enlargement`; the found corpus has no ground truth, so its column
+is pairs, and its CPU is uncooled and swings ±20% between identical runs —
+512 and 768 do the same work on it):
 
-Three things to take from it. **There is no floor to set.** A run under 8
-pixels is never silent — it exits 2 and lists every file as featureless — and
-above that no size is a boundary: 96 merges nothing where 128 and 192 each
-merge one pair of families, and everything from 16 to 64 merges several. A
-floor of 128 shipped briefly on a justification (the pixel check's 128-pixel
-thumbnail) that `Thumb::build` does not bear out, and was taken back out; the
-comment above the argument parsers in `lib.rs` says so.
+| rule | 384 IMGS | IMGS2 | IMGS3 | all 3 | 640 IMGS | IMGS2 | IMGS3 | all 3 | found pairs | found CPU-s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| no enlargement | 0.9389 | 0.9640 | 0.9694 | 0.9566 | 0.9598 | 0.9766 | 0.9825 | **0.9693†** | 1,706 | 405 |
+| up to 256 | 0.9431 | 0.9664 | 0.9717 | 0.9602 | 0.9654 | 0.9819 | 0.9863 | 0.9775 | 1,706 | 406 |
+| up to 384 | 0.9466 | 0.9696 | 0.9700 | 0.9601 | 0.9659 | 0.9819 | 0.9858 | 0.9788 | 1,706 | 407 |
+| **up to 512 (shipped)** | **0.9481** | **0.9709** | **0.9714** | **0.9619** | **0.9706** | **0.9835** | **0.9863** | **0.9799** | **2,438** | **1,137** |
+| up to 768 | 0.9508 | 0.9682 | 0.9723 | 0.9635 | 0.9749 | 0.9826 | 0.9874 | 0.9812 | 2,438 | 1,387 |
+| up to 1024 | 0.9502 | 0.9707 | 0.9717 | 0.9634 | 0.9767 | 0.9802 | 0.9883 | 0.9811 | 2,783 | 3,044 |
+| 512, at most 2x | 0.9475 | 0.9694 | 0.9707 | 0.9622 | 0.9683 | 0.9809 | 0.9858 | 0.9792 | 2,438 | 1,388 |
+| 512, at most 4x | 0.9490 | 0.9701 | 0.9714 | 0.9633 | 0.9717 | 0.9821 | 0.9863 | 0.9796 | 2,438 | 1,389 |
+| 1024, at most 2x | 0.9480 | 0.9685 | 0.9728 | 0.9624 | 0.9714 | 0.9796 | 0.9875 | 0.9804 | 2,438 | 1,370 |
+| 1024, at most 4x | 0.9499 | 0.9688 | 0.9706 | 0.9638 | 0.9735 | 0.9788 | 0.9876 | 0.9805 | 2,783 | 3,167 |
+| up to the work size | 0.9466 | 0.9696 | 0.9700 | 0.9601 | 0.9708 | 0.9827 | 0.9870 | 0.9808 | 1,706 | 434 |
 
-**256 beats the shipped 384 on this corpus, by 2.0 points of F1, 3.8 of recall
-and twelve perfect transformations, with nothing cross-family.** It is not
-that less resolution is better. `extract` doubles an image while twice its
-long side still fits in `upsample_below` (512), so 256 is analysed at 512 and
-384 is not enlarged at all: the 0.9721 here is the 0.9724 the table above has
-for 512. (128 is enlarged x4 to 512 and 192 x2 to 384, but from a source with
-less detail in it, and neither lands on its analysed size's row.) What it costs
-is the 512 row's scale space: 104 s against 83 s of cold wall on IMGS in this
-sweep, single runs, and level on the found corpus, whose output is identical
-at the two sizes. Worth a like-for-like cost comparison before anyone moves the
-default — and note the interaction runs both ways: any change to
-`upsample_below` moves which work sizes get enlarged.
-
-**0 is the best recall measured and not a safe setting.** Every file at its
-own resolution: F1 0.9755, recall 95.66%, 57 perfect — and 14 cross-family
-pairs in one merge, which the same corpus does not make at 256, 384 or 640.
-That is the cliff at the top of the table above (896 merged two families)
-reached from further up. It cost 694 s of wall and a 2,180 MB peak at `-t 2`,
-which it was run at because a 44-megapixel scale space is two to three
-gigabytes and the decode budget does not cover it; the pairs do not depend on
-the thread count, the clock does, so that figure is not comparable with the
-column above. On the found corpus 0 is the 384 run again, pair for pair and
-group for group, since nothing there is larger than 224 pixels.
-
-**Small sizes are unsafe, not merely weak.** 48 makes 1,689 cross-family pairs
-across five merges, which is the family-merge failure the occupancy note in
-*How img-fp works* describes, reached from the other end: a descriptor from a
-blurred enlargement matches along whatever two pictures share.
-
-**What moving the default did to the other four, which is nothing.** Every
-result-changing option was re-swept at 384, on one extraction cached once, so
-each point is a 12 s run rather than a 57 s one. None of them moves, and two of
-them for a better reason than "the sweep says so".
-
-| `--min-aligned-points` | F1 | precision | recall | FP | trap | cross | merges |
-|---|---|---|---|---|---|---|---|
-| 6 | 0.9754 | 99.59% | 95.58% | 922 | 918 | **4** | 2 |
-| 7 | 0.9720 | 99.59% | 94.92% | 902 | 900 | **2** | 2 |
-| 8 | **0.9656** | 99.61% | 93.70% | 856 | 856 | 0 | 0 |
-| 9 | 0.9604 | 99.62% | 92.70% | 827 | 827 | 0 | 0 |
-| **10** | **0.9547** | **99.59%** | **91.68%** | **871** | **871** | **0** | **0** |
-| 11 | 0.9493 | 99.60% | 90.68% | 841 | 841 | 0 | 0 |
-| 12 | 0.9434 | 99.65% | 89.56% | 731 | 731 | 0 | 0 |
-
-The shape is the one the ws-384 column of the big table above already showed,
-and the argument is unchanged: F1 prefers **8**, by 1.09 points, and 8 is one
-step from a cliff that starts at 7. The price of the margin roughly triples at
-this work size — 2.02 points of recall against 0.69 at 640 — which is the one
-thing that could have justified moving it, and the replay says not to. Counting
-cross-family *anchors* before `drop_weak_bridges`, the measurement that decided
-this value at 640 and the only one that does not go through F1:
-
-| bar | anchors | cross-family anchors | after the bridge test | families merged |
-|---|---|---|---|---|
-| 6 | 182,266 | 14 | 2 | **2** |
-| 7 | 179,620 | 9 | 2 | **2** |
-| 8 | 177,003 | **3** | 0 | 0 |
-| 9 | 174,410 | 3 | 0 | 0 |
-| **10** | **172,125** | **1** | **0** | **0** |
-| 12 | 167,466 | 1 | 0 | 0 |
-
-**8 leaves three cross-family anchors for the bridge test to absorb where 10
-leaves one**, and the bridge test survives exactly one false edge. That is the
-same 3:1 shape it had at 640 (6 against 3 there), so a 40% cut in the
-descriptor count did not change what the margin is worth. The replay
-reproduces the runs' own merge counts exactly — 2 at bar 6 and 7, none from 8
-up — which is what makes it worth believing.
-
-**`--min-pixel-correlation`'s cliff is gone at 384, and this is the one
-conclusion the new default changes.** At 640 it merges families at 0.40 and
-catastrophically at 0.30, which is why it ships one step above its cliff. At
-384 there is no cliff in the swept range at all:
-
-| `--min-pixel-correlation` | F1 | precision | recall | FP | cross | merges |
-|---|---|---|---|---|---|---|
-| 0.20 | 0.9564 | 99.56% | 92.02% | 939 | 0 | 0 |
-| 0.30 | 0.9562 | 99.57% | 91.98% | 919 | 0 | 0 |
-| 0.40 | 0.9559 | 99.59% | 91.90% | 885 | 0 | 0 |
-| **0.50** | **0.9547** | **99.59%** | **91.68%** | **871** | **0** | **0** |
-| 0.60 | 0.9508 | 99.61% | 90.94% | 827 | 0 | 0 |
-
-Not one cross-family pair anywhere from 0.20 to 0.60, where 0.30 at 640
-produces 43,540 of them across twelve merges. The reason is the same one that
-costs the default its recall: with 40% fewer descriptors the two Excel
-screenshots never reach ten aligned points, so at this work size the inlier bar
-is the only thing holding that family apart and the agreement bar is not
-binding. It stays at 0.50 regardless — the value is derived as the midpoint of
-what the statistic can report, not read off a corpus, and F1 is flat to 0.0017
-across the whole range. But **do not carry "no cliff" back to 640**, and do not
-read this as the bar being useless: it is the only defence against that failure
-mode at any size where the pairs do reach the inlier bar.
-
-`--min-frame-overlap` keeps the shape it has at 640 — no cliff in the usable
-range, F1 best one step loose (0.80 at 0.9557 against 0.85's 0.9547) and that
-step buying 112 more trap false pairs for 0.001 of F1, so it does not move.
-`-k` is flatter than ever: **100, 150, 200 and 300 are identical to the pair**
-at 384, and 50 costs 0.0003. The knee is below 100 and the shipped 150 is
-still half the range clear of it.
+**It stays at 512, with no cap on the factor.** Enlargement is worth having on every corpus —
+none at all costs IMGS 1.7 points of recall at 384 (`thumbnail` 60 -> 45,
+`scale_small` 59 -> 47, `crop_micro` 38 -> 26) and the found corpus 30% of its
+pairs — and F1 climbs through 256 and 384 to 512 on IMGS and IMGS2 (IMGS3 is
+flat from 256). From 512 to 1024 it is a **plateau whose sign depends on the
+corpus**: IMGS gains up to 0.6 points of F1, mostly `crop_micro` (38 -> 48 at
+384), IMGS2 loses up to 0.3 and IMGS3 gains up to 0.2, while 1024
+quadruples every picture under 256 pixels and costs the found corpus 2.7 times
+the CPU for 14% more pairs. A plateau is where a constant belongs, and 512 is
+its low edge. The **cap** settles the other half: at most 2x, the standard
+SIFT doubling and the one factor with a clean derivation, costs up to a
+quarter of a point everywhere, and at most 4x is within a seventh of a point
+of no cap either way, so factors past 2 earn something on the smallest crops
+and nothing past 4 needs ruling out. No rule here merges a family except none
+at all, on the three corpora together at 640. What ships is 512 *and* the
+working size, whichever is smaller — the "up to the work size" row is that
+rule at 384, and from 512 up it is the 512 row — chosen not for F1 but so that
+`--work-size` bounds the cost of every picture; see *Measured trade-offs*.
 
 `--features` is gone: measured over 300 to 900 at a fixed vocabulary it moves
-F1 by 0.007 (0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977) and 900 costs 11%
-of the run for nothing, so 600 is a constant in `main.rs`. It had looked
-load-bearing, and that was the vocabulary step above, not the detector.
-Candidate breadth (`-k`) is on a plateau, not a peak, and swept the whole way
-it is the flattest surface in the tool — F1 0.9765, 0.9767, 0.9775, 0.9775,
-0.9775, 0.9775 at 25, 50, 100, 150, 200 and 300, with the top four differing by
-three pairs out of 224,779 and not one cross-family pair anywhere in the range.
-The knee is below 100, so the shipped 150 is not merely past it but half the
-range clear of it, and even starving the thing to 25 costs 0.001. Worth
-remembering before reaching for `-k` to fix anything: on this corpus it is not
-connected to a result.
+F1 by 0.007 and 900 costs 11% of the run for nothing, so 600 is a constant in
+`main.rs`. It had looked load-bearing, and that was the vocabulary step, not the
+detector.
 
 ## The window
 

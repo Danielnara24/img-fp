@@ -591,8 +591,10 @@ pub fn analysis_cost(probe: Option<&Probe>, bytes: u64, work: usize, upsample_be
     let long = w.max(h).max(1.0);
     let s = if work > 0 && long > work as f64 { work as f64 / long } else { 1.0 };
     let (bw, bh) = ((w * s).round().max(1.0), (h * s).round().max(1.0));
+    // Enlarged no further than the working size (`lib::enlarge_below`).
+    let below = if work > 0 { upsample_below.min(work) } else { upsample_below };
     let mut factor = 1.0;
-    while bw.max(bh) * factor * 2.0 <= upsample_below.max(2) as f64 {
+    while bw.max(bh) * factor * 2.0 <= below.max(2) as f64 {
         factor *= 2.0;
     }
     let extract = 118.0 * bw * bh * factor * factor;
@@ -621,13 +623,15 @@ mod tests {
     fn cost_follows_the_format_and_the_size() {
         let jpeg = |w, h| Probe { kind: Kind::Image(ImageFormat::Jpeg), w, h };
         let jxl = Probe { kind: Kind::Jxl, w: 4000, h: 3000 };
-        let big = analysis_cost(Some(&jpeg(4000, 3000)), 3_000_000, 384, 512);
-        let small = analysis_cost(Some(&jpeg(224, 224)), 20_000, 384, 512);
-        let jx = analysis_cost(Some(&jxl), 1_000_000, 384, 512);
-        assert!(big > 5 * small, "{big} {small}");
+        let big = analysis_cost(Some(&jpeg(4000, 3000)), 3_000_000, 512, 512);
+        let small = analysis_cost(Some(&jpeg(224, 224)), 20_000, 512, 512);
+        let jx = analysis_cost(Some(&jxl), 1_000_000, 512, 512);
+        assert!(big > 2 * small, "{big} {small}");
         assert!(jx > 2 * big, "{jx} {big}");
         // A thumbnail is enlarged before it is described, so it costs more to
-        // describe than its pixels suggest.
+        // describe than its pixels suggest — but never past the working size.
         assert!(small > 118 * 448 * 448, "{small}");
+        let at_384 = analysis_cost(Some(&jpeg(224, 224)), 20_000, 384, 512);
+        assert!(at_384 < 118 * 448 * 448, "{at_384}");
     }
 }

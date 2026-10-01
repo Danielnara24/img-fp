@@ -15,9 +15,9 @@
 //! is 128 bytes of descriptor and 20 bytes of keypoint for each of up to 600
 //! keypoints, plus a thumbnail of up to 128x128. That is ~148 bytes per
 //! keypoint, and a *small* photograph is the worst case rather than the best:
-//! `upsample_below` enlarges anything under the working size before describing
-//! it, so a 224x224 file yields some 530 keypoints — 95 KB of analysis for a
-//! 25 KB JPEG. Nothing about the encoding causes that; it is how much analysis
+//! `upsample_below` enlarges a small picture before describing it, so a
+//! 224x224 file yields some 530 keypoints — 95 KB of analysis for a 25 KB
+//! JPEG. Nothing about the encoding causes that; it is how much analysis
 //! the picture produces, and the knob connected to it is the enlargement, not
 //! this file.
 //!
@@ -81,7 +81,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// img-fp, and there is nothing for anyone to do about it.
 ///
 /// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
-const MAGIC: &[u8; 8] = b"IMGFPC04";
+/// 05: a small picture is enlarged no further than the working size
+/// (`lib::enlarge_below`), which changes every record below 512.
+const MAGIC: &[u8; 8] = b"IMGFPC05";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the

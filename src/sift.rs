@@ -47,7 +47,20 @@ pub struct Params {
     pub contrast: f32,
     pub edge: f32,
     pub max_features: usize,
-    /// Images are doubled until their long side reaches this.
+    /// Images are doubled while twice their long side still fits in this, and
+    /// never past the working size (`lib::enlarge_below`).
+    ///
+    /// Swept on the three generated corpora at work sizes 384 and 640, and on
+    /// the found corpus (`out/v15-enlargement`): no enlargement at all costs
+    /// IMGS 1.7 points of recall at 384 and the found corpus 30% of its
+    /// pairs, and F1 climbs through 256 and 384 to here on IMGS and IMGS2
+    /// (IMGS3 is flat from 256). From 512 to 1024 it is a plateau whose sign
+    /// depends on the corpus — IMGS gains up to 0.6 points of F1, IMGS2
+    /// loses up to 0.3 — while 1024 quadruples a 224-pixel picture and costs
+    /// the found corpus 2.7 times the CPU. Capping the factor at 2, the
+    /// standard SIFT doubling, costs up to a quarter of a point, and a cap of
+    /// 4 is within a seventh of a point of none either way. So 512 is the low
+    /// edge of a plateau, which is where a constant belongs.
     pub upsample_below: usize,
     /// Detected extrema considered, as a multiple of `max_features`. A wider
     /// pool costs only the ranking, since the losers are never described, and
