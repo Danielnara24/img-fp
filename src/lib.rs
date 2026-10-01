@@ -2026,6 +2026,23 @@ fn unique_pairs(edges: impl IntoIterator<Item = (usize, usize, Affine, bool, Ver
 /// later. And a lone file is the case of one: its one file has an anchor, so
 /// it joins, strongest first, the cluster it matches best — after which a
 /// weak anchor into a second cluster is a join of two clusters like any other.
+///
+/// **And never two clusters that each close a cycle of clean anchors.** That
+/// a family is not matched file by file by its sibling was an expectation,
+/// and two photographs of one scene in Segovia broke it: eighty files
+/// of one, every one with a weak anchor into the other's eighty-five, and
+/// sixty-six of those pointing back. Coverage cannot tell that from a
+/// fragment joining its family; what can is the fragment's own evidence. A
+/// fragment's clean anchors are a pair, a chain or a star, each link the only
+/// one; a family's reach a file by two paths, which is the corroboration the
+/// bridge test asks of a single link. Two clusters that each have it are two
+/// families, whatever the weak anchors between them say — unless **one file of
+/// the larger has a weak anchor to every file of the smaller**. A greyscale, a
+/// duotone and a halftone of one photograph agree with each other cleanly and
+/// close a triangle, and the original matches all three; no photograph of
+/// Segovia was matched by all eighty of the other's. It is the cover test
+/// once more, asked of a single file: the smaller cluster is then renderings
+/// of something the larger holds.
 fn admit_anchors(
     clean: Vec<(usize, usize, Affine, bool, Verdict)>,
     mut weak: Vec<(usize, usize, Affine, bool, Verdict)>,
@@ -2033,7 +2050,9 @@ fn admit_anchors(
 ) -> (Vec<(usize, usize, Affine, bool, Verdict)>, usize) {
     let mut dsu = Dsu::new(n);
     let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    fn join(dsu: &mut Dsu, members: &mut [Vec<usize>], a: usize, b: usize) {
+    // Whether a cluster's clean anchors close a cycle, by root.
+    let mut cycle = vec![false; n];
+    fn join(dsu: &mut Dsu, members: &mut [Vec<usize>], cycle: &mut [bool], a: usize, b: usize) {
         let (mut ra, mut rb) = (dsu.find(a), dsu.find(b));
         if ra == rb {
             return;
@@ -2044,9 +2063,14 @@ fn admit_anchors(
         dsu.0[ra] = rb;
         let moved = std::mem::take(&mut members[ra]);
         members[rb].extend(moved);
+        cycle[rb] |= cycle[ra];
     }
     for e in clean.iter() {
-        join(&mut dsu, &mut members, e.0, e.1);
+        let (ra, rb) = (dsu.find(e.0), dsu.find(e.1));
+        if ra == rb {
+            cycle[ra] = true;
+        }
+        join(&mut dsu, &mut members, &mut cycle, e.0, e.1);
     }
     weak.sort_by(|x, y| {
         y.4.n_in.cmp(&x.4.n_in).then(y.4.blk.total_cmp(&x.4.blk)).then((x.0, x.1).cmp(&(y.0, y.1)))
@@ -2073,8 +2097,17 @@ fn admit_anchors(
                 continue;
             }
             let covered = members[small].iter().all(|&x| near[x].iter().any(|&y| dsu.find(y) == big));
-            if covered {
-                join(&mut dsu, &mut members, small, big);
+            // Two clusters with clean cycles join only when one file of the
+            // larger has a weak anchor to every file of the smaller: the
+            // smaller is then renderings of a photograph the larger holds.
+            // A weak edge is listed once, so a count is a cover.
+            let admitted = covered
+                && (!(cycle[ra] && cycle[rb]) || {
+                    let k = members[small].len();
+                    members[big].iter().any(|&y| near[y].iter().filter(|&&z| dsu.find(z) == small).count() == k)
+                });
+            if admitted {
+                join(&mut dsu, &mut members, &mut cycle, small, big);
                 refused_pairs.clear();
                 joined = true;
             } else {
@@ -2575,6 +2608,33 @@ mod tests {
         // never joins it however many of its other files do.
         assert_eq!(pairs, [(0, 1), (0, 2), (1, 2), (2, 7), (3, 4), (3, 6), (3, 8), (4, 5), (4, 9), (8, 9)]);
         assert_eq!(refused, 3);
+    }
+
+    /// Two clusters whose clean anchors each close a cycle are two families,
+    /// and weak anchors do not join them even file for file in both
+    /// directions — unless one file vouches for the whole of the smaller; a
+    /// chain matched the same way still joins.
+    #[test]
+    fn weak_anchors_join_two_clusters_with_clean_cycles_only_through_one_file() {
+        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let e = |a: usize, b: usize, n_in: u32| (a, b, id, false, Verdict { n_in, ..Default::default() });
+        // Triangles {0,1,2} and {3,4,5}; a chain {6,7,8}.
+        let clean = vec![e(0, 1, 50), e(1, 2, 50), e(0, 2, 50), e(3, 4, 50), e(4, 5, 50), e(3, 5, 50), e(6, 7, 50), e(7, 8, 50)];
+        // Every file of each triangle has a weak anchor into the other, and
+        // every file of the chain one into the first triangle.
+        let weak = vec![e(0, 3, 12), e(1, 4, 12), e(2, 5, 12), e(6, 0, 11), e(7, 1, 11), e(8, 2, 11)];
+        let (kept, refused) = admit_anchors(clean, weak, 9);
+        let mut pairs: Vec<(usize, usize)> = kept.iter().map(|x| (x.0, x.1)).collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5), (6, 0), (6, 7), (7, 1), (7, 8), (8, 2)]);
+        assert_eq!(refused, 3);
+        // One file of the first triangle matching every file of the second,
+        // as an original matches its renderings, does join them.
+        // The first is given a fourth file so that it is the larger.
+        let clean = vec![e(0, 1, 50), e(1, 2, 50), e(0, 2, 50), e(2, 6, 50), e(3, 4, 50), e(4, 5, 50), e(3, 5, 50)];
+        let weak = vec![e(0, 3, 12), e(0, 4, 12), e(0, 5, 12)];
+        let (kept, refused) = admit_anchors(clean, weak, 7);
+        assert_eq!((kept.len(), refused), (10, 0));
     }
 
     /// A component propagation cannot afford is named, not passed over in

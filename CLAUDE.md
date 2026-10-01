@@ -44,30 +44,26 @@ at all, a photograph embedded in a bigger canvas: `embed_tiny` 47/62 against
 52 at 640, `contact_sheet` 43 against 53. **Anyone who cares about that case
 should pass `--work-size 640`.**
 
-**Open, and the next thing to work on: the weak-anchor join needs a
-structural fix.** At the default `--min-aligned-points` is one step from a
-merge. On IMGS3 at 512 the two `Segovia` photographs' families merge at a bar
-of 9 and below (about 6,700 false pairs) and are clean from 10; at 384 the same
-merge starts at 7, at 640 the nearest one (IMGS2's busts) at 8. It is the
-thinnest margin any shipped value has, and a threshold is the wrong tool to
-widen it: 11 costs 0.3 points of IMGS F1 per step bought. The anchor replays
-say where the weakness is. At 384 and 512 no *clean* cross-family anchor
-survives the bridge test at any bar — every Segovia merge is made by
-`admit_anchors` joining two clusters on weak anchors, because some fragment of
-one family ends up with a weak anchor from every one of its files into the
-other. The same rule is why `--min-pixel-correlation` at 640 merges on *both*
-sides of the shipped 0.6 (0.55-0.58 and 0.69-0.70): its joins are not monotone
-in the weak anchors they are given, so removing anchors can create a merge.
-What a fix has to do is decide joins on the clusters' structure rather than on
-whether a fragment happens to be fully covered: for instance require the
-weak anchors to cover the larger side too, refuse a join between two clusters
-that each have clean structure of their own, or make the result independent
-of the order fragments form in. The test cases are written down: Segovia at
-512 bar 9, at 384 bar 7, and at 640 correlation 0.55 and 0.70, each of which
-must come out clean without losing IMGS's recall (`replay_ap.py` and
-`replay_corr.py` in `out/v14-fullsweep` replay a candidate rule offline off one
-`--dump`). Fresh seeds are needed to defend whatever is chosen, since IMGS3 is
-spent. See *Parameters* for the tables.
+**The weak-anchor join is fixed, and what is left open is the clean-anchor
+merges.** `admit_anchors` now refuses a weak-anchor join between two clusters
+that each close a *cycle* of clean anchors, unless one file of the larger has a
+weak anchor to every file of the smaller (the argument is under *Parameters*,
+after the aligned-points replay). Every shipped setting is pair-for-pair
+identical to 0.21 on all four corpora — IMGS, IMGS2, IMGS3 and IMGS4 at 384,
+512 and 640 — and every weak-anchor merge is gone: Segovia on IMGS3 at 512 from
+bar 9 down to 3 (bar 9: F1 0.9770 -> 0.9855, cross-family 6,794 -> 165), and at
+640 across the whole non-monotone correlation band (0.55: 0.9787 -> 0.9878,
+7,058 -> 2). `--min-aligned-points` at 512 goes from one step from a merge to
+five (IMGS2's busts at 5). Measured in `out/v16-weak-join`.
+
+What it does not touch, because it is a different mechanism: *clean*
+cross-family anchors that survive the bridge test — `bust1`/`bust2` on IMGS2
+(bar 5 at 512, 8 at 640), `field2`/`field3` at 640 bar 3, `docks1`/`docks2` at
+640 overlap 0.6 and below, `Acueducto3`/`Acueducto4` at 512 overlap 0.3. Nor
+the stray-file allowance at fragment scale: at 384, shipped settings, a
+three-file `game2` fragment (a chain, no cycle) joins `game3`, 249 pairs,
+which is in the published 384 row. The documented "Segovia at 384 bar 7" case
+does not exist on 0.21, whose 384 changed with the enlargement limit.
 
 (**The cost figures are the soft ones here, and the accuracy figures are
 not.** Accuracy is a property of the build and the work size and reproduces to
@@ -208,6 +204,15 @@ clean-anchor rule, then in every run of the `out/v14-fullsweep` sweep. The
 next rule to be defended needs fresh seeds. The old held-out set
 (`benchmark/VALIDATION.md`) was folded into IMGS long ago; its rule is still
 the rule.
+
+`/home/daniel/Documents/IMGS4` (70 seeds, 6,370 files, generated the same way;
+near-miss sets `baseball1-5`, `house1-5`, `aerial*`, `notes1/2`,
+`Cmentarz1/2`) was **held out for the cycle rule** of `admit_anchors` and is
+now spent. Read what it proved narrowly: the rule is identical to 0.21 there
+at every setting replayed, and the shipped rule makes **no family merge on
+IMGS4 anywhere in the grid** and never attempts a join between two cyclic
+clusters — so it shows the rule costs nothing on fresh near misses, and
+nothing about whether it prevents merges. That evidence is still IMGS3's.
 
 ## The corpus
 
@@ -780,9 +785,9 @@ shipped values than the old ones were:
 
 | option | distance from shipped to the nearest merge, 384 | **512 (default)** | 640 | documented before (IMGS, 640) |
 |---|---|---|---|---|
-| `--min-aligned-points` 10 | 3 steps (IMGS3 at 7) | **1 step** (IMGS3 at 9) | 2 steps (IMGS2 at 8) | 3 steps (at 7) |
+| `--min-aligned-points` 10 | 3 steps (IMGS3 at 7); since the cycle rule, none down to 3 on any one corpus | **1 step** (IMGS3 at 9); since the cycle rule, **5 steps** (IMGS2 at 5) | 2 steps (IMGS2 at 8) | 3 steps (at 7) |
 | `--min-frame-overlap` 0.85 | 0.35 (IMGS3 at 0.5) | **0.55** (IMGS3 at 0.3) | 0.25 (IMGS3 at 0.6) | none in the usable range |
-| `--min-pixel-correlation` 0.6 | none from 0.2 to 0.8 | **none from 0.2 to 0.8** | 0.01 below (IMGS3 at 0.58), 0.09 above (at 0.69) | 0.1 (at 0.40, when 0.50 shipped) |
+| `--min-pixel-correlation` 0.6 | none from 0.2 to 0.8 | **none from 0.2 to 0.8** | 0.01 below (IMGS3 at 0.58), 0.09 above (at 0.69); since the cycle rule, none from 0.2 to 0.8 | 0.1 (at 0.40, when 0.50 shipped) |
 | `-k` 150 | 140 (all three at 10) | **140** (IMGS3 at 10) | none from 10 up | none |
 
 The combined corpus does not simply add its parts: it merges `bust` at bar 8
@@ -790,9 +795,12 @@ at 640 as IMGS2 does, but not `Segovia` at 384 as IMGS3 does, and `docks` at
 overlap 0.4 where IMGS3 alone merges at 0.6. A merge of near-miss siblings
 depends on which anchors happen to exist, and the vocabulary a corpus builds
 changes that — which is also why the three work sizes do not line up. Read the
-margins as the distance to *a* merge, not to a fixed edge.
+margins as the distance to *a* merge, not to a fixed edge. The "since the cycle
+rule" entries are replays of single corpora (`out/v16-weak-join`); the combined
+corpus has not been re-swept.
 
-**`--min-aligned-points` at the default is the thin one, and it is open.**
+**`--min-aligned-points` at the default was the thin one, and the cycle rule
+closed it** (see the end of this section; the table is the 0.20.0 build).
 Recall is still a ramp and F1 still falls at every step above the cliff, so F1
 still prefers the lowest safe bar, and the reason not to follow it is the
 margin — which at 512 is a single step. Replayed off one `--dump` per corpus
@@ -820,11 +828,26 @@ at any of the three sizes, and on IMGS none at any bar above 3.
 So the margin at the default is held by `admit_anchors`, and a threshold is
 the wrong tool to widen it: 11 at 512 costs 0.3 points of IMGS F1 for one more
 step, 12 costs 0.8 for two, and the merge is not a property of the bar but of
-which weak anchors a Segovia fragment happens to have. The structural fix —
-something about how much of a cluster must vouch, or about joining clusters
-that each have clean structure of their own — is the next thing to try, and
-the Segovia pair at 512 bar 9, at 640 correlation 0.55 and 0.70, and at 384
-bar 7 is the test case for it. Until then 10 stays, with the margin stated.
+which weak anchors a Segovia fragment happens to have.
+
+**Traced, it was not a fragment.** At 512 bar 9 the join that merges Segovia
+is an 80-file Segovia2 cluster, held together by 1,131 clean anchors, joining
+the 85-file Segovia1 cluster: every one of the 80 has a weak anchor into
+Segovia1, 66 of the 85 point back. Every legitimate multi-file join on IMGS3
+has 2-5 files and 0-2 clean anchors inside. Counting does not separate them —
+38 weak anchors per file across against 28 clean ones inside — and structure
+does: after the bridge test a fragment's clean anchors are a pair, a chain or
+a star, a family's close cycles. So two clusters that both hold a cycle no
+longer join on weak anchors. That alone cost IMGS2 0.1-0.16 points of F1 and
+up to 8 perfect transformations, all from two fragments that *are* cycles —
+`fort2`'s greyscale/duotone/halftone triangle and a 3-4 file crop/rotation
+cycle of `manhole3` — which the second half of the rule lets back in: one file
+of the larger has a weak anchor to every file of the smaller (3 of 3, 4 of 4;
+Segovia's best is 73 of 80). Tried and rejected on the way: covering the
+larger side too (the legitimate fragments are touched back by 90-96% of the
+family, Segovia by 78% — the wrong way round for a rule), and the density of
+weak anchors across the cut (0.90-0.95 against 0.45-0.52, separable only by a
+fitted cut). 10 stays, now five steps from the nearest merge at 512.
 
 **`--min-pixel-correlation` at 640 is not monotone.** Swept by hundredths on
 IMGS3: `Segovia` merges at 0.55-0.58 (7,028-7,058 false pairs), is clean from
@@ -842,12 +865,16 @@ complete the cover of a Segovia fragment into its sibling; one fewer can leave
 a fragment unjoined to its own family and small enough that every file of it
 has a weak anchor into the other. Which of the two happens depends on which
 anchors exist, so a bar that only removes anchors can create a merge. It is the
-same weakness as the aligned-points margin above, seen through another bar.
+same weakness as the aligned-points margin above, seen through another bar,
+and the cycle rule removes it the same way: replayed, IMGS3 at 640 merges at
+no correlation from 0.2 to 0.8, and 0.55 runs at F1 0.9878 with 2
+cross-family pairs where 0.21 ran at 0.9787 with 7,058.
 
 **`--min-frame-overlap` has a cliff on IMGS3**, and it is the near-miss one:
 `docks1` / `docks2`, one quay framed slightly differently, join at 0.6 and
 below at 640 and at 0.5 and below at 384, and `Acueducto3` / `Acueducto4` at
-0.3 at 512 (5,000-7,000 false pairs); the mechanism has not been replayed. On
+0.3 at 512 (5,000-7,000 false pairs). Replayed, the cycle rule changes
+neither, so these are not weak-anchor joins. On
 IMGS and IMGS2 the shape is exactly the documented one — no cliff anywhere,
 loosening buys trap pairs by the thousand (937 at 0.85 to 10,839 at 0.3 on
 IMGS at 512), and F1 is flat to a thousandth between 0.80 and 0.85, so the
