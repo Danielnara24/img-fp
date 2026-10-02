@@ -358,6 +358,9 @@ impl Setup {
         log_box.append(&log_choose);
         a.attach(&log_box, 1, 14, 2, 1);
         a.attach(&hint("Every skipped file, problem and stage timing, in full."), 1, 15, 2, 1);
+        let version = hint(concat!("img-fp ", env!("CARGO_PKG_VERSION")));
+        version.set_margin_top(18);
+        a.attach(&version, 0, 16, 3, 1);
         let advanced = gtk::ScrolledWindow::builder().child(&a).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
 
         let notebook = gtk::Notebook::new();
@@ -704,6 +707,7 @@ impl Setup {
             }
         };
         self.app.log.set_text("");
+        self.app.log_line(concat!("img-fp ", env!("CARGO_PKG_VERSION")));
         let shown: Vec<String> = argv.iter().skip(1).map(|a| shell_word(&a.to_string_lossy())).collect();
         self.app.log_line(&format!("$ img-fp {}", shown.join(" ")));
         self.scan.replace(Some(scan));
