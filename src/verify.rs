@@ -49,9 +49,9 @@ pub fn mirror_affine(w: f32) -> Affine {
 #[derive(Clone, Copy, Debug)]
 pub struct Verdict {
     pub m: Affine,
-    /// Kept for reporting and debugging: which permutation of the query
-    /// produced this match.
-    #[allow(dead_code)]
+    /// Which permutation of the query produced this match. A direct verdict
+    /// stands for an edge by itself, and this is the edge's inversion; see
+    /// `lib::direct_edge`.
     pub variant: Variant,
     /// Inliers at distinct keypoint positions.
     pub n_in: u32,
@@ -808,11 +808,14 @@ fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
 /// so the check reported disagreement for a difference the *sampling* had
 /// introduced. The pyramid is derived from `px` and is not serialised.
 ///
-/// It is built the first time a comparison reads it, not with the thumbnail.
-/// A third again of every thumbnail, held from the analysis to the end of the
-/// run, is fifty megabytes on a nine-thousand-image corpus — where almost no
-/// image ever reaches a pixel check, and one that does may only ever be read
-/// at level zero. The levels are a pure function of `px`, so when they are
+/// Nor is it kept. It is built for each comparison that reads it, into
+/// scratch the worker keeps (`Pyramid`), and that costs less than a
+/// microsecond: a level is a 2x2 mean, sixteen outputs to a few vector
+/// instructions. Kept on the thumbnail it was a third again of every
+/// thumbnail, held from the first comparison to the end of the run — 103 MB
+/// on a corpus of 27,000 pictures, nearly all of whose thumbnails are read
+/// above level zero, and alive at the end of verification, which is where
+/// that run peaks. The levels are a pure function of `px`, so when they are
 /// made cannot change what they hold.
 #[derive(Clone, Debug, Default)]
 pub struct Thumb {
@@ -821,8 +824,90 @@ pub struct Thumb {
     /// Scale from working-image coordinates to thumbnail coordinates.
     pub scale: f32,
     pub px: Vec<u8>,
-    /// Half-resolution levels above `px`: level i has been halved i+1 times.
-    mips: std::sync::OnceLock<Vec<(u16, u16, Vec<u8>)>>,
+}
+
+/// The half-resolution levels above a thumbnail's `px`, built into buffers a
+/// worker keeps from one comparison to the next: level i has been halved
+/// i+1 times.
+#[derive(Default)]
+pub(crate) struct Pyramid {
+    buf: Vec<u8>,
+    /// Width, height and where in `buf` each level starts.
+    levels: Vec<(u16, u16, usize)>,
+}
+
+impl Pyramid {
+    /// The levels of `t`, in place of whatever this held.
+    fn fill(&mut self, t: &Thumb) {
+        self.buf.clear();
+        self.levels.clear();
+        let (mut cw, mut ch) = (t.w as usize, t.h as usize);
+        // Every level together is under a third of level zero.
+        self.buf.reserve(cw * ch / 2);
+        let mut from: Option<usize> = None;
+        while cw >= 4 && ch >= 4 {
+            let (nw, nh) = (cw / 2, ch / 2);
+            let at = self.buf.len();
+            self.buf.resize(at + nw * nh, 0);
+            let (done, next) = self.buf.split_at_mut(at);
+            let cur: &[u8] = match from {
+                None => &t.px,
+                Some(f) => &done[f..f + cw * ch],
+            };
+            for y in 0..nh {
+                halve_row(&cur[2 * y * cw..(2 * y + 1) * cw], &cur[(2 * y + 1) * cw..(2 * y + 2) * cw], &mut next[y * nw..(y + 1) * nw]);
+            }
+            self.levels.push((nw as u16, nh as u16, at));
+            from = Some(at);
+            cw = nw;
+            ch = nh;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.levels.len()
+    }
+
+    fn level(&self, i: usize) -> (&[u8], usize, usize) {
+        let (w, h, at) = self.levels[i];
+        let (w, h) = (w as usize, h as usize);
+        (&self.buf[at..at + w * h], w, h)
+    }
+}
+
+/// One output row of a pyramid level: each byte the rounded mean of the 2x2
+/// block below it, `(a + b + c + d + 2) / 4`. An odd last column is dropped,
+/// as the level's width is the floor of half.
+#[inline]
+fn halve_row(r0: &[u8], r1: &[u8], out: &mut [u8]) {
+    let mut x = 0usize;
+    // Sixteen outputs at a time: `maddubs` against ones sums each horizontal
+    // pair into a sixteen-bit lane, the two rows' sums are added, and the
+    // rounding is the same integer arithmetic as the scalar tail. Every sum is
+    // at most 1,022, so nothing saturates.
+    #[cfg(target_feature = "avx2")]
+    unsafe {
+        use std::arch::x86_64::*;
+        let ones = _mm256_set1_epi8(1);
+        let two = _mm256_set1_epi16(2);
+        while x + 16 <= out.len() {
+            let a = _mm256_loadu_si256(r0.as_ptr().add(2 * x) as *const __m256i);
+            let b = _mm256_loadu_si256(r1.as_ptr().add(2 * x) as *const __m256i);
+            let s = _mm256_add_epi16(_mm256_maddubs_epi16(a, ones), _mm256_maddubs_epi16(b, ones));
+            let v = _mm256_srli_epi16(_mm256_add_epi16(s, two), 2);
+            // Packing works per 128-bit half; the two halves' bytes are the
+            // even quadwords afterwards.
+            let packed = _mm256_permute4x64_epi64(_mm256_packus_epi16(v, v), 0b00_00_10_00);
+            _mm_storeu_si128(out.as_mut_ptr().add(x) as *mut __m128i, _mm256_castsi256_si128(packed));
+            x += 16;
+        }
+    }
+    while x < out.len() {
+        let i = 2 * x;
+        let s = r0[i] as u32 + r0[i + 1] as u32 + r1[i] as u32 + r1[i + 1] as u32;
+        out[x] = ((s + 2) / 4) as u8;
+        x += 1;
+    }
 }
 
 impl Thumb {
@@ -862,43 +947,11 @@ impl Thumb {
         )
     }
 
-    /// A thumbnail from its level zero. Used by `build` and by the cache,
-    /// which stores only that; the pyramid waits for `mips`.
+    /// A thumbnail from its level zero, which is all there is of one.
     pub fn new(w: u16, h: u16, scale: f32, px: Vec<u8>) -> Thumb {
-        Thumb { w, h, scale, px, mips: std::sync::OnceLock::new() }
+        Thumb { w, h, scale, px }
     }
 
-    /// The pyramid, built on first use.
-    fn mips(&self) -> &[(u16, u16, Vec<u8>)] {
-        self.mips.get_or_init(|| Thumb::pyramid(self.w, self.h, &self.px))
-    }
-
-    fn pyramid(w: u16, h: u16, px: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
-        let mut mips: Vec<(u16, u16, Vec<u8>)> = Vec::new();
-        let (mut cw, mut ch) = (w as usize, h as usize);
-        while cw >= 4 && ch >= 4 {
-            let (nw, nh) = (cw / 2, ch / 2);
-            let cur: &[u8] = match mips.last() {
-                None => px,
-                Some((_, _, p)) => p,
-            };
-            let mut next = Vec::with_capacity(nw * nh);
-            for y in 0..nh {
-                next.extend((0..nw).map(|x| {
-                    let i = 2 * y * cw + 2 * x;
-                    let s = cur[i] as u32
-                        + cur[i + 1] as u32
-                        + cur[i + cw] as u32
-                        + cur[i + cw + 1] as u32;
-                    ((s + 2) / 4) as u8
-                }));
-            }
-            mips.push((nw as u16, nh as u16, next));
-            cw = nw;
-            ch = nh;
-        }
-        mips
-    }
 
     /// Where a coordinate lands in a level: the pixel below it and the
     /// fraction past it, with the clamp the tap used to carry.
@@ -960,7 +1013,9 @@ impl Thumb {
     /// land in *this* thumbnail's pixels, so it is the width of the box each
     /// sample should represent. It is fixed for a whole comparison, so the
     /// choice is made once here rather than per sample.
-    fn lod(&self, footprint: f32) -> Lod<'_> {
+    /// The levels above zero are built into `pyr` when they are needed at
+    /// all, and read from there.
+    fn lod<'s>(&'s self, footprint: f32, pyr: &'s mut Pyramid) -> Lod<'s> {
         let whole = Lod {
             lo: (&self.px[..], self.w as usize, self.h as usize, 1.0),
             hi: None,
@@ -969,8 +1024,9 @@ impl Thumb {
         if !(footprint > 1.0) {
             return whole;
         }
-        let mips = self.mips();
-        if mips.is_empty() {
+        pyr.fill(self);
+        let mips: &Pyramid = pyr;
+        if mips.len() == 0 {
             return whole;
         }
         let l = footprint.log2();
@@ -978,18 +1034,18 @@ impl Thumb {
         let lo: (&[u8], usize, usize, f32) = if li == 0 {
             (&self.px[..], self.w as usize, self.h as usize, 1.0)
         } else {
-            let (w, h, ref p) = mips[li - 1];
-            (&p[..], w as usize, h as usize, 1.0 / (1 << li) as f32)
+            let (p, w, h) = mips.level(li - 1);
+            (p, w, h, 1.0 / (1 << li) as f32)
         };
         if li >= mips.len() {
             return Lod { lo, hi: None, t: 0.0 };
         }
         // Blending into the next level keeps a footprint that drifts across a
         // power of two from stepping the measurement.
-        let (w, h, ref p) = mips[li];
+        let (p, w, h) = mips.level(li);
         Lod {
             lo,
-            hi: Some((&p[..], w as usize, h as usize, 1.0 / (1 << (li + 1)) as f32)),
+            hi: Some((p, w, h, 1.0 / (1 << (li + 1)) as f32)),
             t: l - li as f32,
         }
     }
@@ -1341,6 +1397,29 @@ fn pixel_check(
     bh: f32,
     invert: bool,
 ) -> (f32, u32, f32, f32) {
+    PYRAMIDS.with(|cell| {
+        let (a, b) = &mut *cell.borrow_mut();
+        pixel_check_with(ta, tb, m, aw, ah, bw, bh, invert, (a, b))
+    })
+}
+
+thread_local! {
+    /// Each worker's pyramid scratch, one per side of a comparison.
+    static PYRAMIDS: std::cell::RefCell<(Pyramid, Pyramid)> = std::cell::RefCell::new(Default::default());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pixel_check_with(
+    ta: &Thumb,
+    tb: &Thumb,
+    m: &Affine,
+    aw: f32,
+    ah: f32,
+    bw: f32,
+    bh: f32,
+    invert: bool,
+    pyramids: (&mut Pyramid, &mut Pyramid),
+) -> (f32, u32, f32, f32) {
     // Bounding box, in A's frame, of the part of A that lands inside B.
     //
     // A probe's column depends on `ix` alone and its row on `iy` alone, and so
@@ -1404,8 +1483,9 @@ fn pixel_check(
     // detail against that measures the gap in resolution, not a difference in
     // content, so the sharper side is taken down to what the blunter one can
     // actually show.
-    let lod_a = ta.lod(raw_a);
-    let lod_b = tb.lod(raw_b);
+    let (pyr_a, pyr_b) = pyramids;
+    let lod_a = ta.lod(raw_a, pyr_a);
+    let lod_b = tb.lod(raw_b, pyr_b);
 
     // Each axis at its own scale. `Thumb::scale` is the horizontal one; the
     // thumbnail's two sides are rounded separately, so the vertical one differs
@@ -1682,8 +1762,10 @@ mod bench {
                 y: rng.f(h as f32),
                 sigma: 1.6 + rng.f(20.0),
                 angle: rng.f(360.0),
-                response: rng.f(1.0),
             });
+            // Where the keypoint's response used to be drawn, so that the
+            // rest of the fixture is the same draw it always was.
+            let _ = rng.f(1.0);
             for _ in 0..DESC_LEN {
                 f.desc.push(rng.byte());
             }
@@ -1819,6 +1901,66 @@ mod bench {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pyramid as it was built when it was kept on the thumbnail, one
+    /// output at a time: the reference `Pyramid::fill` is held to.
+    fn pyramid_reference(w: u16, h: u16, px: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
+        let mut mips: Vec<(u16, u16, Vec<u8>)> = Vec::new();
+        let (mut cw, mut ch) = (w as usize, h as usize);
+        while cw >= 4 && ch >= 4 {
+            let (nw, nh) = (cw / 2, ch / 2);
+            let cur: &[u8] = match mips.last() {
+                None => px,
+                Some((_, _, p)) => p,
+            };
+            let mut next = Vec::with_capacity(nw * nh);
+            for y in 0..nh {
+                next.extend((0..nw).map(|x| {
+                    let i = 2 * y * cw + 2 * x;
+                    let s = cur[i] as u32 + cur[i + 1] as u32 + cur[i + cw] as u32 + cur[i + cw + 1] as u32;
+                    ((s + 2) / 4) as u8
+                }));
+            }
+            mips.push((nw as u16, nh as u16, next));
+            cw = nw;
+            ch = nh;
+        }
+        mips
+    }
+
+    /// Every level, at every shape the vector path and its tail divide
+    /// differently: under sixteen outputs, odd widths and heights, exact
+    /// multiples, the 128-pixel side thumbnails really have, and the
+    /// extremes of the byte range.
+    #[test]
+    fn the_pyramid_is_built_exactly_as_it_was() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut byte = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 56) as u8
+        };
+        let mut pyr = Pyramid::default();
+        for &(w, h) in [(1u16, 1u16), (3, 9), (4, 4), (5, 7), (31, 4), (32, 32), (33, 17), (63, 65), (128, 96), (96, 128), (127, 85), (128, 128)].iter() {
+            for fill in 0..3 {
+                let px: Vec<u8> = (0..w as usize * h as usize)
+                    .map(|_| match fill {
+                        0 => byte(),
+                        1 => 255,
+                        _ => byte() & 1,
+                    })
+                    .collect();
+                let t = Thumb::new(w, h, 1.0, px);
+                pyr.fill(&t);
+                let want = pyramid_reference(w, h, &t.px);
+                assert_eq!(pyr.len(), want.len(), "{w}x{h}");
+                for (i, (ww, wh, wp)) in want.iter().enumerate() {
+                    let (p, gw, gh) = pyr.level(i);
+                    assert_eq!((gw, gh), (*ww as usize, *wh as usize));
+                    assert_eq!(p, &wp[..], "{w}x{h} level {i}");
+                }
+            }
+        }
+    }
 
     /// A verdict read the other way round is the same claim about the same two
     /// files: the overlaps swap, the scale is the reciprocal, the rotation is

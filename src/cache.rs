@@ -83,7 +83,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
 /// 05: a small picture is enlarged no further than the working size
 /// (`lib::enlarge_below`), which changes every record below 512.
-const MAGIC: &[u8; 8] = b"IMGFPC05";
+/// 06: a keypoint is four fields, not five: the extractor's `response`, which
+/// nothing after extraction reads, is no longer kept on it.
+const MAGIC: &[u8; 8] = b"IMGFPC06";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the
@@ -181,17 +183,16 @@ pub fn key_of(path: &Path) -> Option<Key> {
 
 // ------------------------------------------------------------ packing
 
-/// The five `Keypoint` fields, in the order a record stores them.
+/// The four `Keypoint` fields, in the order a record stores them.
 fn field_of(kp: &Keypoint, i: usize) -> f32 {
     match i {
         0 => kp.x,
         1 => kp.y,
         2 => kp.sigma,
-        3 => kp.angle,
-        _ => kp.response,
+        _ => kp.angle,
     }
 }
-const FIELDS: usize = 5;
+const FIELDS: usize = 4;
 
 /// PNG's Paeth predictor: of the pixel to the left, the one above and the one
 /// above-left, whichever is nearest to `a + b - c`.
@@ -286,7 +287,7 @@ fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec
     let desc = stream(n * DESC_LEN)?;
     let resid = stream(w * h)?;
 
-    let mut kps = vec![Keypoint { x: 0.0, y: 0.0, sigma: 0.0, angle: 0.0, response: 0.0 }; n];
+    let mut kps = vec![Keypoint { x: 0.0, y: 0.0, sigma: 0.0, angle: 0.0 }; n];
     let mut bits = vec![[0u8; 4]; n];
     for field in 0..FIELDS {
         for byte in 0..4 {
@@ -301,8 +302,7 @@ fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec
                 0 => kp.x = f,
                 1 => kp.y = f,
                 2 => kp.sigma = f,
-                3 => kp.angle = f,
-                _ => kp.response = f,
+                _ => kp.angle = f,
             }
         }
     }
@@ -1038,7 +1038,6 @@ mod tests {
                         y: 383.0 - f * 0.919,
                         sigma: 1.6 * (1.0 + f / 64.0),
                         angle: (f * 17.3) % 360.0,
-                        response: 0.001 + f / 100_000.0,
                     }
                 })
                 .collect();
@@ -1060,7 +1059,6 @@ mod tests {
                 assert_eq!(got.y.to_bits(), want.y.to_bits());
                 assert_eq!(got.sigma.to_bits(), want.sigma.to_bits());
                 assert_eq!(got.angle.to_bits(), want.angle.to_bits());
-                assert_eq!(got.response.to_bits(), want.response.to_bits());
             }
         }
     }
@@ -1113,7 +1111,7 @@ mod tests {
 
     fn analysis(n: usize, seed: u8) -> (Features, Thumb) {
         let kps = (0..n)
-            .map(|i| Keypoint { x: i as f32, y: seed as f32, sigma: 1.6, angle: 0.0, response: 0.01 })
+            .map(|i| Keypoint { x: i as f32, y: seed as f32, sigma: 1.6, angle: 0.0 })
             .collect();
         let desc = (0..n * DESC_LEN).map(|i| (i as u8).wrapping_add(seed)).collect();
         (Features { w: 64, h: 48, kps, desc }, Thumb::new(8, 6, 0.125, vec![seed; 48]))

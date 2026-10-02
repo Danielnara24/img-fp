@@ -375,6 +375,22 @@ const FEATURES: usize = 600;
 /// constant only exists so a pathological graph cannot spin forever.
 const PROPAGATE_MAX_ROUNDS: usize = 8;
 
+/// A verdict of the direct pass, between the files at two indices, the lower
+/// first. See `direct_edge`.
+type Direct = (u32, u32, Verdict);
+
+/// The edge a direct verdict stands for. Its transform is the verdict's own,
+/// and its inversion the verdict's variant's, which the direct pass never sets.
+fn direct_edge(d: &Direct) -> (usize, usize, Affine, bool, Verdict) {
+    (d.0 as usize, d.1 as usize, d.2.m, d.2.variant.invert, d.2)
+}
+
+/// Candidate pairs verified per slice; see the verification pass in `run`.
+/// A few seconds of work across the workers, so the barrier between slices
+/// costs nothing measurable, and a few megabytes of verdicts, so a slice's
+/// own collect is no transient worth the name.
+const VERIFY_SLICE: usize = 1 << 16;
+
 /// The largest component propagation works inside. A round tests every
 /// unmatched pair in a component, which is quadratic in it: two thousand files
 /// are two million pixel checks a round, about a minute of CPU, and
@@ -495,10 +511,9 @@ fn quantise(vocab: &Vocabulary, f: &Features) -> WordList {
         }
     }
     pairs.sort_unstable();
-    // A keypoint index fits the list's sixteen bits: `retain_best` holds an
-    // image to `FEATURES`.
-    debug_assert!(f.len() <= u16::MAX as usize + 1);
-    WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1 as u16).collect() }
+    // A keypoint index fits an entry's `KP_BITS`: `retain_best` holds an
+    // image to `FEATURES`. `from_sorted` checks it, and the word's bound.
+    WordList::from_sorted(&pairs)
 }
 
 /// The same features as seen in a mirrored (and/or inverted) copy of the
@@ -1290,7 +1305,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let vp = index::VocabParams::for_corpus(n_desc_match);
     progress.forecast(|f| f.vocab_sample = Some(vp.sample.min(n_desc_match)));
     progress.begin(Stage::Vocabulary);
-    let mut pool: Vec<u8> = Vec::with_capacity(vp.sample.min(n_desc_match) * DESC_LEN);
+    let mut pool: Vec<&[u8; DESC_LEN]> = Vec::with_capacity(vp.sample.min(n_desc_match));
     timed!(34, {
         // Even sampling across images, so one feature-rich image cannot own
         // the vocabulary.
@@ -1299,12 +1314,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             let take = it.feats.len().min(per);
             let step = (it.feats.len() / take.max(1)).max(1);
             for i in (0..it.feats.len()).step_by(step).take(take) {
-                pool.extend_from_slice(it.feats.d(i));
+                pool.push(it.feats.d(i).try_into().unwrap());
             }
         }
     });
-    let vocab = timed!(12, Vocabulary::build(&pool, &vp));
-    drop(pool);
+    let vocab = timed!(12, Vocabulary::build(pool, &vp));
     stage!(t_start, "vocabulary: {} live words of {} from {} samples", vocab.n_live_words(), vocab.n_words(), vp.sample.min(n_desc_match));
 
     // Quantise. The word lists are built straight into the vector the inverted
@@ -1374,6 +1388,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         cand_pairs.dedup();
     });
     stage!(t_start, "candidates: {} pairs", cand_pairs.len());
+    // Verification reads the word lists and never the postings, and the
+    // second look, which does, is asked of a few per cent of the files after
+    // verification is done. So the postings are let go here and built again
+    // from the same lists if the second look has anything to ask: on a corpus
+    // of 27,000 pictures that is 94 MB off the run's peak, which is the end of
+    // verification, for a rebuild of under two seconds on one thread. The
+    // build is deterministic, so the second index is the first.
+    drop(inv);
 
     let dumping = args.dump.is_some();
     // What a verdict must already have before its pixels are worth reading:
@@ -1387,36 +1409,59 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let gate = if dumping { (tier_gate.0.min(3), tier_gate.1.min(0.2)) } else { tier_gate };
     progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
     let bar = progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs");
-    let all_direct: Vec<Edge> = cand_pairs
-        .par_iter()
-        .map_init(
-            || (Vec::new(), Vec::new(), verify::Scratch::default()),
-            |(cands, matches, scratch), &(i, j)| timed!(42, {
-                bar.tick();
-                let (i, j) = (i as usize, j as usize);
-                timed!(15, index::shared(&lists[i], &lists[j], cands, 60_000));
-                if cands.len() < 3 {
-                    return None;
-                }
-                let p = verify::Pair {
-                    fa: &items[i].feats,
-                    fb: &items[j].feats,
-                    ta: &items[i].thumb,
-                    tb: &items[j].thumb,
-                };
-                let v = verify::verify(&p, cands, Variant::default(), gate, matches, scratch);
-                (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some((i, j, v.m, false, v))
-            }),
-        )
-        .flatten()
-        .collect();
+    // Verified a slice of the candidates at a time, each slice's verdicts
+    // appended to the one list as it finishes. A parallel `collect` of a
+    // filtered stream gathers every worker's results into vectors of their
+    // own, grown by doubling, and only then copies them into one: on a corpus
+    // of 27,000 pictures that was some 300 MB alive for a moment at the end of
+    // verification, which was the run's peak, and the holes it left in the
+    // heap were dirtied again by the second look. The slices are taken in
+    // order and each is collected in order, so the list is the one a single
+    // collect gave, verdict for verdict.
+    //
+    // A verdict is kept as `Direct`, not as an `Edge`: an edge carries its
+    // transform beside the verdict that already holds it, its inversion beside
+    // the verdict's own variant, and two `usize`s for indices that fit a
+    // `u32`. That is 112 bytes against 76, for the one list of edges held
+    // through the peak — 923,601 of them on a corpus of 27,000 pictures.
+    let mut all_direct: Vec<Direct> = Vec::new();
+    for slice in cand_pairs.chunks(VERIFY_SLICE) {
+        let part: Vec<Direct> = slice
+            .par_iter()
+            .map_init(
+                || (Vec::new(), Vec::new(), verify::Scratch::default()),
+                |(cands, matches, scratch), &(i, j)| timed!(42, {
+                    bar.tick();
+                    let (i, j) = (i as usize, j as usize);
+                    timed!(15, index::shared(&lists[i], &lists[j], cands, 60_000));
+                    if cands.len() < 3 {
+                        return None;
+                    }
+                    let p = verify::Pair {
+                        fa: &items[i].feats,
+                        fb: &items[j].feats,
+                        ta: &items[i].thumb,
+                        tb: &items[j].thumb,
+                    };
+                    let v = verify::verify(&p, cands, Variant::default(), gate, matches, scratch);
+                    (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some((i as u32, j as u32, v))
+                }),
+            )
+            .flatten()
+            .collect();
+        all_direct.extend(part);
+    }
     // Every candidate has its verdict now, and the second look below is where
     // a found corpus's run peaks: a million pairs held through it for nothing.
     drop(cand_pairs);
     // Anchors only: a pair believed on its own evidence. These are what decide
-    // which files end up in one cluster.
-    let edges: Vec<Edge> = all_direct.iter().filter(|(_, _, _, _, v)| v.accepted(&policy.anchor)).cloned().collect();
-    stage!(t_start, "anchors: {} of {} verified pairs", edges.len(), all_direct.len());
+    // which files end up in one cluster. They are read out of `all_direct`
+    // where they lie rather than copied: they are nearly all of it, and a copy
+    // was another hundred-odd megabytes held through the second look, which
+    // is where a large corpus's run peaks.
+    let edges = || all_direct.iter().filter(|(_, _, v)| v.accepted(&policy.anchor)).map(direct_edge);
+    let n_edges = edges().count();
+    stage!(t_start, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
 
     // ---- second look at images nothing matched: mirrored and inverted
     // A mirrored or inverted copy shares no visual words with its original —
@@ -1427,7 +1472,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // with no matches, or with so few that it may be hanging off the edge of
     // its real cluster.
     let mut degree = vec![0u32; n];
-    for &(a, b, _, _, _) in edges.iter() {
+    for (a, b, _, _, _) in edges() {
         degree[a] += 1;
         degree[b] += 1;
     }
@@ -1477,21 +1522,60 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let total_weight: u64 = lonely_weight.iter().sum();
     progress.forecast(|f| {
         f.variants = Some(total_weight);
-        f.edges = Some(edges.len());
+        f.edges = Some(n_edges);
     });
     let bar = progress.begin_counted(Stage::Variants, total_weight, lonely.len(), "images");
+    // The vocabulary is wanted here only to quantise the re-asked files'
+    // mirrored and inverted descriptors, and the postings only to query them.
+    // Where those files are few — a benchmark corpus, whose files nearly all
+    // found their family — their word lists are quantised first and the
+    // vocabulary let go before the postings are built again (see the drop
+    // after the candidates), so the two are never held together: on 27,000
+    // pictures that is 1,336 files' lists, some 20 MB, against a 181 MB
+    // vocabulary. Where they are most of the corpus — a found one, where
+    // nearly every file is re-asked — their lists would outweigh the
+    // vocabulary several times over, and each file's are made and spent in
+    // turn as before. The words are the same words either way.
+    let n_live = vocab.n_live_words();
+    let mut vocab = Some(vocab);
+    let ahead_bytes = lonely.iter().map(|&i| lists[i].len()).sum::<usize>() * 3 * WordList::BYTES_PER_ENTRY;
+    let ahead: Option<Vec<[WordList; 3]>> = (ahead_bytes < vocab.as_ref().unwrap().heap_bytes()).then(|| {
+        let vocab = vocab.as_ref().unwrap();
+        lonely
+            .par_iter()
+            .map(|&i| {
+                std::array::from_fn(|v| {
+                    let vf = timed!(40, variant_features(&items[i].feats, variants[v]));
+                    timed!(39, quantise(vocab, &vf))
+                })
+            })
+            .collect()
+    });
+    if ahead.is_some() {
+        vocab = None;
+    }
+    let inv = (!lonely.is_empty()).then(|| timed!(13, InvertedFile::build(&lists, n_live, max_posting)));
     let variant_all: Vec<(Edge, bool)> = lonely
         .par_iter()
+        .enumerate()
         .zip(lonely_weight.par_iter())
         .map_init(
             || (vec![0f32; n], Vec::new(), Vec::new(), Vec::new(), verify::Scratch::default(), Vec::new()),
-            |(acc, scored, cands, matches, scratch, merged), (&i, &w)| timed!(38, {
+            |(acc, scored, cands, matches, scratch, merged), ((k, &i), &w)| timed!(38, {
                 let mut out: Vec<(Edge, bool)> = Vec::new();
                 let vf: [Features; 3] = timed!(40, std::array::from_fn(|v| variant_features(&items[i].feats, variants[v])));
-                let wl: [WordList; 3] = std::array::from_fn(|v| timed!(39, quantise(&vocab, &vf[v])));
+                let made: [WordList; 3];
+                let wl: &[WordList; 3] = match &ahead {
+                    Some(a) => &a[k],
+                    None => {
+                        let vocab = vocab.as_ref().unwrap();
+                        made = std::array::from_fn(|v| timed!(39, quantise(vocab, &vf[v])));
+                        &made
+                    }
+                };
                 merged.clear();
                 for v in 0..3 {
-                    timed!(14, inv.query(&wl[v], i as u32, acc, scored));
+                    timed!(14, inv.as_ref().unwrap().query(&wl[v], i as u32, acc, scored));
                     timed!(41, rank_best(scored, args.candidates));
                     merged.extend(scored.iter().map(|&(j, s)| (j, s, v as u8)));
                 }
@@ -1561,7 +1645,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // find the other — and a pair counted twice is two links to the bridge
     // test, so a lone match between two clusters stopped being a bridge by
     // being found twice. The direct verdict is kept where there are two.
-    let all: Vec<Edge> = unique_pairs(edges.into_iter().chain(variant_edges.iter().cloned()));
+    let all: Vec<Edge> = unique_pairs(edges().chain(variant_edges.iter().cloned()));
 
     // Every anchor faces the bridge test, whichever pass produced it: a
     // mirrored match joining two clusters is exactly as consequential as a
@@ -1675,12 +1759,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             all.iter().chain(propagated.iter()).map(|&(a, b, _, _, _)| (a, b)).collect();
         all_direct
             .iter()
-            .filter(|(a, b, _, _, v)| {
-                !anchored.contains(&(*a, *b))
-                    && v.accepted(&policy.corroborated)
-                    && dsu.find(*a) == dsu.find(*b)
+            .filter(|(a, b, v)| {
+                let (a, b) = (*a as usize, *b as usize);
+                !anchored.contains(&(a, b)) && v.accepted(&policy.corroborated) && dsu.find(a) == dsu.find(b)
             })
-            .cloned()
+            .map(direct_edge)
             .collect()
     };
     stage!(t_start, "corroborated: {} more pairs inside existing clusters", corroborated.len());
@@ -1689,6 +1772,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
         let mut w = std::io::BufWriter::new(f);
         writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min")?;
+        let all_direct: Vec<Edge> = all_direct.iter().map(direct_edge).collect();
         for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
             for (a, b, _, iv, v) in set.iter() {
                 // The paths as their own bytes, quoted the way CSV quotes:

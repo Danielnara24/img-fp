@@ -91,7 +91,6 @@ pub struct Keypoint {
     pub sigma: f32,
     /// Degrees, 0..360, OpenCV convention.
     pub angle: f32,
-    pub response: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -698,14 +697,14 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
     cands.sort_by(|a, b| {
         (a.octave, key3(&a.kp))
             .cmp(&(b.octave, key3(&b.kp)))
-            .then(b.kp.response.partial_cmp(&a.kp.response).unwrap())
+            .then(b.response.partial_cmp(&a.response).unwrap())
     });
     cands.dedup_by(|a, b| a.octave == b.octave && key3(&a.kp) == key3(&b.kp));
 
     // Then rank once, across the whole pyramid, and describe only the best.
     cands.sort_by(|a, b| {
-        b.kp.response
-            .partial_cmp(&a.kp.response)
+        b.response
+            .partial_cmp(&a.response)
             .unwrap()
             .then((a.octave, key3(&a.kp)).cmp(&(b.octave, key3(&b.kp))))
     });
@@ -725,9 +724,12 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
     // a textured image was describing three keypoints for every one it kept.
     const KEEP_MARGIN: usize = 8;
     let stop_at = p.max_features + KEEP_MARGIN;
+    // Each described keypoint's candidate's response, beside it, for the stop
+    // test and for `retain_best`; dropped with the extraction.
+    let mut response: Vec<f32> = Vec::new();
     timed!(9, {
         for c in cands.iter() {
-            if feats.kps.len() >= stop_at && c.kp.response < feats.kps[stop_at - 1].response {
+            if feats.kps.len() >= stop_at && c.response < response[stop_at - 1] {
                 break;
             }
             let oct_scale = (1u32 << c.octave) as f32 * coord_scale;
@@ -759,12 +761,13 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
                     let mut d = [0u8; DESC_LEN];
                     timed!(31, descriptor(grad, h, px, py, angle, scl_octv, &mut d));
                     feats.kps.push(kp);
+                    response.push(c.response);
                     feats.desc.extend_from_slice(&d);
                 }
             }
         }
     });
-    timed!(10, retain_best(&mut feats, p.max_features));
+    timed!(10, retain_best(&mut feats, &response, p.max_features));
     feats
 }
 
@@ -810,6 +813,10 @@ fn is_extreme(v: f32, x: usize, rows: [&[f32]; 6], max: bool) -> bool {
 /// A detected extremum, before it has an orientation or a descriptor.
 struct Cand {
     kp: Keypoint,
+    /// |DoG| at the refined extremum: what keypoints are ranked by. It is not
+    /// kept on the `Keypoint`, because nothing after extraction reads it and
+    /// a corpus holds millions of keypoints through the whole match.
+    response: f32,
     octave: usize,
     layer: usize,
 }
@@ -902,8 +909,8 @@ fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_sc
                 if !is_extreme(v, xu, [p0, p1, p2, n0, n1, n2], positive) {
                     continue;
                 }
-                if let Some((kp, lay)) = adjust(dog, octave, layer, xu as i32, y, p, oct_scale) {
-                    out.push(Cand { kp, octave, layer: lay });
+                if let Some((kp, response, lay)) = adjust(dog, octave, layer, xu as i32, y, p, oct_scale) {
+                    out.push(Cand { kp, response, octave, layer: lay });
                 }
             }
         }
@@ -920,7 +927,7 @@ fn adjust(
     y0: i32,
     p: &Params,
     oct_scale: f32,
-) -> Option<(Keypoint, usize)> {
+) -> Option<(Keypoint, f32, usize)> {
     let s = p.n_layers;
     let (mut layer, mut x, mut y) = (layer0 as i32, x0, y0);
     let (w, h) = (dog[0].w as i32, dog[0].h as i32);
@@ -990,9 +997,8 @@ fn adjust(
         y: (y as f32 + xr) * oct_scale,
         sigma: p.sigma * 2f32.powf((layer as f32 + xi) / s as f32) * oct_scale,
         angle: 0.0,
-        response: contr.abs(),
     };
-    Some((kp, layer as usize))
+    Some((kp, contr.abs(), layer as usize))
 }
 
 fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
@@ -1361,12 +1367,12 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
 
 /// Keep the strongest `n` keypoints (by DoG contrast), dropping exact
 /// duplicates. Order is deterministic: response desc, then position.
-fn retain_best(f: &mut Features, n: usize) {
+fn retain_best(f: &mut Features, response: &[f32], n: usize) {
     let mut idx: Vec<usize> = (0..f.kps.len()).collect();
     idx.sort_by(|&a, &b| {
         let (ka, kb) = (&f.kps[a], &f.kps[b]);
-        kb.response
-            .partial_cmp(&ka.response)
+        response[b]
+            .partial_cmp(&response[a])
             .unwrap()
             .then(ka.x.partial_cmp(&kb.x).unwrap())
             .then(ka.y.partial_cmp(&kb.y).unwrap())
@@ -1501,7 +1507,7 @@ mod bench {
             for g in imgs.iter() {
                 let f = extract(g, &p);
                 for k in f.kps.iter() {
-                    for v in [k.x, k.y, k.sigma, k.angle, k.response] {
+                    for v in [k.x, k.y, k.sigma, k.angle] {
                         sum = sum.wrapping_mul(0x100000001b3).wrapping_add(v.to_bits() as u64);
                     }
                 }

@@ -167,7 +167,7 @@ impl Default for VocabParams {
 /// 134 MB of centres of which at most a sixth can ever be reached. `slot` maps
 /// a node number to its centre, or to `DEAD` for the nodes k-means never
 /// populated.
-pub struct Vocabulary {
+pub struct Vocabulary<'a> {
     pub branching: usize,
     pub depth: usize,
     /// `levels[l]` holds the centres of the live nodes of level `l`, in node
@@ -176,7 +176,27 @@ pub struct Vocabulary {
     /// Bytes, because the descent is waiting for memory rather than for
     /// arithmetic — see `dist2` and `quantise_threads`. A centre is the mean of
     /// descriptor bytes and is stored to the nearest one of them.
+    ///
+    /// The deepest level is the exception, and is empty here: see `leaves`.
     levels: Vec<Vec<u8>>,
+    /// The deepest level's centres, by slot, as where their bytes are.
+    ///
+    /// Nearly every leaf is a member of the training sample, byte for byte.
+    /// The tree is sized so that its leaves outnumber the sample, so a parent
+    /// at the level above holds a handful of members — about three on a
+    /// corpus of 27,000 pictures — and k-means hands a parent with no more
+    /// members than children each member as a centre of its own. The sample
+    /// is drawn from the descriptors the analysis holds, and those stay where
+    /// they are for as long as the vocabulary is asked anything, so such a
+    /// leaf is a pointer to them: eight bytes rather than a copy of 128. On
+    /// that corpus the level was 133 MB of copies, alive through the whole of
+    /// verification, which is where the run peaks. A leaf that really is a
+    /// mean points into `own`.
+    leaves: Vec<*const u8>,
+    /// The bytes of the leaves that are means of several members.
+    own: Vec<u8>,
+    /// The descriptors `leaves` points into.
+    corpus: std::marker::PhantomData<&'a [u8]>,
     /// Per level, the squared length of each centre in `levels[l]`, by slot.
     /// See `Query`.
     norms: Vec<Vec<u32>>,
@@ -205,6 +225,22 @@ pub struct Vocabulary {
     down: Vec<Vec<Kids>>,
     max_paths: usize,
     path_ratio: f32,
+}
+
+// SAFETY: `leaves` points into `own`, whose buffer is never touched after
+// `build` and lives as long as the vocabulary, and into descriptors borrowed
+// for `'a`. Nothing is written through any of them, so sharing the vocabulary
+// between threads shares only reads of immutable bytes.
+unsafe impl Send for Vocabulary<'_> {}
+unsafe impl Sync for Vocabulary<'_> {}
+
+/// Where a leaf's bytes are while the tree is being built.
+#[derive(Clone, Copy)]
+enum Leaf {
+    /// The sample member it is a copy of.
+    Member(u32),
+    /// Its index among the means in `own`.
+    Own(u32),
 }
 
 /// Where a parent's live children live, and how many.
@@ -284,6 +320,21 @@ fn prefetch_centres(centres: &[u8], kids: Kids) {
     let _ = centres;
 }
 
+/// Ask for the bytes of a parent's leaves, wherever each one is.
+fn prefetch_leaves(leaves: &[*const u8], kids: Kids) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        let start = kids.first as usize;
+        for &c in leaves[start..(start + kids.n as usize).min(leaves.len())].iter() {
+            _mm_prefetch(c as *const i8, _MM_HINT_T0);
+            _mm_prefetch(c.add(64) as *const i8, _MM_HINT_T0);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (leaves, kids);
+}
+
 /// Ask for one centre's entry in `down`.
 #[inline]
 fn prefetch_kids(below: &[Kids], slot: u32) {
@@ -298,7 +349,17 @@ fn prefetch_kids(below: &[Kids], slot: u32) {
     let _ = (below, slot);
 }
 
-impl Vocabulary {
+impl<'a> Vocabulary<'a> {
+    /// The bytes the tree holds: every level's centres, their norms and the
+    /// descent's tables.
+    pub fn heap_bytes(&self) -> usize {
+        self.levels.iter().map(|v| v.capacity()).sum::<usize>()
+            + self.leaves.capacity() * std::mem::size_of::<*const u8>()
+            + self.own.capacity()
+            + self.norms.iter().map(|v| v.capacity() * 4).sum::<usize>()
+            + self.down.iter().map(|v| v.capacity() * 8).sum::<usize>()
+    }
+
     /// Words are the leaves: `branching^depth` of them.
     ///
     /// This is the *node numbering*, not the count of words that exist. Almost
@@ -329,30 +390,34 @@ impl Vocabulary {
     /// consumer of a word list — the merge in `shared`, the runs the inverted
     /// file is built from — reads only that order.
     pub fn n_live_words(&self) -> usize {
-        self.levels[self.depth - 1].len() / DESC_LEN
+        self.leaves.len()
     }
 
-    pub fn build(descriptors: &[u8], p: &VocabParams) -> Vocabulary {
+    pub fn build(mut sample_at: Vec<&'a [u8; DESC_LEN]>, p: &VocabParams) -> Vocabulary<'a> {
         assert!(p.max_paths * p.branching <= FRONTIER, "vocabulary frontier too small");
         assert!(p.branching <= MAX_BRANCH, "branching wider than k-means' accumulators");
-        let n = descriptors.len() / DESC_LEN;
+        let n = sample_at.len();
         let mut rng = Rng(p.seed);
-        // Sample without replacement, deterministically.
+        // Sample without replacement, deterministically: the first `take`
+        // candidates after a partial shuffle are the sample, in the order the
+        // shuffle drew them. The candidates are where descriptors are, and
+        // the leaves keep pointing there (see `leaves`).
         let take = p.sample.min(n);
-        let mut idx: Vec<u32> = (0..n as u32).collect();
         for i in 0..take {
             let j = i + rng.below(n - i);
-            idx.swap(i, j);
+            sample_at.swap(i, j);
         }
-        // Kept as bytes. k-means widens each member to floats as it reads it,
-        // which is exact, so every distance and every sum is the float it was
-        // when the sample was widened here — and the sample is 20 MB rather
-        // than 82 at the moment the whole tree is being built on top of it.
-        let sample: Vec<u8> = idx[..take]
-            .iter()
-            .flat_map(|&i| descriptors[i as usize * DESC_LEN..(i as usize + 1) * DESC_LEN].iter().copied())
-            .collect();
-        drop(idx);
+        sample_at.truncate(take);
+        // And the sample's bytes, copied into one buffer for as long as the
+        // tree is being trained. k-means reads its members over and over in
+        // no order, and reading them from all over the analysis — a gigabyte
+        // and a half on a corpus of 27,000 pictures — was measured at 30%
+        // slower than reading them from here. It is kept as bytes: k-means
+        // widens each member to floats as it reads it, which is exact.
+        let mut sample: Vec<u8> = Vec::with_capacity(take * DESC_LEN);
+        for d in sample_at.iter() {
+            sample.extend_from_slice(&d[..]);
+        }
 
         let mut levels: Vec<Vec<u8>> = Vec::with_capacity(p.depth);
         let mut norms: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
@@ -362,7 +427,11 @@ impl Vocabulary {
         let mut assign: Vec<u32> = vec![0; take];
         let mut parents = 1usize;
 
-        for _level in 0..p.depth {
+        // The deepest level's leaves, and the means among them.
+        let mut leaf_src: Vec<Leaf> = Vec::new();
+        let mut own: Vec<u8> = Vec::new();
+        for level in 0..p.depth {
+            let deepest = level + 1 == p.depth;
             let nodes = parents * p.branching;
             let mut centres: Vec<u8> = Vec::new();
             let mut slot = vec![DEAD; nodes];
@@ -376,41 +445,76 @@ impl Vocabulary {
             // whole level is in means the level is never held as floats: at the
             // deepest one that was some seventy megabytes, alive at the same
             // moment as everything the run had analysed.
-            let results: Vec<(usize, Vec<u8>, Vec<bool>, Vec<(u32, u32)>)> = groups
-                .par_iter()
-                .enumerate()
-                .map(|(g, members)| {
-                    let (c, l, a) = kmeans(&sample, members, p.branching, p.iters, p.seed ^ (g as u64 + 1));
-                    (g, c.iter().map(|&v| quantise_centre(v)).collect(), l, a)
-                })
-                .collect();
-            drop(groups);
-            for (g, c, l, a) in results {
-                let base = g * p.branching;
-                // One parent's live children go down together, each one's
-                // dimensions contiguous, so that the descent reads a child's
-                // whole centre as two cache lines. See `quantise`.
-                let live: Vec<usize> = (0..p.branching).filter(|&c| l[c]).collect();
-                let first = (centres.len() / DESC_LEN) as u32;
-                for (k, &child) in live.iter().enumerate() {
-                    slot[base + child] = first + k as u32;
+            //
+            // And the parents are taken a slice at a time, each slice's
+            // centres laid down before the next is computed. The whole level
+            // computed first was the level twice over by the time it had been
+            // laid down — 133 MB of centres in the results and 133 MB in
+            // `centres` at the deepest level of a 27,000-picture corpus's
+            // tree — and each parent's seed is its own index whichever slice
+            // it falls in, so the tree is the same tree.
+            let mut done = 0usize;
+            while done < parents {
+                let upto = (done + BUILD_SLICE).min(parents);
+                let results: Vec<(usize, Vec<u8>, Vec<bool>, Vec<(u32, u32)>, bool)> = groups[done..upto]
+                    .par_iter()
+                    .enumerate()
+                    .map(|(k, members)| {
+                        let g = done + k;
+                        let (c, l, a) = kmeans(&sample, members, p.branching, p.iters, p.seed ^ (g as u64 + 1));
+                        // No more members than children: k-means gives each
+                        // member its own centre, in member order.
+                        let own_centres = members.len() <= p.branching;
+                        (g, c.iter().map(|&v| quantise_centre(v)).collect(), l, a, own_centres)
+                    })
+                    .collect();
+                for members in groups[done..upto].iter_mut() {
+                    *members = Vec::new();
                 }
-                // `c` holds the live centres only, in child order. A centre is
-                // a mean of descriptor bytes; it is kept as the nearest byte,
-                // which is what makes the descent's reads a quarter of what
-                // they were. The deepest level loses nothing at all by it —
-                // a node with one member hands that member's own bytes down.
-                centres.extend_from_slice(&c[..live.len() * DESC_LEN]);
-                for (i, child) in a {
-                    assign[i as usize] = (base + child as usize) as u32;
+                done = upto;
+                for (g, c, l, a, own_centres) in results {
+                    let base = g * p.branching;
+                    // One parent's live children go down together, each one's
+                    // dimensions contiguous, so that the descent reads a child's
+                    // whole centre as two cache lines. See `quantise`.
+                    let live: Vec<usize> = (0..p.branching).filter(|&c| l[c]).collect();
+                    let first = if deepest { leaf_src.len() } else { centres.len() / DESC_LEN } as u32;
+                    for (k, &child) in live.iter().enumerate() {
+                        slot[base + child] = first + k as u32;
+                    }
+                    // `c` holds the live centres only, in child order. A centre is
+                    // a mean of descriptor bytes; it is kept as the nearest byte,
+                    // which is what makes the descent's reads a quarter of what
+                    // they were. The deepest level loses nothing at all by it —
+                    // a node with one member hands that member's own bytes down,
+                    // and is kept as where those bytes are (see `leaves`).
+                    if !deepest {
+                        centres.extend_from_slice(&c[..live.len() * DESC_LEN]);
+                    } else if own_centres {
+                        for (k, &(m, child)) in a.iter().enumerate() {
+                            debug_assert!(child as usize == k && live[k] == k);
+                            debug_assert!(c[k * DESC_LEN..(k + 1) * DESC_LEN] == sample[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]);
+                            leaf_src.push(Leaf::Member(m));
+                        }
+                    } else {
+                        for k in 0..live.len() {
+                            leaf_src.push(Leaf::Own((own.len() / DESC_LEN + k) as u32));
+                        }
+                        own.extend_from_slice(&c[..live.len() * DESC_LEN]);
+                    }
+                    for (i, child) in a {
+                        assign[i as usize] = (base + child as usize) as u32;
+                    }
                 }
             }
+            drop(groups);
             centres.shrink_to_fit();
+            let n_centres = if deepest { leaf_src.len() } else { centres.len() / DESC_LEN };
             // The descent's view of this level: one entry per parent saying
             // where its live children start and how many there are, and one
             // entry per centre saying which node it is. Same tree, asked once.
             let mut head = vec![Kids::default(); parents];
-            let mut node_of = vec![0u32; centres.len() / DESC_LEN];
+            let mut node_of = vec![0u32; n_centres];
             for parent in 0..parents {
                 let base = parent * p.branching;
                 let mut first = u32::MAX;
@@ -428,7 +532,20 @@ impl Vocabulary {
                 }
                 head[parent] = Kids { first: if first == u32::MAX { 0 } else { first }, n };
             }
-            norms.push(centres.chunks_exact(DESC_LEN).map(|c| c.iter().map(|&v| v as u32 * v as u32).sum()).collect());
+            let norm = |c: &[u8]| -> u32 { c.iter().map(|&v| v as u32 * v as u32).sum() };
+            if deepest {
+                norms.push(
+                    leaf_src
+                        .iter()
+                        .map(|&src| match src {
+                            Leaf::Member(m) => norm(&sample[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN]),
+                            Leaf::Own(k) => norm(&own[k as usize * DESC_LEN..(k as usize + 1) * DESC_LEN]),
+                        })
+                        .collect(),
+                );
+            } else {
+                norms.push(centres.chunks_exact(DESC_LEN).map(norm).collect());
+            }
             levels.push(centres);
             heads.push(head);
             node_ofs.push(node_of);
@@ -437,10 +554,24 @@ impl Vocabulary {
         let down: Vec<Vec<Kids>> = (0..p.depth.saturating_sub(1))
             .map(|l| node_ofs[l].iter().map(|&node| heads[l + 1][node as usize]).collect())
             .collect();
+        drop(sample);
+        own.shrink_to_fit();
+        let leaves: Vec<*const u8> = leaf_src
+            .iter()
+            .map(|&src| match src {
+                Leaf::Member(m) => sample_at[m as usize].as_ptr(),
+                // In bounds: `own` holds every mean pushed above, and it is
+                // not touched again, so its buffer stays where it is.
+                Leaf::Own(k) => unsafe { own.as_ptr().add(k as usize * DESC_LEN) },
+            })
+            .collect();
         Vocabulary {
             branching: p.branching,
             depth: p.depth,
             levels,
+            leaves,
+            own,
+            corpus: std::marker::PhantomData,
             norms,
             root: heads[0][0],
             down,
@@ -503,8 +634,13 @@ impl Vocabulary {
                     kids[pi] = above[cur[pi].0 as usize];
                 }
             }
+            let deepest = l + 1 == self.depth;
             for pi in 0..n_cur {
-                prefetch_centres(centres, kids[pi]);
+                if deepest {
+                    prefetch_leaves(&self.leaves, kids[pi]);
+                } else {
+                    prefetch_centres(centres, kids[pi]);
+                }
             }
             // `max_paths` rather than the old `min(max_paths, n_next)`: the
             // two differ only when the level offers fewer children than that,
@@ -523,8 +659,12 @@ impl Vocabulary {
                 // corpus, and on a corpus of any size it is most of the
                 // retrieval stage. Each child's centre is its own contiguous
                 // run of bytes, so a parent's children are read as one stream.
-                let blk = &centres[first * DESC_LEN..(first + n_live) * DESC_LEN];
-                qp.dists(blk, &self.norms[l][first..first + n_live], &mut dist);
+                let norms = &self.norms[l][first..first + n_live];
+                if deepest {
+                    qp.dists_at(&self.leaves[first..first + n_live], norms, &mut dist);
+                } else {
+                    qp.dists(&centres[first * DESC_LEN..(first + n_live) * DESC_LEN], norms, &mut dist);
+                }
                 // Only the closest `max_paths` children are descended, and
                 // only their distances are looked at afterwards. Ordering the
                 // whole frontier — up to forty-eight entries, once per level
@@ -658,6 +798,37 @@ impl Query {
         Query { q: *q }
     }
 
+    /// Distances from this query to each centre `at` points to, into `out`.
+    /// The same arithmetic as `dists`, for centres that are not side by side.
+    #[inline]
+    fn dists_at(&self, at: &[*const u8], norms: &[u32], out: &mut [u32; MAX_BRANCH]) {
+        let n = norms.len();
+        debug_assert!(n <= MAX_BRANCH && at.len() == n);
+        // SAFETY: every leaf pointer names `DESC_LEN` readable bytes; see
+        // `Vocabulary::leaves`.
+        #[cfg(target_feature = "avx2")]
+        unsafe {
+            let mut k = 0usize;
+            while k + 4 <= n {
+                let d = self.dots4_at([at[k], at[k + 1], at[k + 2], at[k + 3]]);
+                for i in 0..4 {
+                    out[k + i] = self.norm + norms[k + i] - 2 * d[i];
+                }
+                k += 4;
+            }
+            while k < n {
+                let d = self.dot1(at[k]);
+                out[k] = self.norm + norms[k] - 2 * d;
+                k += 1;
+            }
+        }
+        #[cfg(not(target_feature = "avx2"))]
+        for k in 0..n {
+            let c = unsafe { std::slice::from_raw_parts(at[k], DESC_LEN) };
+            out[k] = dist2(&self.q, c);
+        }
+    }
+
     /// Distances from this query to each centre of `blk`, into `out`.
     #[inline]
     fn dists(&self, blk: &[u8], norms: &[u32], out: &mut [u32; MAX_BRANCH]) {
@@ -745,12 +916,19 @@ impl Query {
     #[cfg(target_feature = "avx2")]
     #[inline(always)]
     unsafe fn dots4(&self, c: *const u8) -> [u32; 4] {
+        unsafe { self.dots4_at([c, c.add(DESC_LEN), c.add(2 * DESC_LEN), c.add(3 * DESC_LEN)]) }
+    }
+
+    /// The same for four centres wherever they are.
+    #[cfg(target_feature = "avx2")]
+    #[inline(always)]
+    unsafe fn dots4_at(&self, c: [*const u8; 4]) -> [u32; 4] {
         use std::arch::x86_64::*;
         unsafe {
-            let a0 = self.dot_lanes(c);
-            let a1 = self.dot_lanes(c.add(DESC_LEN));
-            let a2 = self.dot_lanes(c.add(2 * DESC_LEN));
-            let a3 = self.dot_lanes(c.add(3 * DESC_LEN));
+            let a0 = self.dot_lanes(c[0]);
+            let a1 = self.dot_lanes(c[1]);
+            let a2 = self.dot_lanes(c[2]);
+            let a3 = self.dot_lanes(c[3]);
             let h01 = _mm256_hadd_epi32(a0, a1);
             let h23 = _mm256_hadd_epi32(a2, a3);
             let h = _mm256_hadd_epi32(h01, h23);
@@ -893,9 +1071,11 @@ fn dists_dyn(k: usize, q: &[f32], blk: &[f32], acc: &mut [f32; MAX_BRANCH]) {
     }
 }
 
-/// k-means on a subset, with k-means++ seeding. Empty clusters are marked
-/// dead rather than re-seeded: a vocabulary with fewer live nodes is correct,
-/// one with a centre nobody uses is noise.
+/// Parents whose k-means are run together in `Vocabulary::build` before their
+/// centres are laid down. Thousands of k-means each, so the workers stay busy,
+/// and megabytes of centres, so the slice is no transient worth the name.
+const BUILD_SLICE: usize = 4096;
+
 /// One sample descriptor, widened to floats. Exact: every byte is a float.
 #[inline(always)]
 fn widen(data: &[u8], m: u32) -> [f32; DESC_LEN] {
@@ -903,6 +1083,9 @@ fn widen(data: &[u8], m: u32) -> [f32; DESC_LEN] {
     std::array::from_fn(|i| d[i] as f32)
 }
 
+/// k-means on a subset, with k-means++ seeding. Empty clusters are marked
+/// dead rather than re-seeded: a vocabulary with fewer live nodes is correct,
+/// one with a centre nobody uses is noise.
 fn kmeans(data: &[u8], members: &[u32], k: usize, iters: usize, seed: u64) -> (Vec<f32>, Vec<bool>, Vec<(u32, u32)>) {
     assert!(k <= MAX_BRANCH);
     let mut live = vec![false; k];
@@ -1047,18 +1230,66 @@ fn kmeans(data: &[u8], members: &[u32], k: usize, iters: usize, seed: u64) -> (V
 
 /// Words of one image, sorted, with the keypoint each came from.
 ///
-/// The keypoint index is sixteen bits because an image holds at most
-/// `max_features` keypoints, which is hundreds. The lists are held for every
-/// image through the whole of matching, which is where a found corpus's peak
-/// is, and at twelve million entries the two bytes are twenty-five megabytes.
+/// An entry is one `u32`: the word in the high `32 - KP_BITS` bits and the
+/// keypoint index in the low `KP_BITS`. The lists are held for every image
+/// through the whole of matching, which is where a large corpus's peak is, and
+/// at 23 million entries — a corpus of 27,000 pictures — the two bytes the
+/// keypoint took as a parallel `u16` array were 43 MB of it.
+///
+/// It fits with room to spare, and both bounds are statements rather than
+/// hopes. A word is a live leaf of the vocabulary, and a tree trained on a
+/// sample has no more live leaves than the sample has members, which
+/// `SAMPLE_CAP` holds to 1.28 M against the 2.1 M that 21 bits can name. A
+/// keypoint index is below `max_features`, 600, against 2,048. The packed
+/// entries sort exactly as the pairs did, word first and keypoint second, so
+/// every order downstream is unchanged.
 #[derive(Clone, Debug, Default)]
 pub struct WordList {
-    /// Parallel arrays sorted by `word`.
-    pub word: Vec<u32>,
-    pub kp: Vec<u16>,
+    e: Vec<u32>,
 }
 
+/// Bits of an entry that hold the keypoint index; see `WordList`.
+const KP_BITS: u32 = 11;
+const KP_MASK: u32 = (1 << KP_BITS) - 1;
+
 impl WordList {
+    /// What one entry costs.
+    pub const BYTES_PER_ENTRY: usize = std::mem::size_of::<u32>();
+
+    /// A list from (word, keypoint) pairs already sorted.
+    pub fn from_sorted(pairs: &[(u32, u32)]) -> WordList {
+        WordList {
+            e: pairs
+                .iter()
+                .map(|&(w, k)| {
+                    assert!(w < 1 << (32 - KP_BITS) && k <= KP_MASK, "a word list entry out of range");
+                    w << KP_BITS | k
+                })
+                .collect(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.e.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.e.is_empty()
+    }
+
+    /// The word of entry `i`.
+    #[inline(always)]
+    pub fn word(&self, i: usize) -> u32 {
+        self.e[i] >> KP_BITS
+    }
+
+    /// The keypoint of entry `i`. `shared` reads the entries whole, so only
+    /// the tests' reference merge asks for this.
+    #[cfg(test)]
+    pub fn kp(&self, i: usize) -> u32 {
+        self.e[i] & KP_MASK
+    }
+
     /// Iterate (word, count) over the sorted list.
     pub fn runs(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
         self.runs_at().map(|(_, w, c)| (w, c))
@@ -1079,13 +1310,13 @@ pub struct Runs<'a> {
 impl Iterator for Runs<'_> {
     type Item = (usize, u32, u32);
     fn next(&mut self) -> Option<(usize, u32, u32)> {
-        if self.i >= self.wl.word.len() {
+        if self.i >= self.wl.len() {
             return None;
         }
         let at = self.i;
-        let w = self.wl.word[at];
+        let w = self.wl.word(at);
         let mut c = 0u32;
-        while self.i < self.wl.word.len() && self.wl.word[self.i] == w {
+        while self.i < self.wl.len() && self.wl.word(self.i) == w {
             c += 1;
             self.i += 1;
         }
@@ -1159,8 +1390,9 @@ const POST_LINES: usize = 8;
 /// word of every query paid two dependent trips to memory. Some thousand words
 /// a query, tens of thousands of queries.
 #[inline]
-fn prefetch_postings(inv: &InvertedFile, words: &[u32], at: usize) {
-    let Some(&w) = words.get(at) else { return };
+fn prefetch_postings(inv: &InvertedFile, wl: &WordList, at: usize) {
+    let Some(&e) = wl.e.get(at) else { return };
+    let w = e >> KP_BITS;
     #[cfg(target_arch = "x86_64")]
     unsafe {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
@@ -1185,6 +1417,7 @@ fn prefetch_postings(inv: &InvertedFile, words: &[u32], at: usize) {
 }
 
 impl InvertedFile {
+
     pub fn build(lists: &[WordList], n_words: usize, max_posting: usize) -> InvertedFile {
         let n = lists.len();
         // The documents a word's rarity is measured against: the images that
@@ -1194,7 +1427,7 @@ impl InvertedFile {
         // counting them made every word look rarer by the same factor: a
         // folder where each photograph is there three times weighed every
         // word by ln(3n/d) rather than ln(n/d).
-        let docs = lists.iter().filter(|l| !l.word.is_empty()).count().max(1);
+        let docs = lists.iter().filter(|l| !l.is_empty()).count().max(1);
         let mut df = vec![0u32; n_words];
         for wl in lists.iter() {
             for (w, _) in wl.runs() {
@@ -1322,7 +1555,6 @@ impl InvertedFile {
             return self.query_touched(wl, exclude, acc, out);
         }
         let mut qmass = 0f32;
-        let words = &wl.word[..];
         for (at, w, c) in wl.runs_at() {
             let w = w as usize;
             // The postings of a word further down the list, asked for now.
@@ -1334,7 +1566,7 @@ impl InvertedFile {
             // *dependent* miss: `off[w]` has to arrive before the address of
             // the postings is even known. Asking a few words early breaks the
             // chain, and asks for nothing the loop was not about to read.
-            prefetch_postings(self, words, at + POST_AHEAD);
+            prefetch_postings(self, wl, at + POST_AHEAD);
             let (p0, p1) = (self.off[w] as usize, self.off[w + 1] as usize);
             let post = &self.data[p0..p1];
             if post.is_empty() {
@@ -1428,10 +1660,11 @@ fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
     debug_assert!(a.len() >= BLOCK && b.len() >= BLOCK);
     unsafe {
         use std::arch::x86_64::*;
-        let bv = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+        let mask = _mm256_set1_epi32(KP_MASK as i32);
+        let bv = _mm256_or_si256(_mm256_loadu_si256(b.as_ptr() as *const __m256i), mask);
         let mut acc = _mm256_setzero_si256();
         for k in 0..BLOCK {
-            let av = _mm256_set1_epi32(*a.get_unchecked(k) as i32);
+            let av = _mm256_set1_epi32((*a.get_unchecked(k) | KP_MASK) as i32);
             acc = _mm256_or_si256(acc, _mm256_cmpeq_epi32(av, bv));
         }
         _mm256_movemask_epi8(acc) != 0
@@ -1488,7 +1721,11 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
     // whether the pairs can be sorted by counting rather than by comparing —
     // see `sort_pairs` — and it costs one integer operation per pair.
     let mut hi = 0u32;
-    let (aw, bw) = (&a.word[..], &b.word[..]);
+    // Entries are compared by their word alone, and `| KP_MASK` is how: it
+    // sets every keypoint bit, so two entries compare equal exactly when
+    // their words do and order exactly as their words do. One `or` per
+    // entry read, here and in the block filter.
+    let (aw, bw) = (&a.e[..], &b.e[..]);
     let (na, nb) = (aw.len(), bw.len());
     let (mut i, mut j) = (0usize, 0usize);
     while i < na && j < nb {
@@ -1498,7 +1735,7 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
         while BLOCK > 0 && ia <= na && jb <= nb && !blocks_meet(&aw[i..ia], &bw[j..jb]) {
             // The block that ends first cannot match anything the other side
             // has left, so it goes whole. Equal ends retire both.
-            let (am, bm) = (aw[ia - 1], bw[jb - 1]);
+            let (am, bm) = (aw[ia - 1] | KP_MASK, bw[jb - 1] | KP_MASK);
             if am <= bm {
                 i = ia;
                 ia += BLOCK;
@@ -1517,7 +1754,7 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
         // filter's own reasoning reaches.
         let (aend, bend) = if BLOCK == 0 { (na, nb) } else { (ia.min(na), jb.min(nb)) };
         while i < aend && j < bend {
-            let (av, bv) = (aw[i], bw[j]);
+            let (av, bv) = (aw[i] | KP_MASK, bw[j] | KP_MASK);
             // Two conditional increments rather than a three-way branch: a
             // shared word is rare enough that the test below predicts, and the
             // ordering of two words that differ does not.
@@ -1527,10 +1764,10 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
                 continue;
             }
             let (i0, j0) = (i, j);
-            while i < na && aw[i] == av {
+            while i < na && aw[i] | KP_MASK == av {
                 i += 1;
             }
-            while j < nb && bw[j] == av {
+            while j < nb && bw[j] | KP_MASK == av {
                 j += 1;
             }
             // A word matching many keypoints on both sides is repeated
@@ -1539,9 +1776,9 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
             if (i - i0) * (j - j0) > 64 {
                 continue;
             }
-            for x in i0..i {
-                for y in j0..j {
-                    let e = (a.kp[x] as u32, b.kp[y] as u32);
+            for &ea in &aw[i0..i] {
+                for &eb in &bw[j0..j] {
+                    let e = (ea & KP_MASK, eb & KP_MASK);
                     hi |= e.0 | e.1;
                     out.push(e);
                 }
@@ -1645,6 +1882,12 @@ fn sort_pairs(out: &mut Vec<(u32, u32)>, hi: u32) {
     });
 }
 
+/// A flat run of descriptors as the candidates `Vocabulary::build` samples.
+#[cfg(test)]
+fn as_samples(desc: &[u8]) -> Vec<&[u8; DESC_LEN]> {
+    desc.chunks_exact(DESC_LEN).map(|d| d.try_into().unwrap()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1655,18 +1898,18 @@ mod tests {
     fn shared_reference(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
         out.clear();
         let (mut i, mut j) = (0usize, 0usize);
-        while i < a.word.len() && j < b.word.len() {
-            match a.word[i].cmp(&b.word[j]) {
+        while i < a.len() && j < b.len() {
+            match a.word(i).cmp(&b.word(j)) {
                 std::cmp::Ordering::Less => i += 1,
                 std::cmp::Ordering::Greater => j += 1,
                 std::cmp::Ordering::Equal => {
-                    let w = a.word[i];
+                    let w = a.word(i);
                     let i0 = i;
-                    while i < a.word.len() && a.word[i] == w {
+                    while i < a.len() && a.word(i) == w {
                         i += 1;
                     }
                     let j0 = j;
-                    while j < b.word.len() && b.word[j] == w {
+                    while j < b.len() && b.word(j) == w {
                         j += 1;
                     }
                     if (i - i0) * (j - j0) > 64 {
@@ -1674,7 +1917,7 @@ mod tests {
                     }
                     for x in i0..i {
                         for y in j0..j {
-                            out.push((a.kp[x] as u32, b.kp[y] as u32));
+                            out.push((a.kp(x), b.kp(y)));
                         }
                     }
                     if out.len() > cap {
@@ -1701,10 +1944,7 @@ mod tests {
                 })
                 .collect();
             pairs.sort_unstable();
-            WordList {
-                word: pairs.iter().map(|p| p.0).collect(),
-                kp: pairs.iter().map(|p| p.1 as u16).collect(),
-            }
+            WordList::from_sorted(&pairs)
         };
         let mut got = Vec::new();
         let mut want = Vec::new();
@@ -1762,7 +2002,7 @@ mod tests {
             }
         }
         let p = VocabParams { depth: 2, ..Default::default() };
-        let v = Vocabulary::build(&desc, &p);
+        let v = Vocabulary::build(as_samples(&desc), &p);
 
         let mut words: Vec<Vec<u32>> = Vec::new();
         let mut out = Vec::new();
@@ -1794,9 +2034,8 @@ mod tests {
     /// the reference `query` is checked against.
     fn query_reference(lists: &[WordList], max_posting: usize, wl: &WordList, exclude: u32) -> Vec<(u32, f32)> {
         let n = lists.len();
-        let n_words = lists.iter().flat_map(|l| l.word.iter()).map(|&w| w as usize + 1).max().unwrap_or(0).max(
-            wl.word.iter().map(|&w| w as usize + 1).max().unwrap_or(0),
-        );
+        let top = |l: &WordList| (0..l.len()).map(|i| l.word(i) as usize + 1).max().unwrap_or(0);
+        let n_words = lists.iter().map(top).max().unwrap_or(0).max(top(wl));
         let mut df = vec![0usize; n_words];
         let mut post: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_words];
         for (img, l) in lists.iter().enumerate() {
@@ -1854,7 +2093,7 @@ mod tests {
                 })
                 .collect();
             pairs.sort_unstable();
-            WordList { word: pairs.iter().map(|p| p.0).collect(), kp: pairs.iter().map(|p| p.1 as u16).collect() }
+            WordList::from_sorted(&pairs)
         };
         for &(n_imgs, span) in [(3usize, 50u32), (40, 400), (200, 3000)].iter() {
             let lists: Vec<WordList> =
@@ -1927,7 +2166,7 @@ mod bench {
         let n = 60_000;
         let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
         let p = VocabParams { depth: 4, sample: 40_000, ..Default::default() };
-        let v = Vocabulary::build(&desc, &p);
+        let v = Vocabulary::build(as_samples(&desc), &p);
         let mut out = Vec::new();
         let mut best = f64::MAX;
         for _ in 0..7 {
@@ -1963,10 +2202,7 @@ mod bench {
                     let mut pairs: Vec<(u32, u32)> =
                         (0..l).map(|k| (w32() % v, (k / 3) as u32)).collect();
                     pairs.sort_unstable();
-                    WordList {
-                        word: pairs.iter().map(|p| p.0).collect(),
-                        kp: pairs.iter().map(|p| p.1 as u16).collect(),
-                    }
+                    WordList::from_sorted(&pairs)
                 })
                 .collect();
             let mut out = Vec::new();
@@ -2014,10 +2250,7 @@ mod bench {
                         })
                         .collect();
                     pairs.sort_unstable();
-                    WordList {
-                        word: pairs.iter().map(|p| p.0).collect(),
-                        kp: pairs.iter().map(|p| p.1 as u16).collect(),
-                    }
+                    WordList::from_sorted(&pairs)
                 })
                 .collect();
             let inv = InvertedFile::build(&lists, words as usize, (n_imgs / 5).max(32));
@@ -2089,8 +2322,8 @@ mod bench {
                     }
                     let mk = |mut w: Vec<u32>| {
                         w.sort_unstable();
-                        let kp: Vec<u16> = (0..w.len() as u16).collect();
-                        WordList { word: w, kp }
+                        let pairs: Vec<(u32, u32)> = w.iter().enumerate().map(|(k, &w)| (w, k as u32)).collect();
+                        WordList::from_sorted(&pairs)
                     };
                     (mk(wa), mk(wb))
                 })
@@ -2144,10 +2377,7 @@ mod bench {
                     let mut pairs: Vec<(u32, u32)> =
                         (0..l).map(|k| (w32() % v, (k / 3) as u32)).collect();
                     pairs.sort_unstable();
-                    WordList {
-                        word: pairs.iter().map(|p| p.0).collect(),
-                        kp: pairs.iter().map(|p| p.1 as u16).collect(),
-                    }
+                    WordList::from_sorted(&pairs)
                 })
                 .collect();
             let mb = n_lists as f64 * l as f64 * 8.0 / 1e6;
@@ -2188,8 +2418,8 @@ mod bench {
         let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
         for depth in 1..=5usize {
             let p = VocabParams { depth, branching: 16, sample: 40_000, ..Default::default() };
-            let v = Vocabulary::build(&desc, &p);
-            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum();
+            let v = Vocabulary::build(as_samples(&desc), &p);
+            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum::<usize>() + v.leaves.len();
             let mut out = Vec::new();
             let mut best = f64::MAX;
             for _ in 0..7 {
@@ -2227,8 +2457,8 @@ mod bench {
         let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
         for (depth, branching, sample) in [(4usize, 16usize, 160_000usize), (5, 16, 160_000), (6, 11, 160_000)] {
             let p = VocabParams { depth, branching, sample, ..Default::default() };
-            let v = Vocabulary::build(&desc, &p);
-            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum();
+            let v = Vocabulary::build(as_samples(&desc), &p);
+            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum::<usize>() + v.leaves.len();
             let mut best1 = f64::MAX;
             let mut best8 = f64::MAX;
             for _ in 0..3 {
@@ -2269,7 +2499,7 @@ mod bench {
         let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| rng.byte()).collect();
         for branching in [8usize, 9, 10, 11, 12, 13, 14, 15, 16] {
             let p = VocabParams { depth: 4, branching, sample: 40_000, ..Default::default() };
-            let v = Vocabulary::build(&desc, &p);
+            let v = Vocabulary::build(as_samples(&desc), &p);
             let mut out = Vec::new();
             let mut best = f64::MAX;
             for _ in 0..7 {

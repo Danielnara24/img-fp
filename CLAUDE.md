@@ -1759,7 +1759,10 @@ pass's worth.
 `extract_threads` is new, and it is the check to run on anything in `sift.rs`:
 the whole extractor at the two shapes the corpora hand it, one core and all of
 them, with a checksum over every keypoint field and descriptor byte. Both
-changes above leave it at `48a0f69e907049e6` / `6efa669a9cb66fb9`.
+changes above leave it at `48a0f69e907049e6` / `6efa669a9cb66fb9`. (Since
+`response` left `Keypoint` in the second memory pass the checksum covers four
+fields, and reads `b8e5341a1d7b5cad` / `5c2fd85ed71708a8` — on the build
+before that change as well, summed over the same four.)
 
 **What the pass is worth end to end**, cold, cooled, cache evicted, in the
 order A B B A A B:
@@ -1868,7 +1871,8 @@ said.** Measured with a sampler reading `mallinfo2` every quarter-second:
   `u16`, 25 MB), the million candidate pairs held through it for nothing, and
   the thumbnails' mip pyramids, which are now built on the first pixel check
   that needs one (`Thumb::mips`) — a third of every thumbnail, most of which a
-  found corpus never reads.
+  found corpus never reads. (Since the second memory pass, below, they are not
+  kept at all.)
 - **And a cached run unpacked the whole machine's cache.** `cache::open`
   inflated every record in the file, including every record for a path this
   run was not walking, and held them through the analysis so that their spans
@@ -1882,9 +1886,132 @@ is **875 MB of analysis** — descriptors 625, thumbnails 152, keypoints 98 — 
 the index, and none of that can shrink without being lossy. Packing a word and
 its keypoint into one `u32` would take another 25 MB off the word lists, at the
 price of shifts inside `shared`'s block filter, the matcher's hottest loop; not
-tried. Here the peak is now the JXL render itself on top of the analysis, and
+tried. (Tried since, and shipped: see the second memory pass.) Here the peak is now the JXL render itself on top of the analysis, and
 past that the decode budget, which is `MemAvailable / 8` and so is a choice
 about the machine rather than a property of the build.
+
+**A second memory pass, for the four-corpus baseline.** `out/v17-all4` put
+img-fp's peak at **3,051 MB PSS**, third highest of the field, and the first
+thing worth knowing is that **IMGS-ALL does not peak where IMGS does**. IMGS
+alone peaks during the analysis, on a decode transient; 27,659 files peak at
+the **end of verification**, where everything the analysis made is held
+beside everything matching has built on it. Every change below is
+byte-identical on all four corpora together, on IMGS and on the found corpus —
+the same 1,118,629 pairs and 702 groups, 222,879 and 140, 2,438 and 770 — and
+the `--dump` CSV's direct and variant rows are byte-identical too. (Its
+propagated rows come out in a different order on every run of any build, the
+baseline included, because propagation walks a `HashMap`; the set is the same.)
+
+The cold end-to-end figure first, one session, `bench.py`'s protocol (cooled to
+idle + 3 C, the corpus evicted from the page cache, `--no-cache`), in the
+order final, base, base, final, with **swap added to PSS**, because this
+machine runs at swappiness 100 with gigabytes already swapped out and the
+baseline build's peak was being paged out under it:
+
+| IMGS-ALL, cold | peak PSS + swap | of it swapped | wall | CPU-seconds |
+|---|---|---|---|---|
+| **before** | 3,115 / 3,117 MB | 311 / 399 MB | 474.5 / 470.5 s | 2,835 / 2,853 |
+| **after** | **2,282 / 2,256 MB** | 0 / 0 | 458.9 / 457.0 s | 2,888 / 2,860 |
+
+**-27% of the footprint and -3% of the wall**, the wall being the swapping
+that stopped. CPU is level: +1.8% in the first pair and +0.2% in the second,
+with every "after" run at a clock 2-3% lower than its partner. PSS alone — all
+`bench.py` records — reads 2,804 / 2,718 MB before, so a `bench.py` row would
+show -18%; the larger figure is the honest one. On the found corpus, in the
+same order: peak **989 / 988 MB against 1,108 / 1,126** (-11%), CPU 882 / 953
+against 921 / 918 (one pair each way, following the clock). On IMGS alone,
+three pairs: CPU level (497 / 492 against 493 / 498 in the matched pairs) and
+the peak unmoved at 680-810 MB, because IMGS's peak is the analysis and none of
+this touches it.
+
+How it was found, which is reusable: a sampler of `/proc/self/smaps_rollup`
+against the run's `-v` stage lines says *when*, and `mallinfo2` at each stage
+boundary says *what* — heap in use, heap free, and mmapped. At the baseline's
+peak the itemised data was 2,470 MB of 2,776 (cached, no swap), and
+**`mallinfo2` reported 451 MB of the heap free**. The changes, in the order
+they were made, with cached IMGS-ALL figures (each with no swap in its run):
+
+- **Verification is collected a slice at a time** (`VERIFY_SLICE`, 65,536
+  candidates). A rayon `collect` of a filtered stream gathers each worker's
+  results in vectors of their own, grown by doubling, and copies them into one
+  at the end: 923,601 verdicts at 112 bytes were some 300 MB at that moment.
+  The holes it left were the 451 MB, and trimming them (`malloc_trim` after
+  verification was tried) gives back 400 MB that the second look dirties again
+  within seconds. Slices appended in order are the same list: **2,776 ->
+  2,547 MB**, heap free at the peak 451 -> 25.
+- **The anchors are read out of `all_direct` where they lie** instead of being
+  cloned into a second list: 876,049 of its 923,601 verdicts, with growth
+  slack.
+- **The vocabulary's sample was copied twice**: the pool, then a shuffled copy
+  of the pool inside `Vocabulary::build`. Shuffling in place is the same draw.
+  The vocabulary stage, cold: 2,592 -> 2,478 MB.
+- **And k-means' results were the level twice over**: every parent's centres
+  collected, then copied into the level, 133 MB each way at the deepest level.
+  The parents now go a slice at a time (`BUILD_SLICE`), each parent's seed its
+  own index as before. Vocabulary stage 2,411 -> 2,259.
+- **The postings are dropped after the candidates and built again for the
+  second look**, which is the only thing that reads them after retrieval: 94
+  MB off the end of verification for 1.8 s on one thread. And where the
+  re-asked files are few, their mirrored and inverted word lists are quantised
+  first and the vocabulary dropped before the postings are rebuilt, so the two
+  never coexist. That is decided by size — the lists against
+  `Vocabulary::heap_bytes` — because on the found corpus nearly every file is
+  re-asked and the lists would outweigh the vocabulary several times over;
+  there each file's are made and spent in turn, as before.
+- **A word-list entry is one `u32`**, the word above `KP_BITS` and the keypoint
+  below, which the entry above this one called not tried: 130 -> 87 MB. The
+  block filter compares `entry | KP_MASK` on both sides, one `or` per word.
+  `shared_timings` says it costs 16% of the function on synthetic lists and
+  nearly double on lists sharing nothing, but in place on IMGS-ALL, profiled,
+  `shared` is 48.7-48.9 CPU-seconds against 49.0-49.3: on real candidates the
+  merge is emission and sorting, not filtering. A variant that broadcast the
+  masked words with `vpermd` instead was worse everywhere.
+- **A leaf of the vocabulary is a pointer to the descriptor it copies**
+  (`Vocabulary::leaves`). The tree is sized so that its leaves outnumber its
+  sample, so a parent at the level above holds about three members, and k-means
+  hands a parent with no more members than children each member as a centre
+  of its own — byte for byte, which the debug build asserts. Those members are
+  descriptors the analysis holds until after the vocabulary is dropped, so the
+  leaf level, 1.04 M leaves and 133 MB of copies on IMGS-ALL, is now 8 MB of
+  pointers and the few real means in `own`. The vocabulary goes from 181 MB to
+  81. The descent's last level reads its children through the pointers
+  (`dists_at`, the same integer kernel): profiled, `quantise` read 175 against
+  162-166 CPU-seconds, in a session too short of memory to trust, and end to
+  end it does not show — the found corpus, where quantisation is a quarter of
+  the run, is level above. Holding the *sample* as references too — 9 MB
+  rather than a 145 MB copy — was measured and rejected: k-means reading its
+  members from all over 1.4 GB built the tree 30% slower (13 s -> 17-18 s).
+- **A thumbnail's pyramid is built for each comparison and not kept**
+  (`Pyramid`, two per worker). It is a 2x2 mean, sixteen outputs to a few
+  vector instructions (`halve_row`, held to the old scalar arithmetic by
+  `the_pyramid_is_built_exactly_as_it_was`), and almost every IMGS-ALL
+  thumbnail is read above level zero, so keeping it was a third again of every
+  thumbnail: **103 MB**. `pixel_check` profiled at 129.5 / 130 CPU-seconds
+  against 123-135.
+- **A direct verdict is held as `(u32, u32, Verdict)`**, 76 bytes, and becomes
+  an edge where it is read (`direct_edge`): an edge carried its transform
+  beside the verdict that holds it and its inversion beside the verdict's own
+  variant. 99 -> 66 MB.
+- **`response` left `Keypoint`**: 216 -> 173 MB. See the cache section; the
+  cache is `IMGFPC06` for it.
+
+Together, cached: **2,776 -> 2,228 MB**, and what is at the peak now is the
+analysis — **descriptors 1,386 MB, thumbnails 303, keypoints 173** — with 87 of
+word lists, 81 of vocabulary, 66 of verdicts and 22 of candidate pairs on top.
+The phases that can peak are within 170 MB of each other, measured cold: the
+end of analysis ~2,120, the vocabulary build ~2,260, and the end of
+verification and the second look ~2,290.
+
+What is left is the analysis, and it is lossless only at a price. The
+descriptors carry **5.85 bits of order-0 entropy a byte** (17% zeros, 57% under
+16, 97% under 128), so no fixed-width packing gains anything, and an entropy
+coder with random access — a code per byte, an offset per descriptor — would
+save some 22-26% of 1,386 MB in exchange for a decode inside `correspond` and
+the descent, the two hottest loops in the run, hundreds of millions of times.
+Not tried. Thumbnails and keypoints are read by the pixel check and the
+geometry at full precision. The decode budget, `MemAvailable / 8` taken once
+at the start, sets the analysis-phase transient, and that phase is not the
+peak here.
 
 ### What the second look costs, and the seven ways not to fix it
 
@@ -3055,7 +3182,7 @@ a warmer day than the question was asked on — 55.8 s total):
 | stage | wall |
 |---|---|
 | walk, exact-duplicate hash | 0.2 s |
-| **cache load** (660 MB, inflate + mip pyramids, parallel; the pyramids are now built on first use) | **2.0 s** |
+| **cache load** (660 MB, inflate + mip pyramids, parallel; the pyramids are now built per comparison and never kept) | **2.0 s** |
 | decode and describe | **0 — this is what the cache buys** |
 | vocabulary built from the corpus's own descriptors | 1.7 s |
 | quantise 4.88 M descriptors into words | 4.6 s |
@@ -3129,7 +3256,11 @@ keeping** — they are what stops the next attempt:
   the keypoint stream to 0.638 and the file to 0.741. Declined: it is 1.9% of
   the file in exchange for a cached `Keypoint` that differs from a computed
   one in a field, which is exactly the kind of thing a later reader would
-  trip over.
+  trip over. **Done since, for memory rather than for the file**: it was 4 of a
+  keypoint's 20 bytes, 43 MB of a four-corpus run, and with the field gone
+  from `Keypoint` itself a cached keypoint and a computed one differ in
+  nothing. The extractor keeps the response beside its candidates for as
+  long as it ranks them. The cache went to `IMGFPC06` with it.
 
 Concurrent runs are last-writer-wins: the loser's records are lost and nothing
 is corrupted, because the temporary file a save renames into place carries the
