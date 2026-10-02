@@ -12,16 +12,21 @@ of the corpus: on IMGS2 and IMGS3, which are made of such photographs, the
 build before the clean-anchor rule ran at 87-92% precision.
 
 **Status: the tool exists and beats every measured competitor by a wide
-margin.** On IMGS — 5,638 files, 62 seeds, 90 transformations, every amount
-drawn per seed — img-fp scores F1 **0.967** at 99.6% precision and 94.0%
-recall at the shipped default, `--work-size 512`, against SSCD's 0.762 /
-92.6% / 64.8%, in under two minutes against SSCD's half hour. At `--work-size
-640` it is F1 **0.971** at 99.6% / 94.7%. IMGS2 and IMGS3 score 0.980 and
-0.984 at the default and 0.984 and 0.986 at 640. **47 of 87 transformations
-are handled perfectly** on IMGS at the default (every seed found across the
-whole range of the amount) and 48 at 640; every other tool manages **zero** at
-any setting. Accuracy figures are `out/v14-fullsweep` and `out/v15-enlargement`;
-the competitors' are `out/v5`, on IMGS only.
+margin.** **The baseline is now all four corpora together** — IMGS, IMGS2,
+IMGS3 and IMGS4 as one, `IMGS-ALL`: 27,659 files, 304 seeds, 90
+transformations — since IMGS2-4 are spent and will defend no further rule
+(`benchmark/BASELINE.md`, `out/v17-all4`). There img-fp scores F1 **0.978** at
+99.6% precision and 96.1% recall at the shipped default, `--work-size 512`,
+against SSCD's 0.748 / 85.3% / 66.6%, in 8 minutes against SSCD's 2.5 hours.
+**43 of 87 transformations are handled perfectly** — every one of 304 seeds
+found across the whole range of the amount — and every other tool manages
+**zero**. Its 74 cross-family false pairs are no merge: one stray `Acueducto3`
+file (68 pairs) and six single pairs. On IMGS alone — 5,638 files, 62 seeds —
+it is F1 **0.967** at 99.6% / 94.0% at the default, 47 perfect, and **0.971**
+at 640 (99.6% / 94.7%, 48 perfect); IMGS2 and IMGS3 alone score 0.980 and
+0.984 at the default and 0.984 and 0.986 at 640. Those single-corpus figures
+are `out/v14-fullsweep` and `out/v15-enlargement`; the competitors' IMGS-only
+rows are `out/v5`.
 
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
@@ -163,10 +168,20 @@ benchmark/
                       further than --work-size: accuracy at every size it
                       changes, every threshold at 512, the IMGS3 anchor replay
                       at 512, and the one-session cost table (cost/)
+  out/v16-weak-join/  the cycle rule of admit_anchors, replayed on all four
+  out/v17-all4/       THE BASELINE: twelve tools on IMGS-ALL, one session
+                      (metrics.json, score.txt, analyse.txt, per_transform.csv)
 vendor/               third-party tools and venvs, gitignored
 ```
 
-The corpus lives outside the repo at `/home/daniel/Documents/IMGS`: 54 seeds
+**The baseline corpus is `/home/daniel/Documents/IMGS-ALL`**, built by
+`benchmark/corpus/make_combined.py`: IMGS, IMGS2, IMGS3 and IMGS4 as hard
+links under one root, and `IMGS-ALL/derived/` holding the four ground truths
+merged, paths rewritten and seeds prefixed with their corpus. `bench.py`,
+`score.py` and `analyse.py` all default to it. The links go stale when a corpus
+is regenerated, so re-run the script (`--clean`) after `make_variants.py`.
+
+The first corpus lives outside the repo at `/home/daniel/Documents/IMGS`: 54 seeds
 in the root, 8 in `archive/`. One seed, `beach`, has no extension, so any run meant
 to be compared with the published figures needs `-x '*'` — a walk leaves an
 extensionless file out otherwise, as `vid-fp`'s does. `bench.py` passes it. `/home/daniel/Documents/IMGS-VAL` holds the 16
@@ -650,15 +665,17 @@ of that, which is what every size below 640 pays for first. This is the cost
 worth knowing about before recommending the default to anyone whose corpus is
 screenshots, slides or contact sheets.
 
-**Rows where a competitor leads: two at the default.** Checked against every
-competitor column of `out/v5`: `halftone` is PDQ's, 58/62 against 57, and
-`keystone_side` SSCD's, 61 against 60. At 640 it is four rows, each by a
-single seed (`halftone`, `crop_half`, `motion_blur`, `scale_mid`), and at 384
-it was eight. Before 0.20.0 only `halftone` was; which of that release's
-changes (the clean-anchor rule, the derived vocabulary sample) each row is
-owed to has not been separated. The lead on the rows nobody else can do is
-untouched: `embed_tiny` 47/62 (52 at 640) against SSCD's 0, `barrel_distort`
-60 against 48, `wave_vertical` 56 against 49.
+**Rows where a competitor leads: seven on the four-corpus baseline**, none by
+more than five seeds of 304 (`out/v17-all4`): SSCD on `perspective_top` and
+`keystone_side` (303 against 298), `photo_of_screen`, `scale_nearest` and
+`crop_half`; SSCD and czkawka_tuned on `flip_h` (303 and 302 against 300) and
+`transpose_diag` (301 and 302 against 299); `halftone` is level with PDQ at
+293. The mirrorings are the second look, asked only of files the first pass
+anchored fewer than twice. Where img-fp leads it leads by hundreds:
+`embed_tiny` 254 against 0, `contact_sheet` 262 against 0, `crop_micro` 221
+against SSCD's 0. On IMGS alone it was two rows at the default — `halftone`
+(PDQ, 58/62 against 57) and `keystone_side` (SSCD, 61 against 60) — four at
+640 and eight at 384.
 
 A note on the traps, since they are now the *whole* FP count and will keep
 growing as recall does:
