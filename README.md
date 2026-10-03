@@ -139,7 +139,9 @@ img-fp --from-file paths.txt
 
 A file reached through a symlink, a hard link or two overlapping folders is
 scanned once. Symlinks met inside a folder are skipped unless you pass
-`--follow-symlinks`.
+`--follow-symlinks`. Trash folders and thumbnail caches met inside a folder are
+skipped too, since they hold copies of pictures that are elsewhere or were
+deleted; name one directly to scan it.
 
 ## Desktop app
 

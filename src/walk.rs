@@ -94,6 +94,7 @@ struct Found {
 /// the exit code — which is the whole reason the summary keeps two lists.
 pub fn walk(req: &Request, problems: &mut Problems) -> Vec<PathBuf> {
     let excludes = resolve_excludes(req.exclude, problems);
+    let set_aside = SetAside::here();
     let depth = if req.recursive { usize::MAX } else { 1 };
     let mut found = Vec::new();
     for root in req.roots {
@@ -120,7 +121,7 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Vec<PathBuf> {
                 link,
             });
         } else if meta.is_dir() {
-            walk_dir(root, &canon, depth, req, &excludes, &mut found, problems);
+            walk_dir(root, &canon, depth, req, &excludes, &set_aside, &mut found, problems);
         } else {
             // A socket, a fifo, a device node: naming one is a mistake worth
             // hearing about rather than a file worth trying to decode.
@@ -136,10 +137,14 @@ fn walk_dir(
     depth: usize,
     req: &Request,
     excludes: &[PathBuf],
+    set_aside: &SetAside,
     found: &mut Vec<Found>,
     problems: &mut Problems,
 ) {
     let follow = req.follow_symlinks;
+    // Folders passed over for what they are, said once the walk is done: the
+    // filter below cannot reach `problems`, which the loop is using.
+    let passed_over = std::cell::RefCell::new(Vec::new());
     // The path's canonical form when no link lies between it and the root,
     // which without `--follow-symlinks` is always: the root was canonicalized
     // and every component below it is a real directory the walk descended.
@@ -152,7 +157,16 @@ fn walk_dir(
         .follow_links(follow)
         .max_depth(depth)
         .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !e.file_type().is_dir() || !leads_into(e.path(), &beneath(e.path()), excludes, follow));
+        .filter_entry(|e| {
+            if e.depth() == 0 || !e.file_type().is_dir() {
+                return true;
+            }
+            if set_aside.holds(e.path(), &beneath(e.path()), follow) {
+                passed_over.borrow_mut().push(e.path().to_path_buf());
+                return false;
+            }
+            !leads_into(e.path(), &beneath(e.path()), excludes, follow)
+        });
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -202,6 +216,68 @@ fn walk_dir(
             link: entry.path_is_symlink(),
             path: entry.into_path(),
         });
+    }
+    for dir in passed_over.into_inner() {
+        problems.set_aside(&dir.display().to_string());
+    }
+}
+
+/// Folders a walk does not go into, because what is in them is not the
+/// library: a Trash, and a thumbnail cache.
+///
+/// **Both are copies of pictures that are somewhere else, or were.** A Trash
+/// holds the files a person already decided to throw away — the window moves
+/// duplicates to it — so walking it found every one of them again, and since
+/// a group is headed by the lowest path and `.Trash-1000` sorts before nearly
+/// everything, the copy in the Trash became the group's reference and the
+/// live file the "duplicate" to delete. A thumbnail cache is a small copy of
+/// every picture the desktop has shown, and is the same trap with a smaller
+/// picture.
+///
+/// By name, the ones a removable drive or a home folder carries: the
+/// freedesktop topdir trashes (`.Trash`, `.Trash-1000`), macOS's `.Trashes`,
+/// Windows's `$RECYCLE.BIN` and `RECYCLER`, and the old `.thumbnails`; and by
+/// place, the home Trash and thumbnail cache under the XDG folders, whose own
+/// names (`Trash`, `thumbnails`) are too ordinary to go by. Only a folder met
+/// during a walk is passed over. Named as a root, it is scanned like any
+/// other — that is the way to look inside one — and it is listed among the
+/// skips, so a run that passed one over says so.
+struct SetAside {
+    /// Canonical paths of the home Trash and thumbnail cache, where they exist.
+    places: Vec<PathBuf>,
+}
+
+impl SetAside {
+    fn here() -> SetAside {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let xdg = |var: &str, under_home: &str| {
+            std::env::var_os(var)
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .or_else(|| home.as_ref().map(|h| h.join(under_home)))
+        };
+        let places = [xdg("XDG_DATA_HOME", ".local/share").map(|d| d.join("Trash")), xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("thumbnails"))]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .collect();
+        SetAside { places }
+    }
+
+    /// Whether a directory the walk has met is one of them. `canonical_guess`
+    /// is its canonical path when no link led here, as in `leads_into`.
+    fn holds(&self, path: &Path, canonical_guess: &Path, through_links: bool) -> bool {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if name == ".trash" || name.starts_with(".trash-") || name == ".trashes" || name == "$recycle.bin" || name == "recycler" || name == ".thumbnails" {
+            return true;
+        }
+        if self.places.is_empty() {
+            return false;
+        }
+        if self.places.iter().any(|p| p == canonical_guess) {
+            return true;
+        }
+        through_links && std::fs::canonicalize(path).is_ok_and(|real| self.places.contains(&real))
     }
 }
 
@@ -470,6 +546,31 @@ mod tests {
         // Both links lead to `b`, which is one file and is listed once, under
         // the name that is not itself a link.
         assert_eq!(run(&roots, &[], true, true).files, vec![a, s.0.join("scan/linkdir/b.jpg")]);
+    }
+
+    /// A walk does not go into a Trash or a thumbnail cache, by name or by
+    /// place, and scans one that is named as a root.
+    #[test]
+    fn a_trash_or_thumbnail_cache_is_passed_over() {
+        let s = Scratch::new();
+        let a = s.file("drive/photos/a.jpg");
+        for rel in [".Trash-1000/files/a.jpg", ".Trash/1000/files/b.jpg", "$RECYCLE.BIN/S-1-5/c.jpg", ".Trashes/501/d.jpg", "photos/.thumbnails/e.jpg"] {
+            s.file(&format!("drive/{rel}"));
+        }
+        // A folder only an ordinary name says nothing about.
+        let kept = s.file("drive/trash-talk/f.jpg");
+        assert_eq!(run(&[s.0.join("drive")], &[], true, false).files, vec![a.clone(), kept.clone()]);
+        // Named, it is scanned.
+        let t = s.0.join("drive/.Trash-1000");
+        assert_eq!(run(&[t.clone()], &[], true, false).files, vec![t.join("files/a.jpg")]);
+
+        // The home Trash and thumbnail cache, by where they are.
+        let set = SetAside { places: vec![s.dir("home/.local/share/Trash"), s.dir("home/.cache/thumbnails")] };
+        for p in &set.places {
+            assert!(set.holds(p, p, false));
+        }
+        let other = s.dir("home/Pictures/thumbnails");
+        assert!(!set.holds(&other, &other, false), "a folder of that name elsewhere is a folder");
     }
 
     #[test]

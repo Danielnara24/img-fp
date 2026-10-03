@@ -3117,6 +3117,12 @@ header size, PNM's digit after whitespace and comments, PAM's field name,
 ICO's entry count and planes, GIF's version), so nothing a decoder can read is
 turned away, and `unmarked_format` no longer lets `guess_format` take those
 bytes back;
+a Trash or a thumbnail cache met during a walk (`walk::SetAside`: `.Trash`,
+`.Trash-UID`, `.Trashes`, `$RECYCLE.BIN`, `RECYCLER`, `.thumbnails` by name,
+and the XDG home Trash and thumbnail cache by place; one named as a root is
+scanned) — the window trashes duplicates there, and a rescan found each of them
+again, as the group's *reference*, because `.Trash-1000` sorts first and a
+tie goes to the lowest index;
 a symlink met during a walk without `--follow-symlinks` (a path *named* on the
 command line is still followed), a followed link looping back into a folder
 already being walked, a root `--exclude` covers, and a second name for a file

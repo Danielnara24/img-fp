@@ -130,6 +130,7 @@ pub struct Problems<'a> {
 
     // Skips: the tool passing over what it was never going to read.
     not_an_image: Tally,
+    set_aside: Tally,
     not_image_content: Tally,
     symlink: Tally,
     symlink_loop: Tally,
@@ -149,6 +150,7 @@ impl<'a> Problems<'a> {
         Problems {
             log,
             not_an_image: Tally::default(),
+            set_aside: Tally::default(),
             not_image_content: Tally::default(),
             symlink: Tally::default(),
             symlink_loop: Tally::default(),
@@ -173,6 +175,13 @@ impl<'a> Problems<'a> {
     /// sniffed unless `-x '*'` asks for it. Hence the count.
     pub fn not_an_image(&mut self, path: &str) {
         record(self.log, &mut self.not_an_image, "skip/not-an-image", path.into());
+    }
+
+    /// A Trash or a thumbnail cache met during a walk, and not gone into:
+    /// what is inside is copies of pictures that are elsewhere, or were
+    /// thrown away. See `SetAside` in `walk.rs`.
+    pub fn set_aside(&mut self, path: &str) {
+        record(self.log, &mut self.set_aside, "skip/trash-or-thumbnails", path.into());
     }
 
     /// A symlink met during a walk that does not follow them. A folder that
@@ -256,9 +265,10 @@ impl<'a> Problems<'a> {
 
     // ---- reporting
 
-    fn skips(&self) -> [(&Tally, &'static str); 6] {
+    fn skips(&self) -> [(&Tally, &'static str); 7] {
         [
             (&self.not_an_image, "file(s) whose extension is not searched (see -x)"),
+            (&self.set_aside, "Trash or thumbnail folder(s), not gone into (name one to scan it)"),
             (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
             (&self.symlink, "symlink(s), which are not followed (see --follow-symlinks)"),
             (&self.symlink_loop, "symlink(s) leading back into a folder already being walked"),
