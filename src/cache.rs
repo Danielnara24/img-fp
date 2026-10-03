@@ -5,11 +5,18 @@
 //! mostly-unchanged directory nearly free, and makes tuning the matching
 //! stages practical.
 //!
-//! The format is a header holding the settings, then one record per file. A
+//! The format is a header naming the format, then one record per file. A
 //! record is keyed by canonical path, size, modification time and change
-//! time, so an edited file is re-described rather than trusted. Settings live in the header, so changing
-//! the working size or the feature budget invalidates the whole file rather
-//! than silently mixing two kinds of record.
+//! time, so an edited file is re-described rather than trusted, and it says
+//! which extraction settings made it.
+//!
+//! **The settings are a record's, not the file's.** They used to be in the
+//! header, and a run at any other `--work-size` found the whole file stale and
+//! replaced it with an empty one: one scan at 640 cost the analysis of every
+//! folder the machine had ever scanned at 512, silently, and going back to 512
+//! cost it again. Now a run reads the records made at its own settings and
+//! carries the rest over untouched, as it does a record for a file it did not
+//! walk, so the two never mix and neither costs the other anything.
 //!
 //! **What a record costs, because it is more than people expect.** An analysis
 //! is 128 bytes of descriptor and 20 bytes of keypoint for each of up to 600
@@ -90,7 +97,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// records (see `lib::cache_names`).
 /// 08: grey is BT.601 luma rather than the mean of RGB, and a JPEG's is read
 /// from its Y plane (`decode::decode_jpeg_luma`).
-const MAGIC: &[u8; 8] = b"IMGFPC08";
+/// 09: the settings moved from the header into each record, so that one file
+/// holds the analyses of several working sizes; and a record carries the
+/// picture's own size, which the report's `scale` is stated in.
+const MAGIC: &[u8; 8] = b"IMGFPC09";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the
@@ -100,7 +110,7 @@ const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 /// the run's peak for the length of one write.
 const BATCH: usize = 64;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 /// What the cached analysis depends on. Only the settings a run can actually
 /// change belong here; the detector's own constants are compiled in, so a
 /// binary that changes them changes the magic instead.
@@ -113,6 +123,9 @@ pub struct Settings {
 pub struct Record {
     pub feats: Features,
     pub thumb: Thumb,
+    /// The picture's own size, as shown (EXIF orientation applied); `feats`
+    /// holds the working image's.
+    pub dims: (u32, u32),
 }
 
 /// What the loaded cache says about one path: its key, its analysis — only
@@ -177,13 +190,7 @@ fn default_dir() -> PathBuf {
 /// is a problem, which is to say it is said out loud and sets the exit code,
 /// and then the run goes on without one.
 pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<PathBuf> {
-    let path = match explicit {
-        Some(given) => {
-            let names_a_dir = given.is_dir() || given.to_string_lossy().ends_with('/');
-            if names_a_dir { given.join(FILE_NAME) } else { given.to_path_buf() }
-        }
-        None => default_dir().join(FILE_NAME),
-    };
+    let path = locate(explicit);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         if let Err(e) = std::fs::create_dir_all(dir) {
             problems.cache(format!("could not create {}: {e}", dir.display()));
@@ -191,6 +198,17 @@ pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<
         }
     }
     Some(path)
+}
+
+/// The file `resolve_path` names, without creating anything.
+pub fn locate(explicit: Option<&Path>) -> PathBuf {
+    match explicit {
+        Some(given) => {
+            let names_a_dir = given.is_dir() || given.to_string_lossy().ends_with('/');
+            if names_a_dir { given.join(FILE_NAME) } else { given.to_path_buf() }
+        }
+        None => default_dir().join(FILE_NAME),
+    }
 }
 
 pub fn key_of(path: &Path) -> Option<Key> {
@@ -377,11 +395,9 @@ impl<W: Write> Buf<W> {
         self.0.write_all(v)?;
         Ok(())
     }
-    fn header(&mut self, s: Settings) -> Result<()> {
+    fn header(&mut self) -> Result<()> {
         self.0.write_all(MAGIC)?;
-        self.u32(s.work_size)?;
-        self.u32(s.features)?;
-        self.u32(s.thumb)
+        Ok(())
     }
 }
 
@@ -391,14 +407,19 @@ impl<W: Write> Buf<W> {
 /// UTF-8 is still a name, and two of them that read the same once made
 /// printable — `x\xfe.jpg` and `x\xff.jpg` — are two files: keyed on the
 /// printable form, one was handed the other's analysis.
-fn record(path: &Path, k: Key, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
+fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     let blob = pack(f, t)?;
     let path = path.as_os_str().as_bytes();
-    let mut b = Buf(Vec::with_capacity(path.len() + 64 + blob.len()));
+    let mut b = Buf(Vec::with_capacity(path.len() + 84 + blob.len()));
     b.bytes(path)?;
+    b.u32(s.work_size)?;
+    b.u32(s.features)?;
+    b.u32(s.thumb)?;
     b.u64(k.len)?;
     b.i64(k.mtime)?;
     b.i64(k.ctime)?;
+    b.u32(dims.0)?;
+    b.u32(dims.1)?;
     b.u32(f.w)?;
     b.u32(f.h)?;
     b.u32(f.kps.len() as u32)?;
@@ -502,14 +523,13 @@ fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<F
 /// Why a cache file produced nothing.
 ///
 /// The two are worth keeping apart because only one of them is worth telling
-/// anyone about. A cache written at another working size holds records that
-/// describe a different analysis, so discarding it whole is the format doing
-/// its job — see the note on `Settings` — and it happens every time a sweep
-/// changes `--work-size`. A file that is not a cache at all, or that is
-/// corrupt in the middle, is a file the user pointed at and will keep pointing
-/// at, and it costs a full re-analysis every run until it is noticed.
+/// anyone about. A cache written by a build with another format is replaced
+/// whole, and that is the format doing its job — see the note on `MAGIC`. A
+/// file that is not a cache at all, or that is corrupt in the middle, is a
+/// file the user pointed at and will keep pointing at, and it costs a full
+/// re-analysis every run until it is noticed.
 enum Reject {
-    /// Written by a run with different extraction settings. By design.
+    /// Written by a build with another format. By design.
     Stale,
     /// Not a cache, or corrupt: something to say out loud.
     Damaged(anyhow::Error),
@@ -559,6 +579,11 @@ struct Tail {
 /// into a new file, sorted, byte for byte and without unpacking any of them.
 pub struct Store {
     path: PathBuf,
+    /// The settings this run's records are made at.
+    settings: Settings,
+    /// Records made at other settings, the latest for each path and settings:
+    /// never unpacked, and carried into a compaction while their file exists.
+    others: Vec<(PathBuf, Span)>,
     /// `None` when the cache could not be opened for writing, and the run
     /// keeps nothing.
     file: Option<File>,
@@ -600,6 +625,8 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
     let mut out = HashMap::new();
     let mut store = Store {
         path: path.to_path_buf(),
+        settings: want,
+        others: Vec::new(),
         file: None,
         records: AtomicUsize::new(0),
         failed: Mutex::new(None),
@@ -607,7 +634,7 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
     };
     match OpenOptions::new().read(true).append(true).open(path) {
         Ok(f) => {
-            if let Some(tail) = read_file(&f, path, want, walked, &mut out, problems) {
+            if let Some(tail) = read_file(&f, path, want, walked, &mut out, &mut store.others, problems) {
                 // A partial record at the end would sit in front of every
                 // record appended after it, and turn a lost record into a
                 // damaged file. So would a record whose framing is damaged,
@@ -634,13 +661,13 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             // appended: the caller measures how many records a later one
             // superseded against this, and a count of zero beside a full map
             // was an underflow.
-            if let Some(tail) = File::open(path).ok().and_then(|f| read_file(&f, path, want, walked, &mut out, problems)) {
+            if let Some(tail) = File::open(path).ok().and_then(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
                 store.records = AtomicUsize::new(tail.count);
             }
             return (out, store);
         }
     }
-    match replace_with(path, |f| Buf(f).header(want)) {
+    match replace_with(path, |f| Buf(f).header()) {
         Ok(f) => store.file = Some(f),
         Err(e) => problems.cache(format!("could not write {}: {e}", path.display())),
     }
@@ -655,10 +682,11 @@ fn read_file(
     want: Settings,
     walked: Walked,
     out: &mut HashMap<PathBuf, Entry>,
+    others: &mut Vec<(PathBuf, Span)>,
     problems: &mut Problems,
 ) -> Option<Tail> {
     let size = f.metadata().map_or(u64::MAX, |m| m.len());
-    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), size, want, walked, out) {
+    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), size, want, walked, out, others) {
         Ok(tail) => {
             if let Some(why) = &tail.broken_at {
                 problems.cache(format!(
@@ -678,11 +706,13 @@ fn read_file(
         }
         Err(Reject::Stale) => {
             out.clear();
+            others.clear();
             None
         }
         Err(Reject::Damaged(e)) => {
             problems.cache(format!("ignoring {}: {e}", path.display()));
             out.clear();
+            others.clear();
             None
         }
     }
@@ -692,12 +722,12 @@ impl Store {
     /// Put one analysis into the file, and say where it went. Called by the
     /// workers as they finish; the packing runs outside the lock, and only
     /// the write is inside it.
-    pub fn append(&self, path: impl AsRef<Path>, key: Key, f: &Features, t: &Thumb) -> Option<Span> {
+    pub fn append(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), f: &Features, t: &Thumb) -> Option<Span> {
         let file = self.file.as_ref()?;
         if self.broken.load(Ordering::Relaxed) {
             return None;
         }
-        let wrote = record(path.as_ref(), key, f, t).and_then(|rec| {
+        let wrote = record(path.as_ref(), self.settings, key, dims, f, t).and_then(|rec| {
             let _held = lock(&WRITING);
             let mut w = file;
             w.write_all(&rec)?;
@@ -736,20 +766,26 @@ impl Store {
         self.file.is_some() && !self.broken.load(Ordering::Relaxed)
     }
 
+    /// The records made at other settings, as `open` found them: the latest
+    /// for each path and settings.
+    pub fn other_settings(&self) -> &[(PathBuf, Span)] {
+        &self.others
+    }
+
     /// Rewrite the file to hold `entries` and nothing else, sorted, so that
     /// the same corpus in the same state compacts to the same bytes.
     ///
     /// Every entry is already in the file, so this is a copy: nothing is
     /// unpacked or deflated again, and an interrupt part-way through leaves
     /// the file it was copying from exactly as it was.
-    pub fn compact(&mut self, settings: Settings, entries: &mut [(&Path, Span)]) -> Result<()> {
+    pub fn compact(&mut self, entries: &mut [(&Path, Span)]) -> Result<()> {
         let Some(src) = &self.file else { return Ok(()) };
         // By the path's bytes, which is the order the text sort gave before
         // paths were kept as bytes.
         entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()));
         let new = replace_with(&self.path, |f| {
             let mut b = Buf(std::io::BufWriter::with_capacity(1 << 20, f));
-            b.header(settings)?;
+            b.header()?;
             let mut buf = Vec::new();
             for &(_, s) in entries.iter() {
                 buf.resize(s.len as usize, 0);
@@ -769,7 +805,9 @@ impl Store {
 /// make sense of the packed half.
 struct Head {
     path: PathBuf,
+    settings: Settings,
     key: Key,
+    dims: (u32, u32),
     w: u32,
     h: u32,
     n: usize,
@@ -866,7 +904,9 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     }
     r.need(len as u64)?;
     let path = PathBuf::from(OsString::from_vec(r.take(len)?));
+    let settings = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
     let key = Key { len: r.u64()?, mtime: r.i64()?, ctime: r.i64()? };
+    let dims = (r.u32()?, r.u32()?);
     let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
     let (tw, th) = (r.u32()?, r.u32()?);
     let scale = r.f32()?;
@@ -875,11 +915,18 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     let blob = r.take(packed as usize)?;
     // Held as read, not narrowed, so that `read_stream` can tell a thumbnail
     // side of 65,600 from one of 64.
-    let head = Head { path, key, w, h, n, tw, th, scale };
+    let head = Head { path, settings, key, dims, w, h, n, tw, th, scale };
     Ok(Some((head, blob)))
 }
 
-fn read_stream<R: Read>(r: R, size: u64, want: Settings, walked: Walked, out: &mut HashMap<PathBuf, Entry>) -> Result<Tail, Reject> {
+fn read_stream<R: Read>(
+    r: R,
+    size: u64,
+    want: Settings,
+    walked: Walked,
+    out: &mut HashMap<PathBuf, Entry>,
+    others: &mut Vec<(PathBuf, Span)>,
+) -> Result<Tail, Reject> {
     let mut r = Rd { r, pos: 0, size, ended: false };
     let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
     if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
@@ -890,10 +937,9 @@ fn read_stream<R: Read>(r: R, size: u64, want: Settings, walked: Walked, out: &m
         // the note on MAGIC: that is the format changing, not a damaged file.
         return Err(Reject::Stale);
     }
-    let got = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
-    if got != want {
-        return Err(Reject::Stale);
-    }
+    // The latest record for each path made at other settings, and where it
+    // is in `others`.
+    let mut other_at: HashMap<(PathBuf, Settings), usize> = HashMap::new();
     let mut tail = Tail { end: r.pos, count: 0, truncated: false, damaged: 0, broken_at: None };
     let mut batch: Vec<(Head, Vec<u8>, Span)> = Vec::with_capacity(BATCH);
     loop {
@@ -903,12 +949,26 @@ fn read_stream<R: Read>(r: R, size: u64, want: Settings, walked: Walked, out: &m
             Ok(Some((head, blob))) => {
                 tail.end = r.pos;
                 tail.count += 1;
-                // A record framed whole whose shape these settings cannot
+                // A record framed whole whose shape its own settings cannot
                 // produce: its own bytes are damaged, and the records around
                 // it are not. It is counted, so that the run sees the file
                 // holds something to compact away, and not kept.
-                if head.n > want.features as usize || head.tw > want.thumb || head.th > want.thumb {
+                let s = head.settings;
+                if head.n > s.features as usize || head.tw > s.thumb || head.th > s.thumb {
                     tail.damaged += 1;
+                    continue;
+                }
+                // Made at other settings: kept where it is, for whichever run
+                // asks at those settings next.
+                if s != want {
+                    let span = Span { at, len: r.pos - at };
+                    match other_at.entry((head.path, s)) {
+                        std::collections::hash_map::Entry::Occupied(e) => others[*e.get()].1 = span,
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            others.push((e.key().0.clone(), span));
+                            e.insert(others.len() - 1);
+                        }
+                    }
                     continue;
                 }
                 batch.push((head, blob, Span { at, len: r.pos - at }));
@@ -960,6 +1020,7 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
                     Some(Record {
                         feats: Features { w: h.w, h: h.h, kps, desc },
                         thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px),
+                        dims: h.dims,
                     }),
                     *span,
                 ),
@@ -1134,8 +1195,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The magic and the three settings.
-    const HEADER_LEN: u64 = MAGIC.len() as u64 + 3 * 4;
+    /// The magic, and nothing else: the settings are each record's.
+    const HEADER_LEN: u64 = MAGIC.len() as u64;
 
     const SETTINGS: Settings = Settings { work_size: 384, features: 600, thumb: 128 };
 
@@ -1163,9 +1224,9 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &f2, &t2).unwrap();
         drop(store);
         let (all, _, _) = reopen(&path);
 
@@ -1190,9 +1251,9 @@ mod tests {
         assert!(got.is_empty() && !bad);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &f2, &t2).unwrap();
         assert_eq!(store.records(), 3);
         drop(store);
 
@@ -1217,9 +1278,9 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &f1, &t1).unwrap();
         drop(store);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         let (got, store, bad) = reopen(&path);
@@ -1240,8 +1301,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
         drop(store);
         for cut in [1, 9, b.len / 2, b.len - 1] {
             let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1251,7 +1312,7 @@ mod tests {
             assert!(!bad, "a torn tail is not a damaged cache");
             assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
-            store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+            store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
             drop(store);
             let (got, _, bad) = reopen(&path);
             assert!(!bad && got.len() == 2);
@@ -1259,10 +1320,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Where a record's packed length sits: after its path, the key, and the
-    /// six fields of its shape.
+    /// Where a record's packed length sits: after its path, its settings, the
+    /// key, the picture's size and the six fields of its shape.
     fn packed_len_at(s: Span, path: &str) -> u64 {
-        s.at + 8 + path.len() as u64 + 24 + 6 * 4
+        s.at + 8 + path.len() as u64 + 12 + 24 + 8 + 6 * 4
     }
 
     /// A length damaged into something the file cannot hold is a torn tail,
@@ -1275,9 +1336,9 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
@@ -1297,8 +1358,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
         drop(store);
         // A path length past `MAX_PATH` but inside the file's size.
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1319,17 +1380,17 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(40, 3);
-        store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
-        let shape = store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        let shape = store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         // b's first stream: its length is intact, its deflate is not.
         let body = packed_len_at(b, "b.jpg") + 8 + 8;
         file.write_all_at(&[0xff; 24], body).unwrap();
         // c claims more keypoints than a run of these settings describes.
-        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 24 + 8).unwrap();
+        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 12 + 24 + 8 + 8).unwrap();
         drop(file);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
@@ -1344,7 +1405,8 @@ mod tests {
     }
 
     /// Compaction keeps exactly what it is handed, copied rather than packed
-    /// again, and a stale cache is replaced by an empty one on opening.
+    /// again, and a cache from another format is replaced by an empty one on
+    /// opening.
     #[test]
     fn compaction_keeps_what_it_is_given_and_a_stale_file_starts_again() {
         let dir = scratch("compact");
@@ -1353,11 +1415,11 @@ mod tests {
         let (f, t) = analysis(6, 4);
         let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
             .iter()
-            .map(|p| store.append(p, Key { len: 7, mtime: 7, ctime: 7 }, &f, &t).unwrap())
+            .map(|p| store.append(p, Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).unwrap())
             .collect();
         let mut store = store;
         let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
-        store.compact(SETTINGS, &mut keep).unwrap();
+        store.compact(&mut keep).unwrap();
         drop(store);
         let (got, store, bad) = reopen(&path);
         assert!(!bad);
@@ -1368,12 +1430,57 @@ mod tests {
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f.desc);
         drop(store);
 
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(b"IMGFPC08", 0).unwrap();
+        drop(file);
+        let (got, store, bad) = reopen(&path);
+        assert!(got.is_empty() && !bad && store.records() == 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), HEADER_LEN);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A run at another working size reads none of this one's records and
+    /// destroys none of them either: they are carried, unread, and the next
+    /// run at this size finds them where they were. A run at 640 used to
+    /// replace the whole file, every folder's analysis with it.
+    #[test]
+    fn records_made_at_other_settings_are_kept_not_read() {
+        let dir = scratch("settings");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f, t) = analysis(6, 4);
+        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).unwrap();
+        store.append("b.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).unwrap();
+        drop(store);
+
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
         let other = Settings { work_size: 640, ..SETTINGS };
         let (got, store) = open(&path, other, &|_| true, &mut problems);
-        assert!(got.is_empty() && !problems.any() && store.records() == 0);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), HEADER_LEN);
+        assert!(got.is_empty() && !problems.any());
+        assert_eq!((store.records(), store.other_settings().len()), (2, 2));
+        let (f2, t2) = analysis(3, 9);
+        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f2, &t2).unwrap();
+        drop(store);
+
+        // Back at the first size: its two records, and the 640 one carried.
+        let (got, store, bad) = reopen(&path);
+        assert!(!bad);
+        assert_eq!((got.len(), store.records(), store.other_settings().len()), (2, 3, 1));
+        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f.desc);
+        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().dims, (320, 240));
+        // A compaction that keeps both kinds keeps both.
+        let mut store = store;
+        let mut keep: Vec<(&Path, Span)> = got.iter().map(|(p, e)| (p.as_path(), e.2)).collect();
+        let others = store.other_settings().to_vec();
+        keep.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
+        store.compact(&mut keep).unwrap();
+        drop(store);
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let (got, store) = open(&path, other, &|_| true, &mut problems);
+        assert_eq!((got.len(), store.records()), (1, 3));
+        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1391,8 +1498,8 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append(&fe, Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
-        store.append(&ff, Key { len: 1, mtime: 1, ctime: 1 }, &f2, &t2).unwrap();
+        store.append(&fe, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
+        store.append(&ff, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f2, &t2).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad);

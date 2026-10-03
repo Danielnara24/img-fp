@@ -351,7 +351,7 @@ impl<'a> Problems<'a> {
     /// The summary goes to both. A log file that holds every failure and not
     /// the conclusion drawn from them is the wrong half.
     fn say(&self, line: &str) {
-        eprintln!("{line}");
+        crate::progress::to_stderr(line);
         self.log.line(line);
     }
 }

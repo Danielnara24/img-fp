@@ -1700,7 +1700,11 @@ impl InvertedFile {
         }
         let inv = 1.0 / qmass.max(1e-6);
         // Every contribution is positive — a count of at least one times an
-        // idf of at least ln 5 — so a touched slot is exactly a non-zero one.
+        // idf above zero — so a touched slot is exactly a non-zero one. The
+        // idf is above zero because a word in every image, the one word whose
+        // idf is 0, sends the whole index to `query_touched` (`zero_idf`).
+        // It used to say "at least ln 5", which was the posting cap's doing,
+        // and the cap is gone: a word can now be in all but one image.
         const LANES: usize = 8;
         let mut base = 0usize;
         for chunk in acc.chunks_exact_mut(LANES) {

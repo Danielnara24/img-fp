@@ -261,7 +261,11 @@ impl Setup {
         // ---- General
         let folders = PathList::new(window, l::ADD_FOLDER, l::REMOVE_FOLDER, "No folders yet. Add one, or drop it here.", 130);
         let recursive = gtk::CheckButton::with_mnemonic(l::RECURSIVE);
-        let work_size = spin(0.0, 4096.0, 32.0, 0);
+        // Up to JPEG's largest side, 65,535. The command line has no limit,
+        // and this one used to be 4,096, which turned away a size the command
+        // line takes for nothing; past the largest picture in a folder any
+        // size means what 0 (full size) means.
+        let work_size = spin(0.0, 65535.0, 32.0, 0);
         let candidates = spin(1.0, 2000.0, 10.0, 0);
         let min_points = spin(0.0, 200.0, 1.0, 0);
         let min_overlap = spin(0.0, 1.0, 0.05, 2);

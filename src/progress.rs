@@ -82,6 +82,19 @@ fn speaking() -> bool {
 
 /// One line to the window. A window that has gone away is not the run's
 /// problem: the worker is told to stop by a signal, not by a broken pipe.
+/// A line on stderr, or nothing if nobody is reading it.
+///
+/// `eprintln!` panics when the write fails, and a write to a pipe whose reader
+/// has gone fails: `img-fp DIR -o r.json 2>&1 | head -1` took the first line
+/// and then aborted the run at the second, before the report it was asked to
+/// write, and with the appends to the cache after that point lost. The report
+/// on stdout already took a broken pipe as the end of a pipeline rather than a
+/// failed run; what the run says about itself on stderr now does too.
+pub fn to_stderr(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
+}
+
 fn speak(v: serde_json::Value) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
@@ -452,7 +465,7 @@ impl Progress {
         if speaking() {
             return speak(serde_json::json!({"l": line}));
         }
-        self.bar.suspend(|| eprintln!("{line}"));
+        self.bar.suspend(|| to_stderr(line));
     }
 
     /// Revise what the run knows about the work ahead. Takes effect from the

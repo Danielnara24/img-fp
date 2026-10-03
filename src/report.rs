@@ -157,6 +157,8 @@ pub struct OutPair {
     pub aligned_points: u32,
     pub frame_overlap: f32,
     pub pixel_correlation: f32,
+    /// How many pixels of `b` one pixel of `a` spans, in the files' own
+    /// pixels: 0.5 when `b` is `a` at half the size. See `lib::file_scale`.
     pub scale: f32,
     /// A left-right flip, folded into the transform as a negative
     /// determinant — so a composed pair carries it too.

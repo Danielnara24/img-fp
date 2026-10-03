@@ -10,6 +10,14 @@
 //! - **Two decoders at most**, because a decode holds the whole picture for a
 //!   moment — 133 MB for a 44-megapixel photograph — and a window that spikes
 //!   a gigabyte to draw a grid of thumbnails is not light.
+//! - **The desktop's own thumbnail is used when it has one** (`from_cache`):
+//!   a card is 200 pixels across, and a file manager that has shown the
+//!   folder has usually already made a 256- or 512-pixel copy of every picture
+//!   in it. Reading that is a few kilobytes of PNG where the picture itself
+//!   was the whole decode. The large view still decodes the file, since no
+//!   thumbnail is that large.
+//! - **A picture being decoded is not queued again.** Paging away and back
+//!   used to start a second decode of a card whose first was still running.
 //!
 //! What is kept is the textures most recently shown, up to a fixed number of
 //! bytes, so paging back is instant. Bytes and not a count: a card's texture
@@ -35,6 +43,9 @@ type Decoded = Result<(u32, u32, Vec<u8>), String>;
 
 struct Queue {
     jobs: VecDeque<Key>,
+    /// Taken by a decoder and not yet `arrived`: asking for one again waits
+    /// for that answer rather than starting another decode.
+    in_flight: std::collections::HashSet<Key>,
 }
 
 /// What a picture widget is waiting for.
@@ -54,7 +65,7 @@ pub struct Thumbs {
 
 impl Thumbs {
     pub fn new() -> Rc<Thumbs> {
-        let queue = Arc::new((Mutex::new(Queue { jobs: VecDeque::new() }), Condvar::new()));
+        let queue = Arc::new((Mutex::new(Queue { jobs: VecDeque::new(), in_flight: Default::default() }), Condvar::new()));
         let (tx, rx) = async_channel::unbounded::<(Key, Decoded)>();
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 2);
         for _ in 0..workers {
@@ -65,12 +76,16 @@ impl Thumbs {
                     let mut q = m.lock().unwrap();
                     loop {
                         if let Some(k) = q.jobs.pop_front() {
+                            q.in_flight.insert(k.clone());
                             break k;
                         }
                         q = cv.wait(q).unwrap();
                     }
                 };
-                let got = img_fp::preview(&key.0, key.1).map_err(|e| format!("{e:#}"));
+                let got = match thumbnail_dir().and_then(|dir| from_cache(&dir, &key.0, key.1)) {
+                    Some(t) => Ok(t),
+                    None => img_fp::preview(&key.0, key.1).map_err(|e| format!("{e:#}")),
+                };
                 if tx.send_blocking((key, got)).is_err() {
                     return;
                 }
@@ -112,6 +127,11 @@ impl Thumbs {
         waiting.entry(key.clone()).or_default().push(shown);
         let (m, cv) = &*self.queue;
         let mut q = m.lock().unwrap();
+        // Already being decoded: its answer reaches every widget waiting for
+        // it, this one included, whenever it comes.
+        if q.in_flight.contains(&key) {
+            return;
+        }
         if first || urgent {
             q.jobs.retain(|k| *k != key);
             if urgent {
@@ -130,6 +150,9 @@ impl Thumbs {
     }
 
     fn arrived(&self, key: Key, got: Decoded) {
+        // Here and not on the decoder's thread, so that a request between the
+        // decode finishing and its answer arriving waits for this answer.
+        self.queue.0.lock().unwrap().in_flight.remove(&key);
         let r = got.map(|(w, h, rgba)| {
             let bytes = glib::Bytes::from_owned(rgba);
             gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &bytes, w as usize * 4).upcast::<gdk::Texture>()
@@ -145,6 +168,75 @@ impl Thumbs {
             self.done.borrow_mut().remove(&old);
         }
     }
+}
+
+/// The desktop's thumbnail cache: `$XDG_CACHE_HOME/thumbnails`, or
+/// `~/.cache/thumbnails`.
+fn thumbnail_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    Some(base.join("thumbnails"))
+}
+
+/// A picture from the freedesktop thumbnail cache under `dir`, no larger than
+/// `long` on its long side, as RGBA — when there is one that is current and at
+/// least that large.
+///
+/// The cache is the one the file managers share: a thumbnail is
+/// `<size>/<md5 of the file's URI>.png`, and it is current when its
+/// `Thumb::MTime` text is the file's modification time in seconds, which is
+/// the spec's own test. Only the sizes at least as large as what is asked for
+/// are looked in, smallest first, so a card is never drawn from a thumbnail
+/// smaller than itself.
+fn from_cache(dir: &Path, path: &Path, long: u32) -> Option<(u32, u32, Vec<u8>)> {
+    const SIZES: [(&str, u32); 4] = [("normal", 128), ("large", 256), ("x-large", 512), ("xx-large", 1024)];
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // The URI the file manager would have named it by, which is the path it
+    // was opened under: the one the report gives, and failing that the real
+    // one, for a report that reached it through a link.
+    let mut names = vec![path.to_path_buf()];
+    if let Ok(real) = std::fs::canonicalize(path) {
+        if real != path {
+            names.push(real);
+        }
+    }
+    for name in names {
+        let uri = gtk::gio::File::for_path(&name).uri();
+        let md5 = glib::compute_checksum_for_string(glib::ChecksumType::Md5, uri.as_str())?;
+        for (sub, _) in SIZES.iter().filter(|(_, s)| *s >= long) {
+            let thumb = dir.join(sub).join(format!("{md5}.png"));
+            if !thumb.is_file() || !current(&thumb, uri.as_str(), mtime) {
+                continue;
+            }
+            // At least `long` on its long side, or smaller than its folder's
+            // size and so the whole picture (a thumbnailer shrinks and never
+            // enlarges): either way what a full decode would have given.
+            if let Ok(t) = img_fp::preview(&thumb, long) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a thumbnail PNG says it is of `uri` as it was at `mtime`.
+fn current(thumb: &Path, uri: &str, mtime: u64) -> bool {
+    let Ok(f) = std::fs::File::open(thumb) else { return false };
+    let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+    dec.set_ignore_text_chunk(false);
+    let Ok(reader) = dec.read_info() else { return false };
+    let text = |key: &str| {
+        let info = reader.info();
+        info.uncompressed_latin1_text
+            .iter()
+            .find(|t| t.keyword == key)
+            .map(|t| t.text.clone())
+            .or_else(|| info.utf8_text.iter().find(|t| t.keyword == key).and_then(|t| t.get_text().ok()))
+    };
+    let uri_ok = text("Thumb::URI").is_none_or(|u| u == uri);
+    uri_ok && text("Thumb::MTime").and_then(|m| m.trim().parse::<u64>().ok()) == Some(mtime)
 }
 
 /// Keys oldest first, each with its size, held to a total.
@@ -252,6 +344,54 @@ mod tests {
         assert_eq!(b.held, 500);
         b.remove_where(|k| *k == "huge");
         assert_eq!(b.held, 0);
+    }
+
+    /// A PNG of `w` x `h` with the two texts the thumbnail spec asks for.
+    fn thumbnail_png(at: &Path, w: u32, h: u32, uri: &str, mtime: u64) {
+        let f = std::fs::File::create(at).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.add_text_chunk("Thumb::URI".into(), uri.into()).unwrap();
+        enc.add_text_chunk("Thumb::MTime".into(), mtime.to_string()).unwrap();
+        let mut w8 = enc.write_header().unwrap();
+        w8.write_image_data(&vec![200u8; (w * h * 4) as usize]).unwrap();
+    }
+
+    /// A card is drawn from the desktop's thumbnail when one is current and
+    /// large enough, and from the picture otherwise.
+    #[test]
+    fn a_current_thumbnail_large_enough_is_used() {
+        let dir = std::env::temp_dir().join(format!("img-fp-thumbs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = dir.join("thumbnails");
+        std::fs::create_dir_all(cache.join("large")).unwrap();
+        std::fs::create_dir_all(cache.join("normal")).unwrap();
+        let pic = dir.join("pic.png");
+        std::fs::write(&pic, b"not read when the thumbnail answers").unwrap();
+        let mtime = std::fs::metadata(&pic).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let uri = gtk::gio::File::for_path(&pic).uri();
+        let md5 = glib::compute_checksum_for_string(glib::ChecksumType::Md5, uri.as_str()).unwrap();
+
+        // None at all: the picture is decoded.
+        assert!(from_cache(&cache, &pic, 200).is_none());
+        // A 128-pixel one is too small for a 200-pixel card.
+        thumbnail_png(&cache.join("normal").join(format!("{md5}.png")), 128, 96, &uri, mtime);
+        assert!(from_cache(&cache, &pic, 200).is_none());
+        // A 256-pixel one is used, shrunk to the card.
+        let large = cache.join("large").join(format!("{md5}.png"));
+        thumbnail_png(&large, 256, 192, &uri, mtime);
+        let (w, h, rgba) = from_cache(&cache, &pic, 200).expect("a current large thumbnail");
+        assert_eq!((w, h, rgba.len()), (200, 150, 200 * 150 * 4));
+        // But not one made before the file last changed, nor one of another file.
+        thumbnail_png(&large, 256, 192, &uri, mtime - 1);
+        assert!(from_cache(&cache, &pic, 200).is_none());
+        thumbnail_png(&large, 256, 192, "file:///elsewhere.png", mtime);
+        assert!(from_cache(&cache, &pic, 200).is_none());
+        // And never for the large view: no thumbnail is that large.
+        thumbnail_png(&large, 256, 192, &uri, mtime);
+        assert!(from_cache(&cache, &pic, 1600).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Only the latest request's answer is shown, whatever order the answers

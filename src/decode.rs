@@ -5,9 +5,9 @@
 //! the same place — a `Gray` of f32 in 0..=1 whose long side is at most the
 //! requested working size — so the rest of the pipeline never sees a format.
 //!
-//! The channel used is the mean of R, G and B rather than a luma weighting.
-//! Mean is invariant to any permutation of the channels, which luma is not, so
-//! a channel-swapped copy of an image yields the same working image.
+//! The channel used is BT.601 luma (see `luma`), and a JPEG's is its own Y
+//! plane (`decode_jpeg_luma`), so that a JPEG and a PNG of one picture give the
+//! same grey.
 
 use anyhow::{bail, Context, Result};
 use crate::timed;
@@ -32,6 +32,9 @@ impl Gray {
 pub struct Decoded {
     /// Long side <= the working size passed to `decode`.
     pub work: Gray,
+    /// The picture's own width and height, as shown: an EXIF orientation that
+    /// turns it on its side is applied, as it is to `work`.
+    pub size: (u32, u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -592,8 +595,7 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
             None => bail!(NOT_AN_IMAGE),
         },
     };
-    let _ = (w, h);
-    Ok(Decoded { work: gray })
+    Ok(Decoded { work: gray, size: (w, h) })
 }
 
 /// What a file's header says, read without decoding anything: its format and

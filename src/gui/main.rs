@@ -38,7 +38,7 @@ const APP_ID: &str = "io.github.danielnara24.img-fp";
 
 fn main() -> glib::ExitCode {
     // Before anything else, for the reason `check_cpu` gives.
-    if let Err(e) = img_fp::check_cpu() {
+    if let Err(e) = img_fp::check_cpu_for_window() {
         eprintln!("Error: {e:#}");
         return glib::ExitCode::FAILURE;
     }
@@ -309,11 +309,19 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     let app = Rc::new(App { window: window.clone(), stack: stack.clone(), log: gtk::TextBuffer::new(None), log_window: Rc::default() });
 
     let mut settings = settings::Settings::load();
-    for f in start {
-        let f = std::fs::canonicalize(&f).unwrap_or(f);
-        if !settings.folders.contains(&f) {
-            settings.folders.push(f);
+    // Folders handed over at start — "Open With" in a file manager — are what
+    // to scan, in place of the ones remembered from last time. They used to be
+    // added to those, so opening the window on one folder scanned every folder
+    // it had ever been pointed at, and nothing on the button said so.
+    if !start.is_empty() {
+        let mut folders: Vec<PathBuf> = Vec::new();
+        for f in start {
+            let f = std::fs::canonicalize(&f).unwrap_or(f);
+            if !folders.contains(&f) {
+                folders.push(f);
+            }
         }
+        settings.folders = folders;
     }
     follow_dark_text(&window);
     // No animations: the theme's transitions on focus and hover are frames

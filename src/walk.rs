@@ -54,24 +54,13 @@ pub struct Request<'a> {
     pub follow_symlinks: bool,
 }
 
-/// What one set of bytes is known by: its inode where there is one.
+/// What one set of bytes is known by: its device and inode.
 #[derive(PartialEq, Eq, Hash)]
-enum Identity {
-    #[cfg_attr(not(unix), allow(dead_code))]
-    Inode(u64, u64),
-    #[cfg_attr(unix, allow(dead_code))]
-    Path(PathBuf),
-}
+struct Identity(u64, u64);
 
-#[cfg(unix)]
-fn identity(_: &Path, meta: &std::fs::Metadata) -> Identity {
+fn identity(meta: &std::fs::Metadata) -> Identity {
     use std::os::unix::fs::MetadataExt;
-    Identity::Inode(meta.dev(), meta.ino())
-}
-
-#[cfg(not(unix))]
-fn identity(path: &Path, _: &std::fs::Metadata) -> Identity {
-    Identity::Path(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    Identity(meta.dev(), meta.ino())
 }
 
 /// A name the walk offered, before the names for one file are settled.
@@ -116,7 +105,7 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Vec<PathBuf> {
         if meta.is_file() {
             let link = std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink());
             found.push(Found {
-                id: identity(root, &meta),
+                id: identity(&meta),
                 path: root.clone(),
                 link,
             });
@@ -212,7 +201,7 @@ fn walk_dir(
             }
         };
         found.push(Found {
-            id: identity(entry.path(), &meta),
+            id: identity(&meta),
             link: entry.path_is_symlink(),
             path: entry.into_path(),
         });
@@ -371,34 +360,34 @@ pub struct Sources<'a> {
 /// or `-` with `--from-file -`, is a typo rather than a request to read the
 /// pipe twice. A list that cannot be opened or read is fatal — it is the whole
 /// of what the run was asked to scan, and a run over nothing would exit 0.
-pub fn requested_roots(sources: &Sources, problems: &mut Problems) -> anyhow::Result<(Vec<PathBuf>, Vec<(String, usize)>)> {
+pub fn requested_roots(sources: &Sources) -> anyhow::Result<(Vec<PathBuf>, Vec<(String, usize)>)> {
     let stdin = Path::new("-");
     let mut roots = Vec::new();
     let mut lists = Vec::new();
     let mut stdin_taken = false;
-    let mut take_stdin = |roots: &mut Vec<PathBuf>, lists: &mut Vec<(String, usize)>, problems: &mut Problems| -> anyhow::Result<()> {
+    let mut take_stdin = |roots: &mut Vec<PathBuf>, lists: &mut Vec<(String, usize)>| -> anyhow::Result<()> {
         if std::mem::replace(&mut stdin_taken, true) {
             return Ok(());
         }
-        let paths = read_stdin(sources.null_separated, problems)?;
+        let paths = read_stdin(sources.null_separated)?;
         lists.push(("stdin".to_string(), paths.len()));
         roots.extend(paths);
         Ok(())
     };
     for path in sources.named {
         if path == stdin {
-            take_stdin(&mut roots, &mut lists, problems)?;
+            take_stdin(&mut roots, &mut lists)?;
         } else {
             roots.push(path.clone());
         }
     }
     if let Some(list) = sources.from_file {
         if list == stdin {
-            take_stdin(&mut roots, &mut lists, problems)?;
+            take_stdin(&mut roots, &mut lists)?;
         } else {
             let file = std::fs::File::open(list)
                 .with_context(|| format!("could not open the path list {}", list.display()))?;
-            let paths = read_path_list(file, sources.null_separated, problems)
+            let paths = read_path_list(file, sources.null_separated)
                 .with_context(|| format!("could not read the path list {}", list.display()))?;
             lists.push((list.display().to_string(), paths.len()));
             roots.extend(paths);
@@ -407,7 +396,7 @@ pub fn requested_roots(sources: &Sources, problems: &mut Problems) -> anyhow::Re
     Ok((roots, lists))
 }
 
-fn read_stdin(null_separated: bool, problems: &mut Problems) -> anyhow::Result<Vec<PathBuf>> {
+fn read_stdin(null_separated: bool) -> anyhow::Result<Vec<PathBuf>> {
     use std::io::IsTerminal;
     // Without this, `img-fp -` at a prompt looks exactly like a hang.
     if std::io::stdin().is_terminal() {
@@ -416,7 +405,7 @@ fn read_stdin(null_separated: bool, problems: &mut Problems) -> anyhow::Result<V
              Pipe a list in (e.g. `fd -e jpg | img-fp -`), or name folders as arguments."
         );
     }
-    read_path_list(std::io::stdin().lock(), null_separated, problems).context("could not read the path list from stdin")
+    read_path_list(std::io::stdin().lock(), null_separated).context("could not read the path list from stdin")
 }
 
 /// Read a whole path list.
@@ -425,27 +414,11 @@ fn read_stdin(null_separated: bool, problems: &mut Problems) -> anyhow::Result<V
 /// UTF-8 is still a filename, and the roots are paths rather than strings, so
 /// nothing here has to turn one away. (`vid-fp` holds its paths as strings and
 /// skips such an entry; img-fp never had to.)
-fn read_path_list<R: std::io::Read>(mut reader: R, null_separated: bool, problems: &mut Problems) -> std::io::Result<Vec<PathBuf>> {
+fn read_path_list<R: std::io::Read>(mut reader: R, null_separated: bool) -> std::io::Result<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStrExt;
     let mut raw = Vec::new();
     reader.read_to_end(&mut raw)?;
-    Ok(split_path_list(&raw, null_separated).into_iter().filter_map(|entry| path_of(entry, problems)).collect())
-}
-
-#[cfg(unix)]
-fn path_of(entry: &[u8], _: &mut Problems) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    Some(PathBuf::from(std::ffi::OsStr::from_bytes(entry)))
-}
-
-#[cfg(not(unix))]
-fn path_of(entry: &[u8], problems: &mut Problems) -> Option<PathBuf> {
-    match std::str::from_utf8(entry) {
-        Ok(s) => Some(PathBuf::from(s)),
-        Err(e) => {
-            problems.unscannable(&String::from_utf8_lossy(entry), &e);
-            None
-        }
-    }
+    Ok(split_path_list(&raw, null_separated).into_iter().map(|entry| PathBuf::from(std::ffi::OsStr::from_bytes(entry))).collect())
 }
 
 /// Split a list on newlines, or on NUL bytes when asked. Blank entries are
@@ -779,12 +752,9 @@ mod tests {
     #[test]
     fn a_path_that_is_not_utf8_is_still_a_path() {
         use std::os::unix::ffi::OsStrExt;
-        let log = Log::default();
-        let mut problems = Problems::new(&log);
-        let paths = read_path_list(&b"/imgs/good.jpg\n/imgs/\xFF\xFEodd.jpg\n"[..], false, &mut problems).unwrap();
+        let paths = read_path_list(&b"/imgs/good.jpg\n/imgs/\xFF\xFEodd.jpg\n"[..], false).unwrap();
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[1].as_os_str().as_bytes(), b"/imgs/\xFF\xFEodd.jpg");
-        assert_eq!(problems.count(), 0);
     }
 
     #[test]
@@ -799,14 +769,8 @@ mod tests {
             .join("\0");
         fs::write(&list, raw).unwrap();
 
-        let log = Log::default();
-        let mut problems = Problems::new(&log);
         let named = [a.clone()];
-        let (roots, lists) = requested_roots(
-            &Sources { named: &named, from_file: Some(&list), null_separated: true },
-            &mut problems,
-        )
-        .unwrap();
+        let (roots, lists) = requested_roots(&Sources { named: &named, from_file: Some(&list), null_separated: true }).unwrap();
         assert_eq!(lists, vec![(list.display().to_string(), 3)]);
         // `a` is named and listed: one file, listed once.
         let mut want = vec![a, b, odd];
@@ -816,10 +780,8 @@ mod tests {
 
     #[test]
     fn a_list_that_cannot_be_opened_is_fatal() {
-        let log = Log::default();
-        let mut problems = Problems::new(&log);
         let missing = Path::new("/nonexistent/img-fp/list");
-        let err = requested_roots(&Sources { named: &[], from_file: Some(missing), null_separated: false }, &mut problems);
+        let err = requested_roots(&Sources { named: &[], from_file: Some(missing), null_separated: false });
         assert!(err.is_err(), "a run over nothing would exit 0 and say nothing was found");
     }
 }

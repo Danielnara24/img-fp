@@ -173,8 +173,12 @@ impl Default for Rules {
             min_aligned_points: 8,
             min_frame_overlap: 0.85,
             min_pixel_correlation: 0.6,
-            // A sanity bound, not a tuned one: past a sixteen-fold size ratio
-            // the smaller image is a few hundred pixels against a wall.
+            // A sanity bound, not a tuned one. It is a ratio between the
+            // *working* images, which are both near `--work-size` on their
+            // long side whatever the files' sizes, so it does not limit how
+            // much smaller one file may be than another: it limits how small
+            // a part of one picture the other may be, and past sixteen-fold
+            // that part is some thirty pixels of a 512-pixel analysis.
             max_scale: 16.0,
             centred_evidence: false,
             min_worst_block: 0.0,

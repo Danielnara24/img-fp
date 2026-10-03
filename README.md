@@ -180,7 +180,9 @@ install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
   ~/.local/share/applications/io.github.danielnara24.img-fp.desktop
 ```
 
-Folders given on its command line are added to the list: `img-fp-gui ~/Pictures`.
+Folders given on its command line are the ones to scan, in place of the ones
+remembered from last time: `img-fp-gui ~/Pictures`. With the desktop entry
+installed, file managers offer it under "Open With" for a folder.
 
 Every control can be reached from the keyboard; the underlined letter of each
 button and field is its Alt shortcut. F1 lists every key.
@@ -256,9 +258,9 @@ extension.
 
 The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis.bin`
 (or `~/.cache/img-fp/analysis.bin`), so later runs over the same images are much
-faster. One cache serves every folder you scan, and entries for deleted files
-are dropped automatically. Use `--prune-cache` to keep only the images in the
-current scan, or delete the file to start over.
+faster. One cache serves every folder you scan and every `--work-size` you use,
+and entries for deleted files are dropped automatically. Use `--prune-cache` to
+keep only the images in the current scan, or `--clear-cache` to start over.
 
 Pressing Ctrl-C keeps every image analysed so far.
 

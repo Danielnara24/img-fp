@@ -137,9 +137,9 @@ pub fn report() {
             .filter(|(t, _)| *t > 0.0)
             .collect();
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        eprintln!("--- profile (cpu seconds; stages nest; tsc {:.0} MHz) ---", hz / 1e6);
+        crate::progress::to_stderr(&format!("--- profile (cpu seconds; stages nest; tsc {:.0} MHz) ---", hz / 1e6));
         for (t, n) in v {
-            eprintln!("{n:>18}  {t:8.2}");
+            crate::progress::to_stderr(&format!("{n:>18}  {t:8.2}"));
         }
     }
 }

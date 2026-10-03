@@ -2916,8 +2916,9 @@ verdict, where every round used to add one — 57 of 349 rows on
 from each end, because those are two verdicts. The
 cache is on by default and is what makes tuning the matching stages practical:
 on the 5,638-image corpus a cold run at 384 is ~57 s and a cached one ~12 s
-(at 640, ~82 s and ~17 s; the default, 512, sits between), and the cache is keyed on the extraction
-settings so changing `--work-size` invalidates it correctly — which also means one cached extraction serves a
+(at 640, ~82 s and ~17 s; the default, 512, sits between), and each record
+carries the extraction settings that made it, so a run reads only the records
+made at its own `--work-size` — which also means one cached extraction serves a
 whole threshold sweep at a given work size, and that is how
 `out/v14-fullsweep` was taken. A sweep's runs after the first also write
 nothing: an unchanged record set is not rewritten.
@@ -3169,6 +3170,12 @@ colour `decode::preview`, which only the window calls).
   for the group on screen (a group change drops the queue) plus the next
   group's first 16; textures are kept to a 96 MB budget (`KEEP_BYTES`), by
   bytes rather than by count, since one large view outweighs sixty cards.
+  A card is drawn from the desktop's freedesktop thumbnail when one is
+  current (`Thumb::MTime` equal to the file's) and at least the card's size
+  (`thumbs::from_cache`: `large`, then `x-large`, `xx-large`), so a folder a
+  file manager has shown costs a few KB of PNG a card rather than a full
+  decode; the large view always decodes the file. A picture already being
+  decoded is not queued again (`Queue::in_flight`).
 - **Arrow keys on the cards are handled by hand** (`Results::move_to`):
   GtkFlowBox moves its cursor only after a click or Tab has set it, and not
   after `grab_focus` from code, which is how the page hands it the keyboard.
@@ -3203,6 +3210,10 @@ colour `decode::preview`, which only the window calls).
   it was on the user's first scan: a window from 0.17 kept asking for `.dds`
   after 0.19 dropped it, and exited 2 on every one. The one deliberate
   difference from the CLI is `recursive`, on by default in the window.
+  Folders given on the window's command line (`%F` from the desktop entry,
+  which declares `inode/directory` for "Open With") **replace** the
+  remembered ones for that session; they used to be appended, so opening the
+  window on one folder scanned every folder it had ever been pointed at.
 - **Testing on the real display:** Cinnamon's focus-stealing prevention
   ignores `xdotool windowactivate`, and keys then go to whatever window has
   focus. Activate with `wmctrl -i -a`, and check `xdotool getactivewindow`
@@ -3409,13 +3420,18 @@ and only the first is obvious:
   scan throws away records for files that are still there.
   **`--clear-cache`** deletes the file before the run; with `--no-cache` it
   deletes it and starts nothing new.
-- **The settings header still invalidates the whole file**, and now that is
-  every corpus's records rather than one's. It is the format doing its job
-  (see `Settings`) and a `--work-size` sweep pays it every time, which is
-  another reason a sweep should hand itself a `--cache` of its own. A cache
-  written by a build with a different *format* is discarded the same way and
-  just as silently — the magic carries a version, and a file with the right
-  prefix and the wrong version is stale rather than damaged.
+- **Settings are a record's, not the file's** (`IMGFPC09`). They were in the
+  header, and a run at any other `--work-size` replaced the whole file: one
+  scan at 640 in the window cost the analysis of every folder the machine had
+  scanned at 512, silently, and going back cost it again. Now a run reads the
+  records made at its own settings and carries the rest unread, like a record
+  for a file it did not walk (kept while the file exists; under
+  `--prune-cache`, only for files the scan found). The price is that a
+  `--work-size` sweep leaves a copy of the corpus's analysis per size in the
+  file, which is one more reason a sweep should hand itself a `--cache` of its
+  own. A cache written by a build with a different *format* is still
+  discarded whole and silently — the magic carries a version, and a file with
+  the right prefix and the wrong version is stale rather than damaged.
 
 **A cached record is moved into the run, not copied into it.** Every walked
 file's record is `remove`d from the loaded map before the analysis pass, so

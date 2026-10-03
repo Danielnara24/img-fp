@@ -9,3 +9,4 @@ Terminal=false
 Categories=Graphics;
 Keywords=duplicate;duplicates;images;photos;pictures;
 StartupNotify=true
+MimeType=inode/directory;

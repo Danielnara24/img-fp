@@ -21,6 +21,16 @@
 //! child process of its own (`worker_main`) — see `src/gui/scan.rs` for why a
 //! process and not a thread.
 
+// Unix only, and said once here rather than pretended in a few places. A path
+// is its bytes throughout — in the cache, the reports, the dump and the path
+// lists — the cache is keyed on change times and the walk on inodes, and the
+// interrupt ends the process with `_exit`. There used to be `cfg(not(unix))`
+// branches in the walk and the interrupt as if another platform were a few
+// lines away, beside a dozen unconditional `std::os::unix` uses that meant no
+// such build could ever compile.
+#[cfg(not(unix))]
+compile_error!("img-fp builds for Unix-like systems only (Linux, the BSDs, macOS)");
+
 mod cache;
 mod decode;
 mod extensions;
@@ -456,6 +466,8 @@ fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usiz
 struct Item {
     feats: std::sync::Arc<Features>,
     thumb: std::sync::Arc<Thumb>,
+    /// The picture's own size, as shown; `feats` holds the working image's.
+    dims: (u32, u32),
     ok: bool,
     err: Option<String>,
 }
@@ -541,7 +553,7 @@ fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::P
             let feats = sift::extract(&d.work, &p);
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
             let thumb = timed!(4, Thumb::build(&d.work, THUMB_LONG));
-            Item { feats: feats.into(), thumb: thumb.into(), ok: true, err: None }
+            Item { feats: feats.into(), thumb: thumb.into(), dims: d.size, ok: true, err: None }
         }
         Err(e) => Item { err: Some(e.to_string()), ..Default::default() },
     }
@@ -727,6 +739,17 @@ pub fn cli_main() -> Result<()> {
 /// for the machine it runs on (`target-cpu=native`) always passes, and a
 /// portable one (`x86-64`) checks nothing.
 pub fn check_cpu() -> Result<()> {
+    check_cpu_for("img-fp", "cargo install img-fp --locked")
+}
+
+/// `check_cpu` for the window, whose build for this machine is not the
+/// command line's: `cargo install img-fp` builds `img-fp` alone, and a person
+/// told to run it was left with the same window that had just refused.
+pub fn check_cpu_for_window() -> Result<()> {
+    check_cpu_for("img-fp-gui", "cargo install img-fp --locked --features gui")
+}
+
+fn check_cpu_for(program: &str, install: &str) -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     {
         let mut missing: Vec<&str> = Vec::new();
@@ -740,8 +763,8 @@ pub fn check_cpu() -> Result<()> {
         need!("sse4.2", "popcnt", "avx", "avx2", "fma", "bmi1", "bmi2", "lzcnt", "movbe", "f16c");
         if !missing.is_empty() {
             anyhow::bail!(
-                "this build of img-fp needs a CPU with {}, which this one does not have. \
-                 Build it for this machine instead: cargo install img-fp --locked",
+                "this build of {program} needs a CPU with {}, which this one does not have. \
+                 Build it for this machine instead: {install}",
                 missing.join(", ")
             );
         }
@@ -775,7 +798,8 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let args = Args::try_parse_from(argv).map_err(|e| e.to_string())?;
-    validate(&args)
+    validate(&args)?;
+    outputs_are_distinct(&args).map_err(|e| e.to_string())
 }
 
 /// The combinations of flags clap cannot express.
@@ -889,18 +913,26 @@ fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Refuse two of `-o`, `--dump` and `--log-file` naming one file.
+/// Refuse two of `-o`, `--dump`, `--log-file` and the cache naming one file.
 ///
 /// The log is opened at the start and written a line at a time, and the
 /// report and the dump are written at the end, so two of them on one file
 /// overwrite each other: the report replaced the dump outright, and over the
 /// log it was followed by a run of NUL bytes and the end of the log, written
 /// at the offset the log had reached. Nothing said so, and the run exited 0.
+///
+/// The cache is one of them while the run uses it. `-o` naming it wrote the
+/// report over the analysis of every folder the machine had scanned, with
+/// exit 0, and the next run found "not a cache file" and started again; the
+/// default cache is out of sight, so it is the easiest of the four to name by
+/// mistake.
 fn outputs_are_distinct(args: &Args) -> Result<()> {
+    let cache = (!args.no_cache).then(|| cache::locate(args.cache.as_deref()));
     let named: Vec<(&str, &Path)> = [("-o", &args.output), ("--dump", &args.dump), ("--log-file", &args.log_file)]
         .into_iter()
         .filter_map(|(flag, p)| Some((flag, p.as_deref()?)))
         .filter(|(_, p)| *p != stdout_path())
+        .chain(cache.as_deref().map(|p| ("the cache", p)))
         .collect();
     for (i, (fa, a)) in named.iter().enumerate() {
         for (fb, b) in &named[i + 1..] {
@@ -975,41 +1007,33 @@ const EXIT_INTERRUPTED: i32 = 130;
 /// are an account of a run nobody is going to read the results of.
 fn interrupt() -> Result<()> {
     ctrlc::set_handler(|| {
-        #[cfg(unix)]
-        {
-            const SIG_DFL: usize = 0;
-            unsafe extern "C" {
-                fn signal(signum: i32, handler: usize) -> usize;
-            }
-            // SIGHUP, SIGINT, SIGTERM.
-            for sig in [1, 2, 15] {
-                unsafe {
-                    signal(sig, SIG_DFL);
-                }
+        const SIG_DFL: usize = 0;
+        unsafe extern "C" {
+            fn signal(signum: i32, handler: usize) -> usize;
+        }
+        // SIGHUP, SIGINT, SIGTERM.
+        for sig in [1, 2, 15] {
+            unsafe {
+                signal(sig, SIG_DFL);
             }
         }
         let (_held, kept) = cache::seal();
         progress::clear_for_exit();
         if kept > 0 {
             let (noun, verb) = if kept == 1 { ("description", "was") } else { ("descriptions", "were") };
-            eprintln!("Interrupted. {kept} new image {noun} {verb} saved to cache.");
+            progress::to_stderr(&format!("Interrupted. {kept} new image {noun} {verb} saved to cache."));
         } else {
-            eprintln!("Interrupted.");
+            progress::to_stderr("Interrupted.");
         }
         // `_exit`, not `exit`: the workers are still running, some of them
         // inside libheif, and `exit` would run the C++ static destructors out
         // from under them. Nothing is buffered that needs flushing — stderr
         // is not, the log is written a line at a time, and the cache is
         // written through the kernel.
-        #[cfg(unix)]
-        {
-            unsafe extern "C" {
-                fn _exit(status: i32) -> !;
-            }
-            unsafe { _exit(EXIT_INTERRUPTED) }
+        unsafe extern "C" {
+            fn _exit(status: i32) -> !;
         }
-        #[cfg(not(unix))]
-        std::process::exit(EXIT_INTERRUPTED);
+        unsafe { _exit(EXIT_INTERRUPTED) }
     })
     .context("could not install the Ctrl-C handler")
 }
@@ -1027,7 +1051,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             from_file: args.from_file.as_deref(),
             null_separated: args.null,
         },
-        problems,
     )?;
     prof::start();
     let t_start = Instant::now();
@@ -1196,9 +1219,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
         None => Default::default(),
     };
-    // Records in the file that the map does not hold: each superseded by a
-    // later one for the same path. Something to compact away, if nothing else is.
-    let superseded = store.as_ref().map_or(0, |s| s.records() - cached.len());
+    // Records in the file that the map does not hold, and that are not this
+    // file's records at other settings: each superseded by a later one for
+    // the same path. Something to compact away, if nothing else is.
+    let superseded = store.as_ref().map_or(0, |s| s.records() - cached.len() - s.other_settings().len());
     if !cached.is_empty() {
         stage!(t_start, "cache: {} usable records", cached.len());
     }
@@ -1315,7 +1339,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         if !it.ok {
             return None;
         }
-        s.append(&names[i], key, &it.feats, &it.thumb)
+        s.append(&names[i], key, it.dims, &it.feats, &it.thumb)
     };
     let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
         .into_par_iter()
@@ -1325,7 +1349,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 return (Item::default(), None);
             }
             if let Some((rec, _)) = rec {
-                let it = Item { feats: rec.feats.into(), thumb: rec.thumb.into(), ok: true, err: None };
+                let it = Item { feats: rec.feats.into(), thumb: rec.thumb.into(), dims: rec.dims, ok: true, err: None };
                 return (it, None);
             }
             let f = &files[i];
@@ -1367,6 +1391,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         items[i] = Item {
             feats: items[r].feats.clone(),
             thumb: items[r].thumb.clone(),
+            dims: items[r].dims,
             ok: items[r].ok,
             err: items[r].err.clone(),
         };
@@ -1408,7 +1433,22 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             stage!(t_start, "cache: {} records kept from other scans", kept.len());
         }
         entries.extend_from_slice(&kept);
-        let dropped = cached.len() - kept.len();
+        // And the analyses made at other settings, which this run did not
+        // read: kept while their file is there, and under `--prune-cache` only
+        // for the files this scan found.
+        let walked: std::collections::HashSet<&Path> = if prune { names.iter().map(|p| p.as_path()).collect() } else { Default::default() };
+        let others: Vec<(PathBuf, cache::Span)> = store
+            .other_settings()
+            .iter()
+            .filter(|(p, _)| if prune { walked.contains(p.as_path()) } else { p.exists() })
+            .cloned()
+            .collect();
+        if !others.is_empty() {
+            stage!(t_start, "cache: {} records kept from other working sizes", others.len());
+        }
+        let others_dropped = store.other_settings().len() - others.len();
+        entries.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
+        let dropped = cached.len() - kept.len() + others_dropped;
         if prune && dropped > 0 {
             say!("pruned {dropped} cached record(s) this scan did not find");
         }
@@ -1422,7 +1462,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         // one of them finds the file already says what it would write.
         if store.records() == entries.len() || !store.writable() {
             stage!(t_start, "cache: {} records, none to compact", store.records());
-        } else if let Err(e) = store.compact(settings, &mut entries) {
+        } else if let Err(e) = store.compact(&mut entries) {
             problems.cache(format!("could not write {}: {e}", p.display()));
         }
     }
@@ -1900,23 +1940,22 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // again. Components never merge here, since a composed pair joins two
     // files already in one.
     let mut dirty: Option<Vec<bool>> = None;
-    let (mut proposed_total, mut starred_said) = (0usize, false);
+    let mut proposed_total = 0usize;
+    // The clusters whose last proposal was a star, by lowest file, with their
+    // sizes. A cluster starred in one round is the only one left to propose in
+    // the next as often as not, and then fits the budget alone and is compared
+    // pair by pair after all — so what to say is decided once the rounds are
+    // done, from each cluster's last round, and not from its first. (A cluster
+    // keeps its lowest file from round to round: components never merge here.)
+    let mut still_starred: std::collections::BTreeMap<usize, usize> = Default::default();
     for round in 0..PROPAGATE_MAX_ROUNDS {
-        let Propagation { found: round_all, starred, proposed } =
+        let Propagation { found: round_all, starred, full, proposed } =
             timed!(21, propagate(&items, &pool, n, prop_min_ov, dirty.as_deref(), prop_budget));
         proposed_total += proposed;
-        // Said on the console, once per run: pairs between two members of such
-        // a cluster that direct matching missed are not looked for, and
-        // propagation is most of the tool's recall.
-        if !starred.is_empty() && !starred_said {
-            starred_said = true;
-            let files: usize = starred.iter().sum();
-            say!(
-                "Note: {} cluster(s) ({files} files in all) are too large to compare every pair inside; their files \
-                 were compared with the cluster's best-connected file.",
-                starred.len()
-            );
+        for first in full {
+            still_starred.remove(&first);
         }
+        still_starred.extend(starred);
         let before = propagated.len();
         let seen: std::collections::HashSet<(usize, usize)> =
             pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
@@ -1959,6 +1998,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         propagated.len(),
         hypotheses.len()
     );
+    // Said on the console: pairs between two members of such a cluster that
+    // direct matching missed are not looked for, and propagation is most of
+    // the tool's recall.
+    if !still_starred.is_empty() {
+        let files: usize = still_starred.values().sum();
+        say!(
+            "Note: {} cluster(s) ({files} files in all) are too large to compare every pair inside; their files \
+             were compared with the cluster's best-connected file.",
+            still_starred.len()
+        );
+    }
     drop(hypotheses);
     drop(row_of);
 
@@ -2104,7 +2154,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 aligned_points: v.n_in,
                 frame_overlap: round3(v.ov_a.max(v.ov_b)),
                 pixel_correlation: round3(v.blk),
-                scale: round3(v.scale),
+                scale: round3(file_scale(v.scale, &items[a], &items[b])),
                 mirrored: v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0,
                 inverted: *inv_flag,
                 identical: false,
@@ -2293,6 +2343,27 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 fn stdout_path() -> &'static Path {
     Path::new("-")
+}
+
+/// A verdict's scale, which is the analysis images', as the files' own.
+///
+/// A transform is fitted between working images, and every picture is
+/// analysed at about `--work-size` on its long side however large the file
+/// is: a photograph and a copy shrunk to a third of it are both 512 pixels
+/// there, and a crop of half the photograph is too. So the verdict's scale
+/// said 0.99 for the copy a third the size and 0.5 for the crop that has the
+/// photograph's own pixels. Measured in each file's pixels instead — each
+/// working image's long side over its file's — it is what a person reading
+/// "scale" expects: how many pixels of `b` one pixel of `a` spans.
+fn file_scale(scale: f32, a: &Item, b: &Item) -> f32 {
+    let shrink = |it: &Item| {
+        let file = it.dims.0.max(it.dims.1);
+        (file > 0).then(|| it.feats.w.max(it.feats.h) as f32 / file as f32)
+    };
+    match (shrink(a), shrink(b)) {
+        (Some(sa), Some(sb)) if sb > 0.0 => scale * sa / sb,
+        _ => scale,
+    }
 }
 
 fn round3(v: f32) -> f32 {
@@ -2577,9 +2648,12 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
 struct Propagation {
     /// Every composed hypothesis that cleared the overlap floor, verdict and all.
     found: Vec<(usize, usize, Affine, bool, Verdict)>,
-    /// The sizes of the components the round could not afford to compare pair
-    /// by pair, and compared with their root alone; see `propagate`.
-    starred: Vec<usize>,
+    /// The components the round could not afford to compare pair by pair,
+    /// and compared with their root alone, each as its lowest file and its
+    /// size; see `propagate`.
+    starred: Vec<(usize, usize)>,
+    /// The lowest file of each component the round compared pair by pair.
+    full: Vec<usize>,
     /// Composed hypotheses put to the pixels.
     proposed: usize,
 }
@@ -2670,15 +2744,16 @@ fn propagate(
         .collect();
     costed.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1[0].cmp(&y.1[0])));
     let mut spent = 0usize;
-    let mut starred = Vec::new();
+    let (mut starred, mut full) = (Vec::new(), Vec::new());
     let plan: Vec<(Vec<usize>, bool)> = costed
         .into_iter()
         .map(|(cost, c)| {
             let every_pair = spent + cost <= budget;
             if every_pair {
                 spent += cost;
+                full.push(c[0]);
             } else {
-                starred.push(c.len());
+                starred.push((c[0], c.len()));
             }
             (c, every_pair)
         })
@@ -2761,7 +2836,7 @@ fn propagate(
             out
         })
         .collect();
-    Propagation { found, starred, proposed: proposed.into_inner() }
+    Propagation { found, starred, full, proposed: proposed.into_inner() }
 }
 
 #[cfg(test)]
@@ -3058,6 +3133,11 @@ mod tests {
         assert!(outputs_are_distinct(&args(&["-o", r, "--dump", r])).is_err());
         assert!(outputs_are_distinct(&args(&["--dump", r, "--log-file", r, "-o", l])).is_err());
         assert!(outputs_are_distinct(&args(&["-o", "-", "--log-file", r])).is_ok());
+        // Nor the cache, while the run uses it.
+        assert!(outputs_are_distinct(&args(&["-o", r, "--cache", r])).is_err());
+        assert!(outputs_are_distinct(&args(&["--log-file", l, "--cache", l])).is_err());
+        assert!(outputs_are_distinct(&args(&["-o", r, "--cache", l])).is_ok());
+        assert!(outputs_are_distinct(&args(&["-o", r, "--cache", r, "--no-cache", "--clear-cache"])).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3181,12 +3261,26 @@ mod tests {
         // root is the second file of the chain, the first of the best
         // connected, and it is asked about the 18 files it has no link to.
         let p = propagate(&items, &edges, n, 0.0, None, 100);
-        assert_eq!(p.starred, vec![20]);
+        assert_eq!(p.starred, vec![(10, 20)]);
+        assert_eq!(p.full, vec![0]);
         assert_eq!(p.proposed, 36 + 17);
         assert!(p.found.iter().filter(|e| e.0 >= 10).all(|e| e.0 == 11 || e.1 == 11), "a star is all through its root");
         // No budget at all: both are starred, and still asked.
         let p = propagate(&items, &edges, n, 0.0, None, 0);
         assert_eq!((p.starred.len(), p.proposed), (2, 7 + 17));
+        // Starred in one round, and alone in the next, it fits the budget and
+        // is compared pair by pair: which is why the run's note is decided by
+        // a cluster's last round and not its first.
+        let p1 = propagate(&items, &edges, n, 0.0, None, 180);
+        assert_eq!(p1.starred, vec![(10, 20)]);
+        let mut dirty = vec![false; n];
+        for e in &p1.found {
+            dirty[e.0] = true;
+            dirty[e.1] = true;
+        }
+        let pool = [edges.clone(), p1.found.clone()].concat();
+        let p2 = propagate(&items, &pool, n, 0.0, Some(&dirty), 180);
+        assert!(p2.starred.is_empty() && p2.full.contains(&10), "{:?} {:?}", p2.starred, p2.full);
         // The order is the plan's, whatever order the work finished in.
         let again = propagate(&items, &edges, n, 0.0, None, 1_000);
         let pairs = |p: &Propagation| p.found.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>();
