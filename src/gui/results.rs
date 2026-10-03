@@ -421,7 +421,7 @@ impl Results {
             self.clear_cards();
             let s = self.state.borrow();
             self.title.set_text("");
-            let mut text = format!("No duplicates found among {} images.", s.analysed);
+            let mut text = format!("No duplicates found among {} image{}.", s.analysed, if s.analysed == 1 { "" } else { "s" });
             if s.problems {
                 text.push_str(" The scan had problems with some files; see the scan log.");
             }
@@ -522,6 +522,14 @@ impl Results {
         let dir = m.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
         let dir = gtk::Label::builder().label(&dir).ellipsize(gtk::pango::EllipsizeMode::Start).max_width_chars(28).css_classes(["dim-label", "caption"]).build();
         let facts = gtk::Label::builder().label(facts(m)).css_classes(["caption"]).build();
+        // What the match rests on.
+        let why = gtk::Label::builder()
+            .label(evidence(m))
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .max_width_chars(28)
+            .css_classes(["dim-label", "caption"])
+            .build();
         let check = gtk::CheckButton::with_label("Move to Trash");
         check.set_halign(gtk::Align::Center);
         check.set_focusable(false);
@@ -533,6 +541,7 @@ impl Results {
         body.append(&name);
         body.append(&dir);
         body.append(&facts);
+        body.append(&why);
         body.append(&check);
         let child = gtk::FlowBoxChild::new();
         child.set_child(Some(&body));
@@ -783,7 +792,7 @@ impl Results {
                 drop(cards);
                 win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at.get() + 1)));
                 let text = match &member {
-                    Some(m) => format!("{}  ·  {}", path.display(), facts(m)),
+                    Some(m) => format!("{}  ·  {}  ·  {}", path.display(), facts(m), evidence(m)),
                     None => path.display().to_string(),
                 };
                 info.set_text(&text);
@@ -1005,6 +1014,32 @@ fn size(bytes: u64) -> String {
     } else {
         format!("{bytes} bytes")
     }
+}
+
+/// What a member's match with the reference image rests on: how much of one
+/// lies inside the other, and how closely their pixels agree there.
+fn evidence(m: &Member) -> String {
+    if m.is_representative() {
+        return "reference image".into();
+    }
+    if m.relation.as_deref() == Some("identical") {
+        return "identical copy of the reference".into();
+    }
+    let (Some(ov), Some(corr)) = (m.frame_overlap, m.pixel_correlation) else {
+        return String::new();
+    };
+    // A corroborated match cleared only the lower bar a pair inside an
+    // existing group faces, so its correlation can sit below the one the scan
+    // asked for; the text report says so, and so does the card.
+    let mut s = if m.relation.as_deref() == Some("corroborated") { "corroborated · ".to_string() } else { String::new() };
+    s.push_str(&format!("overlap {ov:.2} · correlation {corr:.2}"));
+    if m.mirrored == Some(true) {
+        s.push_str(" · mirrored");
+    }
+    if m.inverted == Some(true) {
+        s.push_str(" · inverted");
+    }
+    s
 }
 
 /// Dimensions and size, as far as the report knows them.

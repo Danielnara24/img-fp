@@ -40,15 +40,22 @@ pub enum Sink {
 pub struct Target {
     pub sink: Sink,
     pub format: Format,
+    /// Whether the JSON lists every pair as well as the groups. Only the
+    /// window's own copy goes without: it reads the groups and nothing else,
+    /// and the pairs were 289 MB of a 303 MB report on 27,000 pictures —
+    /// written into a folder that lives in memory, and parsed by the window.
+    pub pairs: bool,
 }
 
 impl Target {
     /// `--output` and `--format` read together, in the one place either is.
     pub fn of(output: Option<&Path>, format: Option<Format>) -> Target {
         match output {
-            None => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt) },
-            Some(p) if p == Path::new("-") => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt) },
-            Some(p) => Target { sink: Sink::File(p.to_path_buf()), format: format.unwrap_or_else(|| from_extension(p)) },
+            None => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt), pairs: true },
+            Some(p) if p == Path::new("-") => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt), pairs: true },
+            Some(p) => {
+                Target { sink: Sink::File(p.to_path_buf()), format: format.unwrap_or_else(|| from_extension(p)), pairs: true }
+            }
         }
     }
 }
@@ -190,7 +197,7 @@ pub fn write_with(target: &Target, out: &Output, files: &[PathBuf], facts: &File
     let facts = &facts.0;
     let body = |w: &mut dyn Write| -> std::io::Result<()> {
         match target.format {
-            Format::Json => write_json(w, out, files, &facts),
+            Format::Json => write_json(w, out, files, &facts, target.pairs),
             Format::Txt => write_txt(w, out, files, &facts),
             Format::Csv => write_csv(w, out, files, &facts),
         }
@@ -232,7 +239,7 @@ struct JsonGroup<'a> {
 /// was a megabyte-long line on a found corpus and fifty on the benchmark one,
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
-fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
+fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>, with_pairs: bool) -> std::io::Result<()> {
     fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
         write!(w, "  \"{key}\": [")?;
         for (i, x) in xs.iter().enumerate() {
@@ -260,8 +267,10 @@ fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMa
     writeln!(w, "  \"files_analysed\": {},", out.files_analysed)?;
     list(w, "failures", &out.failures, false)?;
     writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&out.runtime_seconds)?)?;
-    list(w, "groups", &groups, false)?;
-    list(w, "pairs", &out.pairs, true)?;
+    list(w, "groups", &groups, !with_pairs)?;
+    if with_pairs {
+        list(w, "pairs", &out.pairs, true)?;
+    }
     writeln!(w, "}}")
 }
 
@@ -636,7 +645,7 @@ mod tests {
         let mut buf = Vec::new();
         let facts: HashMap<usize, Facts> =
             [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000) })].into_iter().collect();
-        write_json(&mut buf, &out, &files(), &facts).unwrap();
+        write_json(&mut buf, &out, &files(), &facts, true).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         let g = &v["groups"][0];
         assert_eq!(g["group"], "group_1");
@@ -657,6 +666,18 @@ mod tests {
         assert!(v["pairs"][0].get("ia").is_none());
     }
 
+    /// The window's copy is the same document without the pairs, and still
+    /// one document.
+    #[test]
+    fn the_windows_copy_leaves_out_the_pairs() {
+        let out = output();
+        let mut buf = Vec::new();
+        write_json(&mut buf, &out, &files(), &HashMap::new(), false).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v.get("pairs").is_none());
+        assert_eq!(v["groups"][0]["files"][2]["relation"], "direct", "a row's evidence is still its pair's");
+    }
+
     #[test]
     fn a_corroborated_pair_says_so_in_every_format() {
         let mut out = output();
@@ -673,7 +694,7 @@ mod tests {
         write_csv(&mut csv, &out, &files(), &facts).unwrap();
         assert!(String::from_utf8(csv).unwrap().contains(";corroborated;9;0.987;0.54;true;false"));
         let mut json = Vec::new();
-        write_json(&mut json, &out, &files(), &facts).unwrap();
+        write_json(&mut json, &out, &files(), &facts, true).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(v["groups"][0]["files"][2]["relation"], "corroborated");
         assert_eq!(v["pairs"][1]["corroborated"], true);
@@ -706,7 +727,7 @@ mod tests {
         assert!(csv.windows(quoted.len()).any(|w| w == quoted), "and so does the CSV, quoted for its ';'");
 
         let mut json = Vec::new();
-        write_json(&mut json, &out, &files, &facts).unwrap();
+        write_json(&mut json, &out, &files, &facts, true).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
         let bytes = |x: &serde_json::Value| x.as_array().unwrap().iter().map(|b| b.as_u64().unwrap() as u8).collect::<Vec<u8>>();
         assert_eq!(bytes(&v["groups"][0]["files"][2]["path_bytes"]), odd);

@@ -45,9 +45,9 @@ pub enum Kind {
 /// What a walk takes when `-x` is not given: every extension this can decode.
 /// A file with none at all is left out by default, as in `vid-fp`, and
 /// `-x '*'` is how to reach it; see `extensions.rs`.
-pub const EXTENSIONS: [&str; 24] = [
+pub const EXTENSIONS: [&str; 25] = [
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "bmp", "tif", "tiff", "avif", "heic",
-    "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "tga", "qoi", "exr", "ff",
+    "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "tga", "qoi", "exr", "hdr", "ff",
 ];
 
 /// The error `decode` gives for bytes that are no picture format at all, as
@@ -294,6 +294,66 @@ fn reserve(bytes: u64) -> Permit {
     timed!(29, reserve_inner(bytes))
 }
 
+thread_local! {
+    /// How much of the decode under way the `Claim` it began with covers.
+    static COVERED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// What a decode claims before it reads its file: the file's bytes and what
+/// the header says the decoder will hold, waited for in the queue like any
+/// claim.
+///
+/// **The file is read after the claim, not before it.** A decoder knows
+/// exactly what it will hold only once it has the bytes, and the claim used
+/// to be made there — so every worker waiting for room was already holding a
+/// whole file. Six 75 MB BMPs peaked at 176 MB on one thread and 535 MB on
+/// six, against a budget of 168: five files held while waiting for room to
+/// decode them. The estimate comes from the header probe the progress bar has
+/// already taken; whatever the decoder finds it needs beyond it, it takes
+/// through `cover` without queueing, since this thread is holding a claim.
+struct Claim {
+    _permit: Permit,
+    outer: u64,
+}
+
+impl Claim {
+    fn new(bytes: u64) -> Claim {
+        let permit = reserve(bytes);
+        let outer = COVERED.with(|c| c.replace(bytes));
+        Claim { _permit: permit, outer }
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        COVERED.with(|c| c.set(self.outer));
+    }
+}
+
+/// What a decoder will hold, now that it knows: the part its decode's `Claim`
+/// did not already cover, taken at once.
+fn cover(bytes: u64) -> Permit {
+    let have = COVERED.with(|c| c.replace(c.get().max(bytes)));
+    reserve(bytes.saturating_sub(have))
+}
+
+/// What a decoder will hold for a picture of this header, beyond the file's
+/// own bytes: the decoded buffer as each decoder lays it out, and the working
+/// plane. A guess on the low side of each layout, since a guess too high holds
+/// back other decodes for memory nobody takes, and one too low is made up by
+/// `cover` — a PNG is read a row at a time, so its buffer is nothing unless
+/// it turns out to need the general path.
+fn decode_estimate(p: &Probe, work: usize) -> u64 {
+    let per_px: u64 = match p.kind {
+        Kind::Image(ImageFormat::Png) => 0,
+        Kind::Image(ImageFormat::Jpeg) => 3,
+        Kind::Heif => 6,
+        Kind::Jxl => 24,
+        Kind::Image(_) | Kind::Unknown => 3,
+    };
+    p.w as u64 * p.h as u64 * per_px + working_bytes(p.w as usize, p.h as usize, work)
+}
+
 fn reserve_inner(bytes: u64) -> Permit {
     let want = bytes.min(isize::MAX as u64) as usize;
     // A thread already holding a claim takes what it asks for and does not
@@ -346,7 +406,14 @@ const HEAD: usize = 64;
 /// budget, which is claimed once a decoder knows the picture's size, could
 /// say anything about it. The answer is the same either way: both tests look
 /// only at the head of the file.
+#[cfg(test)]
 fn read_if_image(path: &Path) -> Result<Vec<u8>> {
+    let (f, head, len) = open_if_image(path)?;
+    read_rest(f, head, len, path)
+}
+
+/// The open file, its head, and its length, if the head says it is a picture.
+fn open_if_image(path: &Path) -> Result<(std::fs::File, Vec<u8>, u64)> {
     use std::io::Read;
     let ctx = || format!("read {}", path.display());
     let mut f = std::fs::File::open(path).with_context(ctx)?;
@@ -355,10 +422,15 @@ fn read_if_image(path: &Path) -> Result<Vec<u8>> {
     if sniff(&bytes) == Kind::Unknown && unmarked_format(&bytes, path).is_none() {
         bail!(NOT_AN_IMAGE);
     }
-    if let Ok(md) = f.metadata() {
-        bytes.reserve_exact((md.len() as usize).saturating_sub(bytes.len()));
-    }
-    f.read_to_end(&mut bytes).with_context(ctx)?;
+    let len = f.metadata().map_or(bytes.len() as u64, |m| m.len());
+    Ok((f, bytes, len))
+}
+
+/// The rest of a file `open_if_image` has begun.
+fn read_rest(mut f: std::fs::File, mut bytes: Vec<u8>, len: u64, path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    bytes.reserve_exact((len as usize).saturating_sub(bytes.len()));
+    f.read_to_end(&mut bytes).with_context(|| format!("read {}", path.display()))?;
     Ok(bytes)
 }
 
@@ -412,8 +484,13 @@ fn ico_png(bytes: &[u8]) -> Option<&[u8]> {
 fn unmarked_format(bytes: &[u8], path: &Path) -> Option<ImageFormat> {
     // Not a format `sniff` judges: it has refused those bytes already, and
     // `guess_format` would take them back on the same two bytes.
+    //
+    // Nor one this build has no decoder for. `guess_format` knows DDS, PCX and
+    // others whose features are not compiled in, and naming one here made a
+    // texture under `-x '*'` a picture that would not decode — a problem and
+    // exit 2 — where it is a file that is not an image this build can read.
     if let Ok(fmt) = image::guess_format(bytes) {
-        if !matches!(fmt, ImageFormat::Bmp | ImageFormat::Pnm | ImageFormat::Ico | ImageFormat::Gif) {
+        if fmt.reading_enabled() && !matches!(fmt, ImageFormat::Bmp | ImageFormat::Pnm | ImageFormat::Ico | ImageFormat::Gif) {
             return Some(fmt);
         }
     }
@@ -421,8 +498,21 @@ fn unmarked_format(bytes: &[u8], path: &Path) -> Option<ImageFormat> {
 }
 
 /// Decode a file to a working-resolution gray image.
+#[cfg(test)]
 pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
-    let bytes = timed!(0, read_if_image(path)?);
+    decode_with(path, work_size, probe(path).as_ref())
+}
+
+/// `decode`, given what `probe` read of the file's header, which decides how
+/// much of the decode budget to claim before the file is read; `None` claims
+/// the file's bytes alone.
+pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Result<Decoded> {
+    // The head first, so a file that is no picture is turned away without
+    // queueing for room it would never use: under `-x '*'` that is every
+    // video in the folder, and each would wait for the budget to empty.
+    let (f, head, len) = timed!(0, open_if_image(path)?);
+    let _claim = Claim::new(len + header.map_or(0, |p| decode_estimate(p, work_size)));
+    let bytes = timed!(0, read_rest(f, head, len, path)?);
     let kind = sniff(&bytes);
     let (w, h, gray) = match kind {
         // The two formats that are almost all of a real corpus get their own
@@ -455,6 +545,7 @@ pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
 /// file by what analysing it will cost (see `progress::analysis_cost`), and
 /// nothing about the result depends on it — a file this cannot read is
 /// weighed from its size and then decoded, or refused, as usual.
+#[derive(Clone, Copy)]
 pub struct Probe {
     pub kind: Kind,
     pub w: u32,
@@ -697,7 +788,7 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
         image::ColorType::Rgb8 | image::ColorType::Rgba8 | image::ColorType::L8 | image::ColorType::La8
     );
     let (dw, dh) = decoder.dimensions();
-    let _permit = reserve(
+    let _permit = cover(
         bytes.len() as u64
             + decoder.total_bytes().saturating_mul(1 + rotates as u64)
             + if converts { dw as u64 * dh as u64 * 4 } else { 0 }
@@ -753,7 +844,7 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     let (wu, hu) = (w as usize, h as usize);
     // What this holds: the file, the working plane, and a row or two of the
     // decoder's own. The frame the general path would claim is not among them.
-    let _permit = reserve(bytes.len() as u64 + working_bytes(wu, hu, work) + 2 * reader.output_line_size(w)? as u64);
+    let _permit = cover(bytes.len() as u64 + working_bytes(wu, hu, work) + 2 * reader.output_line_size(w)? as u64);
     let reduced = timed!(1, match color {
         png::ColorType::Rgb => png_rows::<_, 3, false>(&mut reader, wu, hu, work)?,
         png::ColorType::Rgba => png_rows::<_, 4, true>(&mut reader, wu, hu, work)?,
@@ -1319,7 +1410,7 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     // the picture is held beside it.
     let header = image.image_header();
     let nch = if header.metadata.grayscale() { 1 } else { 3 } + header.metadata.alpha().is_some() as u64;
-    let _permit = reserve(
+    let _permit = cover(
         bytes.len() as u64
             + (image.width() as u64) * (image.height() as u64) * nch * 8
             + working_bytes(image.width() as usize, image.height() as usize, work),
@@ -1369,7 +1460,7 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     // to be a copy of the plane with its stride padding packed out; the rows
     // now go to the reduction from where they lie, and the claim is left as it
     // was rather than guessed down to what libheif holds while it converts.
-    let _permit = reserve(
+    let _permit = cover(
         bytes.len() as u64
             + (handle.width() as u64) * (handle.height() as u64) * if has_alpha { 8 } else { 6 }
             + working_bytes(handle.width() as usize, handle.height() as usize, work),

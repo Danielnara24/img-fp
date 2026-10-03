@@ -237,6 +237,20 @@ pub struct Member {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub size_bytes: Option<u64>,
+    /// How this file came to be in its group: `identical`, `direct`,
+    /// `corroborated` or `propagated`; `None` for the representative.
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// How much of one of this file and the representative lies inside the
+    /// other: the larger of the two ways round.
+    #[serde(default)]
+    pub frame_overlap: Option<f32>,
+    #[serde(default)]
+    pub pixel_correlation: Option<f32>,
+    #[serde(default)]
+    pub mirrored: Option<bool>,
+    #[serde(default)]
+    pub inverted: Option<bool>,
 }
 
 impl Member {
@@ -329,6 +343,7 @@ mod tests {
         assert_eq!(files[0].path, PathBuf::from("/p/a.jpg"));
         assert_eq!(files[1].path.as_os_str().as_bytes(), b"/p/b\xff.jpg");
         assert_eq!(found.analysed, 2);
+        assert_eq!(files[1].relation, None, "a field the report leaves out is not needed");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

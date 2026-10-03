@@ -754,7 +754,19 @@ impl Setup {
                         stderr.push(line);
                     }
                     Event::Exited { code, signal } => {
-                        me.finished(code, signal, &stderr);
+                        // The report is read on a thread of its own: on a large
+                        // library it is megabytes of JSON, and parsing it here
+                        // froze the window.
+                        let result = me.scan.borrow().as_ref().map(|s| s.result.clone());
+                        let found = match (code, result) {
+                            (Some(0) | Some(scan::EXIT_PROBLEMS), Some(path)) => {
+                                me.status.set_text("Reading the results…");
+                                let read = gio::spawn_blocking(move || scan::read_report(&path)).await;
+                                Some(read.unwrap_or_else(|_| Err("reading the scan's results failed".into())))
+                            }
+                            _ => None,
+                        };
+                        me.finished(code, signal, &stderr, found);
                         return;
                     }
                 }
@@ -786,7 +798,8 @@ impl Setup {
         });
     }
 
-    fn finished(self: &Rc<Self>, code: Option<i32>, signal: Option<i32>, stderr: &[String]) {
+    /// The scan has ended. `found` is its report, read, when it ended with one.
+    fn finished(self: &Rc<Self>, code: Option<i32>, signal: Option<i32>, stderr: &[String], found: Option<Result<scan::Found, String>>) {
         let scan = self.scan.borrow_mut().take();
         let secs = self.started.get().map_or(0, |t| t.elapsed().as_secs());
         let took = format!("{}:{:02}", secs / 60, secs % 60);
@@ -795,7 +808,7 @@ impl Setup {
         self.prune_cache.set_active(false);
         match code {
             Some(0) | Some(scan::EXIT_PROBLEMS) => {
-                let found = scan.as_ref().map(|s| scan::read_report(&s.result)).unwrap_or(Err("the scan left no results".into()));
+                let found = found.unwrap_or(Err("the scan left no results".into()));
                 drop(scan);
                 match found {
                     Ok(found) => {
@@ -803,10 +816,11 @@ impl Setup {
                         self.progress.set_text(Some("100%"));
                         let problems = code == Some(scan::EXIT_PROBLEMS);
                         let summary = format!(
-                            "Done in {took}: {} group{} among {} images.{}",
+                            "Done in {took}: {} group{} among {} image{}.{}",
                             found.groups.len(),
                             if found.groups.len() == 1 { "" } else { "s" },
                             found.analysed,
+                            if found.analysed == 1 { "" } else { "s" },
                             if problems { " It had problems with some files; see the scan log." } else { "" }
                         );
                         self.idle(&summary);

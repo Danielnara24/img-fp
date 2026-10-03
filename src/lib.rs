@@ -152,6 +152,7 @@ struct Args {
     min_pixel_correlation: f32,
 
     /// Write every candidate pair considered, accepted or not, to this CSV.
+    /// `-` is stdout.
     #[arg(long, value_name = "FILE")]
     dump: Option<PathBuf>,
 
@@ -185,7 +186,7 @@ struct Args {
 
     /// Write every skipped file, problem and stage timing to this file.
     ///
-    /// Truncated at the start of each run.
+    /// Truncated at the start of each run. `-` is stdout.
     #[arg(long, value_name = "PATH")]
     log_file: Option<PathBuf>,
 
@@ -317,48 +318,94 @@ fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
             by_size.entry(md.len()).or_default().push(i);
         }
     }
-    let candidates: Vec<Vec<usize>> = by_size.into_values().filter(|v| v.len() > 1).collect();
-    let hashed: Vec<(u128, usize)> = candidates
+    // Files that share a size are told apart first by a few pieces of each,
+    // and only files that agree on those are read whole. Every same-size file
+    // used to be hashed whole on every run, cached or not, and uncompressed
+    // pictures from one scanner or camera are all one size: thirty 9 MB BMPs,
+    // nothing changed, all of them in the cache, were 270 MB read to find that
+    // no two were alike. A sample that differs is proof enough that the files
+    // do, and almost every pair of different files differs in its first piece.
+    let sampled: Vec<((u64, u128), usize)> = by_size
+        .into_iter()
+        .filter(|(_, v)| v.len() > 1)
+        .collect::<Vec<_>>()
         .par_iter()
-        .flat_map(|group| {
-            group
-                .par_iter()
-                .filter_map(|&i| content_hash(&files[i]).map(|h| (h, i)))
-                .collect::<Vec<_>>()
+        .flat_map_iter(|(len, group)| {
+            group.iter().filter_map(move |&i| sample_hash(&files[i], *len).map(|h| ((*len, h), i))).collect::<Vec<_>>()
         })
         .collect();
-    let mut by_hash: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (h, i) in hashed {
-        by_hash.entry(h).or_default().push(i);
+    let mut by_sample: HashMap<(u64, u128), Vec<usize>> = HashMap::new();
+    for (k, i) in sampled {
+        by_sample.entry(k).or_default().push(i);
     }
     // A shared hash is a reason to compare, not a verdict. FNV is no defence
     // against a file made to collide — new bytes enter only the low half of
     // its state, so two files differing in a word and the word after it can
     // be made to agree, and two pictures differing in twelve thousand bytes
     // were reported `identical` — and "identical" is the one claim a person
-    // acts on without looking. So the files of a hash group are compared byte
-    // for byte, each against the first of every class found so far. They are
-    // all one size, nearly every group is a pair, and the page cache has just
-    // seen them.
-    let mut out: Vec<Vec<usize>> = by_hash
+    // acts on without looking. So the files of a group are compared byte for
+    // byte, each against the first of every class found so far. A group of
+    // two, which is nearly every group, is compared straight away, and a
+    // larger one is hashed whole first so that the comparisons are between
+    // files that are almost certainly the same.
+    let mut out: Vec<Vec<usize>> = by_sample
         .into_values()
         .filter(|v| v.len() > 1)
         .collect::<Vec<_>>()
         .into_par_iter()
         .flat_map_iter(|mut group| {
             group.sort_unstable();
-            let mut classes: Vec<Vec<usize>> = Vec::new();
-            for i in group {
-                match classes.iter_mut().find(|c| same_bytes(&files[c[0]], &files[i]) == Some(true)) {
-                    Some(c) => c.push(i),
-                    None => classes.push(vec![i]),
+            let hashed: Vec<Vec<usize>> = if group.len() == 2 {
+                vec![group]
+            } else {
+                let mut by_hash: HashMap<u128, Vec<usize>> = HashMap::new();
+                for i in group {
+                    if let Some(h) = content_hash(&files[i]) {
+                        by_hash.entry(h).or_default().push(i);
+                    }
                 }
+                by_hash.into_values().filter(|v| v.len() > 1).collect()
+            };
+            let mut found: Vec<Vec<usize>> = Vec::new();
+            for mut group in hashed {
+                group.sort_unstable();
+                let mut classes: Vec<Vec<usize>> = Vec::new();
+                for i in group {
+                    match classes.iter_mut().find(|c| same_bytes(&files[c[0]], &files[i]) == Some(true)) {
+                        Some(c) => c.push(i),
+                        None => classes.push(vec![i]),
+                    }
+                }
+                found.extend(classes.into_iter().filter(|c| c.len() > 1));
             }
-            classes.into_iter().filter(|c| c.len() > 1)
+            found
         })
         .collect();
     out.sort();
     out
+}
+
+/// Bytes read from each place `sample_hash` looks.
+const SAMPLE_PIECE: u64 = 16 << 10;
+
+/// A hash of four pieces of a file of length `len`: its start, its end, and
+/// two places between. A file no longer than the four pieces is hashed whole.
+///
+/// Four rather than the start alone, because the files this is for are the
+/// ones least likely to differ there: an uncompressed scan's first rows are its
+/// header and its white margin, and so are its last.
+fn sample_hash(path: &Path, len: u64) -> Option<u128> {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::File::open(path).ok()?;
+    if len <= 4 * SAMPLE_PIECE {
+        return hash_reader(f, 1 << 16);
+    }
+    let mut buf = vec![0u8; 4 * SAMPLE_PIECE as usize];
+    for (k, at) in [0, len / 3, 2 * len / 3, len - SAMPLE_PIECE].into_iter().enumerate() {
+        let piece = &mut buf[k * SAMPLE_PIECE as usize..(k + 1) * SAMPLE_PIECE as usize];
+        f.read_exact_at(piece, at).ok()?;
+    }
+    hash_reader(&buf[..], 1 << 16)
 }
 
 /// Whether two files hold the same bytes, read a piece at a time; `None` if
@@ -479,9 +526,9 @@ fn enlarge_below(work: usize, upsample_below: usize) -> usize {
     if work == 0 { upsample_below } else { upsample_below.min(work) }
 }
 
-fn analyse(path: &Path, work: usize, p: &sift::Params) -> Item {
+fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>) -> Item {
     let t0 = Instant::now();
-    let r = decode::decode(path, work);
+    let r = decode::decode_with(path, work, header);
     T_DECODE.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
     match r {
         Ok(d) => {
@@ -761,6 +808,7 @@ pub use decode::preview;
 /// says the run did not finish, which is a stronger statement than `2`, and
 /// anyhow's own `main` handling prints the error and supplies the code.
 fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
+    stdout_has_one_reader(args, gui)?;
     // Opened before any work, so that a log file that cannot be written is an
     // ordinary fatal error at the top of the run rather than a discovery made
     // an hour into one.
@@ -780,6 +828,34 @@ fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
     outcome?;
     if problems.any() {
         std::process::exit(EXIT_WITH_PROBLEMS);
+    }
+    Ok(())
+}
+
+/// Refuse two outputs that would both be written to stdout.
+///
+/// The report goes there unless `-o` names a file, and `--dump -` and
+/// `--log-file -` go there too; any two of them would be one stream of
+/// interleaved CSV, log lines and report that nothing can read back. Under the
+/// window stdout is the progress channel, so neither may use it at all.
+fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
+    let dash = |p: &Option<PathBuf>| p.as_deref() == Some(stdout_path());
+    let mut on_stdout: Vec<&str> = Vec::new();
+    if gui.is_none() && args.output.as_deref().is_none_or(|p| p == stdout_path()) {
+        on_stdout.push("the report");
+    }
+    if dash(&args.dump) {
+        on_stdout.push("--dump -");
+    }
+    if dash(&args.log_file) {
+        on_stdout.push("--log-file -");
+    }
+    if gui.is_some() && !on_stdout.is_empty() {
+        anyhow::bail!("{} cannot be used here: stdout carries the scan's progress", on_stdout.join(" and "));
+    }
+    if on_stdout.len() > 1 {
+        let fix = if on_stdout[0] == "the report" { "; send the report to a file with -o" } else { "" };
+        anyhow::bail!("{} would both be written to stdout{fix}", on_stdout.join(" and "));
     }
     Ok(())
 }
@@ -1145,30 +1221,36 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         f.cache_write = rewrite;
     });
     let headers = progress.begin_counted(Stage::Headers, n as u64, n, "files");
-    let weight: Vec<u64> = (0..n)
+    // The headers are kept as well: the decode claims its share of the
+    // decode budget from them before it reads the file.
+    let (weight, header): (Vec<u64>, Vec<Option<decode::Probe>>) = (0..n)
         .into_par_iter()
         .map(|i| {
             headers.tick();
             if twin_of[i] != i || mine[i].is_some() {
-                return 0;
+                return (0, None);
             }
             let bytes = std::fs::metadata(&files[i]).map(|m| m.len()).unwrap_or(0);
             let probe = decode::probe(&files[i]);
-            progress::analysis_cost(probe.as_ref(), bytes, args.work_size, sp.upsample_below)
+            (progress::analysis_cost(probe.as_ref(), bytes, args.work_size, sp.upsample_below), probe)
         })
-        .collect();
+        .unzip();
     stage!(t_start, "{todo} files to analyse");
     // A wildcard walk has not guessed at anything, so what it found is files;
     // calling them images is how a home directory reads as a photo library.
-    let found = if wanted.is_a_guess_at_images() { "images" } else { "files" };
+    let found = if wanted.is_a_guess_at_images() { ("image", "images") } else { ("file", "files") };
     // The three add up to `n`: a copy is answered by its original whether or
     // not the cache also knew it, so it is counted as a copy and only there.
     let copies = (0..n).filter(|&i| twin_of[i] != i).count();
     let from_cache = n - copies - todo;
     if from_cache > 0 || copies > 0 {
-        say!("Found {n} {found}; {from_cache} already cached, {copies} identical copies, {todo} to analyse.");
+        say!(
+            "Found {}; {from_cache} already cached, {}, {todo} to analyse.",
+            count(n, found.0, found.1),
+            count(copies, "identical copy", "identical copies")
+        );
     } else {
-        say!("Found {n} {found}. Analysing...");
+        say!("Found {}. Analysing...", count(n, found.0, found.1));
     }
     let total_weight: u64 = weight.iter().sum();
     progress.forecast(|f| f.describe = Some(total_weight));
@@ -1198,7 +1280,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             // Keyed before it is read, so that a file changing under the
             // analysis is described again next time rather than trusted.
             let key = store.as_ref().and_then(|_| cache::key_of(f));
-            let it = analyse(f, args.work_size, &sp);
+            let it = analyse(f, args.work_size, &sp, header[i].as_ref());
             let span = keep(i, key, &it);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             bar.add(weight[i]);
@@ -1213,6 +1295,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         })
         .unzip();
     drop(weight);
+    drop(header);
     for (s, a) in span_of.iter_mut().zip(appended) {
         if a.is_some() {
             *s = a;
@@ -1369,7 +1452,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // copy's descriptors are its original's, so counting them would weigh
     // that picture twice in the sample and size the tree for words that are
     // not there.
-    say!("Analysis complete. Matching {n_ok} images...");
+    say!("Analysis complete. Matching {}...", count(n_ok, "image", "images"));
     let vp = index::VocabParams::for_corpus(n_desc_match);
     progress.forecast(|f| f.vocab_sample = Some(vp.sample.min(n_desc_match)));
     progress.begin(Stage::Vocabulary);
@@ -1850,8 +1933,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     stage!(t_start, "corroborated: {} more pairs inside existing clusters", corroborated.len());
 
     if let Some(path) = &args.dump {
-        let f = std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?;
-        let mut w = std::io::BufWriter::new(f);
+        // `-` is stdout, which `stdout_has_one_reader` has kept for it alone.
+        let sink: Box<dyn Write> = if path == stdout_path() {
+            Box::new(std::io::stdout().lock())
+        } else {
+            Box::new(std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?)
+        };
+        let mut w = std::io::BufWriter::new(sink);
         writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min")?;
         let all_direct: Vec<Edge> = all_direct.iter().map(direct_edge).collect();
         for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
@@ -1882,7 +1970,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             }
         }
         w.flush()?;
-        say!("dumped verdicts -> {}", path.display());
+        drop(w);
+        if path == stdout_path() {
+            say!("dumped verdicts -> stdout");
+        } else {
+            say!("dumped verdicts -> {}", path.display());
+        }
     }
 
     // ---- assemble
@@ -2013,7 +2106,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         pairs: out_pairs,
     };
 
-    let summary = format!("{} groups, {} pairs over {} images in {:.1}s", out.groups.len(), out.pairs.len(), n_ok, runtime);
+    let summary = format!(
+        "{}, {} over {} in {:.1}s",
+        count(out.groups.len(), "group", "groups"),
+        count(out.pairs.len(), "pair", "pairs"),
+        count(n_ok, "image", "images"),
+        runtime
+    );
     match timed!(36, write_reports(args, gui, &out, &files))? {
         Some(path) => say!("{summary} -> {}", path.display()),
         None => say!("{summary}"),
@@ -2029,10 +2128,18 @@ fn run_config(args: &Args) -> serde_json::Value {
         "features": FEATURES,
         "candidates": args.candidates,
         "min_aligned_points": aligned_points(args),
-        "min_frame_overlap": args.min_frame_overlap,
-        "min_pixel_correlation": args.min_pixel_correlation,
+        "min_frame_overlap": as_typed(args.min_frame_overlap),
+        "min_pixel_correlation": as_typed(args.min_pixel_correlation),
         "stages": "anchor, propagate, corroborate",
     })
+}
+
+/// A threshold as it was typed. The flags are `f32`, and JSON numbers are
+/// `f64`: widened as they stand, `0.85` was written `0.8500000238418579`. The
+/// shortest form that reads back as the same `f32` is the number the user
+/// gave, and as an `f64` it prints as that.
+fn as_typed(v: f32) -> f64 {
+    v.to_string().parse().unwrap_or(v as f64)
 }
 
 /// Write the report where `-o` says, and the window's copy of it; the file
@@ -2051,7 +2158,7 @@ fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf
     let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
     let facts = report::read_facts(out, files);
     if let Some(path) = gui {
-        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json };
+        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
         report::write_with(&target, out, files, &facts)?;
     }
     let mut went = None;
@@ -2108,6 +2215,11 @@ fn release_memory() {
             malloc_trim(0);
         }
     }
+}
+
+/// `n` and the noun that goes with it: "1 image", "2 images".
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn stdout_path() -> &'static Path {
@@ -2799,6 +2911,58 @@ mod tests {
         assert_eq!(same_stream(&a[..], &a[..], 16), Some(true));
         assert_eq!(same_stream(&a[..], &a[..63], 16), Some(false));
         assert_eq!(same_stream(&a[..48], &a[..48], 16), Some(true), "a length that ends on a piece");
+    }
+
+    /// Same-size files are grouped exactly when their bytes agree, whatever the
+    /// sample said: files that differ only between the sampled pieces, three
+    /// copies of one file, a pair, and files short enough to be hashed whole.
+    #[test]
+    fn identical_files_are_found_whatever_the_sample_says() {
+        let dir = std::env::temp_dir().join(format!("img-fp-exact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i * 31 % 251) as u8).collect();
+        let mut middle = big.clone();
+        // Between the start and the first third, where no piece is read.
+        middle[50_000] ^= 1;
+        let small = b"short file".to_vec();
+        let mut small_other = small.clone();
+        small_other[3] = b'X';
+        let named: Vec<(&str, &[u8])> = vec![
+            ("a", &big), ("a_copy1", &big), ("a_copy2", &big), ("a_middle", &middle),
+            ("s", &small), ("s_copy", &small), ("s_other", &small_other),
+        ];
+        let files: Vec<PathBuf> = named
+            .iter()
+            .map(|(n, b)| {
+                let p = dir.join(n);
+                std::fs::write(&p, b).unwrap();
+                p
+            })
+            .collect();
+        assert_eq!(exact_groups(&files), vec![vec![0, 1, 2], vec![4, 5]]);
+        // A pair alone is compared straight away.
+        assert_eq!(exact_groups(&[files[0].clone(), files[3].clone()]), Vec::<Vec<usize>>::new());
+        assert_eq!(exact_groups(&[files[0].clone(), files[1].clone()]), vec![vec![0, 1]]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two outputs never share stdout, and under the window neither the dump
+    /// nor the log may use it at all.
+    #[test]
+    fn stdout_carries_one_output() {
+        let check = |extra: &[&str], gui: bool| {
+            let args = Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
+            stdout_has_one_reader(&args, gui.then_some(Path::new("/r.json"))).is_ok()
+        };
+        assert!(check(&[], false));
+        assert!(check(&["-o", "r.json", "--dump", "-"], false));
+        assert!(check(&["-o", "r.json", "--log-file", "-"], false));
+        assert!(!check(&["--dump", "-"], false), "the report is on stdout already");
+        assert!(!check(&["-o", "-", "--log-file", "-"], false));
+        assert!(!check(&["-o", "r.json", "--dump", "-", "--log-file", "-"], false));
+        assert!(check(&["--dump", "./-"], false), "a file named - is ./-");
+        assert!(check(&[], true), "the window's report is a file");
+        assert!(!check(&["--dump", "-"], true));
     }
 
     /// A lone link between two clusters is a bridge however many times the

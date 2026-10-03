@@ -59,14 +59,21 @@ const MAX_SAMPLES: usize = 10;
 /// `BufWriter` would swallow exactly the tail that says why. The cost is a
 /// debugging flag's alone, and small: a few microseconds a line, so even a
 /// walk that skips a quarter of a million files pays well under a second.
+///
+/// `-` is stdout, as it is for `-o`; a file really named `-` is `./-`.
 #[derive(Default)]
-pub struct Log(Option<Mutex<std::fs::File>>);
+pub struct Log(Option<Mutex<Box<dyn Write + Send>>>);
 
 impl Log {
     pub fn open(path: Option<&Path>) -> Result<Log> {
         let Some(path) = path else { return Ok(Log(None)) };
-        let mut f = std::fs::File::create(path)
-            .with_context(|| format!("could not create the log file {}", path.display()))?;
+        let mut f: Box<dyn Write + Send> = if path == Path::new("-") {
+            Box::new(std::io::stdout())
+        } else {
+            Box::new(
+                std::fs::File::create(path).with_context(|| format!("could not create the log file {}", path.display()))?,
+            )
+        };
         // `args_os`, not `args`: the latter panics on an argument that is not
         // UTF-8, and a folder with such a name is an ordinary thing to scan.
         let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();

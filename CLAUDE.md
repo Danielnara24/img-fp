@@ -664,6 +664,15 @@ The parts that are easy to get wrong:
   identical_pair` builds one). The comparison re-reads only files that share a
   hash, which are the duplicates, and `derived/Desktop` is pair-for-pair the
   same either way.
+
+  **Same-size files are told apart by a sample first** (`sample_hash`: 16 KB
+  at the start, at a third, at two thirds and at the end), and only files
+  agreeing there are read whole; a pair is compared straight away, a larger
+  group hashed whole and then compared. Every same-size file used to be read
+  whole on every run, cached or not: thirty same-size 9 MB BMPs, all cached and
+  nothing changed, read 270 MB, and now 2.5 MB. Four pieces rather than the
+  start, because an uncompressed scan's first and last rows are header and
+  white margin.
 - **Byte-identical copies are matched through their original, not beside
   it.** Each exact group elects one member (one the cache already holds, if
   any) and everything from the vocabulary to corroboration runs over the
@@ -2269,6 +2278,13 @@ And for memory:
   eight workers at once, for three planes nothing would read again.
 - **The working image was copied to become the base of the pyramid**, when the
   blur that makes the base could read it where it lies.
+- **The claim is made before the file is read** (`decode::Claim`), from the
+  header probe the progress stage takes (`decode_estimate`), and a decoder
+  takes whatever it finds it needs beyond that through `cover`, without
+  queueing. The claim used to be made by the decoder, after the read, so every
+  worker waiting for room already held its whole file: six 75 MB BMPs peaked at
+  176 MB on one thread and 535 MB on six, and 184 MB on six after. A file the
+  head says is no picture is turned away before it claims anything.
 - **A decode's claim on the shared budget did not cover everything the decode
   holds** — not the file's own bytes, and not the float plane the reduction
   writes while the decoder's buffer is still alive, which for a picture
@@ -2887,7 +2903,10 @@ colour `decode::preview`, which only the window calls).
   Ctrl-C: the window re-runs its own binary as `img-fp-gui --worker RESULT
   <img-fp argv>`, which is `execute` with the progress line spoken as JSON on
   stdout (`progress::speak_json`) and the report also written as JSON to
-  `RESULT`. Cancel sends SIGINT; the worker's existing handler answers it in
+  `RESULT`. That copy has the groups and no `pairs`, which the window never
+  read and which were 289 MB of IMGS-ALL's 303 MB report, written to
+  `$XDG_RUNTIME_DIR` (a tmpfs, 581 MB here); it is parsed with
+  `gio::spawn_blocking`, off the main thread. Cancel sends SIGINT; the worker's existing handler answers it in
   **30-60 ms** measured, keeping the cache. A thread could not be stopped from
   inside libheif or a large decode. Exit hands back all the scan's memory.
   `PR_SET_PDEATHSIG` makes a dying window take the worker with it (checked
@@ -3029,6 +3048,15 @@ pairs credits a tool with every match its chains imply rather than the ones it
 made. This inflated SSCD from 9,172 claims to 238,771 once, and roughly 7,000
 of a 16,267-pair labelling queue were artifacts of it. Any new consumer of
 these files must follow the same rule.
+
+Every report gives one overlap per pair, the larger of the two ways round,
+which is what `--min-frame-overlap` is compared with — so a crop and a
+photograph pasted into a poster read 1.00, as a copy does. Reporting both
+directions was built and taken back, by the user's decision: the larger
+figure reads better. `--dump`'s `ov_a`/`ov_b` still have both.
+
+`--dump -` and `--log-file -` are stdout, as `-o -` is, and a run where two of
+the three would share it is refused before it starts (`stdout_has_one_reader`).
 
 img-fp's own `groups` are **not** a closure — each is a representative plus the
 files that matched it, and it names the representative (see `src/group.rs`):
@@ -3206,7 +3234,10 @@ WebP and QOI, decodes to the same `--dump` bytes.
 **DDS is not in the default extensions.** `image` 0.25 has no DDS decoder
 behind its `dds` feature ("The image format `DDS` is not supported"), so every
 `.dds` a walk took was a problem and exit 2; it is a skip now, and the feature
-is gone from `Cargo.toml` with it. **An ICO holding an RGB PNG is read as that
+is gone from `Cargo.toml` with it. Under `-x '*'` the same held for any format
+`guess_format` names with no decoder built (DDS, PCX): `unmarked_format` now
+asks `reading_enabled`, so such a file is not an image, a skip. `.hdr`
+(Radiance) is decoded and is in the default extensions. **An ICO holding an RGB PNG is read as that
 PNG** (`decode::ico_png`). The crate refuses one, as the format says it should,
 and Pillow writes one whenever a picture with no alpha channel is saved as
 `.ico` — `Image.open("logo.jpg").save("favicon.ico")` — under a directory entry

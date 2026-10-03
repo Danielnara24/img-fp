@@ -230,8 +230,8 @@ to stderr.
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
-| `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run | |
-| `--dump <FILE>` | Write every candidate pair considered, accepted or not, to a CSV | |
+| `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
+| `--dump <FILE>` | Write every candidate pair considered, accepted or not, to a CSV. `-` writes it to stdout | |
 | `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
@@ -245,7 +245,7 @@ different photographs together. The defaults are a safe starting point.
 ## Formats
 
 JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO, PNM, TGA,
-QOI, OpenEXR and farbfeld. Files are identified by their content, so a wrong
+QOI, OpenEXR, Radiance HDR and farbfeld. Files are identified by their content, so a wrong
 extension doesn't matter, but a folder walk only picks up files whose extension
 is in `-x`. TGA files have no signature and are recognised by the `.tga`
 extension.
