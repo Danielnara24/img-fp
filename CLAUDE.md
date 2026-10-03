@@ -3261,6 +3261,10 @@ crate has refused, on the entry the crate itself would have chosen, and only
 when that entry is a PNG. ImageMagick's icons hold bitmaps and were never
 affected.
 
+**A HEIF is recognised by any of its `ftyp` brands** (`heif_brands`),
+not only the major one: a `mif2` file listing `mif1, heic` was "not an image"
+here and read by libheif everywhere else.
+
 **`--min-aligned-points` below 3 is run as 3, and the run says so.** Three is
 the fewest a transform is fitted through, so 1 and 2 already behaved as 3, and
 0 let a pair with no geometry at all through once overlap and correlation were

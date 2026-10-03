@@ -98,16 +98,8 @@ fn sniff_signature(b: &[u8]) -> Kind {
     if b.starts_with(&[0xFF, 0x0A]) || b.starts_with(b"\0\0\0\x0cJXL \r\n\x87\n") {
         return Kind::Jxl;
     }
-    if &b[4..8] == b"ftyp" {
-        // ISO BMFF: HEIC/HEIF/AVIF brands all go to libheif.
-        let brand = &b[8..12];
-        if matches!(
-            brand,
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1"
-                | b"avif" | b"avis"
-        ) {
-            return Kind::Heif;
-        }
+    if &b[4..8] == b"ftyp" && heif_brands(b) {
+        return Kind::Heif;
     }
     if b.starts_with(b"qoif") {
         return Kind::Image(ImageFormat::Qoi);
@@ -125,6 +117,28 @@ fn sniff_signature(b: &[u8]) -> Kind {
         return Kind::Image(ImageFormat::Ico);
     }
     Kind::Unknown
+}
+
+/// Whether an ISO BMFF `ftyp` box names a brand libheif reads: HEIC, HEIF or
+/// AVIF, still or sequence.
+///
+/// **Any of its brands, not only the first.** The major brand is the one the
+/// writer liked best, and the compatible list is the one a reader is meant to
+/// go by: a HEIF file whose major brand is `mif2`, from the format's second
+/// edition, lists `mif1` and `heic` after it, and libheif — through
+/// ImageMagick and gdk-pixbuf alike — reads it. Judged by the major brand
+/// alone it was "not an image" here, and a problem. The list is read only as
+/// far as the box and the head both go; a brand past the head is not looked
+/// for, and a video's brands (`isom`, `mp41`, `qt  `) name none of these.
+fn heif_brands(b: &[u8]) -> bool {
+    const HEIF: [&[u8; 4]; 10] = [b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif", b"avis"];
+    let size = u32::from_be_bytes(b[0..4].try_into().unwrap()) as usize;
+    // The major brand, then the minor version (four bytes, not a brand), then
+    // the compatible brands to the end of the box.
+    let end = size.min(b.len());
+    let major = std::iter::once(&b[8..12]);
+    let compatible = b.get(16..end.max(16)).into_iter().flat_map(|l| l.chunks_exact(4));
+    major.chain(compatible).any(|brand| HEIF.iter().any(|h| &h[..] == brand))
 }
 
 /// Whether the bytes after a short signature pass the first test the format's
@@ -1617,6 +1631,29 @@ mod tests {
                 assert_eq!(fast.px, slow.px, "{ch} {alpha} {w}x{h}@{work}");
             }
         }
+    }
+
+    /// A HEIF is told by any of its brands, and an MP4 by none of them.
+    #[test]
+    fn a_heif_is_known_by_its_compatible_brands() {
+        let ftyp = |major: &[u8; 4], compatible: &[&[u8; 4]]| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&((16 + 4 * compatible.len()) as u32).to_be_bytes());
+            b.extend_from_slice(b"ftyp");
+            b.extend_from_slice(major);
+            b.extend_from_slice(&[0, 0, 0, 0]);
+            for c in compatible {
+                b.extend_from_slice(*c);
+            }
+            // The next box, so that a brand cannot be read from past the end.
+            b.extend_from_slice(b"\0\0\0\x08heic");
+            b
+        };
+        assert_eq!(sniff(&ftyp(b"heic", &[b"mif1", b"heic"])), Kind::Heif);
+        assert_eq!(sniff(&ftyp(b"mif2", &[b"mif1", b"heic", b"miaf"])), Kind::Heif);
+        assert_eq!(sniff(&ftyp(b"MiHE", &[b"MiHB", b"miaf", b"avif"])), Kind::Heif);
+        assert_eq!(sniff(&ftyp(b"isom", &[b"isom", b"iso2", b"mp41"])), Kind::Unknown, "an MP4");
+        assert_eq!(sniff(&ftyp(b"mp42", &[])), Kind::Unknown, "a box with no compatible brands, and `heic` only past it");
     }
 
     /// Rows handed over one at a time reduce to the plane the whole buffer
