@@ -3261,6 +3261,14 @@ crate has refused, on the entry the crate itself would have chosen, and only
 when that entry is a PNG. ImageMagick's icons hold bitmaps and were never
 affected.
 
+**A decoder may allocate what the machine has available** (`decode::max_alloc`,
+`MemAvailable` at start, at least 512 MiB), not the `image` crate's own 512 MiB,
+which refused a 15000x12000 TIFF (540 MB of RGB) with "Memory limit exceeded"
+while the same picture as JPEG or PNG decoded. The decode budget decides how
+much decodes at once; this only turns a picture larger than memory into an
+error rather than an abort. The probe and the window's preview use the same
+limits.
+
 **A HEIF is recognised by any of its `ftyp` brands** (`heif_brands`),
 not only the major one: a `mif2` file listing `mif1, heic` was "not an image"
 here and read by libheif everywhere else.

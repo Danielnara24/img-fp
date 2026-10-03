@@ -233,15 +233,48 @@ fn pnm_header_starts(b: &[u8]) -> bool {
 /// scratch it is reasonable to hold is a fact about the machine and not about
 /// the pictures.
 fn decode_budget() -> usize {
-    let available = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
-        let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
-        line.split_whitespace().nth(1)?.parse::<usize>().ok()
-    });
-    match available {
-        Some(kb) => (kb / 8 * 1024).max(64 << 20),
+    match mem_available() {
+        Some(bytes) => (bytes / 8).max(64 << 20),
         // No /proc to ask: enough for several large photographs at once.
         None => 256 << 20,
     }
+}
+
+/// What the machine reports it can still hand out, in bytes: `MemAvailable`.
+fn mem_available() -> Option<usize> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb = line.split_whitespace().nth(1)?.parse::<usize>().ok()?;
+    Some(kb.saturating_mul(1024))
+}
+
+/// The most a single decoder may allocate: what the machine has available
+/// when the run starts.
+///
+/// **This replaces the `image` crate's own 512 MiB**, which was nobody's
+/// decision here and refused real pictures: a 15000x12000 scan saved as TIFF
+/// is 540 MB of RGB, and it was "Memory limit exceeded" — a problem, exit 2 —
+/// while the same picture as JPEG or PNG decoded. The decode budget already
+/// decides how much decoding happens at once, so what is left for a limit to
+/// say is the one thing the budget cannot: that a picture larger than the
+/// memory there is will not decode, and should be refused with a message
+/// rather than end the process. A header claiming a gigapixel is exactly that
+/// case on a laptop and not on a workstation, which is why it is measured and
+/// not written down.
+///
+/// Taken once, like the budget. Without `/proc` there is nothing to measure
+/// and the crate's own default stands.
+fn max_alloc() -> u64 {
+    static MAX: std::sync::LazyLock<u64> =
+        std::sync::LazyLock::new(|| mem_available().map_or(512 << 20, |b| (b as u64).max(512 << 20)));
+    *MAX
+}
+
+/// The `image` crate's limits, with `max_alloc` in place of its own.
+fn limits() -> image::Limits {
+    let mut l = image::Limits::default();
+    l.max_alloc = Some(max_alloc());
+    l
 }
 
 /// The float plane the box reduction writes while the decoder's buffer is
@@ -626,7 +659,9 @@ fn turns(o: image::metadata::Orientation) -> bool {
 
 /// A picture's shown size from the `image` crate's own decoder, which reads
 /// the header and whatever metadata comes before the pixels, and nothing else.
-fn decoder_size<R: std::io::BufRead + std::io::Seek>(rd: image::ImageReader<R>) -> Option<(u32, u32)> {
+fn decoder_size<R: std::io::BufRead + std::io::Seek>(mut rd: image::ImageReader<R>) -> Option<(u32, u32)> {
+    // The decode's own limits, or a picture the decode reads has no size here.
+    rd.limits(limits());
     let mut d = rd.into_decoder().ok()?;
     let (w, h) = d.dimensions();
     Some(if d.orientation().is_ok_and(turns) { (h, w) } else { (w, h) })
@@ -783,7 +818,8 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
 
 /// Any format `image` reads, decoded whole and then reduced.
 fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32, Gray)> {
-    let reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
+    reader.limits(limits());
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     // The header already says how large the pixels will be. A rotation holds
@@ -838,11 +874,12 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
 /// price only broken files pay.
 fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     // What `image` asks of the `png` crate, so that the rows are the rows it
-    // would have got: its default allocation limit, text chunks read, and
-    // EXPAND, which widens palettes and low bit depths to eight bits and a
-    // transparency chunk to an alpha channel.
-    const IMAGE_MAX_ALLOC: usize = 512 << 20;
-    let mut dec = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: IMAGE_MAX_ALLOC });
+    // would have got: the allocation limit the general path is given (see
+    // `max_alloc`), text chunks read, and EXPAND, which widens palettes and
+    // low bit depths to eight bits and a transparency chunk to an alpha
+    // channel.
+    let image_max_alloc = max_alloc() as usize;
+    let mut dec = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: image_max_alloc });
     dec.set_ignore_text_chunk(false);
     dec.set_transformations(png::Transformations::EXPAND);
     let mut reader = dec.read_info().ok()?;
@@ -852,7 +889,7 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     }
     let (w, h) = (info.width, info.height);
     let (color, depth) = reader.output_color_type();
-    if depth != png::BitDepth::Eight || reader.output_buffer_size()? > IMAGE_MAX_ALLOC {
+    if depth != png::BitDepth::Eight || reader.output_buffer_size()? > image_max_alloc {
         return None;
     }
     let (wu, hu) = (w as usize, h as usize);
@@ -1527,7 +1564,9 @@ pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
 }
 
 fn preview_image_crate(bytes: &[u8], fmt: ImageFormat) -> Result<DynamicImage> {
-    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), fmt).into_decoder()?;
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
+    reader.limits(limits());
+    let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut img = DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
