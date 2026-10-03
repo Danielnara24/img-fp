@@ -33,6 +33,7 @@ use std::sync::Arc;
 pub const WORKER_FLAG: &str = "--worker";
 
 /// img-fp's exit codes; see `EXIT STATUS` in its man page.
+pub const EXIT_FATAL: i32 = 1;
 pub const EXIT_PROBLEMS: i32 = 2;
 pub const EXIT_INTERRUPTED: i32 = 130;
 

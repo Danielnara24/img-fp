@@ -2954,7 +2954,11 @@ colour `decode::preview`, which only the window calls).
   per-file facts both state are read once. A `-o` that failed used to end the
   run first, so a finished scan came back as a failed one with nothing to
   show; reading the facts once takes `main:output` from 0.30 to 0.27 s on a
-  cached IMGS scan with `-o`, identical reports either way.
+  cached IMGS scan with `-o`, identical reports either way. **And the window
+  reads it on exit 1 too** (`setup.rs`, when the file is there), showing the
+  results and an alert naming what failed: until 0.25 it read the report only
+  on exit 0 or 2, so the fix above never reached anyone (checked on Xvfb with
+  `-o /dev/full`).
 - **Released beside the CLI** by `release.yml`: the CLI is built first and
   without the feature, the window after it, and the DT_NEEDED check holds the
   CLI to no GTK. The worker is smoke-tested headless on an empty folder.

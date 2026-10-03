@@ -758,8 +758,14 @@ impl Setup {
                         // library it is megabytes of JSON, and parsing it here
                         // froze the window.
                         let result = me.scan.borrow().as_ref().map(|s| s.result.clone());
+                        // Exit 1 with a report is a scan that finished and
+                        // then failed at the end — an `-o` that could not be
+                        // written — and the window's copy is written before
+                        // that, so that the scan can still be shown.
                         let found = match (code, result) {
-                            (Some(0) | Some(scan::EXIT_PROBLEMS), Some(path)) => {
+                            (Some(0) | Some(scan::EXIT_PROBLEMS), Some(path)) | (Some(scan::EXIT_FATAL), Some(path))
+                                if code != Some(scan::EXIT_FATAL) || path.exists() =>
+                            {
                                 me.status.set_text("Reading the results…");
                                 let read = gio::spawn_blocking(move || scan::read_report(&path)).await;
                                 Some(read.unwrap_or_else(|_| Err("reading the scan's results failed".into())))
@@ -806,28 +812,24 @@ impl Setup {
         // The one-off cache requests have been carried out, or given up on.
         self.clear_cache.set_active(false);
         self.prune_cache.set_active(false);
+        // The error a run that failed printed last, if it printed one.
+        let error_line = || stderr.iter().rev().find(|l| l.starts_with("Error")).map(|l| l.trim_start_matches("Error:").trim().to_string());
+        // A scan that finished, and then could not write what it was asked to
+        // at the end: its results are shown, and what failed is said.
+        if code == Some(scan::EXIT_FATAL) {
+            if let Some(Ok(found)) = found {
+                drop(scan);
+                self.show_found(found, true, &took);
+                self.status_after_failure(error_line());
+                return;
+            }
+        }
         match code {
             Some(0) | Some(scan::EXIT_PROBLEMS) => {
                 let found = found.unwrap_or(Err("the scan left no results".into()));
                 drop(scan);
                 match found {
-                    Ok(found) => {
-                        self.progress.set_fraction(1.0);
-                        self.progress.set_text(Some("100%"));
-                        let problems = code == Some(scan::EXIT_PROBLEMS);
-                        let summary = format!(
-                            "Done in {took}: {} group{} among {} image{}.{}",
-                            found.groups.len(),
-                            if found.groups.len() == 1 { "" } else { "s" },
-                            found.analysed,
-                            if found.analysed == 1 { "" } else { "s" },
-                            if problems { " It had problems with some files; see the scan log." } else { "" }
-                        );
-                        self.idle(&summary);
-                        self.results.show(found, problems);
-                        self.app.show_results();
-                        self.results.focus();
-                    }
+                    Ok(found) => self.show_found(found, code == Some(scan::EXIT_PROBLEMS), &took),
                     Err(e) => {
                         self.idle("The scan finished, but its results could not be read.");
                         self.alert("Could not read the results", &e);
@@ -851,11 +853,7 @@ impl Setup {
                     self.idle("Stopped: the scan did not answer the cancel, and was ended.");
                     return;
                 }
-                let error = stderr
-                    .iter()
-                    .rev()
-                    .find(|l| l.starts_with("Error"))
-                    .map(|l| l.trim_start_matches("Error:").trim().to_string())
+                let error = error_line()
                     .unwrap_or_else(|| match (code, signal) {
                         (_, Some(9)) => "The scan was killed (SIGKILL), most likely by the system \
                             running out of memory."
@@ -868,6 +866,32 @@ impl Setup {
                 self.alert("The scan failed", &error);
             }
         }
+    }
+}
+
+impl Setup {
+    /// A finished scan's groups, on the results page.
+    fn show_found(self: &Rc<Self>, found: scan::Found, problems: bool, took: &str) {
+        self.progress.set_fraction(1.0);
+        self.progress.set_text(Some("100%"));
+        let summary = format!(
+            "Done in {took}: {} group{} among {} image{}.{}",
+            found.groups.len(),
+            if found.groups.len() == 1 { "" } else { "s" },
+            found.analysed,
+            if found.analysed == 1 { "" } else { "s" },
+            if problems { " It had problems with some files; see the scan log." } else { "" }
+        );
+        self.idle(&summary);
+        self.results.show(found, problems);
+        self.app.show_results();
+        self.results.focus();
+    }
+
+    /// Say what failed at the end of a scan whose results are shown anyway.
+    fn status_after_failure(&self, error: Option<String>) {
+        let detail = error.unwrap_or_else(|| "The scan exited with an error after finishing.".into());
+        self.alert("The scan finished, but something failed at the end", &detail);
     }
 }
 
