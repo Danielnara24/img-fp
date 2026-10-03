@@ -830,7 +830,10 @@ impl Setup {
             _ => {
                 drop(scan);
                 self.progress.set_text(Some("Failed"));
-                if signal == Some(9) {
+                // Ended by the window only if the window asked. The kernel's
+                // out-of-memory killer sends the same signal, and a scan it
+                // ended was reported as one the user had cancelled.
+                if signal == Some(9) && self.cancelling.get() {
                     self.idle("Stopped: the scan did not answer the cancel, and was ended.");
                     return;
                 }
@@ -840,6 +843,9 @@ impl Setup {
                     .find(|l| l.starts_with("Error"))
                     .map(|l| l.trim_start_matches("Error:").trim().to_string())
                     .unwrap_or_else(|| match (code, signal) {
+                        (_, Some(9)) => "The scan was killed (SIGKILL), most likely by the system \
+                            running out of memory."
+                            .to_string(),
                         (_, Some(s)) => format!("The scan was ended by signal {s}."),
                         (Some(c), _) => format!("The scan exited with code {c}."),
                         _ => "The scan ended unexpectedly.".to_string(),

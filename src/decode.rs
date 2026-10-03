@@ -56,7 +56,24 @@ pub const EXTENSIONS: [&str; 24] = [
 pub const NOT_AN_IMAGE: &str = "not an image";
 
 /// Identify a format from the first bytes.
+///
+/// Four of these signatures are two to four bytes long — `BM`, `P1` to `P7`,
+/// `00 00 01 00` and `GIF8` — and a text file can start with any of the first
+/// two: "BMW service record", "P3 notes". Under `-x '*'` such a file was taken
+/// for a broken picture, a problem rather than a skip, and two copies of it
+/// were reported as a byte-identical *image*. So for those formats the bytes
+/// after the signature have to pass the first check the format's own decoder
+/// makes (`plausible`), which is a check every file that decoder can read
+/// already passes — the decodable set is exactly what it was.
 pub fn sniff(b: &[u8]) -> Kind {
+    let kind = sniff_signature(b);
+    match kind {
+        Kind::Image(fmt) if !plausible(fmt, b) => Kind::Unknown,
+        _ => kind,
+    }
+}
+
+fn sniff_signature(b: &[u8]) -> Kind {
     if b.len() < 12 {
         return Kind::Unknown;
     }
@@ -66,7 +83,7 @@ pub fn sniff(b: &[u8]) -> Kind {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Kind::Image(ImageFormat::Png);
     }
-    if b.starts_with(b"GIF8") {
+    if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
         return Kind::Image(ImageFormat::Gif);
     }
     if b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
@@ -108,6 +125,78 @@ pub fn sniff(b: &[u8]) -> Kind {
         return Kind::Image(ImageFormat::Ico);
     }
     Kind::Unknown
+}
+
+/// Whether the bytes after a short signature pass the first test the format's
+/// decoder applies to them. Each test is the decoder's own, in `image` 0.25,
+/// so nothing the decoder could read is turned away; a head too short to say
+/// passes. Formats with a long signature are not asked.
+fn plausible(fmt: ImageFormat, b: &[u8]) -> bool {
+    match fmt {
+        // The DIB header's size, which the BMP decoder reads first and refuses
+        // unless it is one of the six it knows.
+        ImageFormat::Bmp => match b.get(14..18) {
+            Some(v) => matches!(u32::from_le_bytes(v.try_into().unwrap()), 12 | 40 | 52 | 56 | 108 | 124),
+            None => true,
+        },
+        ImageFormat::Pnm => pnm_header_starts(b),
+        // At least one directory entry, and the entry's planes and bit depth
+        // no more than 256: the ICO decoder's own refusals.
+        ImageFormat::Ico => {
+            let u16_at = |i: usize| b.get(i..i + 2).map(|v| u16::from_le_bytes(v.try_into().unwrap()));
+            u16_at(4).is_none_or(|n| n > 0)
+                && u16_at(10).is_none_or(|p| p <= 256)
+                && u16_at(12).is_none_or(|d| d <= 256)
+        }
+        _ => true,
+    }
+}
+
+/// What a PNM decoder reads after `P1` to `P6`: whitespace and `#` comments,
+/// then a digit. After `P7`, a newline and then header lines, the first that
+/// is not a comment naming a PAM field.
+fn pnm_header_starts(b: &[u8]) -> bool {
+    let rest = &b[2..];
+    if b[1] == b'7' {
+        let Some((&first, mut rest)) = rest.split_first() else { return true };
+        if first != b'\n' {
+            return false;
+        }
+        loop {
+            let (line, more) = match rest.iter().position(|&c| c == b'\n') {
+                Some(k) => (&rest[..k], Some(&rest[k + 1..])),
+                // The head ends inside this line: judge what there is of it.
+                None => (rest, None),
+            };
+            if line.first() == Some(&b'#') {
+                match more {
+                    Some(m) => rest = m,
+                    None => return true,
+                }
+                continue;
+            }
+            let word = line.trim_ascii_start();
+            let word = &word[..word.iter().position(|c| c.is_ascii_whitespace()).unwrap_or(word.len())];
+            const FIELDS: [&[u8]; 6] = [b"ENDHDR", b"HEIGHT", b"WIDTH", b"DEPTH", b"MAXVAL", b"TUPLTYPE"];
+            return match more {
+                Some(_) => FIELDS.contains(&word),
+                None => FIELDS.iter().any(|f| f.starts_with(word)),
+            };
+        }
+    }
+    let mut comment = false;
+    for &c in rest {
+        if comment {
+            comment = c != b'\n' && c != b'\r';
+            continue;
+        }
+        match c {
+            b'#' => comment = true,
+            b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' ' => {}
+            c => return c.is_ascii_digit(),
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------- decode budget
@@ -321,8 +410,12 @@ fn ico_png(bytes: &[u8]) -> Option<&[u8]> {
 /// consulted only for formats like that, so a `.png` holding something else
 /// is still judged by its bytes.
 fn unmarked_format(bytes: &[u8], path: &Path) -> Option<ImageFormat> {
+    // Not a format `sniff` judges: it has refused those bytes already, and
+    // `guess_format` would take them back on the same two bytes.
     if let Ok(fmt) = image::guess_format(bytes) {
-        return Some(fmt);
+        if !matches!(fmt, ImageFormat::Bmp | ImageFormat::Pnm | ImageFormat::Ico | ImageFormat::Gif) {
+            return Some(fmt);
+        }
     }
     ImageFormat::from_path(path).ok().filter(|f| *f == ImageFormat::Tga)
 }
@@ -397,7 +490,13 @@ pub fn probe(path: &Path) -> Option<Probe> {
         Kind::Image(fmt) => decoder_size(image::ImageReader::with_format(r, fmt))?,
         Kind::Jxl => jxl_size(&mut r)?,
         Kind::Heif => {
-            let ctx = libheif_rs::HeifContext::read_from_file(path.to_str()?).ok()?;
+            // Through a reader rather than `read_from_file`, which takes the
+            // path as `&str`: a HEIC whose name is not UTF-8 had no size in
+            // any report or on its card. libheif reads only what it seeks to.
+            let file = std::fs::File::open(path).ok()?;
+            let size = file.metadata().ok()?.len();
+            let reader = libheif_rs::StreamReader::new(std::io::BufReader::new(file), size);
+            let ctx = libheif_rs::HeifContext::read_from_reader(Box::new(reader)).ok()?;
             let handle = ctx.primary_image_handle().ok()?;
             (handle.width(), handle.height())
         }
@@ -1519,6 +1618,39 @@ mod tests {
         assert_eq!(sniff(b"\xFF\xD8\xFF\xE0\0\x10JFIF\0\x01\x01"), Kind::Image(ImageFormat::Jpeg));
         assert_eq!(sniff(b"\0\0\0\x18ftypavif\0\0\0\0"), Kind::Heif);
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Kind::Image(ImageFormat::WebP));
+    }
+
+    /// Text whose first bytes are a short signature is not a picture, and is
+    /// not taken back by the fallback either; the real formats still are.
+    #[test]
+    fn text_that_starts_like_a_short_signature_is_no_picture() {
+        let no = |b: &[u8]| {
+            assert_eq!(sniff(b), Kind::Unknown, "{:?}", String::from_utf8_lossy(b));
+            assert!(unmarked_format(b, Path::new("x")).is_none(), "{:?}", String::from_utf8_lossy(b));
+        };
+        no(b"BMW service record for 2024\n");
+        no(b"P3 notes: the plan for monday\n");
+        no(b"P7 is the seventh paragraph\n");
+        no(b"P5\n# a comment\nand then words\n");
+        no(b"GIF8 is not a version\n");
+        no(b"\0\0\x01\0\0\0 no entries at all");
+        let yes = |b: &[u8], f| assert_eq!(sniff(b), Kind::Image(f), "{:?}", String::from_utf8_lossy(b));
+        yes(b"P5 640 480 255\n", ImageFormat::Pnm);
+        yes(b"P6\n# made by hand\n  640 480\n255\n", ImageFormat::Pnm);
+        yes(b"P5#c\n1 1 255\n", ImageFormat::Pnm);
+        yes(b"P7\nWIDTH 4\nHEIGHT 4\n", ImageFormat::Pnm);
+        yes(b"P7\n# c\nTUPLTYPE GRAYSCALE\n", ImageFormat::Pnm);
+        yes(b"P4\n# a comment that runs past the head", ImageFormat::Pnm);
+        yes(b"GIF89a\x01\0\x01\0\0\0\0", ImageFormat::Gif);
+        let mut bmp = b"BM\0\0\0\0\0\0\0\0\x36\0\0\0".to_vec();
+        for size in [12u32, 40, 52, 56, 108, 124] {
+            let mut b = bmp.clone();
+            b.extend_from_slice(&size.to_le_bytes());
+            yes(&b, ImageFormat::Bmp);
+        }
+        bmp.extend_from_slice(&0x6f6d_6564u32.to_le_bytes());
+        no(&bmp);
+        yes(b"\0\0\x01\0\x01\0\x10\x10\0\0\x01\0\x20\0", ImageFormat::Ico);
     }
 }
 

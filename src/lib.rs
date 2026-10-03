@@ -292,6 +292,24 @@ fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
     Some(h)
 }
 
+/// The name each file's cache record is kept under: its canonical path.
+///
+/// A walk spells a file the way its root was typed, and the cache used to be
+/// keyed on that spelling. So one folder scanned as `photos`, as `./photos`
+/// and as its absolute path was analysed three times and held three records
+/// an image, and a relative record was carried or dropped according to
+/// whatever folder the next run happened to start in — `carry_over` asks
+/// whether the path exists, and a relative path exists relative to the
+/// current directory. The window always names folders absolutely, so it and
+/// `img-fp .` never shared a record either. A canonical path is one name per
+/// file however it is reached; the report still names files as the run did.
+fn cache_names(files: &[PathBuf]) -> Vec<PathBuf> {
+    files
+        .par_iter()
+        .map(|f| std::fs::canonicalize(f).or_else(|_| std::path::absolute(f)).unwrap_or_else(|_| f.clone()))
+        .collect()
+}
+
 fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, f) in files.iter().enumerate() {
@@ -313,12 +331,65 @@ fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
     for (h, i) in hashed {
         by_hash.entry(h).or_default().push(i);
     }
-    let mut out: Vec<Vec<usize>> = by_hash.into_values().filter(|v| v.len() > 1).collect();
-    for g in out.iter_mut() {
-        g.sort_unstable();
-    }
+    // A shared hash is a reason to compare, not a verdict. FNV is no defence
+    // against a file made to collide — new bytes enter only the low half of
+    // its state, so two files differing in a word and the word after it can
+    // be made to agree, and two pictures differing in twelve thousand bytes
+    // were reported `identical` — and "identical" is the one claim a person
+    // acts on without looking. So the files of a hash group are compared byte
+    // for byte, each against the first of every class found so far. They are
+    // all one size, nearly every group is a pair, and the page cache has just
+    // seen them.
+    let mut out: Vec<Vec<usize>> = by_hash
+        .into_values()
+        .filter(|v| v.len() > 1)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .flat_map_iter(|mut group| {
+            group.sort_unstable();
+            let mut classes: Vec<Vec<usize>> = Vec::new();
+            for i in group {
+                match classes.iter_mut().find(|c| same_bytes(&files[c[0]], &files[i]) == Some(true)) {
+                    Some(c) => c.push(i),
+                    None => classes.push(vec![i]),
+                }
+            }
+            classes.into_iter().filter(|c| c.len() > 1)
+        })
+        .collect();
     out.sort();
     out
+}
+
+/// Whether two files hold the same bytes, read a piece at a time; `None` if
+/// either could not be read.
+fn same_bytes(a: &Path, b: &Path) -> Option<bool> {
+    same_stream(std::fs::File::open(a).ok()?, std::fs::File::open(b).ok()?, 1 << 20)
+}
+
+fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usize) -> Option<bool> {
+    let fill = |r: &mut dyn std::io::Read, buf: &mut [u8]| -> Option<usize> {
+        let mut got = 0;
+        while got < buf.len() {
+            match r.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(k) => got += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
+        }
+        Some(got)
+    };
+    let (mut x, mut y) = (vec![0u8; piece], vec![0u8; piece]);
+    loop {
+        let (n, m) = (fill(&mut a, &mut x)?, fill(&mut b, &mut y)?);
+        if n != m || x[..n] != y[..m] {
+            return Some(false);
+        }
+        if n < piece {
+            return Some(true);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- per image
@@ -390,12 +461,6 @@ fn direct_edge(d: &Direct) -> (usize, usize, Affine, bool, Verdict) {
 /// costs nothing measurable, and a few megabytes of verdicts, so a slice's
 /// own collect is no transient worth the name.
 const VERIFY_SLICE: usize = 1 << 16;
-
-/// The largest component propagation works inside. A round tests every
-/// unmatched pair in a component, which is quadratic in it: two thousand files
-/// are two million pixel checks a round, about a minute of CPU, and
-/// the cost goes up fourfold with every doubling after that.
-const PROPAGATE_MAX_COMPONENT: usize = 2000;
 
 static T_DECODE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static T_SIFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -988,13 +1053,16 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     };
     // The cache is keyed on the paths themselves, not on their printable
     // form: two names that are not UTF-8 can print the same and be two files.
+    // And on each file's canonical path, not the one this run spells; see
+    // `cache_names`.
+    let names: Vec<PathBuf> = if cache_path.is_some() { cache_names(&files) } else { Vec::new() };
     let (mut cached, mut store) = match &cache_path {
         Some(p) => {
             progress.begin(Stage::CacheRead);
             // Only this run's paths are unpacked; the rest of the machine's
             // cache is read for where it is, not for what it says. See
             // `cache::open`.
-            let walked: std::collections::HashSet<&Path> = files.iter().map(|p| p.as_path()).collect();
+            let walked: std::collections::HashSet<&Path> = names.iter().map(|p| p.as_path()).collect();
             let (cached, store) = cache::open(p, settings, &|path| walked.contains(path), problems);
             (cached, Some(store))
         }
@@ -1021,11 +1089,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let mine: Vec<Option<(cache::Record, cache::Span)>> = files
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            let got = cached.remove(name)?;
+        .map(|(i, _)| {
+            let got = cached.remove(names.get(i)?)?;
             in_cache += 1;
             let k = cache::key_of(&files[i])?;
-            if got.0.len != k.len || got.0.mtime != k.mtime {
+            if got.0 != k {
                 return None;
             }
             same_key += 1;
@@ -1113,7 +1181,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         if !it.ok {
             return None;
         }
-        s.append(&files[i], key, &it.feats, &it.thumb)
+        s.append(&names[i], key, &it.feats, &it.thumb)
     };
     let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
         .into_par_iter()
@@ -1194,7 +1262,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             problems.cache(format!("could not write {}: {e}", p.display()));
         }
         let mut entries: Vec<(&Path, cache::Span)> =
-            (0..n).filter(|&i| items[i].ok).filter_map(|i| Some((files[i].as_path(), span_of[i]?))).collect();
+            (0..n).filter(|&i| items[i].ok).filter_map(|i| Some((names[i].as_path(), span_of[i]?))).collect();
         // What the cache already knew about images this run never walked —
         // which, every walked file's record having been taken out of the map
         // above, is everything still in it. The cache is one file for the
@@ -1451,6 +1519,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             .collect();
         all_direct.extend(part);
     }
+    // What a round of propagation may spend: one composed hypothesis for each
+    // candidate the direct pass verified. See `propagate`.
+    let prop_budget = cand_pairs.len();
     // Every candidate has its verdict now, and the second look below is where
     // a found corpus's run peaks: a million pairs held through it for nothing.
     drop(cand_pairs);
@@ -1695,16 +1766,21 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // again. Components never merge here, since a composed pair joins two
     // files already in one.
     let mut dirty: Option<Vec<bool>> = None;
+    let (mut proposed_total, mut starred_said) = (0usize, false);
     for round in 0..PROPAGATE_MAX_ROUNDS {
-        let (round_all, too_large) = timed!(21, propagate(&items, &pool, n, prop_min_ov, dirty.as_deref()));
-        // Said once, and on the console: pairs inside such a component rest on
-        // direct matches alone, and propagation is most of the tool's recall.
-        if round == 0 && !too_large.is_empty() {
-            let files: usize = too_large.iter().sum();
+        let Propagation { found: round_all, starred, proposed } =
+            timed!(21, propagate(&items, &pool, n, prop_min_ov, dirty.as_deref(), prop_budget));
+        proposed_total += proposed;
+        // Said on the console, once per run: pairs between two members of such
+        // a cluster that direct matching missed are not looked for, and
+        // propagation is most of the tool's recall.
+        if !starred.is_empty() && !starred_said {
+            starred_said = true;
+            let files: usize = starred.iter().sum();
             say!(
-                "Note: {} cluster(s) of more than {PROPAGATE_MAX_COMPONENT} files ({files} files in all) are too large to \
-                 propagate matches inside; pairs within them come from direct matches only.",
-                too_large.len()
+                "Note: {} cluster(s) ({files} files in all) are too large to compare every pair inside; their files \
+                 were compared with the cluster's best-connected file.",
+                starred.len()
             );
         }
         let before = propagated.len();
@@ -1743,7 +1819,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
     }
 
-    stage!(t_start, "propagated: {} of {} composed hypotheses", propagated.len(), hypotheses.len());
+    stage!(
+        t_start,
+        "propagated: {} of {} composed hypotheses ({proposed_total} put to the pixels, budget {prop_budget} a round)",
+        propagated.len(),
+        hypotheses.len()
+    );
     drop(hypotheses);
     drop(row_of);
 
@@ -2311,6 +2392,17 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
     edges.into_iter().enumerate().filter(|(e, _)| !drop[*e]).map(|(_, x)| x).collect()
 }
 
+/// What a round of propagation proposed, and how.
+struct Propagation {
+    /// Every composed hypothesis that cleared the overlap floor, verdict and all.
+    found: Vec<(usize, usize, Affine, bool, Verdict)>,
+    /// The sizes of the components the round could not afford to compare pair
+    /// by pair, and compared with their root alone; see `propagate`.
+    starred: Vec<usize>,
+    /// Composed hypotheses put to the pixels.
+    proposed: usize,
+}
+
 /// Within each connected component, test the pairs direct matching missed by
 /// composing transforms along the edges that were found.
 ///
@@ -2321,9 +2413,31 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
 /// the only question is whether the pixels agree — which is cheap to answer
 /// and wrong to assume.
 ///
-/// Also returns the sizes of the components skipped for being larger than
-/// `PROPAGATE_MAX_COMPONENT`, so that the run can say so.
-#[allow(clippy::type_complexity)]
+/// **What a round may spend is `budget` hypotheses**, and the caller makes that
+/// the number of candidate pairs the direct pass verified. Every pair inside a
+/// component is quadratic in it, and everything else in a run is linear in
+/// files times `-k`; a budget in those units keeps propagation the same order
+/// of cost as the matching it extends, whatever one family's size. Components
+/// are taken cheapest first, so small families — nearly all of them — are
+/// never touched by it, and one that does not fit is not skipped but
+/// **starred**: each of its files is compared with the root alone, which is
+/// linear in the component. That is what a group is anyway — a
+/// representative and what matched it, and the root is the best-connected
+/// file, which is what `group::find` elects — so a starred family still comes
+/// out as one group; what it gives up is the pairs between two non-root
+/// members that direct matching missed.
+///
+/// It replaces a cap of two thousand files, in the first commit and never
+/// derived, past which a component was not propagated at all. A family of
+/// 2,100 variants of one photograph came out at a tenth of its pairs and as 26
+/// overlapping groups, where 2,000 would have had every pair.
+///
+/// **The work is spread by row, not by component.** A component used to be one
+/// task, so one large family ran on one thread while the rest sat idle — the
+/// same 2,100 files took 76 CPU-seconds in 70 seconds of wall. A unit of work
+/// is now one row of a component's pair triangle, or one pair of a star, and
+/// the units come back in component order and row order, which is the order
+/// the per-component loop produced them in.
 ///
 /// `dirty`, when given, limits the work to the components holding a file it
 /// marks; see the round loop in `run`.
@@ -2333,7 +2447,8 @@ fn propagate(
     n: usize,
     min_ov: f32,
     dirty: Option<&[bool]>,
-) -> (Vec<(usize, usize, Affine, bool, Verdict)>, Vec<usize>) {
+    budget: usize,
+) -> Propagation {
     let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); n];
     for (a, b, m, inv, v) in edges.iter() {
         adj[*a].push((*b, *m, *inv, v.n_in));
@@ -2353,82 +2468,119 @@ fn propagate(
     }
     let known: std::collections::HashSet<(usize, usize)> =
         edges.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
+    // Pairs each component already holds, so that what a component would cost
+    // is the pairs it would actually propose.
+    let mut inside: HashMap<usize, usize> = HashMap::new();
+    for &(a, _) in known.iter() {
+        *inside.entry(dsu.find(a)).or_default() += 1;
+    }
 
-    let too_large: Vec<usize> = comps.values().map(|c| c.len()).filter(|&l| l > PROPAGATE_MAX_COMPONENT).collect();
-    let comps: Vec<Vec<usize>> = comps
-        .into_values()
-        .filter(|c| c.len() > 2 && c.len() <= PROPAGATE_MAX_COMPONENT)
-        .filter(|c| dirty.is_none_or(|d| c.iter().any(|&i| d[i])))
-        .map(|mut c| {
+    // Cheapest first, ties to the lowest file, so the plan does not depend on
+    // the order a hash map hands the components over in.
+    let mut costed: Vec<(usize, Vec<usize>)> = comps
+        .into_iter()
+        .filter(|(_, c)| c.len() > 2)
+        .filter(|(_, c)| dirty.is_none_or(|d| c.iter().any(|&i| d[i])))
+        .map(|(r, mut c)| {
             c.sort_unstable();
-            c
+            let k = c.len();
+            (k * (k - 1) / 2 - inside.get(&r).copied().unwrap_or(0).min(k * (k - 1) / 2), c)
+        })
+        .collect();
+    costed.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1[0].cmp(&y.1[0])));
+    let mut spent = 0usize;
+    let mut starred = Vec::new();
+    let plan: Vec<(Vec<usize>, bool)> = costed
+        .into_iter()
+        .map(|(cost, c)| {
+            let every_pair = spent + cost <= budget;
+            if every_pair {
+                spent += cost;
+            } else {
+                starred.push(c.len());
+            }
+            (c, every_pair)
         })
         .collect();
 
-    let found = comps
+    // Pose of every member relative to its component's root, by position in
+    // the component.
+    //
+    // Breadth-first, from the best-connected member. Every hop composes
+    // another transform and carries its error into the result, so the thing
+    // to minimise is the number of hops, not the quality of each one: growing
+    // the tree best-edge-first was tried and is measurably worse, because it
+    // trades short paths for slightly better links and ends up composing more
+    // of them. The root is the file most others matched, which is usually the
+    // original or a clean re-encode of it.
+    let posed: Vec<(usize, Vec<Option<(Affine, bool)>>)> = plan
         .par_iter()
-        .flat_map(|comp| {
-            // Pose of every member relative to the component's root.
-            //
-            // Breadth-first, from the best-connected member. Every hop
-            // composes another transform and carries its error into the
-            // result, so the thing to minimise is the number of hops, not the
-            // quality of each one: growing the tree best-edge-first was tried
-            // and is measurably worse, because it trades short paths for
-            // slightly better links and ends up composing more of them. The
-            // root is the file most others matched, which is usually the
-            // original or a clean re-encode of it.
-            let root = *comp
-                .iter()
-                .max_by_key(|&&i| (adj[i].len(), std::cmp::Reverse(i)))
-                .unwrap();
-            let mut pose: HashMap<usize, (Affine, bool)> = HashMap::new();
-            pose.insert(root, ([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], false));
+        .map(|(comp, _)| {
+            let root = *comp.iter().max_by_key(|&&i| (adj[i].len(), std::cmp::Reverse(i))).unwrap();
+            let at = |v: usize| comp.binary_search(&v).ok();
+            let mut pose: Vec<Option<(Affine, bool)>> = vec![None; comp.len()];
+            pose[at(root).unwrap()] = Some(([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], false));
             let mut queue = std::collections::VecDeque::from([root]);
             while let Some(u) = queue.pop_front() {
-                let (mu, iu) = pose[&u];
+                let (mu, iu) = pose[at(u).unwrap()].unwrap();
                 for &(v, m, inv, _) in adj[u].iter() {
-                    if pose.contains_key(&v) {
+                    let Some(pv) = at(v) else { continue };
+                    if pose[pv].is_some() {
                         continue;
                     }
-                    pose.insert(v, (verify::compose(&mu, &m), iu ^ inv));
+                    pose[pv] = Some((verify::compose(&mu, &m), iu ^ inv));
                     queue.push_back(v);
                 }
             }
+            (root, pose)
+        })
+        .collect();
+
+    // One unit per row of a component pair by pair, one per member of a star.
+    let units: Vec<(u32, u32)> =
+        plan.iter().enumerate().flat_map(|(ci, (c, _))| (0..c.len() as u32).map(move |ai| (ci as u32, ai))).collect();
+    // `a -> root -> b`, put to the pixels, and kept against the floor the
+    // caller asked for — the propagated tier's own, or a dump's lower one —
+    // and no other. This used to be a fixed 0.5, which quietly overruled a
+    // `--min-frame-overlap` below it for every composed pair, and threw away
+    // the dump's hypotheses between 0.2 and 0.5.
+    let test = |comp: &[usize], pose: &[Option<(Affine, bool)>], x: usize, y: usize| {
+        let (a, b) = (comp[x], comp[y]);
+        let ((ma, ia), (mb, ib)) = (pose[x]?, pose[y]?);
+        let m = verify::compose(&verify::invert_affine(&ma)?, &mb);
+        let var = Variant { mirror: false, invert: ia ^ ib };
+        let p = verify::Pair { fa: &items[a].feats, fb: &items[b].feats, ta: &items[a].thumb, tb: &items[b].thumb };
+        let v = verify::verify_transform(&p, &m, var, min_ov);
+        (v.ov_a.max(v.ov_b) >= min_ov).then_some((a, b, m, var.invert, v))
+    };
+    let proposed = AtomicUsize::new(0);
+    let found = units
+        .par_iter()
+        .flat_map_iter(|&(ci, x)| {
+            let ((comp, every_pair), (root, pose)) = (&plan[ci as usize], &posed[ci as usize]);
+            let x = x as usize;
             let mut out = Vec::new();
-            for (ai, &a) in comp.iter().enumerate() {
-                let Some(&(ma, ia)) = pose.get(&a) else { continue };
-                let Some(inv_ma) = verify::invert_affine(&ma) else { continue };
-                for &b in comp[ai + 1..].iter() {
-                    if known.contains(&(a, b)) {
-                        continue;
-                    }
-                    let Some(&(mb, ib)) = pose.get(&b) else { continue };
-                    // a -> root -> b
-                    let m = verify::compose(&inv_ma, &mb);
-                    let var = Variant { mirror: false, invert: ia ^ ib };
-                    let p = verify::Pair {
-                        fa: &items[a].feats,
-                        fb: &items[b].feats,
-                        ta: &items[a].thumb,
-                        tb: &items[b].thumb,
-                    };
-                    let v = verify::verify_transform(&p, &m, var, min_ov);
-                    // Kept against the floor the caller asked for — the
-                    // propagated tier's own, or a dump's lower one — and no
-                    // other. This used to be a fixed 0.5, which quietly
-                    // overruled a `--min-frame-overlap` below it for every
-                    // composed pair, and threw away the dump's hypotheses
-                    // between 0.2 and 0.5.
-                    if v.ov_a.max(v.ov_b) >= min_ov {
-                        out.push((a, b, m, var.invert, v));
+            let mut asked = 0;
+            if *every_pair {
+                for y in x + 1..comp.len() {
+                    if !known.contains(&(comp[x], comp[y])) {
+                        asked += 1;
+                        out.extend(test(comp, pose, x, y));
                     }
                 }
+            } else if comp[x] != *root {
+                let r = comp.binary_search(root).unwrap();
+                let (lo, hi) = (x.min(r), x.max(r));
+                if !known.contains(&(comp[lo], comp[hi])) {
+                    asked += 1;
+                    out.extend(test(comp, pose, lo, hi));
+                }
             }
+            proposed.fetch_add(asked, Ordering::Relaxed);
             out
         })
         .collect();
-    (found, too_large)
+    Propagation { found, starred, proposed: proposed.into_inner() }
 }
 
 #[cfg(test)]
@@ -2621,6 +2773,34 @@ mod tests {
         assert_eq!(hash_reader(Trickle(&data), 16), Some(whole(&data)));
     }
 
+    /// Files sharing a hash are grouped only when their bytes agree. The two
+    /// streams here are built to collide under the hash — a change in bits
+    /// 40 to 55 of one word, cancelled by the next — and are not identical.
+    #[test]
+    fn a_hash_collision_is_not_an_identical_pair() {
+        let a: Vec<u8> = (0..64u32).map(|i| (i * 37 % 251) as u8).collect();
+        let mut b = a.clone();
+        // The state before word 2, by the same arithmetic as `hash_reader`.
+        let mut h: u128 = 0x6c62272e07bb0142_62b821756295c58d;
+        let p: u128 = 0x0000000001000000_000000000000013B;
+        let word = |d: &[u8], k: usize| u64::from_le_bytes(d[k * 8..k * 8 + 8].try_into().unwrap());
+        for k in 0..2 {
+            h = (h ^ word(&a, k) as u128).wrapping_mul(p);
+        }
+        let wa = word(&a, 2);
+        let wb = wa ^ (0x1234u64 << 40);
+        let (ha, hb) = ((h ^ wa as u128).wrapping_mul(p), (h ^ wb as u128).wrapping_mul(p));
+        assert_eq!((ha ^ hb) >> 64, 0, "the difference stays in the low half");
+        b[16..24].copy_from_slice(&wb.to_le_bytes());
+        b[24..32].copy_from_slice(&(word(&a, 3) ^ (ha ^ hb) as u64).to_le_bytes());
+        assert_ne!(a, b);
+        assert_eq!(hash_reader(&a[..], 8), hash_reader(&b[..], 8), "a collision, as built");
+        assert_eq!(same_stream(&a[..], &b[..], 16), Some(false));
+        assert_eq!(same_stream(&a[..], &a[..], 16), Some(true));
+        assert_eq!(same_stream(&a[..], &a[..63], 16), Some(false));
+        assert_eq!(same_stream(&a[..48], &a[..48], 16), Some(true), "a length that ends on a piece");
+    }
+
     /// A lone link between two clusters is a bridge however many times the
     /// run found it. Two passes verifying the same pair used to be two links,
     /// and the bridge test then kept a match it exists to drop.
@@ -2721,19 +2901,39 @@ mod tests {
         assert_eq!((kept.len(), refused), (10, 0));
     }
 
-    /// A component propagation cannot afford is named, not passed over in
-    /// silence; one it can is not.
+    /// A round proposes every unmatched pair of a component it can afford,
+    /// cheapest component first, and compares the files of one it cannot with
+    /// the root alone — it never passes one over.
     #[test]
-    fn a_component_too_large_to_propagate_is_reported() {
+    fn a_component_over_the_budget_is_starred_not_skipped() {
         let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let star = |k: usize| (1..k).map(|b| (0, b, id, false, Verdict::default())).collect::<Vec<_>>();
-        let n = PROPAGATE_MAX_COMPONENT + 1;
+        // A chain over `files`, which leaves every pair but the links to ask.
+        let chain = |files: std::ops::Range<usize>| {
+            files.clone().skip(1).map(|b| (b - 1, b, id, false, Verdict::default())).collect::<Vec<_>>()
+        };
+        let n = 30;
         let items: Vec<Item> = (0..n).map(|_| Item::default()).collect();
-        let (found, too_large) = propagate(&items, &star(n), n, 0.85, None);
-        assert!(found.is_empty());
-        assert_eq!(too_large, vec![n]);
-        let (_, too_large) = propagate(&items, &star(3), n, 0.85, None);
-        assert!(too_large.is_empty());
+        // {0..10}: 45 pairs, 9 known, 36 to ask. {10..30}: 190 pairs, 19 known, 171.
+        let edges = [chain(0..10), chain(10..30)].concat();
+        let p = propagate(&items, &edges, n, 0.0, None, 1_000);
+        assert_eq!((p.proposed, p.found.len(), p.starred.len()), (36 + 171, 36 + 171, 0));
+        // A budget for the small one alone: the large one is starred — its
+        // root is the second file of the chain, the first of the best
+        // connected, and it is asked about the 18 files it has no link to.
+        let p = propagate(&items, &edges, n, 0.0, None, 100);
+        assert_eq!(p.starred, vec![20]);
+        assert_eq!(p.proposed, 36 + 17);
+        assert!(p.found.iter().filter(|e| e.0 >= 10).all(|e| e.0 == 11 || e.1 == 11), "a star is all through its root");
+        // No budget at all: both are starred, and still asked.
+        let p = propagate(&items, &edges, n, 0.0, None, 0);
+        assert_eq!((p.starred.len(), p.proposed), (2, 7 + 17));
+        // The order is the plan's, whatever order the work finished in.
+        let again = propagate(&items, &edges, n, 0.0, None, 1_000);
+        let pairs = |p: &Propagation| p.found.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>();
+        assert_eq!(pairs(&again), pairs(&propagate(&items, &edges, n, 0.0, None, 1_000)));
+        let mut sorted = pairs(&again);
+        sorted.sort_unstable();
+        assert_eq!(pairs(&again), sorted, "component by component, row by row");
     }
 
     /// Values the thresholds are not measured on are refused by the parser,

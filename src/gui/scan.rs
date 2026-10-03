@@ -70,8 +70,17 @@ impl Scan {
     /// it says. The channel ends with `Exited`.
     pub fn start(argv: &[OsString]) -> std::io::Result<(Scan, async_channel::Receiver<Event>)> {
         let result = result_path()?;
+        // The running binary, through `/proc/self/exe` rather than the path
+        // `current_exe` reads out of it. A package upgrade replaces the file
+        // while the window is open, and the path then reads
+        // `/usr/bin/img-fp-gui (deleted)`, which names nothing: every scan
+        // failed to start with "No such file or directory" until the window
+        // was restarted. The link itself still opens the binary this window
+        // is, which is also the worker it should run.
         let exe = std::env::current_exe()?;
-        let mut cmd = Command::new(exe);
+        let proc_exe = Path::new("/proc/self/exe");
+        let mut cmd = if proc_exe.exists() { Command::new(proc_exe) } else { Command::new(&exe) };
+        cmd.arg0(&exe);
         cmd.arg(WORKER_FLAG).arg(&result).args(argv);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         // SAFETY: `prctl` is async-signal-safe and touches nothing of the

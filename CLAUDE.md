@@ -426,6 +426,32 @@ The parts that are easy to get wrong:
   the pass is now unconditional. To re-measure it, put the `if`
   back around the propagation loop in `main.rs`; that is a two-line edit and a
   rebuild, and it is the right price for something no run should be doing.
+  **What a round may spend is a budget, not a cap on component size.** A
+  round proposes every unmatched pair of a component, which is quadratic in
+  it; until now a component over 2,000 files — a literal in the first commit,
+  never derived — was not propagated at all. Measured on 2,100 variants of one
+  photograph, that was 218,256 pairs and 26 overlapping groups for one
+  picture, where the uncapped run gave 2,104,842 pairs and one group. Now a
+  round may put as many composed pairs to the pixels as the direct pass
+  verified candidates (`prop_budget`), which keeps propagation in the units
+  everything else costs, files times `-k`. Components are taken cheapest
+  first, and one that does not fit is **starred**: each file is compared with
+  the root alone, linear in the component, and since the root is the best-
+  connected file it is the one `group::find` elects — the 2,100 come out as
+  one group, 219,979 pairs, in 7.8 s. What a star gives up is the pairs
+  between two non-root members that direct matching missed, which no group
+  shows. On IMGS the budget is 586,329 a round against 81,737 proposed over
+  all rounds, and the output is pair-for-pair identical. Where it binds is a
+  folder that is mostly one family of more than a few hundred files: a
+  family needs about `F^2/2` checks against a budget near `F * k`.
+
+  **And the work is spread by row, not by component.** A component was one
+  task, so a large family ran on one thread: the 2,100 took 76 CPU-seconds in
+  70 s of wall. A unit is now one row of a component's pair triangle (or one
+  pair of a star), and units come back in plan order, so a component's pairs
+  are in the order its own loop made them. IMGS plus 1,000 variants of one of
+  its seeds, cached, cooled: round 1 16.6 s -> 4.9 s of wall, the run 31.0 ->
+  19.4 s, pair-for-pair identical (785,537 pairs).
 - **Three acceptance tests** (`verify::Policy`): `anchor` decides clustering,
   `propagated` judges composed transforms on pixels alone, `corroborated`
   applies only inside an existing cluster. Collapsing them into one threshold
@@ -456,7 +482,9 @@ The parts that are easy to get wrong:
   verified against the file at its head, and nothing else is claimed. The
   representative is chosen greedily — the file still accounting for the most
   ungrouped files, ties to the lowest index — which is a statement rather than
-  a threshold, and it is the file to keep.
+  a threshold. It is **not** the file to keep: measured on IMGS it is the
+  pristine original in 33 of 62 families, and the README says as much to
+  users ("don't interpret the representative as the source image").
 
   **The measurements that chose it**, all by re-grouping `out/v9`'s pairs:
 
@@ -626,6 +654,16 @@ The parts that are easy to get wrong:
   together, one pair: 284.7 -> 283.3 s, 1,738 -> 1,732 CPU-s, 1,893 MB both.
   So level on time everywhere, and 40-80 MB more peak where a corpus is large
   enough for the sample to grow.
+- **"Identical" is a byte comparison, not a hash.** `exact_groups` hashes
+  same-size files and then compares each hash group byte for byte. The hash
+  alone was FNV-1a over 64-bit words into a 128-bit state, where new bytes
+  enter only the low half: a change in bits 40-55 of one word leaves a
+  difference the next word can cancel, so collisions are built in two words.
+  Two 256x256 PGMs differing in 12,145 bytes were reported `identical`, and the
+  window would have offered one for the Trash (`a_hash_collision_is_not_an_
+  identical_pair` builds one). The comparison re-reads only files that share a
+  hash, which are the duplicates, and `derived/Desktop` is pair-for-pair the
+  same either way.
 - **Byte-identical copies are matched through their original, not beside
   it.** Each exact group elects one member (one the cache already holds, if
   any) and everything from the vocabulary to corroboration runs over the
@@ -2855,6 +2893,13 @@ colour `decode::preview`, which only the window calls).
   `PR_SET_PDEATHSIG` makes a dying window take the worker with it (checked
   with SIGKILL). It fires on the death of the *thread* that spawned, which
   is the GTK main thread; keep spawning there.
+  **It runs `/proc/self/exe`, not `current_exe()`.** A package upgrade
+  renames a new binary over the open one, and `current_exe()` then reads
+  `…/img-fp-gui (deleted)`: every scan failed with "No such file or
+  directory" until the window was restarted (reproduced on Xvfb). A worker
+  ended by SIGKILL is "did not answer the cancel" only when Cancel was
+  pressed; otherwise it is named as killed, since the OOM killer sends the
+  same signal and was being reported as the user's own cancel.
 - **The GTK base follows the desktop's text colour** (`follow_dark_text`).
   A plain GTK 4 app gets GTK's light default plus the user's
   `~/.config/gtk-4.0/gtk.css`, and desktops that theme libadwaita put a whole
@@ -2898,7 +2943,8 @@ colour `decode::preview`, which only the window calls).
   renderer loads Mesa's libLLVM: idle PSS 100 MB against 73 MB.
 - **Thumbnails are decoded again, in colour**, on two threads at most, only
   for the group on screen (a group change drops the queue) plus the next
-  group's first 16; 160 textures are kept.
+  group's first 16; textures are kept to a 96 MB budget (`KEEP_BYTES`), by
+  bytes rather than by count, since one large view outweighs sixty cards.
 - **Arrow keys on the cards are handled by hand** (`Results::move_to`):
   GtkFlowBox moves its cursor only after a click or Tab has set it, and not
   after `grab_focus` from code, which is how the page hands it the keyboard.
@@ -3030,7 +3076,15 @@ an image format or has none, as in `vid-fp` (the one thing that can hide a
 photograph — a JPEG named `.txt` is passed over without being sniffed); under
 a wildcard `-x`, a file whose bytes are no picture and whose name never said
 they were (it is also dropped from the exact groups, so two copies of a README
-are not a pair);
+are not a pair). "No picture" includes text that merely starts like one:
+`BM`, `P1`-`P7`, `00 00 01 00` and `GIF8` are two to four bytes, so
+"BMW service record" was a broken BMP, a problem and exit 2, and two copies
+of it a byte-identical *image*. `decode::plausible` now asks the bytes after
+such a signature the first question that format's own decoder asks (BMP's DIB
+header size, PNM's digit after whitespace and comments, PAM's field name,
+ICO's entry count and planes, GIF's version), so nothing a decoder can read is
+turned away, and `unmarked_format` no longer lets `guess_format` take those
+bytes back;
 a symlink met during a walk without `--follow-symlinks` (a path *named* on the
 command line is still followed), a followed link looping back into a folder
 already being walked, a root `--exclude` covers, and a second name for a file
@@ -3261,6 +3315,23 @@ keeping** — they are what stops the next attempt:
   from `Keypoint` itself a cached keypoint and a computed one differ in
   nothing. The extractor keeps the response beside its candidates for as
   long as it ranks them. The cache went to `IMGFPC06` with it.
+
+**A record is kept under the file's canonical path, and its key includes
+the change time** (`IMGFPC07`). Both were found by running, not by reading:
+
+- Keyed on the path as the walk spelled it, one folder scanned as `photos`,
+  `./photos` and its absolute path was analysed three times and held a record
+  per spelling, and a relative record was carried over or dropped according to
+  the directory the next run started in, since `carry_over` asks whether the
+  path exists. The window names folders absolutely, so it never shared a
+  record with `img-fp .`. `lib::cache_names` canonicalizes each walked file
+  for the cache alone; the report still spells paths as the run was given them.
+- Keyed on size and mtime, a file rewritten with a different picture of the
+  same size and its mtime put back (`cp -p`, `rsync -a`, `touch -r`,
+  `exiftool -P`) kept its old record, and the cached run reported a pair at
+  correlation 1.00 that `--no-cache` did not. ctime cannot be set back from
+  userspace. The price is a re-analysis after a chmod, rename or new hard
+  link, and of every file after a backup restore.
 
 Concurrent runs are last-writer-wins: the loser's records are lost and nothing
 is corrupted, because the temporary file a save renames into place carries the

@@ -6,8 +6,8 @@
 //! stages practical.
 //!
 //! The format is a header holding the settings, then one record per file. A
-//! record is keyed by path, size and modification time, so an edited file is
-//! re-described rather than trusted. Settings live in the header, so changing
+//! record is keyed by canonical path, size, modification time and change
+//! time, so an edited file is re-described rather than trusted. Settings live in the header, so changing
 //! the working size or the feature budget invalidates the whole file rather
 //! than silently mixing two kinds of record.
 //!
@@ -85,7 +85,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// (`lib::enlarge_below`), which changes every record below 512.
 /// 06: a keypoint is four fields, not five: the extractor's `response`, which
 /// nothing after extraction reads, is no longer kept on it.
-const MAGIC: &[u8; 8] = b"IMGFPC06";
+/// 07: a record's key carries the file's change time (see `Key`), and its path
+/// is the file's canonical one, so that a folder named two ways is one set of
+/// records (see `lib::cache_names`).
+const MAGIC: &[u8; 8] = b"IMGFPC07";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the
@@ -118,10 +121,23 @@ pub type Entry = (Key, Option<Record>, Span);
 /// Which paths this run walks, asked of every record as it is read.
 pub type Walked<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
 
-#[derive(Clone, Copy)]
+/// What says a file is still the file a record describes: its size, its
+/// modification time and its change time, in nanoseconds.
+///
+/// **The change time is the one that cannot be put back.** Size and mtime
+/// are both under the user's control — `cp -p`, `rsync -a`, `touch -r` and
+/// `exiftool -P` all restore a modification time — so a file rewritten with a
+/// different picture of the same size kept its record, and two files that
+/// were no longer anything alike were reported as a duplicate at correlation
+/// 1.00. The kernel sets ctime on every write, rename and chmod, and nothing
+/// in userspace sets it back. What it costs is a re-analysis after a chmod, a
+/// rename or a new hard link, and every record after a backup restore: a few
+/// milliseconds an image, against reporting a pair that is not there.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Key {
     pub len: u64,
     pub mtime: i64,
+    pub ctime: i64,
 }
 
 /// The default cache is one file in one directory, named the way `vid-fp`
@@ -176,9 +192,11 @@ pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<
 }
 
 pub fn key_of(path: &Path) -> Option<Key> {
+    use std::os::unix::fs::MetadataExt;
     let md = std::fs::metadata(path).ok()?;
     let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as i64;
-    Some(Key { len: md.len(), mtime })
+    let ctime = md.ctime().checked_mul(1_000_000_000)?.checked_add(md.ctime_nsec())?;
+    Some(Key { len: md.len(), mtime, ctime })
 }
 
 // ------------------------------------------------------------ packing
@@ -369,6 +387,7 @@ fn record(path: &Path, k: Key, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     b.bytes(path)?;
     b.u64(k.len)?;
     b.i64(k.mtime)?;
+    b.i64(k.ctime)?;
     b.u32(f.w)?;
     b.u32(f.h)?;
     b.u32(f.kps.len() as u32)?;
@@ -836,7 +855,7 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     }
     r.need(len as u64)?;
     let path = PathBuf::from(OsString::from_vec(r.take(len)?));
-    let key = Key { len: r.u64()?, mtime: r.i64()? };
+    let key = Key { len: r.u64()?, mtime: r.i64()?, ctime: r.i64()? };
     let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
     let (tw, th) = (r.u32()?, r.u32()?);
     let scale = r.f32()?;
@@ -1085,7 +1104,7 @@ mod tests {
         let gone = dir.join("gone.jpg");
 
         let record = || (
-            Key { len: 1, mtime: 2 },
+            Key { len: 1, mtime: 2, ctime: 2 },
             None,
             Span { at: 0, len: 0 },
         );
@@ -1133,9 +1152,9 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3 }, &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, &f2, &t2).unwrap();
         drop(store);
         let (all, _, _) = reopen(&path);
 
@@ -1160,9 +1179,9 @@ mod tests {
         assert!(got.is_empty() && !bad);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2 }, &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 3, mtime: 3 }, &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, &f2, &t2).unwrap();
         assert_eq!(store.records(), 3);
         drop(store);
 
@@ -1187,9 +1206,9 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 2, mtime: 2 }, &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3 }, &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, &f1, &t1).unwrap();
         drop(store);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         let (got, store, bad) = reopen(&path);
@@ -1210,8 +1229,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
         drop(store);
         for cut in [1, 9, b.len / 2, b.len - 1] {
             let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1221,7 +1240,7 @@ mod tests {
             assert!(!bad, "a torn tail is not a damaged cache");
             assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
-            store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+            store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
             drop(store);
             let (got, _, bad) = reopen(&path);
             assert!(!bad && got.len() == 2);
@@ -1232,7 +1251,7 @@ mod tests {
     /// Where a record's packed length sits: after its path, the key, and the
     /// six fields of its shape.
     fn packed_len_at(s: Span, path: &str) -> u64 {
-        s.at + 8 + path.len() as u64 + 16 + 6 * 4
+        s.at + 8 + path.len() as u64 + 24 + 6 * 4
     }
 
     /// A length damaged into something the file cannot hold is a torn tail,
@@ -1245,9 +1264,9 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        store.append("c.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
@@ -1267,8 +1286,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
         drop(store);
         // A path length past `MAX_PATH` but inside the file's size.
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1289,17 +1308,17 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(40, 3);
-        store.append("other/x.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        store.append("a.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
-        let shape = store.append("c.jpg", Key { len: 1, mtime: 1 }, &f, &t).unwrap();
+        store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
+        let shape = store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         // b's first stream: its length is intact, its deflate is not.
         let body = packed_len_at(b, "b.jpg") + 8 + 8;
         file.write_all_at(&[0xff; 24], body).unwrap();
         // c claims more keypoints than a run of these settings describes.
-        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 16 + 8).unwrap();
+        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 24 + 8).unwrap();
         drop(file);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
@@ -1323,7 +1342,7 @@ mod tests {
         let (f, t) = analysis(6, 4);
         let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
             .iter()
-            .map(|p| store.append(p, Key { len: 7, mtime: 7 }, &f, &t).unwrap())
+            .map(|p| store.append(p, Key { len: 7, mtime: 7, ctime: 7 }, &f, &t).unwrap())
             .collect();
         let mut store = store;
         let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
@@ -1361,8 +1380,8 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append(&fe, Key { len: 1, mtime: 1 }, &f1, &t1).unwrap();
-        store.append(&ff, Key { len: 1, mtime: 1 }, &f2, &t2).unwrap();
+        store.append(&fe, Key { len: 1, mtime: 1, ctime: 1 }, &f1, &t1).unwrap();
+        store.append(&ff, Key { len: 1, mtime: 1, ctime: 1 }, &f2, &t2).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad);
