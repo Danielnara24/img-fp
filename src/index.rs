@@ -1418,7 +1418,21 @@ fn prefetch_postings(inv: &InvertedFile, wl: &WordList, at: usize) {
 
 impl InvertedFile {
 
-    pub fn build(lists: &[WordList], n_words: usize, max_posting: usize) -> InvertedFile {
+    /// Every word any image holds is indexed, however common.
+    ///
+    /// There used to be a cap: a word in more than a fifth of the corpus (or
+    /// 32 images, whichever was more) was left out, as carrying no information
+    /// and costing the most to walk. It was in the first commit and never
+    /// measured, and measured it does nothing a run can see. On the benchmark
+    /// corpus and the found one no word reaches a fifth of the images at all,
+    /// so the index, the candidates and every pair are the same with it or
+    /// without it, and the clock is level. It binds only in a folder that is
+    /// mostly one picture — one family and two hundred other files; five
+    /// hundred variants of one photograph — and there it moved the anchors by
+    /// a percent and the pairs by a percent or nothing, either way round, at
+    /// the same cost. A common word weighs little in a score already, through
+    /// its idf; the cap only said so a second time.
+    pub fn build(lists: &[WordList], n_words: usize) -> InvertedFile {
         let n = lists.len();
         // The documents a word's rarity is measured against: the images that
         // have words at all. An image that would not decode, one that
@@ -1441,10 +1455,7 @@ impl InvertedFile {
         for w in 0..n_words {
             off.push(total);
             let d = df[w] as usize;
-            // A word in a large fraction of the corpus carries no information
-            // and costs the most to traverse; dropping it is both faster and
-            // more accurate.
-            if d == 0 || d > max_posting {
+            if d == 0 {
                 continue;
             }
             idf[w] = (docs as f32 / d as f32).ln();
@@ -1484,9 +1495,9 @@ impl InvertedFile {
     ///
     /// The fast loop finds the images a query touched by their scores being
     /// non-zero, which is right whenever every word weighs something. A word
-    /// in every image of the corpus weighs ln 1 = 0, and it can be indexed
-    /// only when the posting cap is at least the corpus — a folder of 32
-    /// images or fewer. There an image can be touched and score nothing, and
+    /// in every image of the corpus weighs ln 1 = 0, which happens in a small
+    /// folder and in one that is all one picture, and nowhere in a library of
+    /// different photographs. There an image can be touched and score nothing, and
     /// the old loop listed it (once per such posting, until it scored) and the
     /// mirrored pass went on to verify it. A handful of images is no place to
     /// be fast, so it is simply the old loop, over the packed postings.
@@ -2032,7 +2043,7 @@ mod tests {
     /// inner loop lost its tests: every posting a pair, the query image
     /// skipped, the touched images listed as they were first reached. Kept as
     /// the reference `query` is checked against.
-    fn query_reference(lists: &[WordList], max_posting: usize, wl: &WordList, exclude: u32) -> Vec<(u32, f32)> {
+    fn query_reference(lists: &[WordList], wl: &WordList, exclude: u32) -> Vec<(u32, f32)> {
         let n = lists.len();
         let top = |l: &WordList| (0..l.len()).map(|i| l.word(i) as usize + 1).max().unwrap_or(0);
         let n_words = lists.iter().map(top).max().unwrap_or(0).max(top(wl));
@@ -2050,7 +2061,7 @@ mod tests {
         for (w, c) in wl.runs() {
             let w = w as usize;
             let d = df[w];
-            if d == 0 || d > max_posting {
+            if d == 0 {
                 continue;
             }
             let idf = (n as f32 / d as f32).ln();
@@ -2099,22 +2110,20 @@ mod tests {
             let lists: Vec<WordList> =
                 (0..n_imgs).map(|i| made(300, span, [0, 1, 254, 255, 256, 290][i % 6])).collect();
             let n_words = span as usize;
-            for max_posting in [n_imgs, (n_imgs / 5).max(2)] {
-                let inv = InvertedFile::build(&lists, n_words, max_posting);
-                let mut acc = vec![0f32; n_imgs];
-                let mut got = Vec::new();
-                for (q, heavy) in [(0usize, 0usize), (1, 1), (2, 260), (3, 300), (4, 254)] {
-                    let wl = made(300, span, heavy);
-                    let exclude = (q % n_imgs) as u32;
-                    inv.query(&wl, exclude, &mut acc, &mut got);
-                    got.sort_by_key(|e| (e.0, e.1.to_bits()));
-                    let want = query_reference(&lists, max_posting, &wl, exclude);
-                    assert_eq!(got.len(), want.len(), "n {n_imgs} span {span} cap {max_posting} heavy {heavy}");
-                    for (g, w) in got.iter().zip(want.iter()) {
-                        assert_eq!((g.0, g.1.to_bits()), (w.0, w.1.to_bits()), "n {n_imgs} span {span} heavy {heavy}");
-                    }
-                    assert!(acc.iter().all(|&v| v == 0.0), "the accumulator is left clean");
+            let inv = InvertedFile::build(&lists, n_words);
+            let mut acc = vec![0f32; n_imgs];
+            let mut got = Vec::new();
+            for (q, heavy) in [(0usize, 0usize), (1, 1), (2, 260), (3, 300), (4, 254)] {
+                let wl = made(300, span, heavy);
+                let exclude = (q % n_imgs) as u32;
+                inv.query(&wl, exclude, &mut acc, &mut got);
+                got.sort_by_key(|e| (e.0, e.1.to_bits()));
+                let want = query_reference(&lists, &wl, exclude);
+                assert_eq!(got.len(), want.len(), "n {n_imgs} span {span} heavy {heavy}");
+                for (g, w) in got.iter().zip(want.iter()) {
+                    assert_eq!((g.0, g.1.to_bits()), (w.0, w.1.to_bits()), "n {n_imgs} span {span} heavy {heavy}");
                 }
+                assert!(acc.iter().all(|&v| v == 0.0), "the accumulator is left clean");
             }
         }
     }
@@ -2253,7 +2262,7 @@ mod bench {
                     WordList::from_sorted(&pairs)
                 })
                 .collect();
-            let inv = InvertedFile::build(&lists, words as usize, (n_imgs / 5).max(32));
+            let inv = InvertedFile::build(&lists, words as usize);
             let mut acc = vec![0f32; n_imgs];
             let mut out = Vec::new();
             let mut best = f64::MAX;

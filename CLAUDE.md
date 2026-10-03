@@ -632,6 +632,18 @@ The parts that are easy to get wrong:
   still reported are different pinned specimens, most of them propagated at
   correlation 0.60-0.79 inside a cluster. That leak is the propagated tier,
   not the clusters, and the obvious fix above costs too much.
+- **The inverted file indexes every word, however common.** Until 0.25 a word
+  in more than a fifth of the images (or 32, whichever was more) was left out,
+  a cap from the first commit that nothing derived. Measured, it never binds on
+  a real corpus: on IMGS and on the found corpus no word reaches a fifth of the
+  images, so the candidates (586,329 and 1,030,236), every pair and the clock
+  are the same with it and without it. It binds only in a folder that is mostly
+  one picture, and there it moved nothing that matters: one family plus two
+  hundred other files, identical family recall either way though the anchors
+  moved by 1.6%; five hundred re-encoded variants of one photograph, 41,756
+  pairs with the cap and 41,318 without, at the same cost (that family is
+  starred by the propagation budget either way). Removed; `InvertedFile::build`
+  has no cap argument.
 - **The vocabulary sample is derived** (`DESC_PER_SAMPLE` in `index.rs` has
   the argument): a tenth of the corpus's distinct descriptors, capped at
   1.28 M. The fixed 160,000 held the *live* words near 150,000 whatever the

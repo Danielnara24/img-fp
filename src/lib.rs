@@ -564,9 +564,10 @@ fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::P
 /// whose ascending order is exactly the comparator's — score descending, then
 /// the lower index — and comparing two of them is one instruction where the
 /// float comparator was a `partial_cmp`, an `unwrap` and a tie-break, each a
-/// branch the selection mispredicts about half the time. Every score a query
-/// hands this is positive (a touched image has at least one shared word, of
-/// idf at least ln 5); anything else takes the comparator, as before.
+/// branch the selection mispredicts about half the time. Nearly every score a
+/// query hands this is positive — a touched image shares a word, and only a
+/// word in every image weighs nothing; anything else takes the comparator, as
+/// before.
 fn rank_best(scored: &mut Vec<(u32, f32)>, k: usize) {
     let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0));
     if k == 0 {
@@ -1535,10 +1536,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .collect();
     stage!(t_start, "quantised");
 
-    // Inverted file. A word present in a fifth of the corpus says nothing.
+    // Inverted file, of every word; see `InvertedFile::build`.
     progress.begin(Stage::InvertedFile);
-    let max_posting = (n_match / 5).max(32);
-    let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words(), max_posting));
+    let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words()));
     stage!(t_start, "inverted file");
 
     let policy = verify::Policy::new(aligned_points(args), args.min_frame_overlap, args.min_pixel_correlation);
@@ -1563,9 +1563,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 timed!(41, {
                     // Every image the query touched, including one that scores
                     // nothing: that happens only when all it shares are words
-                    // in every image, which an index can hold only on a folder
-                    // of 32 or fewer (see `query_touched`) — and on a folder
-                    // of two it is every word a duplicate shares. Dropping it
+                    // in every image, which only a small folder or one that is
+                    // all one picture has (see `query_touched`) — and on a
+                    // folder of two it is every word a duplicate shares. Dropping it
                     // there found no pair at all; the second look never did.
                     scored.retain(|&(j, _)| matched[j as usize]);
                     rank_best(scored, args.candidates);
@@ -1752,7 +1752,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     if ahead.is_some() {
         vocab = None;
     }
-    let inv = (!lonely.is_empty()).then(|| timed!(13, InvertedFile::build(&lists, n_live, max_posting)));
+    let inv = (!lonely.is_empty()).then(|| timed!(13, InvertedFile::build(&lists, n_live)));
     let variant_all: Vec<(Edge, bool)> = lonely
         .par_iter()
         .enumerate()
