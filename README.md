@@ -27,9 +27,11 @@ shows each group and moves the images you choose to the Trash.
 
 ## Requirements
 
-Linux, x86_64 with AVX2 (Intel Haswell or newer, any AMD Zen), glibc 2.39 or
-newer and libheif 1.17 or newer: Ubuntu 24.04+, Debian 13+, Fedora 40+, Arch,
-openSUSE Tumbleweed and Leap 16, RHEL 10 and its rebuilds.
+Linux on x86_64, glibc 2.39 or newer and libheif 1.17 or newer: Ubuntu 24.04+,
+Debian 13+, Fedora 40+, Arch, openSUSE Tumbleweed and Leap 16, RHEL 10 and its
+rebuilds. The release binaries need a CPU with AVX2 (Intel Haswell or newer,
+any AMD Zen). Built from source, img-fp runs on any x86_64 CPU and uses AVX2
+when the CPU has it.
 
 ## Installation
 
@@ -76,10 +78,8 @@ sudo apt install libheif-dev pkg-config                  # Ubuntu, Debian
 sudo dnf install libheif-devel pkgconf-pkg-config        # Fedora, RHEL 10 (EPEL)
 sudo pacman -S libheif pkgconf                           # Arch
 sudo zypper install libheif-devel pkg-config             # openSUSE
-RUSTFLAGS="-C target-cpu=native" cargo install img-fp --locked
+cargo install img-fp --locked
 ```
-
-Without `target-cpu=native` the build uses slower portable code.
 
 ### Shell completions and man page
 
@@ -169,7 +169,7 @@ sudo apt install libgtk-4-dev libheif-dev pkg-config                # Ubuntu, De
 sudo dnf install gtk4-devel libheif-devel pkgconf-pkg-config        # Fedora, RHEL 10 (EPEL)
 sudo pacman -S gtk4 libheif pkgconf                                 # Arch
 sudo zypper install gtk4-devel libheif-devel pkg-config             # openSUSE
-RUSTFLAGS="-C target-cpu=native" cargo install img-fp --locked --features gui
+cargo install img-fp --locked --features gui
 ```
 
 To add it to the applications menu, install the desktop entry from the extras

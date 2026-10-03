@@ -49,10 +49,12 @@ jobs:
       # whatever that host happens to be (often AVX-512), and the binary would
       # die with SIGILL on older users' CPUs. RUSTFLAGS replaces the config's
       # rustflags outright. x86-64-v3 is AVX2 + FMA + BMI2 (Haswell 2013+,
-      # every Zen), which is what the `cfg(target_feature = "avx2")` kernels in
-      # index.rs and decode.rs need; below it they compile to the portable
-      # fallbacks. Job-wide so Build and Test agree and Test does not rebuild
-      # the binary with different flags.
+      # every Zen), which is what the kernels are written for; built for it,
+      # they are compiled in directly. (A build for plain x86-64, which is what
+      # `cargo install` makes, compiles them twice and picks one when it starts;
+      # see src/simd.rs. The release keeps v3 so that its code is exactly the
+      # code the benchmarks measure.) Job-wide so Build and Test agree and Test
+      # does not rebuild the binary with different flags.
       RUSTFLAGS: "-C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
@@ -93,7 +95,12 @@ jobs:
         # artifacts and target/release/img-fp is still the binary that ships.
         # The timing benches are #[ignore]d and do not run here; accuracy is
         # measured against the local corpus, which is not in the repo.
-        run: cargo test --release --locked
+        run: |
+          cargo test --release --locked
+          # The plain x86-64 build `cargo install` makes, whose x86-64-v3
+          # copies are held to its portable ones bit for bit by
+          # `the_plain_and_the_v3_copies_agree`, which only that build has.
+          RUSTFLAGS="-C target-cpu=x86-64" CARGO_TARGET_DIR=target/plain cargo test --release --locked --lib
 
       - name: Build the window
         # Only the img-fp-gui target: target/release/img-fp stays the CLI

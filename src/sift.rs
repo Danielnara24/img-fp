@@ -169,7 +169,8 @@ impl ExpTable {
 }
 
 /// OpenCV's fastAtan2: degrees in 0..360, max error ~0.3 degrees.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 pub fn fast_atan2_deg(y: f32, x: f32) -> f32 {
     const P1: f32 = 0.999_787_8 * (180.0 / std::f32::consts::PI);
     const P3: f32 = -0.325_808_4 * (180.0 / std::f32::consts::PI);
@@ -223,6 +224,7 @@ impl Grad {
     /// the same values in the same order — an indexed write loop being the one
     /// shape this has to keep, since filling the plane by pushing rows was
     /// measured at two and a half times the cost.
+    #[cfg_attr(dispatch, inline(always))]
     fn of(l: &Layer) -> Grad {
         let (w, h) = (l.w, l.h);
         let n = w * h;
@@ -309,6 +311,44 @@ thread_local! {
         const { std::cell::RefCell::new(BlurScratch { ring: Vec::new(), padded: Vec::new(), row: Vec::new() }) };
 }
 
+/// `n` more values on the end of `v`, the `i`th of them `f(i)`, written where
+/// they go.
+///
+/// What `v.extend((0..n).map(f))` says, as an indexed loop over the spare
+/// capacity: the same values in the same order. It exists for
+/// `cfg(dispatch)`, where `extend` is a generic function the compiler kept out
+/// of line, and so outside the extractor's x86-64-v3 copy; a loop in a
+/// function that is inlined is inside it.
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
+fn extend_from_fn<T>(v: &mut Vec<T>, n: usize, mut f: impl FnMut(usize) -> T) {
+    v.reserve(n);
+    let at = v.len();
+    for (i, slot) in v.spare_capacity_mut()[..n].iter_mut().enumerate() {
+        slot.write(f(i));
+    }
+    // SAFETY: the `n` slots past `at` were written just above.
+    unsafe { v.set_len(at + n) };
+}
+
+/// This thread's blur scratch, taken out of the thread-local until
+/// `put_scratch` puts it back.
+///
+/// Out and back rather than borrowed inside `LocalKey::with`, so that the
+/// blur runs in its caller's own body. Inside `with` it was a closure handed
+/// to a generic function, and under `cfg(dispatch)` the compiler kept both out
+/// of line: the whole blur ran four lanes wide inside the extractor's
+/// eight-lane copy. Out and back is three pointer swaps; no buffer is copied.
+#[inline]
+fn take_scratch() -> BlurScratch {
+    BLUR_SCRATCH.with(|c| std::mem::replace(&mut *c.borrow_mut(), BlurScratch { ring: Vec::new(), padded: Vec::new(), row: Vec::new() }))
+}
+
+#[inline]
+fn put_scratch(s: BlurScratch) {
+    BLUR_SCRATCH.with(|c| *c.borrow_mut() = s);
+}
+
 /// Drop this thread's blur scratch. Called once the analysis phase is over,
 /// since nothing after it extracts features.
 pub fn release_scratch() {
@@ -321,14 +361,19 @@ pub fn release_scratch() {
 }
 
 /// Separable Gaussian blur with reflect-101 borders.
+#[cfg_attr(dispatch, inline(always))]
 fn blur(src: &Layer, sigma: f32) -> Layer {
     blur_plane(src.w, src.h, &src.px, sigma)
 }
 
 /// The same, over a plane that is not a `Layer` — the working image itself,
 /// which the pyramid's base is a blur of.
+#[cfg_attr(dispatch, inline(always))]
 fn blur_plane(w: usize, h: usize, px: &[f32], sigma: f32) -> Layer {
-    BLUR_SCRATCH.with(|s| blur_into(w, h, px, sigma, &mut s.borrow_mut(), false, true).0.unwrap())
+    let mut s = take_scratch();
+    let (g, _) = blur_into(w, h, px, sigma, &mut s, false, true);
+    put_scratch(s);
+    g.unwrap()
 }
 
 /// Blur, and the difference-of-Gaussians it forms with the layer it blurred.
@@ -338,8 +383,11 @@ fn blur_plane(w: usize, h: usize, px: &[f32], sigma: f32) -> Layer {
 /// in registers, and the row it was made from was read a few rows ago and is
 /// still in cache — so the subtraction costs one store and the two reads it
 /// used to make are gone. Same two floats, same subtraction, same order.
+#[cfg_attr(dispatch, inline(always))]
 fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
-    let (g, d) = BLUR_SCRATCH.with(|s| blur_into(src.w, src.h, &src.px, sigma, &mut s.borrow_mut(), true, true));
+    let mut s = take_scratch();
+    let (g, d) = blur_into(src.w, src.h, &src.px, sigma, &mut s, true, true);
+    put_scratch(s);
     // The first `true` above is what makes the difference exist.
     (g.unwrap(), d.unwrap())
 }
@@ -354,13 +402,18 @@ fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
 /// where the extractor as a whole is under three), so a plane not written is
 /// the currency here. The difference is the same subtraction of the same two
 /// floats; only the Gaussian's row now lives in a scratch row.
+#[cfg_attr(dispatch, inline(always))]
 fn blur_top(src: &Layer, sigma: f32) -> Layer {
-    BLUR_SCRATCH.with(|s| blur_into(src.w, src.h, &src.px, sigma, &mut s.borrow_mut(), true, false)).1.unwrap()
+    let mut s = take_scratch();
+    let (_, d) = blur_into(src.w, src.h, &src.px, sigma, &mut s, true, false);
+    put_scratch(s);
+    d.unwrap()
 }
 
 /// One row of the horizontal pass: symmetric kernel, eight outputs at a time
 /// so the tap loop stays in registers.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn blur_row(row: &[f32], padded: &mut [f32], out: &mut [f32], kc: f32, ks: &[f32], r: usize, w: usize) {
     for i in 0..r {
         padded[i] = row[reflect101(i as i32 - r as i32, w)];
@@ -394,6 +447,7 @@ fn blur_row(row: &[f32], padded: &mut [f32], out: &mut [f32], kc: f32, ks: &[f32
     }
 }
 
+#[cfg_attr(dispatch, inline(always))]
 fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, want_dog: bool, want_gauss: bool) -> (Option<Layer>, Option<Layer>) {
     let k = gaussian_kernel(sigma);
     let r = k.len() / 2;
@@ -499,7 +553,7 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
             }
             if want_dog {
                 let below = &src[y * w..(y + 1) * w];
-                dog.extend(acc.iter().zip(below).map(|(a, b)| a - b));
+                extend_from_fn(&mut dog, w, |x| acc[x] - below[x]);
             }
         }
     }
@@ -512,7 +566,8 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
     (g, d)
 }
 
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn reflect101(i: i32, n: usize) -> usize {
     let n = n as i32;
     if n == 1 {
@@ -540,6 +595,7 @@ fn reflect101(i: i32, n: usize) -> usize {
 /// four hundred and forty-eight rows. The column's taps are settled once here
 /// and read back per row; every value is the one the per-pixel form computed,
 /// so the enlargement is the same picture to the bit.
+#[cfg_attr(dispatch, inline(always))]
 fn upsample(g: &Gray, f: usize) -> Layer {
     let (w, h) = (g.w * f, g.h * f);
     let ff = f as f32;
@@ -558,28 +614,38 @@ fn upsample(g: &Gray, f: usize) -> Layer {
         let fy = (sy - y0 as f32).clamp(0.0, 1.0);
         let r0 = &g.px[y0 * g.w..(y0 + 1) * g.w];
         let r1 = &g.px[y1 * g.w..(y1 + 1) * g.w];
-        px.extend(cols.iter().map(|&(x0, x1, fx)| {
+        extend_from_fn(&mut px, w, |x| {
+            let (x0, x1, fx) = cols[x];
             let a = r0[x0] * (1.0 - fx) + r0[x1] * fx;
             let b = r1[x0] * (1.0 - fx) + r1[x1] * fx;
             a * (1.0 - fy) + b * fy
-        }));
+        });
     }
     Layer { w, h, px }
 }
 
+#[cfg_attr(dispatch, inline(always))]
 fn halve(src: &Layer) -> Layer {
     let (w, h) = ((src.w / 2).max(1), (src.h / 2).max(1));
     let mut px: Vec<f32> = Vec::with_capacity(w * h);
     for y in 0..h {
         let row = &src.px[(y * 2) * src.w..];
-        px.extend((0..w).map(|x| row[x * 2]));
+        extend_from_fn(&mut px, w, |x| row[x * 2]);
     }
     Layer { w, h, px }
 }
 
 // ---------------------------------------------------------------- extraction
 
-pub fn extract(g: &Gray, p: &Params) -> Features {
+crate::simd::dispatched! {
+    pub fn extract(g: &Gray, p: &Params) -> Features => extract_any;
+}
+
+/// `extract`, for whichever copy `dispatched!` chose; see `simd.rs`. Everything
+/// it calls that does real work is inlined into it under `cfg(dispatch)`, so
+/// that the x86-64-v3 copy is vectorised throughout.
+#[cfg_attr(dispatch, inline(always))]
+fn extract_any(g: &Gray, p: &Params) -> Features {
     let mut feats = Features { w: g.w as u32, h: g.h as u32, ..Default::default() };
     if g.w < 8 || g.h < 8 {
         return feats;
@@ -682,11 +748,17 @@ pub fn extract(g: &Gray, p: &Params) -> Features {
         if o + 1 < n_octaves {
             octave_base = timed!(32, halve(gauss[s].as_ref().unwrap()));
         }
-        grads.push(timed!(8,
-            (0..s + 3)
-                .map(|i| gauss[i].take().filter(|_| (1..=s).contains(&i)).map(|l| Grad::of(&l)))
-                .collect::<Vec<_>>()
-        ));
+        // A loop and an `if` rather than a `collect` and a `map`: under
+        // `cfg(dispatch)` each was a function the compiler kept out of line,
+        // and `Grad::of` went with it, outside the x86-64-v3 copy.
+        grads.push(timed!(8, {
+            let mut layer_grads: Vec<Option<Grad>> = Vec::with_capacity(s + 3);
+            for i in 0..s + 3 {
+                let layer = gauss[i].take().filter(|_| (1..=s).contains(&i));
+                layer_grads.push(if let Some(l) = layer { Some(Grad::of(&l)) } else { None });
+            }
+            layer_grads
+        }));
     }
 
     // Drop repeats of one extremum found from two adjacent scales *within* an
@@ -785,14 +857,16 @@ fn fmin(a: f32, b: f32) -> f32 {
 }
 
 /// The three rows of a layer centred on `y`.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn rows3(l: &Layer, y: usize, w: usize) -> (&[f32], &[f32], &[f32]) {
     (&l.px[(y - 1) * w..y * w], &l.px[y * w..(y + 1) * w], &l.px[(y + 1) * w..(y + 2) * w])
 }
 
 /// The neighbours on the two adjacent scales: the half of the 3x3x3
 /// neighbourhood the row sweep has not already ruled on.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn is_extreme(v: f32, x: usize, rows: [&[f32]; 6], max: bool) -> bool {
     if max {
         for r in rows {
@@ -827,6 +901,7 @@ fn key3(k: &Keypoint) -> (i32, i32, i32) {
     ((k.x * 4.0) as i32, (k.y * 4.0) as i32, (k.sigma * 16.0) as i32)
 }
 
+#[cfg_attr(dispatch, inline(always))]
 fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_scale: f32, out: &mut Vec<Cand>) {
     let s = p.n_layers;
     let (w, h) = (dog[0].w as i32, dog[0].h as i32);
@@ -919,6 +994,7 @@ fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_sc
 
 /// Sub-pixel/scale refinement, contrast and edge tests. Returns the keypoint
 /// in working-image coordinates and the Gaussian layer index to use.
+#[cfg_attr(dispatch, inline(always))]
 fn adjust(
     dog: &[Layer],
     _octave: usize,
@@ -1001,6 +1077,7 @@ fn adjust(
     Some((kp, contr.abs(), layer as usize))
 }
 
+#[cfg_attr(dispatch, inline(always))]
 fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
     let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
@@ -1028,6 +1105,7 @@ fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
 /// so thirty-two covers every row at the scales this runs at in one block.
 const ORI_SWEEP: usize = 32;
 
+#[cfg_attr(dispatch, inline(always))]
 fn orientation_hist(g: &Grad, h: usize, px: f32, py: f32, radius: i32, sigma: f32, hist: &mut [f32; ORI_BINS]) -> f32 {
     let expf_scale = -1.0 / (2.0 * sigma * sigma);
     let mut temphist = [0f32; ORI_BINS];
@@ -1102,12 +1180,14 @@ fn orientation_hist(g: &Grad, h: usize, px: f32, py: f32, radius: i32, sigma: f3
 /// sorted. A zero coefficient yields infinities, which the caller's `max`/`min`
 /// turn into "no constraint" or "no solutions" correctly; a 0/0 yields NaN,
 /// which `max`/`min` drop, leaving the constraint to the per-sample test.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn j_span(a: f32, l: f32, u: f32) -> (f32, f32) {
     let (p, q) = (l / a, u / a);
     if p <= q { (p, q) } else { (q, p) }
 }
 
+#[cfg_attr(dispatch, inline(always))]
 fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst: &mut [u8; DESC_LEN]) {
     let mut ori = 360.0 - kp_angle;
     if (ori - 360.0).abs() < 1e-5 {

@@ -32,6 +32,7 @@ mod progress;
 use progress::Stage;
 mod report;
 mod sift;
+mod simd;
 mod verify;
 mod walk;
 
@@ -615,9 +616,15 @@ fn merge_variants(merged: &mut Vec<(u32, f32, u8)>, k: usize) {
     merged.truncate(k);
 }
 
-/// Quantise every descriptor of an image into the sorted word list the
-/// inverted file speaks.
-fn quantise(vocab: &Vocabulary, f: &Features) -> WordList {
+simd::dispatched! {
+    /// Quantise every descriptor of an image into the sorted word list the
+    /// inverted file speaks.
+    fn quantise(vocab: &Vocabulary, f: &Features) -> WordList => quantise_any;
+}
+
+/// `quantise`, for whichever copy `dispatched!` chose.
+#[cfg_attr(dispatch, inline(always))]
+fn quantise_any(vocab: &Vocabulary, f: &Features) -> WordList {
     let mut buf = Vec::with_capacity(4);
     let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(f.len() * 2);
     for i in 0..f.len() {
@@ -3185,6 +3192,82 @@ mod tests {
             &["--min-pixel-correlation", "1.01"], &["-k", "0"]] {
             assert!(!ok(bad), "{bad:?}");
         }
+    }
+
+    /// In a build that cannot assume AVX2, the two copies of every dispatched
+    /// stage — the one compiled for x86-64-v3 and the one any x86-64 runs —
+    /// give the same answer to the bit: the features, the vocabulary's words,
+    /// the query's scores, the word-list intersection and the verdict. Only
+    /// such a build has two copies; the release, built for x86-64-v3, has one.
+    #[cfg(all(dispatch, not(target_feature = "avx2")))]
+    #[test]
+    fn the_plain_and_the_v3_copies_agree() {
+        // Random blobs at two scales, and a crop of them: a real match.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let (w, h) = (320usize, 240usize);
+        let coarse: Vec<f32> = (0..41 * 31).map(|_| rnd()).collect();
+        let fine: Vec<f32> = (0..161 * 121).map(|_| rnd()).collect();
+        let bilinear = |grid: &[f32], gw: usize, step: f32, x: usize, y: usize| {
+            let (fx, fy) = (x as f32 / step, y as f32 / step);
+            let (x0, y0) = (fx as usize, fy as usize);
+            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+            let at = |i: usize, j: usize| grid[j * gw + i];
+            (at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx) * (1.0 - ty) + (at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx) * ty
+        };
+        let mut g = decode::Gray::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                g.px[y * w + x] = 0.7 * bilinear(&coarse, 41, 8.0, x, y) + 0.3 * bilinear(&fine, 161, 2.0, x, y);
+            }
+        }
+        let mut c = decode::Gray::new(200, 150);
+        for y in 0..150 {
+            for x in 0..200 {
+                c.px[y * 200 + x] = g.px[(30 + y) * w + 40 + x];
+            }
+        }
+        let run = || {
+            let p = sift::Params { max_features: FEATURES, ..Default::default() };
+            let (fa, fb) = (sift::extract(&g, &p), sift::extract(&c, &p));
+            let (ta, tb) = (Thumb::build(&g, THUMB_LONG), Thumb::build(&c, THUMB_LONG));
+            let pool: Vec<&[u8; DESC_LEN]> = (0..fa.len()).map(|i| fa.d(i)).chain((0..fb.len()).map(|i| fb.d(i))).map(|d| d.try_into().unwrap()).collect();
+            let vp = index::VocabParams::for_corpus(pool.len());
+            let vocab = Vocabulary::build(pool, &vp);
+            let lists = vec![quantise(&vocab, &fa), quantise(&vocab, &fb)];
+            let inv = InvertedFile::build(&lists, vocab.n_live_words());
+            let (mut acc, mut scored) = (vec![0f32; 2], Vec::new());
+            inv.query(&lists[1], 1, &mut acc, &mut scored);
+            let mut cands = Vec::new();
+            index::shared(&lists[0], &lists[1], &mut cands, 60_000);
+            let pair = verify::Pair { fa: &fa, fb: &fb, ta: &ta, tb: &tb };
+            let v = verify::verify(&pair, &cands, Variant::default(), (3, 0.2), &mut Vec::new(), &mut verify::Scratch::default());
+            let t = verify::verify_transform(&pair, &v.m, Variant::default(), 0.2);
+            let kps = |f: &Features| f.kps.iter().map(|k| [k.x, k.y, k.sigma, k.angle].map(f32::to_bits)).collect::<Vec<_>>();
+            let verdict = |v: &Verdict| (v.n_match, v.n_in, v.m.map(f32::to_bits), [v.ov_a, v.ov_b, v.blk, v.ncc, v.blk_min].map(f32::to_bits), v.blk_n);
+            (
+                (kps(&fa), fa.desc.clone(), kps(&fb), fb.desc.clone(), ta.px.clone()),
+                (lists.iter().map(|l| (0..l.len()).map(|i| l.word(i)).collect::<Vec<_>>()).collect::<Vec<_>>(), scored.iter().map(|e| (e.0, e.1.to_bits())).collect::<Vec<_>>()),
+                (cands.clone(), verdict(&v), verdict(&t)),
+            )
+        };
+        if !simd::v3() {
+            eprintln!("skipped: a CPU without AVX2 has only the one copy to run");
+            return;
+        }
+        let v3 = run();
+        simd::force_plain(true);
+        let plain = run();
+        simd::force_plain(false);
+        assert!(v3.0.0.len() > 50 && v3.2.1.1 >= 10, "the pictures match: {} keypoints, {} aligned points", v3.0.0.len(), v3.2.1.1);
+        assert_eq!(v3.0, plain.0, "the features");
+        assert_eq!(v3.1, plain.1, "the words and the query");
+        assert_eq!(v3.2, plain.2, "the intersection and the verdicts");
     }
 
     /// A binary built for the machine it runs on passes its own check.

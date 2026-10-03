@@ -586,6 +586,7 @@ impl<'a> Vocabulary<'a> {
     /// descent runs once per descriptor in the corpus, so both frontiers live
     /// in fixed-size arrays: two heap allocations per descriptor is two per
     /// descriptor too many.
+    #[cfg_attr(dispatch, inline(always))]
     pub fn quantise(&self, desc: &[u8], out: &mut Vec<u32>) {
         out.clear();
         let q: &[u8; DESC_LEN] = desc[..DESC_LEN].try_into().unwrap();
@@ -762,23 +763,47 @@ impl<'a> Vocabulary<'a> {
 /// integer: `|q|^2` and `|c|^2` are at most 128 * 255^2 = 8.3 M apiece and the
 /// dot product no more, so nothing overflows, and the identity is exact in
 /// integers. The descent sees the distance it always saw.
+///
+/// The widened form is for AVX2. Without it the difference form is as good as
+/// any, and the query is just the descriptor: a build that cannot assume AVX2
+/// carries both and uses the one `simd::v3()` chooses, and one that can holds
+/// only the widened form, as it always did.
 struct Query {
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     lo: [std::arch::x86_64::__m256i; DESC_LEN / 32],
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     hi: [std::arch::x86_64::__m256i; DESC_LEN / 32],
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     norm: u32,
-    /// Without the vector unit the difference form is as good as any, and
-    /// this is just the descriptor.
     #[cfg(not(target_feature = "avx2"))]
     q: [u8; DESC_LEN],
 }
 
 impl Query {
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn new(q: &[u8; DESC_LEN]) -> Query {
-        #[cfg(target_feature = "avx2")]
+        // SAFETY: the widening runs only where the CPU has AVX2; elsewhere the
+        // lanes are left zero and nothing reads them.
+        #[cfg(target_arch = "x86_64")]
+        let (lo, hi, norm) = if crate::simd::v3() { unsafe { Self::widen(q) } } else { unsafe { std::mem::zeroed() } };
+        Query {
+            #[cfg(target_arch = "x86_64")]
+            lo,
+            #[cfg(target_arch = "x86_64")]
+            hi,
+            #[cfg(target_arch = "x86_64")]
+            norm,
+            #[cfg(not(target_feature = "avx2"))]
+            q: *q,
+        }
+    }
+
+    /// The query's bytes widened to sixteen-bit lanes, and its squared length.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    #[allow(clippy::type_complexity)]
+    unsafe fn widen(q: &[u8; DESC_LEN]) -> ([std::arch::x86_64::__m256i; DESC_LEN / 32], [std::arch::x86_64::__m256i; DESC_LEN / 32], u32) {
         unsafe {
             let norm = q.iter().map(|&v| v as u32 * v as u32).sum();
             use std::arch::x86_64::*;
@@ -792,79 +817,87 @@ impl Query {
                 lo[b] = _mm256_unpacklo_epi8(v, zero);
                 hi[b] = _mm256_unpackhi_epi8(v, zero);
             }
-            Query { lo, hi, norm }
+            (lo, hi, norm)
         }
-        #[cfg(not(target_feature = "avx2"))]
-        Query { q: *q }
     }
 
     /// Distances from this query to each centre `at` points to, into `out`.
     /// The same arithmetic as `dists`, for centres that are not side by side.
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn dists_at(&self, at: &[*const u8], norms: &[u32], out: &mut [u32; MAX_BRANCH]) {
         let n = norms.len();
         debug_assert!(n <= MAX_BRANCH && at.len() == n);
         // SAFETY: every leaf pointer names `DESC_LEN` readable bytes; see
-        // `Vocabulary::leaves`.
-        #[cfg(target_feature = "avx2")]
-        unsafe {
-            let mut k = 0usize;
-            while k + 4 <= n {
-                let d = self.dots4_at([at[k], at[k + 1], at[k + 2], at[k + 3]]);
-                for i in 0..4 {
-                    out[k + i] = self.norm + norms[k + i] - 2 * d[i];
+        // `Vocabulary::leaves`. The vector form runs only where the CPU has
+        // AVX2.
+        #[cfg(target_arch = "x86_64")]
+        if crate::simd::v3() {
+            unsafe {
+                let mut k = 0usize;
+                while k + 4 <= n {
+                    let d = self.dots4_at([at[k], at[k + 1], at[k + 2], at[k + 3]]);
+                    for i in 0..4 {
+                        out[k + i] = self.norm + norms[k + i] - 2 * d[i];
+                    }
+                    k += 4;
                 }
-                k += 4;
+                while k < n {
+                    let d = self.dot1(at[k]);
+                    out[k] = self.norm + norms[k] - 2 * d;
+                    k += 1;
+                }
             }
-            while k < n {
-                let d = self.dot1(at[k]);
-                out[k] = self.norm + norms[k] - 2 * d;
-                k += 1;
-            }
+            return;
         }
         #[cfg(not(target_feature = "avx2"))]
         for k in 0..n {
             let c = unsafe { std::slice::from_raw_parts(at[k], DESC_LEN) };
-            out[k] = dist2(&self.q, c);
+            out[k] = dist2_portable(&self.q, c);
         }
     }
 
     /// Distances from this query to each centre of `blk`, into `out`.
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn dists(&self, blk: &[u8], norms: &[u32], out: &mut [u32; MAX_BRANCH]) {
         let n = norms.len();
         debug_assert!(n <= MAX_BRANCH && blk.len() == n * DESC_LEN);
-        #[cfg(target_feature = "avx2")]
-        unsafe {
-            let mut k = 0usize;
-            while k + 4 <= n {
-                let d = self.dots4(blk.as_ptr().add(k * DESC_LEN));
-                for i in 0..4 {
-                    out[k + i] = self.norm + norms[k + i] - 2 * d[i];
+        // SAFETY: the vector form runs only where the CPU has AVX2.
+        #[cfg(target_arch = "x86_64")]
+        if crate::simd::v3() {
+            unsafe {
+                let mut k = 0usize;
+                while k + 4 <= n {
+                    let d = self.dots4(blk.as_ptr().add(k * DESC_LEN));
+                    for i in 0..4 {
+                        out[k + i] = self.norm + norms[k + i] - 2 * d[i];
+                    }
+                    k += 4;
                 }
-                k += 4;
+                while k < n {
+                    let d = self.dot1(blk.as_ptr().add(k * DESC_LEN));
+                    out[k] = self.norm + norms[k] - 2 * d;
+                    k += 1;
+                }
             }
-            while k < n {
-                let d = self.dot1(blk.as_ptr().add(k * DESC_LEN));
-                out[k] = self.norm + norms[k] - 2 * d;
-                k += 1;
+            #[cfg(debug_assertions)]
+            {
+                let q = self.q_bytes();
+                debug_assert!((0..n).all(|k| out[k] == dist2(&q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN])));
             }
+            return;
         }
         #[cfg(not(target_feature = "avx2"))]
         for k in 0..n {
-            out[k] = dist2(&self.q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN]);
-        }
-        #[cfg(debug_assertions)]
-        {
-            let q = self.q_bytes();
-            debug_assert!((0..n).all(|k| out[k] == dist2(&q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN])));
+            out[k] = dist2_portable(&self.q, &blk[k * DESC_LEN..(k + 1) * DESC_LEN]);
         }
     }
 
-    /// The query's bytes again, for the debug check that the two forms agree.
-    #[cfg(debug_assertions)]
+    /// The query's bytes again, from the widened lanes, for the debug check
+    /// that the two forms agree.
+    #[cfg(all(debug_assertions, target_arch = "x86_64"))]
     fn q_bytes(&self) -> [u8; DESC_LEN] {
-        #[cfg(target_feature = "avx2")]
         unsafe {
             use std::arch::x86_64::*;
             let mut q = [0u8; DESC_LEN];
@@ -874,12 +907,10 @@ impl Query {
             }
             q
         }
-        #[cfg(not(target_feature = "avx2"))]
-        self.q
     }
 
     /// One centre's widened dot product with the query, as eight lanes.
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     unsafe fn dot_lanes(&self, c: *const u8) -> std::arch::x86_64::__m256i {
         use std::arch::x86_64::*;
@@ -897,7 +928,7 @@ impl Query {
         }
     }
 
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     unsafe fn dot1(&self, c: *const u8) -> u32 {
         use std::arch::x86_64::*;
@@ -913,14 +944,14 @@ impl Query {
     /// Four consecutive centres' dot products, reduced together: two rounds of
     /// pairwise horizontal adds leave each 128-bit half holding a partial sum
     /// per centre, and one add of the halves finishes all four.
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     unsafe fn dots4(&self, c: *const u8) -> [u32; 4] {
         unsafe { self.dots4_at([c, c.add(DESC_LEN), c.add(2 * DESC_LEN), c.add(3 * DESC_LEN)]) }
     }
 
     /// The same for four centres wherever they are.
-    #[cfg(target_feature = "avx2")]
+    #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     unsafe fn dots4_at(&self, c: [*const u8; 4]) -> [u32; 4] {
         use std::arch::x86_64::*;
@@ -981,6 +1012,35 @@ fn quantise_centre(v: f32) -> u8 {
 #[cfg(target_feature = "avx2")]
 #[inline]
 pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+    // SAFETY: the build assumes AVX2.
+    unsafe { dist2_avx2(q, c) }
+}
+
+/// `dist2` where the CPU is asked whether it has AVX2.
+#[cfg(all(dispatch, not(target_feature = "avx2")))]
+#[inline(always)]
+pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+    if crate::simd::v3() {
+        // SAFETY: the CPU has AVX2.
+        unsafe { dist2_avx2(q, c) }
+    } else {
+        dist2_portable(q, c)
+    }
+}
+
+/// `dist2` on another architecture; see `simd::v3`.
+#[cfg(not(any(target_feature = "avx2", dispatch)))]
+#[inline]
+pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+    dist2_portable(q, c)
+}
+
+/// `dist2` in sixteen-bit lanes; see `dist2`. Compiled on every x86-64 build,
+/// and called only where the CPU has AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn dist2_avx2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
     debug_assert!(c.len() >= DESC_LEN && DESC_LEN % 32 == 0);
     unsafe {
         use std::arch::x86_64::*;
@@ -1009,8 +1069,9 @@ pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
 /// `avx2` still does not walk one chain of 128 dependent adds. Integers, so it
 /// is the same number the vector form gives.
 #[cfg(not(target_feature = "avx2"))]
-#[inline]
-pub fn dist2(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
+fn dist2_portable(q: &[u8; DESC_LEN], c: &[u8]) -> u32 {
     const LANES: usize = 16;
     let mut acc = [0u32; LANES];
     for (a, b) in q.chunks_exact(LANES).zip(c[..DESC_LEN].chunks_exact(LANES)) {
@@ -1557,6 +1618,12 @@ impl InvertedFile {
     /// The query list need not be one of the indexed ones; the mirrored and
     /// inverted passes query with lists that were never indexed.
     pub fn query(&self, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) {
+        query_entry(self, wl, exclude, acc, out)
+    }
+
+    /// `query`, for whichever copy `dispatched!` chose.
+    #[cfg_attr(dispatch, inline(always))]
+    fn query_any(&self, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) {
         out.clear();
         let n = acc.len();
         // Every posting names an image of the corpus, and `acc` must have a
@@ -1656,6 +1723,10 @@ impl InvertedFile {
     }
 }
 
+crate::simd::dispatched! {
+    fn query_entry(inv: &InvertedFile, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) => InvertedFile::query_any;
+}
+
 /// Whether any word of `a` is also a word of `b`, for two runs of `BLOCK`
 /// sorted words.
 ///
@@ -1665,9 +1736,13 @@ impl InvertedFile {
 /// thirteen hundred each — so this answers "no" almost every time, and the
 /// answer costs about one instruction per word compared against four unusable
 /// branches.
-#[cfg(target_feature = "avx2")]
+///
+/// Compiled on every x86-64 build and called only when `simd::v3()` says the
+/// CPU has AVX2; see `shared`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 #[inline]
-fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
+unsafe fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
     debug_assert!(a.len() >= BLOCK && b.len() >= BLOCK);
     unsafe {
         use std::arch::x86_64::*;
@@ -1682,52 +1757,57 @@ fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
     }
 }
 
-/// On a target without `avx2` there is no filter to run — `BLOCK` is zero and
-/// the block phase of `shared` is dead code — and this exists so that the phase
-/// still type-checks. Answering "yes, look at these" would also be *correct*
-/// there, just pointless: sixty-four scalar comparisons cost more than the eight
-/// merge steps they could skip.
-#[cfg(not(target_feature = "avx2"))]
+/// On another architecture there is no filter to run — `shared`'s block width
+/// is zero and its block phase is dead code — and this exists so that the
+/// phase still type-checks. Answering "yes, look at these" would also be
+/// *correct* there, just pointless: sixty-four scalar comparisons cost more
+/// than the eight merge steps they could skip.
+#[cfg(not(target_arch = "x86_64"))]
 #[inline]
-fn blocks_meet(_a: &[u32], _b: &[u32]) -> bool {
+unsafe fn blocks_meet(_a: &[u32], _b: &[u32]) -> bool {
     true
 }
 
 /// Words compared at a time by the block filter, and the width of the vector
-/// that does it. Zero disables the filter, which is what a target without
-/// `avx2` gets.
-#[cfg(target_feature = "avx2")]
+/// that does it.
 const BLOCK: usize = 8;
-#[cfg(not(target_feature = "avx2"))]
-const BLOCK: usize = 0;
 
-/// Candidate descriptor pairs for two images: keypoints that share a word.
-///
-/// The intersection is *sparse*: two images' word lists hold about thirteen
-/// hundred entries each over a vocabulary of a million-odd words, and share
-/// some tens. It is also the matcher's most-called function — five million
-/// times in one run of a nine-thousand-image corpus, and four times that on
-/// one where most files have no duplicate and the mirrored pass re-asks.
-///
-/// So the words are merged in two phases. A **block filter** asks whether the
-/// next eight words of each side have anything in common at all, and when they
-/// do not — which is nearly always — it advances the side whose block ends
-/// first by all eight. A **scalar merge** takes over for the block pair that
-/// does meet, and it is where the pairs are emitted. The words come out in the
-/// same order a plain merge would give them, so `cap` still cuts the same
-/// place.
-///
-/// The two forms this replaces are worth recording, because both were
-/// measured. A plain three-way merge steps once per entry of both lists, and
-/// every step is a comparison the predictor cannot learn: 43 microseconds a
-/// pair. Galloping — skipping to the next candidate rather than walking to it
-/// — reduced the *steps* to one per entry of one list and left the branches
-/// exactly as unpredictable, which is why it was worth only 4%. Neither was
-/// bound by its comparisons; both were bound by being wrong about them.
-/// Measured on `shared_timings`, at 1,300 entries over 1.7 M words: 13.9
-/// microseconds galloping against 2.5 with the filter.
-pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
+crate::simd::dispatched! {
+    /// Candidate descriptor pairs for two images: keypoints that share a word.
+    ///
+    /// The intersection is *sparse*: two images' word lists hold about thirteen
+    /// hundred entries each over a vocabulary of a million-odd words, and share
+    /// some tens. It is also the matcher's most-called function — five million
+    /// times in one run of a nine-thousand-image corpus, and four times that on
+    /// one where most files have no duplicate and the mirrored pass re-asks.
+    ///
+    /// So the words are merged in two phases. A **block filter** asks whether the
+    /// next eight words of each side have anything in common at all, and when they
+    /// do not — which is nearly always — it advances the side whose block ends
+    /// first by all eight. A **scalar merge** takes over for the block pair that
+    /// does meet, and it is where the pairs are emitted. The words come out in the
+    /// same order a plain merge would give them, so `cap` still cuts the same
+    /// place.
+    ///
+    /// The two forms this replaces are worth recording, because both were
+    /// measured. A plain three-way merge steps once per entry of both lists, and
+    /// every step is a comparison the predictor cannot learn: 43 microseconds a
+    /// pair. Galloping — skipping to the next candidate rather than walking to it
+    /// — reduced the *steps* to one per entry of one list and left the branches
+    /// exactly as unpredictable, which is why it was worth only 4%. Neither was
+    /// bound by its comparisons; both were bound by being wrong about them.
+    /// Measured on `shared_timings`, at 1,300 entries over 1.7 M words: 13.9
+    /// microseconds galloping against 2.5 with the filter.
+    pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) => shared_any;
+}
+
+/// `shared`, for whichever copy `dispatched!` chose.
+#[cfg_attr(dispatch, inline(always))]
+fn shared_any(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
     out.clear();
+    // The block filter's width, or zero, which turns it off, where the CPU
+    // has no AVX2 to run it with.
+    let block = if crate::simd::v3() { BLOCK } else { 0 };
     // The largest keypoint index emitted, as a running `or`. It decides
     // whether the pairs can be sorted by counting rather than by comparing —
     // see `sort_pairs` — and it costs one integer operation per pair.
@@ -1742,18 +1822,20 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
     while i < na && j < nb {
         // Block phase. Nothing is emitted here: it only finds the first block
         // pair that could hold a shared word.
-        let (mut ia, mut jb) = (i + BLOCK, j + BLOCK);
-        while BLOCK > 0 && ia <= na && jb <= nb && !blocks_meet(&aw[i..ia], &bw[j..jb]) {
+        let (mut ia, mut jb) = (i + block, j + block);
+        // SAFETY: `block` is non-zero only when `simd::v3()` has said the CPU
+        // has AVX2.
+        while block > 0 && ia <= na && jb <= nb && !unsafe { blocks_meet(&aw[i..ia], &bw[j..jb]) } {
             // The block that ends first cannot match anything the other side
             // has left, so it goes whole. Equal ends retire both.
             let (am, bm) = (aw[ia - 1] | KP_MASK, bw[jb - 1] | KP_MASK);
             if am <= bm {
                 i = ia;
-                ia += BLOCK;
+                ia += block;
             }
             if bm <= am {
                 j = jb;
-                jb += BLOCK;
+                jb += block;
             }
         }
         if i >= na || j >= nb {
@@ -1763,7 +1845,7 @@ pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
         // the tails, where there is no whole block left to filter. It runs
         // until one of the two windows is used up, which is as far as the
         // filter's own reasoning reaches.
-        let (aend, bend) = if BLOCK == 0 { (na, nb) } else { (ia.min(na), jb.min(nb)) };
+        let (aend, bend) = if block == 0 { (na, nb) } else { (ia.min(na), jb.min(nb)) };
         while i < aend && j < bend {
             let (av, bv) = (aw[i] | KP_MASK, bw[j] | KP_MASK);
             // Two conditional increments rather than a three-way branch: a

@@ -125,6 +125,10 @@ src/
   progress.rs         one progress bar for the whole run: each stage owns a
                       stretch sized by its estimated cost (Forecast), revised
                       as the run learns; files weighted by a header probe
+  simd.rs             which kernels a run uses: x86-64-v3 or portable, decided
+                      at build time where the build can assume AVX2 and at
+                      start-up where it cannot (`dispatched!`, `v3()`)
+build.rs              sets `cfg(dispatch)`: an x86-64 build without AVX2
 benchmark/
   BASELINE.md         the competition's numbers. The bar to clear.
   VALIDATION.md       the held-out corpus, and what it says about overfitting
@@ -1104,6 +1108,45 @@ could only size the tree to within a factor of sixteen and the coarse end of
 that merges families at ordinary corpus sizes. See *How img-fp works*.
 
 ### Speed and memory, and what has already been tried
+
+**A build that cannot assume AVX2 now picks its kernels when it starts**
+(`src/simd.rs`, `build.rs`). `cargo install` reads no `.cargo/config.toml` from
+the package, so a crates.io install was built for plain x86-64: the hand-written
+AVX2 kernels were compiled out (they were chosen with
+`cfg(target_feature = "avx2")`) and every loop the compiler vectorises ran four
+lanes wide. On this machine that cost **+52% CPU in matching** (cached IMGS:
+102-104 CPU-s against 67-69) and **+24% cold** on `derived/Desktop` (60-62
+against 49-50, extraction 34-35 s against 24-27), same pairs. Now:
+
+- `v3()` is `const true` in an AVX2 build, so the release and native builds
+  compile to what they did; in a `cfg(dispatch)` build it asks the CPU once.
+- The six hand-written kernels (`Query`'s dot products, `dist2`,
+  `blocks_meet`, the pixel check's `wide`, `halve_row`, `grey_row_avx2`) are
+  compiled on every x86-64 build and taken when `v3()` says so.
+- `dispatched!` gives `sift::extract`, `lib::quantise`, `InvertedFile::query`,
+  `index::shared`, `verify::verify` and `verify::verify_transform` a second
+  copy compiled for x86-64-v3, with what they call marked
+  `cfg_attr(dispatch, inline(always))` so that it is compiled inside the copy.
+  **Watch for anything that keeps code out of line**, because it then runs in
+  the plain copy and nothing says so: a closure handed to `LocalKey::with`, an
+  `Option::map` or a `collect` wrapping a hot function, a generic `extend`.
+  The first version wrapped the extractor in a closure and recovered nothing;
+  `objdump` on the `x86-64` binary, counting `ymm` per symbol, is how each
+  leak was found (`blur_*` through `BLUR_SCRATCH.with`, `Grad::of` through
+  `Option::map`, `pixel_check` through `PYRAMIDS.with`).
+
+Measured, three rotated rounds, 20 s apart, all four builds pair-for-pair
+identical (222,879 on IMGS, 2,631 on Desktop): cached IMGS **67-70 CPU-s plain
+against 67-68 native** (HEAD native 67-69); cold Desktop **50-52 against
+48-50** (HEAD native 49-50), extraction 25-27 s against 24-25. `extract_threads`
+under dispatch: 23.1 / 16.1 ms single-threaded against native's 25.3 / 16.3, and
+the documented checksums `b8e5341a1d7b5cad` / `5c2fd85ed71708a8`.
+`the_plain_and_the_v3_copies_agree` holds the two copies to each other bit for
+bit (features, words, query scores, intersection, verdicts); it exists only in
+a `cfg(dispatch)` build, so run `RUSTFLAGS="-C target-cpu=x86-64" cargo test
+--release --lib` to see it, as `release.yml` does. Rustdoc compiles without
+`.cargo/config.toml`'s flags while `build.rs` sees them, so the cfgs are
+written to cover that disagreement too (it is merely slow).
 
 (The fourth pass over the parameters, above, is **level on the clock**: six
 alternating pairs on the full corpus, cooled to a common ceiling before each

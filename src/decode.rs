@@ -1215,24 +1215,39 @@ fn box_k<const K: usize>(grey: &[f32], row: &mut [f32]) {
 fn grey_row<const CH: usize, const ALPHA: bool>(line: &[u8], out: &mut [f32]) {
     let n = out.len();
     debug_assert!(line.len() >= n * CH);
-    // Mutated by the vector loop below, which a target without `avx2` does not
+    // Mutated by the vector loop below, which another architecture does not
     // have.
     #[allow(unused_mut)]
     let mut x = 0usize;
-    #[cfg(target_feature = "avx2")]
-    if CH == 3 || CH == 4 {
-        // Eight pixels a step, and the load takes thirty-two bytes where three
-        // channels need twenty-four, so the last few pixels of the row go down
-        // the scalar path rather than read past the end of it.
-        const STEP: usize = 8;
-        while x + STEP <= n && x * CH + 32 <= line.len() {
-            unsafe { grey_eight::<CH, ALPHA>(&line[x * CH..], &mut out[x..x + STEP]) };
-            x += STEP;
-        }
+    #[cfg(target_arch = "x86_64")]
+    if (CH == 3 || CH == 4) && crate::simd::v3() {
+        // SAFETY: the CPU has AVX2.
+        x = unsafe { grey_row_avx2::<CH, ALPHA>(line, out) };
     }
     for x in x..n {
         out[x] = grey_of::<CH, ALPHA>(&line[x * CH..x * CH + CH]);
     }
+}
+
+/// The part of `grey_row` taken eight pixels at a time; the first pixel it
+/// left for the scalar tail.
+///
+/// Eight pixels a step, and the load takes thirty-two bytes where three
+/// channels need twenty-four, so the last few pixels of the row go down the
+/// scalar path rather than read past the end of it. Its own function so that
+/// it is compiled for AVX2 on a build that cannot assume it (see `simd.rs`),
+/// and called once a row rather than once per eight pixels.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn grey_row_avx2<const CH: usize, const ALPHA: bool>(line: &[u8], out: &mut [f32]) -> usize {
+    const STEP: usize = 8;
+    let (n, mut x) = (out.len(), 0usize);
+    while x + STEP <= n && x * CH + 32 <= line.len() {
+        unsafe { grey_eight::<CH, ALPHA>(&line[x * CH..], &mut out[x..x + STEP]) };
+        x += STEP;
+    }
+    x
 }
 
 /// Eight pixels' grey values, de-interleaved with shuffles.
@@ -1240,8 +1255,8 @@ fn grey_row<const CH: usize, const ALPHA: bool>(line: &[u8], out: &mut [f32]) {
 /// `src` must carry 32 readable bytes. Three- and four-channel layouts have
 /// their own path; anything else falls back to the scalar form, which is what
 /// `grey_row` would have done anyway.
-#[cfg(target_feature = "avx2")]
-#[inline]
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
 unsafe fn grey_eight<const CH: usize, const ALPHA: bool>(src: &[u8], out: &mut [f32]) {
     use std::arch::x86_64::*;
     if CH != 3 && CH != 4 {

@@ -358,6 +358,7 @@ use crate::index::dist2;
 /// comparison, and a wrong vote loses there. The code already said as much,
 /// in the comment excusing single-candidate keypoints from the test it no
 /// longer has.
+#[cfg_attr(dispatch, inline(always))]
 pub fn correspond(
     a: &Features,
     b: &Features,
@@ -407,7 +408,8 @@ const PREFETCH: usize = 8;
 
 /// Ask for the descriptor and the keypoint of `cands[k]`'s B side. Out of range
 /// is not an error — the walk is near its end and there is nothing to fetch.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn prefetch_descriptor(b: &Features, cands: &[(u32, u32)], k: usize) {
     let Some(&(_, tj)) = cands.get(k) else { return };
     let tj = tj as usize;
@@ -430,12 +432,14 @@ fn prefetch_descriptor(b: &Features, cands: &[(u32, u32)], k: usize) {
 
 // ------------------------------------------------------------ geometry
 
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn apply(m: &Affine, x: f32, y: f32) -> (f32, f32) {
     (m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5])
 }
 
 /// The similarity transform implied by one keypoint correspondence.
+#[cfg_attr(dispatch, inline(always))]
 fn from_single(ka: &Keypoint, kb: &Keypoint) -> Affine {
     let s = kb.sigma / ka.sigma.max(1e-6);
     let th = (kb.angle - ka.angle).to_radians();
@@ -445,6 +449,7 @@ fn from_single(ka: &Keypoint, kb: &Keypoint) -> Affine {
 }
 
 /// Least-squares affine through the given correspondences.
+#[cfg_attr(dispatch, inline(always))]
 fn fit_affine(a: &Features, b: &Features, pairs: &[(u32, u32)], mask: &[bool]) -> Option<Affine> {
     // Normal equations for [x y 1] -> x' and -> y'.
     let (mut sxx, mut sxy, mut sx, mut syy, mut sy, mut n) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
@@ -478,6 +483,7 @@ fn fit_affine(a: &Features, b: &Features, pairs: &[(u32, u32)], mask: &[bool]) -
     Some([r1[0] as f32, r1[1] as f32, r1[2] as f32, r2[0] as f32, r2[1] as f32, r2[2] as f32])
 }
 
+#[cfg_attr(dispatch, inline(always))]
 fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
@@ -528,6 +534,7 @@ pub fn compose(m1: &Affine, m2: &Affine) -> Affine {
 /// come back as a `Vec<bool>` of its own, which is an allocation and a copy per
 /// verdict — four million of them on a corpus where most files have no
 /// duplicate — for a buffer the caller drops a few lines later.
+#[cfg_attr(dispatch, inline(always))]
 fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh: f32, scratch: &mut Scratch) -> Option<(Affine, usize)> {
     if pairs.len() < 3 {
         return None;
@@ -608,7 +615,8 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
 }
 
 /// Ask for the keypoints `pairs[k]` will read, on both sides.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn prefetch_keypoints(a: &Features, b: &Features, pairs: &[(u32, u32)], k: usize) {
     let Some(&(p, q)) = pairs.get(k) else { return };
     #[cfg(target_arch = "x86_64")]
@@ -645,7 +653,8 @@ fn prefetch_keypoints(a: &Features, b: &Features, pairs: &[(u32, u32)], k: usize
 /// keeps and for no other, and a hypothesis is kept only when it beats every
 /// one before it, so `mark_inliers` takes a second pass over the handful that
 /// win. Counting alone is what the other thousands get.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, need: usize) -> usize {
     const CHUNK: usize = 64;
     let n = ax.len();
@@ -670,7 +679,8 @@ fn count_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol
 /// The same test, recording which correspondences passed it. Run only for a
 /// hypothesis the caller is keeping, so it never stops early: the mask has to
 /// cover every correspondence, and the count it returns is the whole count.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn mark_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2: f32, hit: &mut [bool]) -> usize {
     let mut count = 0usize;
     for t in 0..ax.len() {
@@ -685,6 +695,7 @@ fn mark_inliers(m: &Affine, ax: &[f32], ay: &[f32], bx: &[f32], by: &[f32], tol2
 }
 
 /// Inliers counted once per distinct source position.
+#[cfg_attr(dispatch, inline(always))]
 fn distinct_inliers(a: &Features, pairs: &[(u32, u32)], mask: &[bool], pts: &mut Vec<(i32, i32)>) -> u32 {
     pts.clear();
     pts.extend(
@@ -724,6 +735,7 @@ fn distinct_inliers(a: &Features, pairs: &[(u32, u32)], mask: &[bool], pts: &mut
 /// one-sided. And it is asked of both frames and passes on either, because a
 /// photograph inside a slide legitimately has all its evidence in one corner
 /// of the slide: that is what containment looks like.
+#[cfg_attr(dispatch, inline(always))]
 fn encloses_centre(a: &Features, b: &Features, m: &Affine, pairs: &[(u32, u32)], mask: &[bool]) -> bool {
     let (aw, ah) = (a.w as f32, a.h as f32);
     let (bw, bh) = (b.w as f32, b.h as f32);
@@ -768,6 +780,7 @@ fn encloses_centre(a: &Features, b: &Features, m: &Affine, pairs: &[(u32, u32)],
 }
 
 /// Fraction of each frame that maps inside the other.
+#[cfg_attr(dispatch, inline(always))]
 fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
     const N: usize = 16;
     let mut inside = 0;
@@ -838,6 +851,7 @@ pub(crate) struct Pyramid {
 
 impl Pyramid {
     /// The levels of `t`, in place of whatever this held.
+    #[cfg_attr(dispatch, inline(always))]
     fn fill(&mut self, t: &Thumb) {
         self.buf.clear();
         self.levels.clear();
@@ -864,10 +878,12 @@ impl Pyramid {
         }
     }
 
+    #[cfg_attr(dispatch, inline(always))]
     fn len(&self) -> usize {
         self.levels.len()
     }
 
+    #[cfg_attr(dispatch, inline(always))]
     fn level(&self, i: usize) -> (&[u8], usize, usize) {
         let (w, h, at) = self.levels[i];
         let (w, h) = (w as usize, h as usize);
@@ -878,28 +894,31 @@ impl Pyramid {
 /// One output row of a pyramid level: each byte the rounded mean of the 2x2
 /// block below it, `(a + b + c + d + 2) / 4`. An odd last column is dropped,
 /// as the level's width is the floor of half.
-#[inline]
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
 fn halve_row(r0: &[u8], r1: &[u8], out: &mut [u8]) {
     let mut x = 0usize;
     // Sixteen outputs at a time: `maddubs` against ones sums each horizontal
     // pair into a sixteen-bit lane, the two rows' sums are added, and the
     // rounding is the same integer arithmetic as the scalar tail. Every sum is
-    // at most 1,022, so nothing saturates.
-    #[cfg(target_feature = "avx2")]
-    unsafe {
-        use std::arch::x86_64::*;
-        let ones = _mm256_set1_epi8(1);
-        let two = _mm256_set1_epi16(2);
-        while x + 16 <= out.len() {
-            let a = _mm256_loadu_si256(r0.as_ptr().add(2 * x) as *const __m256i);
-            let b = _mm256_loadu_si256(r1.as_ptr().add(2 * x) as *const __m256i);
-            let s = _mm256_add_epi16(_mm256_maddubs_epi16(a, ones), _mm256_maddubs_epi16(b, ones));
-            let v = _mm256_srli_epi16(_mm256_add_epi16(s, two), 2);
-            // Packing works per 128-bit half; the two halves' bytes are the
-            // even quadwords afterwards.
-            let packed = _mm256_permute4x64_epi64(_mm256_packus_epi16(v, v), 0b00_00_10_00);
-            _mm_storeu_si128(out.as_mut_ptr().add(x) as *mut __m128i, _mm256_castsi256_si128(packed));
-            x += 16;
+    // at most 1,022, so nothing saturates. Only where the CPU has AVX2.
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::v3() {
+        unsafe {
+            use std::arch::x86_64::*;
+            let ones = _mm256_set1_epi8(1);
+            let two = _mm256_set1_epi16(2);
+            while x + 16 <= out.len() {
+                let a = _mm256_loadu_si256(r0.as_ptr().add(2 * x) as *const __m256i);
+                let b = _mm256_loadu_si256(r1.as_ptr().add(2 * x) as *const __m256i);
+                let s = _mm256_add_epi16(_mm256_maddubs_epi16(a, ones), _mm256_maddubs_epi16(b, ones));
+                let v = _mm256_srli_epi16(_mm256_add_epi16(s, two), 2);
+                // Packing works per 128-bit half; the two halves' bytes are the
+                // even quadwords afterwards.
+                let packed = _mm256_permute4x64_epi64(_mm256_packus_epi16(v, v), 0b00_00_10_00);
+                _mm_storeu_si128(out.as_mut_ptr().add(x) as *mut __m128i, _mm256_castsi256_si128(packed));
+                x += 16;
+            }
         }
     }
     while x < out.len() {
@@ -960,7 +979,8 @@ impl Thumb {
     /// number even when the input is not — `clamp` propagates a NaN, and the
     /// integer conversion below is only sound on a value known to be in range.
     /// For every finite input it is the same clamp and the same split.
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn split(v: f32, n: usize) -> (usize, f32) {
         let hi = n as f32 - 1.001;
         let v = if v > 0.0 {
@@ -978,7 +998,8 @@ impl Thumb {
 
     /// Bilinear tap from a row pair already located: the four reads and the
     /// three interpolations, and nothing else.
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn lerp(px: &[u8], w: usize, i: usize, fx: f32, fy: f32) -> f32 {
         // The caller's `split` put the row and column inside the level, so the
         // four taps are inside `px`, which is w*h long.
@@ -997,7 +1018,8 @@ impl Thumb {
     }
 
     /// Bilinear tap into one level of the pyramid.
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn tap(px: &[u8], w: usize, h: usize, x: f32, y: f32) -> f32 {
         if w < 2 || h < 2 {
             return px.first().copied().unwrap_or(0) as f32;
@@ -1015,6 +1037,7 @@ impl Thumb {
     /// choice is made once here rather than per sample.
     /// The levels above zero are built into `pyr` when they are needed at
     /// all, and read from there.
+    #[cfg_attr(dispatch, inline(always))]
     fn lod<'s>(&'s self, footprint: f32, pyr: &'s mut Pyramid) -> Lod<'s> {
         let whole = Lod {
             lo: (&self.px[..], self.w as usize, self.h as usize, 1.0),
@@ -1062,7 +1085,8 @@ impl Lod<'_> {
     /// A tap at `(x, y)` in thumbnail coordinates — pixel `j` of level zero
     /// spans `[j, j + 1)` — which in a level of factor `f` is the pixel whose
     /// centre is `x * f - 0.5`. See `to_level`.
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn at(&self, x: f32, y: f32) -> f32 {
         let (p, w, h, f) = self.lo;
         let a = Thumb::tap(p, w, h, to_level(x, f), to_level(y, f));
@@ -1120,6 +1144,7 @@ impl AxisTaps {
     /// sample positions, and a sample that lands a bit either side of a pixel
     /// boundary is read from a different pair of pixels. That is a different
     /// answer, not a rounder one.
+    #[cfg_attr(dispatch, inline(always))]
     fn of(start: f32, span: f32, scale: f32, f: f32, n: usize) -> AxisTaps {
         let mut t = AxisTaps { i: [0; GRID], f: [0.0; GRID] };
         for k in 0..GRID {
@@ -1140,6 +1165,7 @@ enum LevelTaps {
 }
 
 impl LevelTaps {
+    #[cfg_attr(dispatch, inline(always))]
     fn of(lvl: (&[u8], usize, usize, f32), gx: (f32, f32), gy: (f32, f32), scale: (f32, f32)) -> LevelTaps {
         let (px, w, h, f) = lvl;
         if w < 2 || h < 2 {
@@ -1151,7 +1177,8 @@ impl LevelTaps {
         }
     }
 
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn at(&self, px: &[u8], w: usize, ix: usize, iy: usize) -> f32 {
         match self {
             LevelTaps::Degenerate(v) => *v,
@@ -1170,6 +1197,7 @@ struct GridTaps {
 }
 
 impl GridTaps {
+    #[cfg_attr(dispatch, inline(always))]
     fn of(l: &Lod, gx: (f32, f32), gy: (f32, f32), scale: (f32, f32)) -> GridTaps {
         GridTaps {
             lo: LevelTaps::of(l.lo, gx, gy, scale),
@@ -1177,7 +1205,8 @@ impl GridTaps {
         }
     }
 
-    #[inline]
+    #[cfg_attr(dispatch, inline(always))]
+    #[cfg_attr(not(dispatch), inline)]
     fn at(&self, l: &Lod, ix: usize, iy: usize) -> f32 {
         let a = self.lo.at(l.lo.0, l.lo.1, ix, iy);
         match (&self.hi, l.hi) {
@@ -1218,7 +1247,9 @@ impl GridTaps {
 /// change in how many samples an instruction handles, not in what any sample
 /// is. `pixel_timings` prints a checksum over every figure the check returns
 /// to hold it to that.
-#[cfg(target_feature = "avx2")]
+///
+/// Compiled on every x86-64 build and used only where the CPU has AVX2.
+#[cfg(target_arch = "x86_64")]
 mod wide {
     use super::*;
     use std::arch::x86_64::*;
@@ -1228,6 +1259,7 @@ mod wide {
 
     /// Whether every level both sides read is one this path can: at least two
     /// pixels each way, and as many bytes as its size says.
+    #[cfg_attr(dispatch, inline(always))]
     pub(super) fn fits(ga: &GridTaps, la: &Lod, lb: &Lod) -> bool {
         let level = |l: (&[u8], usize, usize, f32)| l.1 >= 2 && l.2 >= 2 && l.0.len() >= l.1 * l.2;
         let grid = |t: &LevelTaps| matches!(t, LevelTaps::Grid { .. });
@@ -1314,6 +1346,7 @@ mod wide {
     /// # Safety
     /// `fits(ga, la, lb)` must hold.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(dispatch, inline(always))]
     pub(super) unsafe fn sample(
         ga: &GridTaps,
         la: &Lod,
@@ -1387,6 +1420,7 @@ mod wide {
 /// contrast inversion inside one region does not fail an otherwise exact
 /// match, while the block *positions* still have to line up — which is what
 /// the shuffled-tiling trap gets wrong.
+#[cfg_attr(dispatch, inline(always))]
 fn pixel_check(
     ta: &Thumb,
     tb: &Thumb,
@@ -1397,10 +1431,14 @@ fn pixel_check(
     bh: f32,
     invert: bool,
 ) -> (f32, u32, f32, f32) {
-    PYRAMIDS.with(|cell| {
-        let (a, b) = &mut *cell.borrow_mut();
-        pixel_check_with(ta, tb, m, aw, ah, bw, bh, invert, (a, b))
-    })
+    // Taken out of the thread-local and put back, rather than borrowed in a
+    // closure handed to `with`: under `cfg(dispatch)` that closure, with the
+    // whole check inlined into it, was kept out of line, and out of the
+    // x86-64-v3 copy of `verify`. Out and back moves four pointers.
+    let (mut a, mut b) = PYRAMIDS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    let r = pixel_check_with(ta, tb, m, aw, ah, bw, bh, invert, (&mut a, &mut b));
+    PYRAMIDS.with(|cell| *cell.borrow_mut() = (a, b));
+    r
 }
 
 thread_local! {
@@ -1409,6 +1447,7 @@ thread_local! {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(dispatch, inline(always))]
 fn pixel_check_with(
     ta: &Thumb,
     tb: &Thumb,
@@ -1507,10 +1546,10 @@ fn pixel_check_with(
     }
     #[allow(unused_mut)]
     let mut sampled = false;
-    #[cfg(target_feature = "avx2")]
-    if wide::fits(&grid_a, &lod_a, &lod_b) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::v3() && wide::fits(&grid_a, &lod_a, &lod_b) {
         let rows: [f32; GRID] = std::array::from_fn(|iy| y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32);
-        // `fits` has checked every level this reads.
+        // `fits` has checked every level this reads, and the CPU has AVX2.
         unsafe { wide::sample(&grid_a, &lod_a, &lod_b, sb, m, &gux, &gvx, &rows, (bw, bh), invert, &mut va, &mut vb, &mut ok) };
         sampled = true;
     }
@@ -1639,14 +1678,20 @@ pub struct Pair<'a> {
     pub tb: &'a Thumb,
 }
 
-/// Full verification from a candidate correspondence list.
-/// Full verification from a candidate correspondence list.
-///
-/// `gate` is the weakest (inliers, overlap) any consumer of this verdict will
-/// accept. Below it the verdict is discarded whatever the pixels say, so the
-/// pixels are not read: the check is the most expensive thing in the pipeline
-/// and a third of the pairs reaching it have already lost on geometry.
-pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
+crate::simd::dispatched! {
+    /// Full verification from a candidate correspondence list.
+    ///
+    /// `gate` is the weakest (inliers, overlap) any consumer of this verdict
+    /// will accept. Below it the verdict is discarded whatever the pixels say,
+    /// so the pixels are not read: the check is the most expensive thing in
+    /// the pipeline and a third of the pairs reaching it have already lost on
+    /// geometry.
+    pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict => verify_any;
+}
+
+/// `verify`, for whichever copy `dispatched!` chose.
+#[cfg_attr(dispatch, inline(always))]
+fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
     let mut v = Verdict { variant: var, ..Default::default() };
     timed!(16, correspond(p.fa, p.fb, cands, matches));
     v.n_match = matches.len() as u32;
@@ -1698,11 +1743,17 @@ pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     v
 }
 
-/// Check a transform that came from somewhere else — composed through a third
-/// image — using pixels only. No descriptor matching, so it costs almost
-/// nothing, and it is still a real test of this pair rather than an assumption
-/// that matching is transitive.
-pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verdict {
+crate::simd::dispatched! {
+    /// Check a transform that came from somewhere else — composed through a
+    /// third image — using pixels only. No descriptor matching, so it costs
+    /// almost nothing, and it is still a real test of this pair rather than an
+    /// assumption that matching is transitive.
+    pub fn verify_transform(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verdict => verify_transform_any;
+}
+
+/// `verify_transform`, for whichever copy `dispatched!` chose.
+#[cfg_attr(dispatch, inline(always))]
+fn verify_transform_any(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verdict {
     let mut v = Verdict { m: *m, variant: var, ..Default::default() };
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
