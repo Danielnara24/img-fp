@@ -248,9 +248,13 @@ impl Settings {
                 flag("--format", f.to_string());
             }
         }
+        // The named file goes with `--no-cache` too when it is to be cleared:
+        // left out, `--clear-cache` deleted the default cache, not the one in
+        // the field.
         if !self.use_cache {
             a.push("--no-cache".into());
-        } else if !self.cache_path.trim().is_empty() {
+        }
+        if !self.cache_path.trim().is_empty() && (self.use_cache || self.clear_cache) {
             a.push("--cache".into());
             a.push(self.cache_path.trim().into());
         }
@@ -368,6 +372,24 @@ mod tests {
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
         s.use_cache = true;
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
+        // Not using the cache and not clearing it: the named file is left
+        // out, since the run would neither read nor write it.
+        s.use_cache = false;
+        s.clear_cache = false;
+        assert_eq!(img_fp::check_args(s.argv()), Ok(()));
+        assert!(!s.argv().iter().any(|a| a == "--cache"));
+    }
+
+    /// Clearing the cache with the cache off clears the file named in the
+    /// field, not the default one.
+    #[test]
+    fn clearing_without_using_clears_the_named_file() {
+        let s = Settings { folders: vec!["/tmp".into()], use_cache: false, clear_cache: true, cache_path: "/x/mine.bin".into(), ..Default::default() };
+        let a = s.argv();
+        let at = a.iter().position(|x| x == "--cache").expect("the named cache is passed");
+        assert_eq!(a[at + 1], "/x/mine.bin");
+        assert!(a.iter().any(|x| x == "--no-cache") && a.iter().any(|x| x == "--clear-cache"));
+        assert_eq!(img_fp::check_args(a), Ok(()));
     }
 
     #[test]

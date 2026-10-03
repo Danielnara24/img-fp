@@ -161,7 +161,9 @@ struct Args {
     /// The default is `$XDG_CACHE_HOME/img-fp/analysis.bin`, or
     /// `~/.cache/img-fp/analysis.bin`. A folder gets the default file name
     /// inside it.
-    #[arg(long, value_name = "PATH", conflicts_with = "no_cache")]
+    // Allowed beside `--no-cache` only to say which file `--clear-cache`
+    // deletes; see `validate`.
+    #[arg(long, value_name = "PATH")]
     cache: Option<PathBuf>,
 
     /// Don't read or write the cache.
@@ -170,7 +172,8 @@ struct Args {
 
     /// Delete the cache before running.
     ///
-    /// With `--no-cache`, delete it and don't write a new one.
+    /// With `--no-cache`, delete it and don't write a new one. `--cache`
+    /// says which file, as it does without `--no-cache`.
     #[arg(long)]
     clear_cache: bool,
 
@@ -763,7 +766,23 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    Args::try_parse_from(argv).map(|_| ()).map_err(|e| e.to_string())
+    let args = Args::try_parse_from(argv).map_err(|e| e.to_string())?;
+    validate(&args)
+}
+
+/// The combinations of flags clap cannot express.
+///
+/// `--cache` with `--no-cache` names a file the run will neither read nor
+/// write, which is a mistake — unless `--clear-cache` is there too, and then
+/// it is the file to delete. It used to be refused outright, so there was no
+/// way to delete a named cache without also using it, and the window, which
+/// had a cache file named and "Use the cache" off, dropped `--cache` and
+/// deleted the *default* cache instead of the one on screen.
+fn validate(args: &Args) -> std::result::Result<(), String> {
+    if args.cache.is_some() && args.no_cache && !args.clear_cache {
+        return Err("--cache cannot be used with --no-cache, except with --clear-cache to delete that file".into());
+    }
+    Ok(())
 }
 
 /// The defaults of the options a window shows, read from `Args` itself so the
@@ -808,6 +827,7 @@ pub use decode::preview;
 /// says the run did not finish, which is a stronger statement than `2`, and
 /// anyhow's own `main` handling prints the error and supplies the code.
 fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
+    validate(args).map_err(anyhow::Error::msg)?;
     stdout_has_one_reader(args, gui)?;
     // Opened before any work, so that a log file that cannot be written is an
     // ordinary fatal error at the top of the run rather than a discovery made
@@ -2963,6 +2983,17 @@ mod tests {
         assert!(check(&["--dump", "./-"], false), "a file named - is ./-");
         assert!(check(&[], true), "the window's report is a file");
         assert!(!check(&["--dump", "-"], true));
+    }
+
+    /// A named cache beside `--no-cache` is the file `--clear-cache` deletes,
+    /// and without `--clear-cache` it is refused.
+    #[test]
+    fn a_named_cache_beside_no_cache_is_only_for_clearing() {
+        let args = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
+        assert!(validate(&args(&["--cache", "/x.bin"])).is_ok());
+        assert!(validate(&args(&["--cache", "/x.bin", "--no-cache"])).is_err());
+        assert!(validate(&args(&["--cache", "/x.bin", "--no-cache", "--clear-cache"])).is_ok());
+        assert!(check_args(["img-fp", "--cache", "/x.bin", "--no-cache", "."]).is_err());
     }
 
     /// A lone link between two clusters is a bridge however many times the

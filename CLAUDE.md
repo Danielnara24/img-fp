@@ -3145,6 +3145,11 @@ low-light seeds (`crop_strip_top` of `earth.jpeg`, two `low-light2` crops, a
 `panoramic.avif` strip), which is a diagnosis of four of that row's misses —
 and **0 of 2,786** photographs from the found corpus.
 
+**`--cache` with `--no-cache` is allowed only beside `--clear-cache`** (`validate`), to name the file to
+delete: refusing it outright left no way to delete a named cache without using
+it, and the window, dropping `--cache` when the cache was off, deleted the
+default one instead.
+
 **`--log-file PATH`** is the unabridged list: every skip and every problem as
 it is recorded, plus the stage timings whether or not `-v` printed them, plus
 the summary at the end. Truncated per run, written a line at a time with no
