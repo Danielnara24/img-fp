@@ -570,6 +570,20 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     sc.hit.clear();
     sc.hit.resize(n, false);
     let mut best: Option<(usize, Affine)> = None;
+    // The coordinates a hypothesis is counted against, in the order it is
+    // counted: the best hypothesis so far's outliers first, then its inliers.
+    //
+    // A count does not depend on the order, and a hypothesis is only ever
+    // asked whether it beats the best — so the order decides nothing but how
+    // soon a loser is known for one. And most hypotheses on a real duplicate
+    // are themselves inliers of the best: they describe nearly the same
+    // transform, explain nearly the same points, and used to be counted over
+    // every correspondence to find out they did not explain one more. Counted
+    // over the best's outliers first, such a hypothesis that explains none of
+    // them can reach no more than the best's own count, which `count_inliers`
+    // sees at the end of the outliers and stops there. Rebuilt each time the
+    // best changes, which is a handful of times a pair.
+    let mut by_best = false;
     // Every correspondence is a hypothesis. On this scale that is cheaper and
     // more reliable than random sampling: no iteration count to tune, and a
     // single good match is enough to find the answer.
@@ -585,7 +599,12 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
         // correspondences out of hundreds — and a hypothesis that cannot win
         // is not worth finishing. See `count_inliers`.
         let need = best.map_or(3, |(c, _)| c + 1);
-        let count = count_inliers(&m, ax, ay, bx, by, tol2, need);
+        let count = if by_best {
+            let [ox, oy, qx, qy] = &sc.order;
+            count_inliers(&m, &ox[..n], &oy[..n], &qx[..n], &qy[..n], tol2, need)
+        } else {
+            count_inliers(&m, ax, ay, bx, by, tol2, need)
+        };
         if count >= need {
             // A hypothesis that beats the best so far is rare, and it is the
             // only kind whose mask anyone reads.
@@ -593,6 +612,12 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
             debug_assert_eq!(marked, count);
             best = Some((marked, m));
             sc.mask.copy_from_slice(&sc.hit);
+            for (o, src) in sc.order.iter_mut().zip([ax, ay, bx, by]) {
+                o.clear();
+                o.extend((0..n).filter(|&t| !sc.hit[t]).map(|t| src[t]));
+                o.extend((0..n).filter(|&t| sc.hit[t]).map(|t| src[t]));
+            }
+            by_best = true;
         }
     }
     let (n_in, mut m) = best?;
@@ -1669,6 +1694,9 @@ pub struct Scratch {
     mask: Vec<bool>,
     hit: Vec<bool>,
     pts: Vec<(i32, i32)>,
+    /// The four coordinate arrays again, the best hypothesis's outliers first.
+    /// See `best_transform`.
+    order: [Vec<f32>; 4],
 }
 
 pub struct Pair<'a> {

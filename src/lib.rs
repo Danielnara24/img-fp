@@ -2044,8 +2044,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // original, so each pair is now stated for each copy of either file, with
     // the verdict its original's pair was found on.
     let (all, propagated, corroborated) = (with_copies(&all, &twin_of), with_copies(&propagated, &twin_of), with_copies(&corroborated, &twin_of));
-    let mut out_pairs: Vec<OutPair> = Vec::new();
+    // Which pairs are stated, and from what, in the order they are first
+    // met — the order `graph` and every tie in the sort below keep. The
+    // records themselves are a million strings on a large corpus, so they are
+    // made afterwards on every thread rather than here on one.
     let mut graph: Vec<(usize, usize)> = Vec::new();
+    // `None` for byte-identical files, or the edge and whether it was
+    // corroborated.
+    let mut stated: Vec<Option<(&Edge, bool)>> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
     for g in exact.iter() {
         for w in 0..g.len() {
@@ -2053,53 +2059,65 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 let (a, b) = (g[w], g[x]);
                 if seen.insert((a, b)) {
                     graph.push((a, b));
-                    out_pairs.push(OutPair {
-                        a: files[a].display().to_string(),
-                        b: files[b].display().to_string(),
-                        a_bytes: report::raw_bytes(&files[a]),
-                        b_bytes: report::raw_bytes(&files[b]),
-                        aligned_points: 0,
-                        frame_overlap: 1.0,
-                        pixel_correlation: 1.0,
-                        scale: 1.0,
-                        mirrored: false,
-                        inverted: false,
-                        identical: true,
-                        propagated: false,
-                        corroborated: false,
-                        ia: a,
-                        ib: b,
-                    });
+                    stated.push(None);
                 }
             }
         }
     }
     let tiers = all.iter().map(|e| (e, false)).chain(propagated.iter().map(|e| (e, false)));
-    for ((a, b, _, inv_flag, v), corroborated) in tiers.chain(corroborated.iter().map(|e| (e, true))) {
-        let (a, b) = (*a, *b);
+    for (e, corroborated) in tiers.chain(corroborated.iter().map(|e| (e, true))) {
+        let (a, b) = (e.0, e.1);
         if !seen.insert((a, b)) {
             continue;
         }
         graph.push((a, b));
-        out_pairs.push(OutPair {
-            a: files[a].display().to_string(),
-            b: files[b].display().to_string(),
-            a_bytes: report::raw_bytes(&files[a]),
-            b_bytes: report::raw_bytes(&files[b]),
-            aligned_points: v.n_in,
-            frame_overlap: round3(v.ov_a.max(v.ov_b)),
-            pixel_correlation: round3(v.blk),
-            scale: round3(v.scale),
-            mirrored: v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0,
-            inverted: *inv_flag,
-            identical: false,
-            propagated: v.n_match == 0,
-            corroborated,
-            ia: a,
-            ib: b,
-        });
+        stated.push(Some((e, corroborated)));
     }
-    out_pairs.sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
+    drop(seen);
+    let names: Vec<String> = files.par_iter().map(|f| f.display().to_string()).collect();
+    let mut out_pairs: Vec<OutPair> = graph
+        .par_iter()
+        .zip(stated.par_iter())
+        .map(|(&(a, b), src)| match *src {
+            None => OutPair {
+                a: names[a].clone(),
+                b: names[b].clone(),
+                a_bytes: report::raw_bytes(&files[a]),
+                b_bytes: report::raw_bytes(&files[b]),
+                aligned_points: 0,
+                frame_overlap: 1.0,
+                pixel_correlation: 1.0,
+                scale: 1.0,
+                mirrored: false,
+                inverted: false,
+                identical: true,
+                propagated: false,
+                corroborated: false,
+                ia: a,
+                ib: b,
+            },
+            Some(((_, _, _, inv_flag, v), corroborated)) => OutPair {
+                a: names[a].clone(),
+                b: names[b].clone(),
+                a_bytes: report::raw_bytes(&files[a]),
+                b_bytes: report::raw_bytes(&files[b]),
+                aligned_points: v.n_in,
+                frame_overlap: round3(v.ov_a.max(v.ov_b)),
+                pixel_correlation: round3(v.blk),
+                scale: round3(v.scale),
+                mirrored: v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0,
+                inverted: *inv_flag,
+                identical: false,
+                propagated: v.n_match == 0,
+                corroborated,
+                ia: a,
+                ib: b,
+            },
+        })
+        .collect();
+    drop(stated);
+    // Stable, as `sort_by` is, so equal names keep the order they were met in.
+    out_pairs.par_sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
 
     let grouping = timed!(28, group::find(n, &graph));
     let membership = group::membership(&grouping);

@@ -262,14 +262,6 @@ struct JsonGroup<'a> {
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
 fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>, with_pairs: bool) -> std::io::Result<()> {
-    fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
-        write!(w, "  \"{key}\": [")?;
-        for (i, x) in xs.iter().enumerate() {
-            write!(w, "{}\n    ", if i == 0 { "" } else { "," })?;
-            serde_json::to_writer(&mut *w, x)?;
-        }
-        writeln!(w, "{}]{}", if xs.is_empty() { "" } else { "\n  " }, if last { "" } else { "," })
-    }
     let pairs = pair_index(out);
     let groups: Vec<JsonGroup> = out
         .groups
@@ -291,9 +283,50 @@ fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMa
     writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&out.runtime_seconds)?)?;
     list(w, "groups", &groups, !with_pairs)?;
     if with_pairs {
-        list(w, "pairs", &out.pairs, true)?;
+        list_par(w, "pairs", &out.pairs, true)?;
     }
     writeln!(w, "}}")
+}
+
+/// One key of the document and its list, a record a line.
+fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
+    write!(w, "  \"{key}\": [")?;
+    for (i, x) in xs.iter().enumerate() {
+        write!(w, "{}\n    ", if i == 0 { "" } else { "," })?;
+        serde_json::to_writer(&mut *w, x)?;
+    }
+    writeln!(w, "{}]{}", if xs.is_empty() { "" } else { "\n  " }, if last { "" } else { "," })
+}
+
+/// `list`, for a list long enough to be worth writing on every thread: each
+/// piece of it is written into a buffer of its own, and the buffers go out in
+/// order, so the bytes are the ones `list` writes. The pairs of a corpus of
+/// 27,000 pictures are a million records and a quarter of a gigabyte, and
+/// they were the last thing a run did on one thread. A batch of pieces at a
+/// time, so that the report is never held whole.
+fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
+    const PIECE: usize = 4096;
+    const BATCH: usize = 64 * PIECE;
+    write!(w, "  \"{key}\": [")?;
+    for (bi, batch) in xs.chunks(BATCH).enumerate() {
+        let bufs: Vec<std::io::Result<Vec<u8>>> = batch
+            .par_chunks(PIECE)
+            .enumerate()
+            .map(|(pi, piece)| {
+                let mut buf = Vec::with_capacity(piece.len() * 256);
+                for (k, x) in piece.iter().enumerate() {
+                    let first = bi == 0 && pi == 0 && k == 0;
+                    buf.extend_from_slice(if first { b"\n    " } else { b",\n    " });
+                    serde_json::to_writer(&mut buf, x)?;
+                }
+                Ok(buf)
+            })
+            .collect();
+        for b in bufs {
+            w.write_all(&b?)?;
+        }
+    }
+    writeln!(w, "{}]{}", if xs.is_empty() { "" } else { "\n  " }, if last { "" } else { "," })
 }
 
 /// What the per-file rows say about a file beyond its path. Read from the
@@ -686,6 +719,19 @@ mod tests {
         assert_eq!(v["pairs"][1]["mirrored"], true);
         assert!(v["pairs"][0].get("mirrored").is_none());
         assert!(v["pairs"][0].get("ia").is_none());
+    }
+
+    #[test]
+    fn the_pairs_are_written_on_every_thread_byte_for_byte() {
+        for n in [0usize, 1, 2, 4095, 4096, 4097, 300_000] {
+            let xs: Vec<OutPair> = (0..n).map(|i| pair(i, i + 1)).collect();
+            for last in [false, true] {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                list(&mut a, "pairs", &xs, last).unwrap();
+                list_par(&mut b, "pairs", &xs, last).unwrap();
+                assert!(a == b, "{n} pairs");
+            }
+        }
     }
 
     /// The window's copy is the same document without the pairs, and still

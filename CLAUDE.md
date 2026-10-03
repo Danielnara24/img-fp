@@ -28,6 +28,14 @@ at 640 (99.6% / 94.7%, 48 perfect); IMGS2 and IMGS3 alone score 0.980 and
 are `out/v14-fullsweep` and `out/v15-enlargement`; the competitors' IMGS-only
 rows are `out/v5`.
 
+**Grey has been BT.601 luma since the CPU pass** (*Speed and memory*, the
+pass over the four-corpus baseline's CPU), not the mean of RGB, and a JPEG's
+grey is its own Y plane. That moved the accuracy as well as the clock: on
+IMGS-ALL at the default the current build scores F1 **0.9788** at 99.57% /
+96.24% with **46** perfect transformations, against the 0.9781 / 96.11% / 43
+of the build `out/v17-all4` measured, at about 11% less CPU and wall. The
+figures above and the tables below are that older build's, left as measured.
+
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
 similar photographs on real folders, a category IMGS has no negatives for.
@@ -2115,6 +2123,144 @@ geometry at full precision. The decode budget, `MemAvailable / 8` taken once
 at the start, sets the analysis-phase transient, and that phase is not the
 peak here.
 
+**A pass over the four-corpus baseline's CPU, and the one change in it that is
+not exact.** Profiled cold on IMGS-ALL, the starting point was 2,946
+user-seconds, of which decoding was 1,109 thread-seconds (JPEG 568), the
+extractor 1,508 and everything after it about 450. Six of the seven changes
+below are exact — pair-for-pair and field-for-field on all of IMGS-ALL, and the
+JSON report byte-for-byte — and one changes what grey *is*, so its accuracy is
+measured rather than asserted.
+
+- **Grey is BT.601 luma, and a JPEG's is its Y plane** (`decode::luma`,
+  `decode_jpeg_luma`). It was the mean of R, G and B. A JPEG stores luma and
+  chroma, and asking `zune-jpeg` for `ColorSpace::Luma` skips the chroma's
+  IDCT, the upsampling and the colour conversion, and hands back one byte a
+  pixel rather than three: 400 of IMGS2's JPEGs decode in **2.6 s against 3.8**
+  on one core, and in place `decode:jpeg` against the untouched `sift:ori` went
+  from 5.59 to 4.03 of it (**-28%**). Every other format computes the same Y
+  from its RGB (integer weights 299/587/114, divided once), so a JPEG and a PNG
+  of one picture still give the same grey, and PIL's own `convert("L")` — which
+  is what the corpus's greyscale transforms are — is now the identity. A
+  colour space with no Y plane (CMYK, YCCK, RGB stored as such), a picture past
+  `max_alloc` and any error take the general path, so a broken file fails with
+  the message it always did. Measured on IMGS-ALL at the default, against the
+  build before it:
+
+  | build | F1 | precision | recall | perfect | cross-family | halves (alt / hash) |
+  |---|---|---|---|---|---|---|
+  | mean of RGB (`out/v17-all4`'s build) | 0.9781 | 99.58% | 96.11% | 43 | 74 | 0.9759 / 0.9787 |
+  | luma | 0.9789 | 99.57% | 96.27% | 49 | 93 | 0.9768 / 0.9799 |
+  | luma and the streamed resample below | **0.9788** | **99.57%** | **96.24%** | **46** | **89** | **0.9762 / 0.9793** |
+
+  Both seed halves move up with the whole. The cross-family pairs are still no
+  merge: the stray `Acueducto3` file (68 pairs) is gone and a stray `Segovia`
+  one (84) has taken its place, which is the clean-anchor rule's lone-file
+  allowance on the other sibling pair, and the rest are single pairs. The
+  cache went to `IMGFPC08` with it.
+- **The area resample runs vertical first, and is fed the reduction's rows as
+  they come** (`decode::Fit`). The full-size grey plane a picture already near
+  the working size used to be written into, and read back by `fit_to`, no
+  longer exists: each reduced row is added into the one or two output rows its
+  area covers while it is still in cache, and the horizontal pass then runs
+  over `th` rows rather than all of them, every output over the same number of
+  taps (`horizontal::<T>`, zero-padded) so that its inner loop has a constant
+  trip count. Not exact against the old order — the two passes are summed the
+  other way round — so it is in the accuracy row above; `streamed_fit_is_fit_to`
+  holds the streamed form to `fit_to` bit for bit. `reduce_timings`: l8
+  1200x900 **2.75 -> 0.83 ms**, rgb8 2.9 -> 1.36, `resize_area` 1000x750 ->
+  512x384 **1.48 -> 0.61**; in place `decode:fit` **133 -> 30** thread-seconds
+  and `decode:reduce` 130 -> 58. (A gather version of the horizontal pass was
+  no faster: Zen 2's gathers cost what the scalar loads did.)
+- **The cache deflates at level 1** (`cache::pack`). The descriptors are nine
+  tenths of a record and hold nothing for an LZ to find, so level 6's longer
+  match search only spent time: 60 records of IMGS2 packed to **3,095,465 bytes
+  in 222 ms at level 6 and 3,078,257 in 42 at level 1** — smaller too, since
+  the Huffman stage sees longer runs of literals. Every record is packed by the
+  worker that made it, so with the cache on, which is the default, this was
+  some 3 ms an image of a cold run. The reader is unchanged; a cache written
+  at level 6 reads as it did.
+- **An octave is made a row at a time** (`sift::Octave`). The five blurs are a
+  chain and nothing reads a Gaussian whole, so each blur is a stage that makes
+  its next row on demand from the rows below it, each Gaussian lives in a ring
+  of `r + 1` rows (three at least, for the gradient), and what is written whole
+  is what is read whole later: the differences, the gradients and the halved
+  base of the next octave. Exact — the same `blur_row`, the same vertical sums
+  in the same order (`vertical_row`), the same gradient expressions — and
+  `extract_threads` still reads `b8e5341a1d7b5cad` / `5c2fd85ed71708a8`.
+  `octave_threads` (new) at 512x384: planes 11.1 ms on one core and 34.7 each
+  on eight, streamed 10.8 and 29.9, so the octave now scales like pure
+  arithmetic (x2.78, where the planes were x3.13); in place, blur, gradients
+  and halving together went **717 -> 640** thread-seconds. (So `sift:blur` in a
+profile is now the whole octave, gradients and halving included, and
+`sift:grad` and `sift:halve` stay empty.) The driver is a loop
+  and not a recursion, on purpose: a recursive function cannot be inlined into
+  the extractor's x86-64-v3 copy, and `objdump` on a `target-cpu=x86-64` build
+  shows no `Octave` symbol outside `extract::v3`. In a harness without
+  `few_arenas` the rings' small allocations interleaved with the planes made
+  glibc trim and refault 1,700 pages an image; the real binary does not, and
+  measures fewer minor faults than before.
+- **`best_transform` counts a rival against the best hypothesis's outliers
+  first.** A count does not depend on the order and a rival is only asked
+  whether it beats the best, so the order decides nothing but how soon a loser
+  is known — and most rivals on a real duplicate are the best's own inliers,
+  which explain none of its outliers and are now stopped at the end of them.
+  Point tests on IMGS **5.11 G -> 2.72 G**, output identical. The stage's time
+  barely moved, which is the finding: `best_transform` is bound by gathering
+  the two images' keypoints, not by the counting.
+- **The decode budget claims what a decode now holds.** A JPEG's claim is one
+  byte a pixel, for the luma plane, where it was three (a JPEG with no Y plane
+  takes the rest through `cover`, as any decoder does), and the working plane
+  is what `Fit` holds rather than a full-size float plane. Workers waiting on
+  the budget (`decode:permit`) went **19.6 -> 0.5** thread-seconds on IMGS-ALL.
+- **The report's tail runs on every thread.** The 1.12 M output pairs were
+  built, sorted by path and serialised on one thread after everything else had
+  finished: they are now made in parallel, sorted with rayon's stable sort
+  under the same comparator, and the `pairs` list is serialised in pieces
+  written in order (`list_par`, held to `list` byte for byte by
+  `the_pairs_are_written_on_every_thread_byte_for_byte`). The last stretch of
+  an IMGS-ALL run went **7.6 -> 4.9 s** of wall, the report byte-identical.
+
+Tried in this pass and not kept, each measured:
+
+- *Two descriptor histograms taken in turn by consecutive samples*, so that a
+  sample's eight read-modify-writes do not wait on the previous sample's
+  stores. **-14% on one core and level at eight** — the stall it removes is one
+  the sibling hyperthread was already filling — and not exact.
+- *The k-means centre update summed on every thread*, exactly (the `f64` sums
+  of bytes are integers). Bit-identical and no faster: the update was never
+  where the vocabulary's ten seconds go.
+- *Hamerly bounds in the vocabulary's k-means*, with margins wide enough to
+  keep every assignment exact. In 128 dimensions the nearest and second-nearest
+  centres are too close for a triangle-inequality bound to separate: **15%** of
+  measurements skipped, **22%** with the own-centre re-measure. Not worth the
+  code. Padding 13-wide centre tables to 16 lanes measured no different either
+  (170 against 177 ns a call).
+- *Reading the next file ahead* with `posix_fadvise(WILLNEED)` while a worker
+  analyses the current one. Level on a cold IMGS run (wall +0.5 and +1.0 s in
+  the clock-matched pairs): on this SSD the reads are not on the critical path.
+
+One thing outside the code: this machine's libheif decodes AVIF through
+`libheif-plugin-aomdec`, because `libheif-plugin-dav1d` is not installed, and
+dav1d is the faster AV1 decoder. `decode:heif` is ~90 thread-seconds of an
+IMGS-ALL run.
+
+**What the pass is worth end to end**, on IMGS-ALL under `bench.py`'s
+protocol (cold page cache, cooled, `--no-cache`, PSS and swap sampled), in the
+order before, after, after, before:
+
+| IMGS-ALL, cold | CPU-seconds | wall | peak PSS + swap | clock |
+|---|---|---|---|---|
+| **before** | 3,047.7 / 2,878.7 | 486.1 / 454.2 s | 2,257 / 2,252 MB | 1,797 / 1,905 MHz |
+| **after** | 2,690.9 / 2,564.4 | 421.5 / 407.8 s | 2,267 / 2,262 MB | 1,799 / 1,889 MHz |
+
+Slot-matched, **-11.7% and -10.9% of the CPU and -13.3% and -10.2% of the
+wall**, at matched clocks. The peak does not move, and should not: on this
+corpus it is the end of verification, where the analysis is held whole, and
+nothing here changed what the analysis holds. What the pass took out of the
+analysis phase's transient — a JPEG's decode buffer a third the size, no
+full-size grey plane before the resample, no Gaussian planes in an octave — is
+below that peak here, and is what a corpus that peaks in its analysis gets.
+
 ### What the second look costs, and the seven ways not to fix it
 
 It is **41% of a found corpus's run** and 1.5% of this one's. Profiled on the
@@ -3407,6 +3553,9 @@ thumbnail 17.2%, the keypoints 11.2%:
 Whole file: **0.755 on the found corpus** (93.1 KB an image to 70.3) and
 **0.720 on the benchmark one** (48 KB to 34.6), pair-for-pair identical output
 on both, packed and unpacked in parallel batches so the clock does not notice.
+(Every stream is deflated at level 1 since the CPU pass under *Speed and
+memory*, which is smaller as well as five times faster to pack: the
+descriptors' 0.758 above was level 6, and level 1 gives 0.752.)
 
 **The descriptors are the wall, and the measurements that say so are worth
 keeping** — they are what stops the next attempt:

@@ -224,7 +224,11 @@ impl Grad {
     /// the same values in the same order — an indexed write loop being the one
     /// shape this has to keep, since filling the plane by pushing rows was
     /// measured at two and a half times the cost.
+    ///
+    /// The extractor no longer calls this: `Octave` makes the same rows as
+    /// the Gaussian they come from is made, and the benches hold it to this.
     #[cfg_attr(dispatch, inline(always))]
+    #[cfg(test)]
     fn of(l: &Layer) -> Grad {
         let (w, h) = (l.w, l.h);
         let n = w * h;
@@ -383,7 +387,11 @@ fn blur_plane(w: usize, h: usize, px: &[f32], sigma: f32) -> Layer {
 /// in registers, and the row it was made from was read a few rows ago and is
 /// still in cache — so the subtraction costs one store and the two reads it
 /// used to make are gone. Same two floats, same subtraction, same order.
+///
+/// The extractor no longer calls this — `Octave` runs the same arithmetic a
+/// row at a time — and the benches measure one against the other.
 #[cfg_attr(dispatch, inline(always))]
+#[cfg(test)]
 fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
     let mut s = take_scratch();
     let (g, d) = blur_into(src.w, src.h, &src.px, sigma, &mut s, true, true);
@@ -402,7 +410,11 @@ fn blur_dog(src: &Layer, sigma: f32) -> (Layer, Layer) {
 /// where the extractor as a whole is under three), so a plane not written is
 /// the currency here. The difference is the same subtraction of the same two
 /// floats; only the Gaussian's row now lives in a scratch row.
+///
+/// The extractor no longer calls this — `Octave` runs the same arithmetic a
+/// row at a time — and the benches measure one against the other.
 #[cfg_attr(dispatch, inline(always))]
+#[cfg(test)]
 fn blur_top(src: &Layer, sigma: f32) -> Layer {
     let mut s = take_scratch();
     let (_, d) = blur_into(src.w, src.h, &src.px, sigma, &mut s, true, false);
@@ -566,6 +578,280 @@ fn blur_into(w: usize, h: usize, src: &[f32], sigma: f32, s: &mut BlurScratch, w
     (g, d)
 }
 
+/// One blur of an octave's chain, run a row at a time. See `Octave`.
+struct Stage {
+    r: usize,
+    kc: f32,
+    ks: Vec<f32>,
+    /// The last `ring_rows` rows of this stage's input, filtered across, by
+    /// row modulo `ring_rows` — `blur_into`'s ring.
+    ring: Vec<f32>,
+    ring_rows: usize,
+    /// Input rows through the horizontal pass, and output rows made.
+    filtered: usize,
+    produced: usize,
+    /// The last `raw_rows` rows of this stage's output, the Gaussian, by row
+    /// modulo `raw_rows`: what the next stage filters and takes its
+    /// difference against, what the gradient reads and what is halved. The
+    /// top stage keeps none.
+    raw: Vec<f32>,
+    raw_rows: usize,
+    /// The difference of this stage's Gaussian and its input, whole.
+    dog: Vec<f32>,
+    /// The gradient of this stage's Gaussian, whole, when one is wanted.
+    grad: Option<Vec<[f32; 2]>>,
+}
+
+/// An octave of the scale space, made a row at a time.
+///
+/// The five blurs of an octave are a chain: each Gaussian is a blur of the one
+/// before, and nothing reads a Gaussian whole. The next blur reads it a few
+/// rows at a time, its difference is taken a row at a time, its gradient
+/// needs three rows and the next octave's base every other one. So the chain
+/// runs as a pipeline: asking the top stage for a row asks the stage below for
+/// the rows that row's taps reach, and so on down to the octave's base, and
+/// each Gaussian row lives in a ring of a few dozen rows rather than in a
+/// plane of its own. What is written whole is what is read whole later: the
+/// differences, which the extremum search and the sub-pixel refinement read,
+/// the gradients, which description reads, and the halved base of the next
+/// octave.
+///
+/// It is the same arithmetic as `blur_dog`, `blur_top`, `Grad::of` and `halve`
+/// run one after another, on the same values in the same order — only where
+/// the rows between them are kept has changed. At eight threads those planes
+/// were the blur's cost: four Gaussian planes written and read back, three of
+/// them read again for gradients, a megabyte apiece on a 512-pixel picture,
+/// when the rings that replace them fit in the second-level cache.
+struct Octave<'a> {
+    w: usize,
+    h: usize,
+    base: &'a [f32],
+    st: Vec<Stage>,
+    padded: Vec<f32>,
+    /// The top stage's Gaussian row, which only makes a difference.
+    top: Vec<f32>,
+    /// The stage whose Gaussian is halved into the next octave's base.
+    halve_from: Option<usize>,
+    next: Vec<f32>,
+    nw: usize,
+    nh: usize,
+}
+
+impl<'a> Octave<'a> {
+    /// `sig[1..]` are the blurs; the Gaussians of stages `0..s` (layers
+    /// `1..=s`) get a gradient, and stage `s - 1`'s is halved when
+    /// `want_next`.
+    #[cfg_attr(dispatch, inline(always))]
+    fn new(base: &'a Layer, sig: &[f32], s: usize, want_next: bool) -> Octave<'a> {
+        let (w, h) = (base.w, base.h);
+        let n = sig.len() - 1;
+        let kernels: Vec<Vec<f32>> = (1..=n).map(|i| gaussian_kernel(sig[i])).collect();
+        let radius: Vec<usize> = kernels.iter().map(|k| k.len() / 2).collect();
+        let mut st = Vec::with_capacity(n);
+        for j in 0..n {
+            let k = &kernels[j];
+            let r = radius[j];
+            let ring_rows = (2 * r + 1).min(h);
+            let raw_rows = if j + 1 < n { (radius[j + 1] + 1).max(3).min(h) } else { 0 };
+            st.push(Stage {
+                r,
+                kc: k[r],
+                ks: k[r + 1..].to_vec(),
+                ring: vec![0.0; ring_rows * w],
+                ring_rows,
+                filtered: 0,
+                produced: 0,
+                raw: vec![0.0; raw_rows * w],
+                raw_rows,
+                dog: Vec::with_capacity(w * h),
+                grad: (j < s).then(|| Vec::with_capacity(w * h)),
+            });
+        }
+        let rmax = radius.iter().copied().max().unwrap_or(0);
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        Octave {
+            w,
+            h,
+            base: &base.px,
+            st,
+            padded: vec![0.0; w + 2 * rmax],
+            top: vec![0.0; w],
+            halve_from: want_next.then(|| s - 1),
+            next: Vec::with_capacity(if want_next { nw * nh } else { 0 }),
+            nw,
+            nh,
+        }
+    }
+
+    /// Run the chain to the end: every stage's every row.
+    #[cfg_attr(dispatch, inline(always))]
+    fn run(mut self) -> (Vec<Layer>, Vec<Option<Grad>>, Option<Layer>) {
+        // Each step makes one row of the highest stage that can make its next
+        // row from the rows below it — which is the order asking the top stage
+        // for its rows and letting each stage ask the one below would give,
+        // written as a loop so that nothing here is recursive (a recursive
+        // function cannot be inlined into the extractor's x86-64-v3 copy; see
+        // `simd.rs`). A stage below the top therefore runs only when the stage
+        // above it is waiting on it, and is never more than that stage's
+        // radius ahead of it, which is what `raw_rows` is sized for.
+        let last = self.st.len() - 1;
+        let h = self.h;
+        while self.st[last].produced < h {
+            let mut j = last;
+            loop {
+                let need = (self.st[j].produced + self.st[j].r).min(h - 1);
+                if j == 0 || self.st[j - 1].produced > need {
+                    self.produce(j);
+                    break;
+                }
+                j -= 1;
+            }
+        }
+        let w = self.w;
+        let mut dogs = Vec::with_capacity(self.st.len());
+        let mut grads: Vec<Option<Grad>> = Vec::with_capacity(self.st.len() + 1);
+        grads.push(None);
+        for st in self.st.into_iter() {
+            debug_assert_eq!(st.dog.len(), w * h);
+            dogs.push(Layer { w, h, px: st.dog });
+            grads.push(st.grad.map(|mut px| {
+                // Every row was written: the edges as zeros, the rest by
+                // `gradient_row`.
+                unsafe { px.set_len(w * h) };
+                Grad { w, px }
+            }));
+        }
+        let next = self.halve_from.map(|_| {
+            debug_assert_eq!(self.next.len(), self.nw * self.nh);
+            Layer { w: self.nw, h: self.nh, px: self.next }
+        });
+        (dogs, grads, next)
+    }
+
+    /// Stage `j`'s next row, once the stage below has made every row its taps
+    /// reach: the horizontal pass over any of those not yet through it, then
+    /// the vertical pass and the difference — `blur_into`'s loop body, for
+    /// one `y`.
+    #[cfg_attr(dispatch, inline(always))]
+    fn produce(&mut self, j: usize) {
+        let (w, h) = (self.w, self.h);
+        let y = self.st[j].produced;
+        let need = (y + self.st[j].r).min(h - 1);
+        debug_assert!(j == 0 || self.st[j - 1].produced > need);
+        let (below, rest) = self.st.split_at_mut(j);
+        let cur = &mut rest[0];
+        let (r, kc, ring_rows) = (cur.r, cur.kc, cur.ring_rows);
+        while cur.filtered <= need {
+            let q = cur.filtered;
+            let src: &[f32] = match below.last() {
+                None => &self.base[q * w..(q + 1) * w],
+                Some(b) => {
+                    let slot = q % b.raw_rows;
+                    &b.raw[slot * w..(slot + 1) * w]
+                }
+            };
+            let slot = q % ring_rows;
+            blur_row(src, &mut self.padded, &mut cur.ring[slot * w..(slot + 1) * w], kc, &cur.ks, r, w);
+            cur.filtered += 1;
+        }
+        let acc: &mut [f32] = if cur.raw_rows > 0 {
+            let slot = y % cur.raw_rows;
+            &mut cur.raw[slot * w..(slot + 1) * w]
+        } else {
+            &mut self.top[..]
+        };
+        vertical_row(&cur.ring, ring_rows, w, h, y, r, kc, &cur.ks, acc);
+        let src_row: &[f32] = match below.last() {
+            None => &self.base[y * w..(y + 1) * w],
+            Some(b) => {
+                let slot = y % b.raw_rows;
+                &b.raw[slot * w..(slot + 1) * w]
+            }
+        };
+        let (acc, src_row) = (&acc[..w], &src_row[..w]);
+        extend_from_fn(&mut cur.dog, w, |x| acc[x] - src_row[x]);
+        cur.produced += 1;
+        // The gradient of the row above, now that the row below it exists;
+        // the first and last rows, and every row of a picture under three
+        // pixels wide, carry none.
+        if let Some(grad) = cur.grad.as_mut() {
+            let spare = grad.spare_capacity_mut();
+            let zero = |u: &mut [std::mem::MaybeUninit<[f32; 2]>]| {
+                for v in u.iter_mut() {
+                    v.write([0.0, 0.0]);
+                }
+            };
+            if w < 3 || y == 0 || y + 1 == h {
+                zero(&mut spare[y * w..(y + 1) * w]);
+            }
+            if y >= 2 && w >= 3 {
+                let rr = cur.raw_rows;
+                let at = |k: usize| (k % rr) * w;
+                let (u, m, d) = (at(y - 2), at(y - 1), at(y));
+                gradient_row(&cur.raw[u..u + w], &cur.raw[m..m + w], &cur.raw[d..d + w], &mut spare[(y - 1) * w..y * w]);
+            }
+        }
+        if self.halve_from == Some(j) && y % 2 == 0 && y / 2 < self.nh {
+            let slot = y % cur.raw_rows;
+            let row = &cur.raw[slot * w..(slot + 1) * w];
+            extend_from_fn(&mut self.next, self.nw, |x| row[x * 2]);
+        }
+    }
+}
+
+/// The vertical pass of `blur_into` for output row `y`, into `acc`.
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
+#[allow(clippy::too_many_arguments)]
+fn vertical_row(ring: &[f32], ring_rows: usize, w: usize, h: usize, y: usize, r: usize, kc: f32, ks: &[f32], acc: &mut [f32]) {
+    let acc = &mut acc[..w];
+    let base = y % ring_rows;
+    let c = &ring[base * w..(base + 1) * w];
+    for x in 0..w {
+        acc[x] = c[x] * kc;
+    }
+    let interior = y >= r && y + r < h;
+    for (t, &kv) in ks.iter().enumerate() {
+        let (ya, yb) = if interior {
+            let mut ya = base + ring_rows - t - 1;
+            if ya >= ring_rows {
+                ya -= ring_rows;
+            }
+            let mut yb = base + t + 1;
+            if yb >= ring_rows {
+                yb -= ring_rows;
+            }
+            (ya, yb)
+        } else {
+            (
+                reflect101(y as i32 - t as i32 - 1, h) % ring_rows,
+                reflect101(y as i32 + t as i32 + 1, h) % ring_rows,
+            )
+        };
+        let a = &ring[ya * w..(ya + 1) * w];
+        let b = &ring[yb * w..(yb + 1) * w];
+        for x in 0..w {
+            acc[x] += (a[x] + b[x]) * kv;
+        }
+    }
+}
+
+/// One interior row of `Grad::of`: the same expressions, the edge columns as
+/// zeros.
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
+fn gradient_row(up: &[f32], row: &[f32], dn: &[f32], urow: &mut [std::mem::MaybeUninit<[f32; 2]>]) {
+    let w = row.len();
+    let (up, dn, urow) = (&up[..w], &dn[..w], &mut urow[..w]);
+    urow[0].write([0.0, 0.0]);
+    urow[w - 1].write([0.0, 0.0]);
+    for x in 1..w - 1 {
+        let dx = row[x + 1] - row[x - 1];
+        let dy = up[x] - dn[x];
+        urow[x].write([(dx * dx + dy * dy).sqrt(), fast_atan2_deg(dy, dx)]);
+    }
+}
+
 #[cfg_attr(dispatch, inline(always))]
 #[cfg_attr(not(dispatch), inline)]
 fn reflect101(i: i32, n: usize) -> usize {
@@ -624,7 +910,10 @@ fn upsample(g: &Gray, f: usize) -> Layer {
     Layer { w, h, px }
 }
 
+/// Every other row and column; `Octave` takes the same samples as the rows
+/// of the octave's middle Gaussian are made.
 #[cfg_attr(dispatch, inline(always))]
+#[cfg(test)]
 fn halve(src: &Layer) -> Layer {
     let (w, h) = ((src.w / 2).max(1), (src.h / 2).max(1));
     let mut px: Vec<f32> = Vec::with_capacity(w * h);
@@ -705,60 +994,17 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
 
     let mut octave_base = base;
     for o in 0..n_octaves {
-        // A Gaussian layer is kept only as long as something still reads it.
-        //
-        // Three of the `s + 3` are dead the moment the differences are taken:
-        // layer 0 is the octave's own base, layers `s+1` and `s+2` exist only
-        // to make the top two differences, and none of the three carries a
-        // gradient. Holding all of them alongside all `s + 2` differences was
-        // eleven full-size planes per worker at the widest point of the
-        // pyramid, on eight workers at once, for three planes nothing would
-        // read again. `None` in their place says so.
         let height = octave_base.h;
-        let mut gauss: Vec<Option<Layer>> = Vec::with_capacity(s + 3);
-        gauss.push(Some(std::mem::replace(&mut octave_base, Layer { w: 0, h: 0, px: vec![] })));
-        let mut dog: Vec<Layer> = Vec::with_capacity(s + 2);
-        for i in 1..s + 3 {
-            if i == s + 2 {
-                // The top layer: its difference and nothing else. See
-                // `blur_top`.
-                dog.push(timed!(6, blur_top(gauss[i - 1].as_ref().unwrap(), sig[i])));
-                gauss.push(None);
-                gauss[i - 1] = None;
-                break;
-            }
-            let (l, d) = timed!(6, blur_dog(gauss[i - 1].as_ref().unwrap(), sig[i]));
-            gauss.push(Some(l));
-            dog.push(d);
-            // `gauss[i - 1]` has produced its difference. It is read again
-            // only if a gradient is taken from it, or if the next octave
-            // starts from it.
-            if !(1..=s).contains(&(i - 1)) {
-                gauss[i - 1] = None;
-            }
-        }
-        // The top layer made the last difference and carries no gradient.
-        gauss[s + 2] = None;
+        let (dog, layer_grads, next) = timed!(6, Octave::new(&octave_base, &sig, s, o + 1 < n_octaves).run());
         timed!(7, find_extrema(&dog, o, p, thr_pre, coord_scale, &mut cands));
-        // The differences have said all they have to say; the gradients below
-        // need only the Gaussians, and this is the largest thing a worker
-        // holds after the decode.
+        // The differences have said all they have to say; the gradients are
+        // what description reads.
         drop(dog);
         heights.push(height);
-        if o + 1 < n_octaves {
-            octave_base = timed!(32, halve(gauss[s].as_ref().unwrap()));
+        grads.push(layer_grads);
+        if let Some(next) = next {
+            octave_base = next;
         }
-        // A loop and an `if` rather than a `collect` and a `map`: under
-        // `cfg(dispatch)` each was a function the compiler kept out of line,
-        // and `Grad::of` went with it, outside the x86-64-v3 copy.
-        grads.push(timed!(8, {
-            let mut layer_grads: Vec<Option<Grad>> = Vec::with_capacity(s + 3);
-            for i in 0..s + 3 {
-                let layer = gauss[i].take().filter(|_| (1..=s).contains(&i));
-                layer_grads.push(if let Some(l) = layer { Some(Grad::of(&l)) } else { None });
-            }
-            layer_grads
-        }));
     }
 
     // Drop repeats of one extremum found from two adjacent scales *within* an
@@ -1615,6 +1861,64 @@ mod bench {
                 });
             }) / (reps * imgs.len()) as f64;
             println!("extract {w}x{h}: 1 thread {t1:.3} ms, {threads} threads {t8:.3} ms each (x{:.2}); checksum {sum:016x}", t8 / t1);
+        }
+    }
+
+    /// `cargo test --release -- --ignored --nocapture octave_threads`
+    ///
+    /// One octave — five blurs, their differences, three gradients and the
+    /// halving — as the planes used to make it and as `Octave` makes it, on
+    /// one core and on every thread.
+    #[test]
+    #[ignore]
+    fn octave_threads() {
+        let (bw, bh) = std::env::var("BW").map(|v| { let n: usize = v.parse().unwrap(); (n, n * 3 / 4) }).unwrap_or((512, 384));
+        let base = synthetic(bw, bh);
+        let sig = [1.6f32, 1.226, 1.545, 1.946, 2.452, 3.089];
+        let s = 3;
+        let planes = || {
+            let mut g = Layer { w: base.w, h: base.h, px: base.px.clone() };
+            let mut grads = Vec::new();
+            let mut dogs = Vec::new();
+            let mut next = None;
+            for i in 1..=5 {
+                if i == 5 {
+                    dogs.push(blur_top(&g, sig[i]));
+                    break;
+                }
+                let (l, d) = blur_dog(&g, sig[i]);
+                dogs.push(d);
+                if i <= s {
+                    grads.push(Grad::of(&l));
+                }
+                if i == s {
+                    next = Some(halve(&l));
+                }
+                g = l;
+            }
+            std::hint::black_box((dogs, grads, next));
+        };
+        let streamed = || {
+            let l = Layer { w: base.w, h: base.h, px: base.px.clone() };
+            std::hint::black_box(Octave::new(&l, &sig, s, true).run());
+        };
+        for (name, f) in [("planes", &planes as &(dyn Fn() + Sync)), ("streamed", &streamed)] {
+            let reps = 20;
+            let t1 = ms(|| {
+                for _ in 0..reps {
+                    f();
+                }
+            }) / reps as f64;
+            let threads = rayon::current_num_threads();
+            let t8 = ms(|| {
+                use rayon::prelude::*;
+                (0..threads).into_par_iter().for_each(|_| {
+                    for _ in 0..reps {
+                        f();
+                    }
+                });
+            }) / reps as f64;
+            println!("octave {bw}x{bh} {name}: 1 thread {t1:.3} ms, {threads} threads {t8:.3} ms each (x{:.2})", t8 / t1);
         }
     }
 

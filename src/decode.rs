@@ -287,7 +287,14 @@ fn limits() -> image::Limits {
 /// budget must not be.
 fn working_bytes(w: usize, h: usize, work: usize) -> u64 {
     let k = box_factor(w, h, work);
-    ((w / k).max(1) as u64) * ((h / k).max(1) as u64) * 4
+    let (ow, oh) = ((w / k).max(1), (h / k).max(1));
+    // What `Fit` holds: the vertical pass's rows at the reduction's width and
+    // the output, or the reduction's plane when there is nothing to resample.
+    let f = Fit::size(ow, oh, work);
+    match f {
+        Some((tw, th)) => ((ow * th + tw * th) * 4) as u64,
+        None => (ow * oh * 4) as u64,
+    }
 }
 
 /// Claims are served in the order they are made, so that a large one cannot be
@@ -393,7 +400,9 @@ fn cover(bytes: u64) -> Permit {
 fn decode_estimate(p: &Probe, work: usize) -> u64 {
     let per_px: u64 = match p.kind {
         Kind::Image(ImageFormat::Png) => 0,
-        Kind::Image(ImageFormat::Jpeg) => 3,
+        // The luma plane, one byte a pixel (`decode_jpeg_luma`); a JPEG with
+        // no Y plane takes the rest of what it needs through `cover`.
+        Kind::Image(ImageFormat::Jpeg) => 1,
         Kind::Heif => 6,
         Kind::Jxl => 24,
         Kind::Image(_) | Kind::Unknown => 3,
@@ -564,7 +573,7 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     let (w, h, gray) = match kind {
         // The two formats that are almost all of a real corpus get their own
         // line in the profile; everything else shares `decode:codec`.
-        Kind::Image(ImageFormat::Jpeg) => timed!(22, decode_image_crate(&bytes, ImageFormat::Jpeg, work_size)?),
+        Kind::Image(ImageFormat::Jpeg) => timed!(22, decode_jpeg(&bytes, work_size)?),
         Kind::Image(ImageFormat::Png) => timed!(23, decode_image_crate(&bytes, ImageFormat::Png, work_size)?),
         Kind::Image(ImageFormat::WebP) => timed!(24, decode_image_crate(&bytes, ImageFormat::WebP, work_size)?),
         Kind::Image(ImageFormat::Tiff) => timed!(25, decode_image_crate(&bytes, ImageFormat::Tiff, work_size)?),
@@ -816,6 +825,66 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
     decode_whole(bytes, fmt, work)
 }
 
+/// A JPEG, decoded to its luma plane when it has one and through the general
+/// path when it does not.
+fn decode_jpeg(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
+    match decode_jpeg_luma(bytes, work) {
+        Some(done) => Ok(done),
+        None => decode_whole(bytes, ImageFormat::Jpeg, work),
+    }
+}
+
+/// A JPEG's Y plane, which is the grey value the analysis wants: a JPEG
+/// stores luma and chroma, and luma is what `grey_of` computes from the RGB
+/// every other format hands it. Asking `zune-jpeg` for it directly skips the
+/// chroma upsampling and the colour conversion, and the buffer is one byte a
+/// pixel rather than three — measured on 400 of IMGS2's JPEGs, 2.6 s against
+/// 3.8 for the same decoder producing RGB.
+///
+/// `None` means "take the general path": a colour space with no Y plane to
+/// read (CMYK, YCCK, or RGB stored as such), a picture past `max_alloc`, and
+/// any error at all, so that a broken file fails with the message the general
+/// path gives it.
+fn decode_jpeg_luma(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
+    use zune_core::colorspace::ColorSpace;
+    let opts = zune_core::options::DecoderOptions::default()
+        .set_strict_mode(false)
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX)
+        .jpeg_set_out_colorspace(ColorSpace::Luma);
+    let mut dec = zune_jpeg::JpegDecoder::new_with_options(zune_core::bytestream::ZCursor::new(bytes), opts);
+    dec.decode_headers().ok()?;
+    if !matches!(dec.input_colorspace()?, ColorSpace::YCbCr | ColorSpace::Luma) {
+        return None;
+    }
+    let (dw, dh) = dec.dimensions()?;
+    let n = dec.output_buffer_size()?;
+    if n != dw * dh || n as u64 > max_alloc() {
+        return None;
+    }
+    let orientation = dec
+        .exif()
+        .and_then(|e| image::metadata::Orientation::from_exif_chunk(e))
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let rotates = !matches!(
+        orientation,
+        image::metadata::Orientation::NoTransforms
+            | image::metadata::Orientation::FlipHorizontal
+            | image::metadata::Orientation::FlipVertical
+            | image::metadata::Orientation::Rotate180
+    );
+    let _permit = cover(bytes.len() as u64 + n as u64 * (1 + rotates as u64) + working_bytes(dw, dh, work));
+    let mut buf = vec![0u8; n];
+    timed!(1, dec.decode_into(&mut buf).ok()?);
+    let mut img = DynamicImage::ImageLuma8(image::GrayImage::from_raw(dw as u32, dh as u32, buf)?);
+    if orientation != image::metadata::Orientation::NoTransforms {
+        img.apply_orientation(orientation);
+    }
+    let (w, h) = (img.width(), img.height());
+    let gray = timed!(2, dynamic_to_gray(&img, work));
+    Some((w, h, gray))
+}
+
 /// Any format `image` reads, decoded whole and then reduced.
 fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32, Gray)> {
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), fmt);
@@ -903,7 +972,7 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
         png::ColorType::GrayscaleAlpha => png_rows::<_, 2, true>(&mut reader, wu, hu, work)?,
         png::ColorType::Indexed => return None,
     });
-    Some((w, h, timed!(3, fit_to(reduced, work))))
+    Some((w, h, reduced))
 }
 
 fn png_rows<R: std::io::BufRead + std::io::Seek, const CH: usize, const ALPHA: bool>(
@@ -931,7 +1000,7 @@ fn png_rows<R: std::io::BufRead + std::io::Seek, const CH: usize, const ALPHA: b
     Some(r.finish())
 }
 
-/// Mean of RGB, alpha flattened onto mid-grey, box-reduced towards the
+/// BT.601 luma of RGB (see `luma`), alpha flattened onto mid-grey, box-reduced towards the
 /// working size in the same pass so a 50-megapixel file never exists as f32.
 fn dynamic_to_gray(img: &DynamicImage, work: usize) -> Gray {
     let (w, h) = (img.width() as usize, img.height() as usize);
@@ -962,17 +1031,18 @@ pub fn reduce_to_gray(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, w
     // but inside the loop it was a runtime stride and a runtime divisor, which
     // is enough to stop the loop vectorising over a hundred megapixels a
     // minute. Each shape gets its own copy; the arithmetic is unchanged.
-    let g = match (ch, alpha) {
+    // Edge pixels lost to the floor division are ignored on purpose: at most
+    // k-1 rows/cols of a picture already 2x the working size. Each shape's
+    // reduction area-resamples what it keeps to the working size as it goes
+    // (`Fit`).
+    match (ch, alpha) {
         (3, false) => reduce::<3, false>(w, h, data, work),
         (4, true) => reduce::<4, true>(w, h, data, work),
         (1, false) => reduce::<1, false>(w, h, data, work),
         (2, true) => reduce::<2, true>(w, h, data, work),
         (4, false) => reduce::<4, false>(w, h, data, work),
-        _ => return reduce_dyn(w, h, data, ch, alpha, work),
-    };
-    // Edge pixels lost to the floor division are ignored on purpose: at most
-    // k-1 rows/cols of a picture already 2x the working size.
-    timed!(3, fit_to(g, work))
+        _ => reduce_dyn(w, h, data, ch, alpha, work),
+    }
 }
 
 /// `reduce_to_gray` over rows a decoder hands out one at a time, in order, so
@@ -992,7 +1062,8 @@ fn reduce_rows(w: usize, h: usize, ch: usize, alpha: bool, work: usize, row: imp
         }
         r.finish()
     }
-    let g = match (ch, alpha) {
+    // Each shape's reduction resamples to the working size as it goes (`Fit`).
+    match (ch, alpha) {
         (3, false) => rows::<3, false>(w, h, work, row),
         (4, true) => rows::<4, true>(w, h, work, row),
         (1, false) => rows::<1, false>(w, h, work, row),
@@ -1004,17 +1075,37 @@ fn reduce_rows(w: usize, h: usize, ch: usize, alpha: bool, work: usize, row: imp
             for line in data.chunks_exact_mut((w * ch).max(1)) {
                 row(line);
             }
-            return reduce_to_gray(w, h, &data, ch, alpha, work);
+            reduce_to_gray(w, h, &data, ch, alpha, work)
         }
-    };
-    timed!(3, fit_to(g, work))
+    }
 }
 
-/// One grey sample from one source pixel: the mean of the colour channels,
+/// BT.601 luma of one RGB pixel: the Y a JPEG stores, which is what
+/// `decode_jpeg_luma` reads straight out of the file, so a JPEG and a PNG of
+/// one picture give the same grey. The weighted sum is taken in integers,
+/// which is exact, and divided once.
+#[inline(always)]
+fn luma(r: u8, g: u8, b: u8) -> f32 {
+    (LUMA_R * r as u32 + LUMA_G * g as u32 + LUMA_B * b as u32) as f32 / 1000.0
+}
+const LUMA_R: u32 = 299;
+const LUMA_G: u32 = 587;
+const LUMA_B: u32 = 114;
+
+/// One grey sample from one source pixel: the luma of RGB, the mean of any
+/// other set of colour channels,
 /// alpha flattened onto mid-grey.
 #[inline(always)]
 fn grey_of<const CH: usize, const ALPHA: bool>(p: &[u8]) -> f32 {
     let color_ch = if ALPHA { CH - 1 } else { CH };
+    if color_ch == 3 {
+        let mut g = luma(p[0], p[1], p[2]);
+        if ALPHA {
+            let a = p[CH - 1] as f32 / 255.0;
+            g = g * a + 128.0 * (1.0 - a);
+        }
+        return g;
+    }
     let mut v = 0u32;
     for c in 0..color_ch {
         v += p[c] as u32;
@@ -1071,7 +1162,8 @@ struct Reducer<const CH: usize, const ALPHA: bool> {
     ow: usize,
     oh: usize,
     inv: f32,
-    px: Vec<f32>,
+    /// Where the reduced rows go: the area resample to the working size.
+    fit: Fit,
     /// One source row's grey values, so that the interleaved bytes are undone
     /// once per row rather than once per box. See `grey_row`.
     grey: Vec<f32>,
@@ -1093,7 +1185,7 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
             ow,
             oh,
             inv: 1.0 / (255.0 * (k * k) as f32),
-            px: Vec::with_capacity(ow * oh),
+            fit: Fit::new(ow, oh, work),
             grey: vec![0.0; w],
             row: if k == 1 { Vec::new() } else { vec![0.0f32; ow] },
             sy: 0,
@@ -1114,17 +1206,17 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
         }
         if k == 1 {
             // No box reduction: every output pixel is one source pixel, so
-            // there is nothing to accumulate and nothing to zero first.
-            //
-            // The plane this writes is read straight back by the area
-            // resample, and handing that resample a row at a time instead — so
-            // the grey values never leave the first-level cache — is slower,
-            // not faster: the resample reads the plane sequentially, which the
-            // prefetcher serves for nothing, and a row at a time costs a loop
-            // boundary per row of the picture. Measured at +25% on RGB.
+            // there is nothing to accumulate and nothing to zero first. The
+            // row goes straight on to the area resample, which takes it while
+            // it is still in the first-level cache; the full-size plane it
+            // used to be written into first is gone.
             grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
             let inv = self.inv;
-            self.px.extend(self.grey[..self.ow].iter().map(|g| g * inv));
+            let out = &mut self.grey[..self.ow];
+            for g in out.iter_mut() {
+                *g *= inv;
+            }
+            self.fit.push(out);
             return;
         }
         if sy % k == 0 {
@@ -1136,13 +1228,108 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
         // the picture is shorter than one box.
         if sy % k == k - 1 || sy + 1 == self.h {
             let inv = self.inv;
-            self.px.extend(self.row.iter().map(|v| v * inv));
+            for v in self.row.iter_mut() {
+                *v *= inv;
+            }
+            self.fit.push(&self.row);
         }
     }
 
     fn finish(self) -> Gray {
-        debug_assert_eq!(self.px.len(), self.ow * self.oh);
-        Gray { w: self.ow, h: self.oh, px: self.px }
+        timed!(3, self.fit.finish())
+    }
+}
+
+/// `fit_to`, fed the rows of the plane it resamples one at a time and in
+/// order, so that the plane never has to exist: each row is added into the
+/// one or two output rows its area covers as it arrives. The output is the
+/// one `fit_to` gives the whole plane — the same weights, applied to the same
+/// rows in the same order, the first of them written rather than added to a
+/// zero — and `streamed_fit_is_fit_to` holds the two together.
+struct Fit {
+    w: usize,
+    h: usize,
+    /// The resampled size; `fit` is false when the plane is already within
+    /// the working size and is kept as it comes.
+    tw: usize,
+    th: usize,
+    fit: bool,
+    /// Every (source row, output row, weight) the vertical pass applies, in
+    /// source-row order; `first` says the weight is the output row's first.
+    taps: Vec<(u32, u32, f32, bool)>,
+    next: usize,
+    sy: usize,
+    out: Vec<f32>,
+}
+
+impl Fit {
+    /// The size `fit_to` would resample a `w` by `h` plane to, or `None` when
+    /// it would leave it as it is.
+    fn size(w: usize, h: usize, work: usize) -> Option<(usize, usize)> {
+        let long = w.max(h);
+        if work == 0 || long <= work {
+            return None;
+        }
+        let s = work as f32 / long as f32;
+        let (tw, th) = (((w as f32 * s).round() as usize).max(1), ((h as f32 * s).round() as usize).max(1));
+        ((tw, th) != (w, h)).then_some((tw, th))
+    }
+
+    fn new(w: usize, h: usize, work: usize) -> Fit {
+        let (fit, (tw, th)) = match Fit::size(w, h, work) {
+            Some(t) => (true, t),
+            None => (false, (w, h)),
+        };
+        let mut taps = Vec::new();
+        if fit {
+            let yw = weights(h, th);
+            for oy in 0..th {
+                let start = yw.start[oy] as usize;
+                let (a, b) = (yw.at[oy] as usize, yw.at[oy + 1] as usize);
+                for (i, &wgt) in yw.w[a..b].iter().enumerate() {
+                    taps.push(((start + i) as u32, oy as u32, wgt, i == 0));
+                }
+            }
+            // Stable, so an output row's taps keep their order.
+            taps.sort_by_key(|t| t.0);
+        }
+        Fit { w, h, tw, th, fit, taps, next: 0, sy: 0, out: Vec::with_capacity(if fit { w * th } else { w * h }) }
+    }
+
+    fn push(&mut self, row: &[f32]) {
+        let w = self.w;
+        debug_assert_eq!(row.len(), w);
+        let sy = self.sy as u32;
+        self.sy += 1;
+        if !self.fit {
+            self.out.extend_from_slice(row);
+            return;
+        }
+        while let Some(&(r, oy, wgt, first)) = self.taps.get(self.next) {
+            if r != sy {
+                break;
+            }
+            self.next += 1;
+            let at = oy as usize * w;
+            if first {
+                debug_assert_eq!(self.out.len(), at);
+                self.out.extend(row.iter().map(|v| v * wgt));
+            } else {
+                let dst = &mut self.out[at..at + w];
+                for x in 0..w {
+                    dst[x] += row[x] * wgt;
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Gray {
+        debug_assert_eq!(self.sy, self.h);
+        if !self.fit {
+            return Gray { w: self.w, h: self.h, px: self.out };
+        }
+        debug_assert_eq!(self.out.len(), self.w * self.th);
+        horizontal_pass(&self.out, self.w, self.tw, self.th)
     }
 }
 
@@ -1286,17 +1473,23 @@ unsafe fn grey_eight<const CH: usize, const ALPHA: bool>(src: &[u8], out: &mut [
         let c0 = _mm256_and_si256(p, mask);
         let c1 = _mm256_and_si256(_mm256_srli_epi32(p, 8), mask);
         let c2 = _mm256_and_si256(_mm256_srli_epi32(p, 16), mask);
-        // The colour channels, summed as integers in the order `grey_of` sums
-        // them. A fourth colour channel only exists when there is no alpha.
-        let mut sum = _mm256_add_epi32(_mm256_add_epi32(c0, c1), c2);
+        // The colour channels, weighted and summed as integers as `grey_of`
+        // does it. A fourth colour channel only exists when there is no alpha,
+        // and four are averaged.
         let colour_ch = if ALPHA { CH - 1 } else { CH };
-        if colour_ch == 4 {
-            sum = _mm256_add_epi32(sum, _mm256_srli_epi32(p, 24));
-        }
-        let mut g = _mm256_cvtepi32_ps(sum);
-        if colour_ch != 1 {
-            g = _mm256_div_ps(g, _mm256_set1_ps(colour_ch as f32));
-        }
+        let mut g = if colour_ch == 3 {
+            let sum = _mm256_add_epi32(
+                _mm256_add_epi32(
+                    _mm256_mullo_epi32(c0, _mm256_set1_epi32(LUMA_R as i32)),
+                    _mm256_mullo_epi32(c1, _mm256_set1_epi32(LUMA_G as i32)),
+                ),
+                _mm256_mullo_epi32(c2, _mm256_set1_epi32(LUMA_B as i32)),
+            );
+            _mm256_div_ps(_mm256_cvtepi32_ps(sum), _mm256_set1_ps(1000.0))
+        } else {
+            let sum = _mm256_add_epi32(_mm256_add_epi32(_mm256_add_epi32(c0, c1), c2), _mm256_srli_epi32(p, 24));
+            _mm256_div_ps(_mm256_cvtepi32_ps(sum), _mm256_set1_ps(colour_ch as f32))
+        };
         if ALPHA {
             let a = _mm256_div_ps(_mm256_cvtepi32_ps(_mm256_srli_epi32(p, 24)), _mm256_set1_ps(255.0));
             // `g * a + 128 * (1 - a)`, in that order and with no contraction:
@@ -1328,11 +1521,15 @@ fn reduce_dyn(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, work: usi
                 let mut acc = 0.0f32;
                 for sx in ox * k..(ox * k + k).min(w) {
                     let p = &line[sx * ch..sx * ch + ch];
-                    let mut v = 0u32;
-                    for c in 0..color_ch {
-                        v += p[c] as u32;
-                    }
-                    let mut g = v as f32 / color_ch as f32;
+                    let mut g = if color_ch == 3 {
+                        luma(p[0], p[1], p[2])
+                    } else {
+                        let mut v = 0u32;
+                        for c in 0..color_ch {
+                            v += p[c] as u32;
+                        }
+                        v as f32 / color_ch as f32
+                    };
                     if alpha {
                         let a = p[ch - 1] as f32 / 255.0;
                         g = g * a + 128.0 * (1.0 - a);
@@ -1364,56 +1561,107 @@ pub fn fit_to(g: Gray, work: usize) -> Gray {
 /// Separable area (box with fractional edges) resampling. Exact averaging of
 /// source pixel coverage, which is what a good downscaler does and what keeps
 /// a 25-pixel thumbnail comparable to a 25-pixel thumbnail made by Pillow.
+///
+/// The vertical pass runs first. It is the one that vectorises — an output
+/// row is a weighted sum of two or three whole source rows — and running it
+/// first means the horizontal pass, which cannot, sees `th` rows rather than
+/// all `g.h` of them. The horizontal pass then takes every output pixel over
+/// the same number of taps (`Taps::fixed`), padded with zero weights, so that
+/// its inner loop has a trip count the compiler can see.
 pub fn resize_area(g: &Gray, tw: usize, th: usize) -> Gray {
     if tw == g.w && th == g.h {
         return g.clone();
     }
-    let xw = weights(g.w, tw);
     let yw = weights(g.h, th);
-    // Horizontal pass. Written once, never zeroed first: every element of it
-    // is produced below before anything reads it.
-    //
-    // An output pixel averages two or three source pixels, so the work per
-    // output is a couple of multiply-adds — and around them stood four index
-    // bounds to prove, one of them per tap. Taking the taps and the source
-    // pixels they read as two slices of equal length proves the lot once. The
-    // taps are the same taps, read in the same order.
-    let mut tmp: Vec<f32> = Vec::with_capacity(tw * g.h);
-    for y in 0..g.h {
-        let src = &g.px[y * g.w..(y + 1) * g.w];
-        tmp.extend((0..tw).map(|ox| {
-            let start = xw.start[ox] as usize;
-            let (a, b) = (xw.at[ox] as usize, xw.at[ox + 1] as usize);
-            let ws = &xw.w[a..b];
-            let ss = &src[start..start + ws.len()];
-            let mut acc = 0.0;
-            for (sv, wgt) in ss.iter().zip(ws) {
-                acc += sv * wgt;
-            }
-            acc
-        }));
-    }
-    // Vertical pass. The first tap writes the row instead of adding to a row
-    // of zeros, so the output plane is never zeroed — a megabyte an image that
-    // was overwritten immediately. Adding a non-negative product to zero is
-    // the product, so the rows that come out are the rows that came out.
-    let mut px: Vec<f32> = Vec::with_capacity(tw * th);
+    let w = g.w;
+    let mut tmp: Vec<f32> = Vec::with_capacity(w * th);
     for oy in 0..th {
         let start = yw.start[oy] as usize;
         let (a, b) = (yw.at[oy] as usize, yw.at[oy + 1] as usize);
-        let base = px.len();
+        let base = tmp.len();
         let w0 = yw.w[a];
-        let s0 = &tmp[start * tw..(start + 1) * tw];
-        px.extend(s0.iter().map(|v| v * w0));
-        let dst = &mut px[base..base + tw];
+        let s0 = &g.px[start * w..(start + 1) * w];
+        tmp.extend(s0.iter().map(|v| v * w0));
+        let dst = &mut tmp[base..base + w];
         for (i, wgt) in yw.w[a + 1..b].iter().enumerate() {
-            let src = &tmp[(start + i + 1) * tw..(start + i + 2) * tw];
-            for x in 0..tw {
+            let src = &g.px[(start + i + 1) * w..(start + i + 2) * w];
+            for x in 0..w {
                 dst[x] += src[x] * wgt;
             }
         }
     }
+    horizontal_pass(&tmp, w, tw, th)
+}
+
+/// The horizontal half of `resize_area`, over `th` rows of width `w`.
+fn horizontal_pass(tmp: &[f32], w: usize, tw: usize, th: usize) -> Gray {
+    let xw = weights(w, tw);
+    let mut px: Vec<f32> = Vec::with_capacity(tw * th);
+    match xw.max_taps() {
+        1 => horizontal::<1>(tmp, w, &xw, tw, th, &mut px),
+        2 => horizontal::<2>(tmp, w, &xw, tw, th, &mut px),
+        3 => horizontal::<3>(tmp, w, &xw, tw, th, &mut px),
+        4 => horizontal::<4>(tmp, w, &xw, tw, th, &mut px),
+        5 => horizontal::<5>(tmp, w, &xw, tw, th, &mut px),
+        6 => horizontal::<6>(tmp, w, &xw, tw, th, &mut px),
+        _ => {
+            for y in 0..th {
+                let src = &tmp[y * w..(y + 1) * w];
+                px.extend((0..tw).map(|ox| {
+                    let start = xw.start[ox] as usize;
+                    let (a, b) = (xw.at[ox] as usize, xw.at[ox + 1] as usize);
+                    let ws = &xw.w[a..b];
+                    let ss = &src[start..start + ws.len()];
+                    let mut acc = 0.0;
+                    for (sv, wgt) in ss.iter().zip(ws) {
+                        acc += sv * wgt;
+                    }
+                    acc
+                }));
+            }
+        }
+    }
     Gray { w: tw, h: th, px }
+}
+
+/// The horizontal pass with every output pixel over `T` taps: the source
+/// pixels from `start` on, the weights past an output's own padded with
+/// zeros. A tap that would read past the row's end is moved back so that it
+/// reads inside it; its weight is zero, so what it reads adds nothing.
+#[inline]
+fn horizontal<const T: usize>(tmp: &[f32], w: usize, xw: &Taps, tw: usize, th: usize, px: &mut Vec<f32>) {
+    let mut starts: Vec<u32> = Vec::with_capacity(tw);
+    let mut ws: Vec<[f32; T]> = Vec::with_capacity(tw);
+    for ox in 0..tw {
+        let (a, b) = (xw.at[ox] as usize, xw.at[ox + 1] as usize);
+        let mut start = xw.start[ox] as usize;
+        let mut k = [0f32; T];
+        k[..b - a].copy_from_slice(&xw.w[a..b]);
+        // Shift a window that runs off the end back inside the row, and the
+        // weights with it.
+        while start + T > w && start > 0 {
+            start -= 1;
+            k.rotate_right(1);
+        }
+        starts.push(start as u32);
+        ws.push(k);
+    }
+    for y in 0..th {
+        let src = &tmp[y * w..(y + 1) * w];
+        let at = px.len();
+        px.reserve(tw);
+        for (slot, (&st, k)) in px.spare_capacity_mut()[..tw].iter_mut().zip(starts.iter().zip(&ws)) {
+            let st = st as usize;
+            let ss: &[f32; T] = src[st..st + T].try_into().unwrap();
+            let mut acc = 0.0;
+            for t in 0..T {
+                acc += ss[t] * k[t];
+            }
+            slot.write(acc);
+        }
+        // SAFETY: the `tw` slots past `at` were written just above.
+        unsafe { px.set_len(at + tw) };
+    }
 }
 
 /// The source pixels each output pixel averages, flat: output `o` covers
@@ -1424,6 +1672,13 @@ struct Taps {
     start: Vec<u32>,
     at: Vec<u32>,
     w: Vec<f32>,
+}
+
+impl Taps {
+    /// The most taps any one output pixel takes.
+    fn max_taps(&self) -> usize {
+        self.at.windows(2).map(|p| (p[1] - p[0]) as usize).max().unwrap_or(0)
+    }
 }
 
 /// For each output index: the first source index and the normalised weights
@@ -1648,6 +1903,24 @@ fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_fit_is_fit_to() {
+        for &(w, h, work) in &[(1000usize, 750usize, 512usize), (800, 600, 512), (600, 800, 512), (513, 7, 512), (512, 300, 512), (2000, 3, 640), (37, 1100, 100), (300, 200, 0)] {
+            let mut g = Gray::new(w, h);
+            for (i, v) in g.px.iter_mut().enumerate() {
+                *v = ((i * 37 + i / 7) % 251) as f32 / 251.0;
+            }
+            let mut f = Fit::new(w, h, work);
+            for y in 0..h {
+                f.push(&g.px[y * w..(y + 1) * w]);
+            }
+            let got = f.finish();
+            let want = fit_to(g, work);
+            assert_eq!((got.w, got.h), (want.w, want.h));
+            assert!(got.px.iter().zip(&want.px).all(|(a, b)| a.to_bits() == b.to_bits()), "{w}x{h} at {work}");
+        }
+    }
 
     #[test]
     fn area_resize_preserves_mean() {
@@ -1877,6 +2150,18 @@ mod bench {
             std::hint::black_box(resize_area(&g, 640, 480));
         });
         println!("resize_area 1280x960 -> 640x480: {t:8.3} ms");
+        for &(w, h) in &[(800usize, 600usize), (1000, 750), (1023, 767), (600, 800)] {
+            let mut g = Gray::new(w, h);
+            for (i, v) in g.px.iter_mut().enumerate() {
+                *v = ((i * 37) % 251) as f32 / 251.0;
+            }
+            let s = 512.0 / w.max(h) as f32;
+            let (tw, th) = ((w as f32 * s).round() as usize, (h as f32 * s).round() as usize);
+            let t = ms(|| {
+                std::hint::black_box(resize_area(&g, tw, th));
+            });
+            println!("resize_area {w}x{h} -> {tw}x{th}: {t:8.3} ms");
+        }
     }
 
     /// A file whose head is no picture is refused from its head: the rest is

@@ -88,7 +88,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 07: a record's key carries the file's change time (see `Key`), and its path
 /// is the file's canonical one, so that a folder named two ways is one set of
 /// records (see `lib::cache_names`).
-const MAGIC: &[u8; 8] = b"IMGFPC07";
+/// 08: grey is BT.601 luma rather than the mean of RGB, and a JPEG's is read
+/// from its Y plane (`decode::decode_jpeg_luma`).
+const MAGIC: &[u8; 8] = b"IMGFPC08";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the
@@ -267,9 +269,18 @@ fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     }
     // The descriptors go as they are. Nothing helps them: see the head of the
     // file for the entropy that says so.
+    //
+    // At the fastest level. The descriptors are nine tenths of a record and
+    // hold nothing for an LZ to find (not one descriptor in 159,701 repeats
+    // another), so the longer match search of the default level only spends
+    // time: measured on 60 records of IMGS2, level 6 packed to 3,095,465 bytes
+    // in 222 ms and level 1 to 3,078,257 bytes in 42 ms — smaller as well as
+    // five times faster, since level 1 also gives the Huffman stage longer
+    // blocks of literals. Every record is packed by the worker that made it,
+    // so on a cold run with the cache on this was some 3 ms an image.
     let mut out = Vec::with_capacity(n * DESC_LEN);
     for stream in [&planes, &f.desc, &resid] {
-        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
         z.write_all(stream)?;
         let z = z.finish()?;
         out.extend_from_slice(&(z.len() as u64).to_le_bytes());
@@ -1391,3 +1402,4 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+

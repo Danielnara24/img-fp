@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
@@ -33,6 +33,11 @@ image = { version = "0.25", default-features = false, features = [
 # read a row at a time into the reduction; see `decode_png_rows`. Kept at the
 # version `image` resolves to, so there is one copy of it in the build.
 png = "0.18"
+# The decoder `image` itself uses for JPEG, asked directly so that a JPEG can
+# be decoded to its luma plane alone; see `decode_jpeg_luma`. Kept at the
+# versions `image` resolves to, so there is one copy of each in the build.
+zune-jpeg = "0.5.15"
+zune-core = "0.5.3"
 jxl-oxide = "0.12.6"
 libheif-rs = { version = "3.0.0", default-features = false, features = ["v1_17"] }
 rayon = "1.12.0"
