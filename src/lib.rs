@@ -829,6 +829,7 @@ pub use decode::preview;
 fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
     validate(args).map_err(anyhow::Error::msg)?;
     stdout_has_one_reader(args, gui)?;
+    outputs_are_distinct(args)?;
     // Opened before any work, so that a log file that cannot be written is an
     // ordinary fatal error at the top of the run rather than a discovery made
     // an hour into one.
@@ -876,6 +877,29 @@ fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
     if on_stdout.len() > 1 {
         let fix = if on_stdout[0] == "the report" { "; send the report to a file with -o" } else { "" };
         anyhow::bail!("{} would both be written to stdout{fix}", on_stdout.join(" and "));
+    }
+    Ok(())
+}
+
+/// Refuse two of `-o`, `--dump` and `--log-file` naming one file.
+///
+/// The log is opened at the start and written a line at a time, and the
+/// report and the dump are written at the end, so two of them on one file
+/// overwrite each other: the report replaced the dump outright, and over the
+/// log it was followed by a run of NUL bytes and the end of the log, written
+/// at the offset the log had reached. Nothing said so, and the run exited 0.
+fn outputs_are_distinct(args: &Args) -> Result<()> {
+    let named: Vec<(&str, &Path)> = [("-o", &args.output), ("--dump", &args.dump), ("--log-file", &args.log_file)]
+        .into_iter()
+        .filter_map(|(flag, p)| Some((flag, p.as_deref()?)))
+        .filter(|(_, p)| *p != stdout_path())
+        .collect();
+    for (i, (fa, a)) in named.iter().enumerate() {
+        for (fb, b) in &named[i + 1..] {
+            if report::same_destination(a, b) {
+                anyhow::bail!("{fa} and {fb} would both write {}; give each its own file", b.display());
+            }
+        }
     }
     Ok(())
 }
@@ -2994,6 +3018,22 @@ mod tests {
         assert!(validate(&args(&["--cache", "/x.bin", "--no-cache"])).is_err());
         assert!(validate(&args(&["--cache", "/x.bin", "--no-cache", "--clear-cache"])).is_ok());
         assert!(check_args(["img-fp", "--cache", "/x.bin", "--no-cache", "."]).is_err());
+    }
+
+    /// Two outputs on one file are refused before anything is written.
+    #[test]
+    fn two_outputs_on_one_file_are_refused() {
+        let args = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
+        let dir = std::env::temp_dir().join(format!("img-fp-outputs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (r, l) = (dir.join("r.txt"), dir.join("l.txt"));
+        let (r, l) = (r.to_str().unwrap(), l.to_str().unwrap());
+        assert!(outputs_are_distinct(&args(&["-o", r, "--log-file", l])).is_ok());
+        assert!(outputs_are_distinct(&args(&["-o", r, "--log-file", r])).is_err());
+        assert!(outputs_are_distinct(&args(&["-o", r, "--dump", r])).is_err());
+        assert!(outputs_are_distinct(&args(&["--dump", r, "--log-file", r, "-o", l])).is_err());
+        assert!(outputs_are_distinct(&args(&["-o", "-", "--log-file", r])).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A lone link between two clusters is a bridge however many times the

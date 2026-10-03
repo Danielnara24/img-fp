@@ -3145,6 +3145,12 @@ low-light seeds (`crop_strip_top` of `earth.jpeg`, two `low-light2` crops, a
 `panoramic.avif` strip), which is a diagnosis of four of that row's misses —
 and **0 of 2,786** photographs from the found corpus.
 
+**Two of `-o`, `--dump` and `--log-file` on one file are refused**
+(`outputs_are_distinct`, through `report::same_destination`: one inode, or
+one place a write would land), before the log is opened. They used to
+overwrite each other with exit 0 — the report replaced the dump, and over the
+log it left 1,321 NUL bytes and the log's tail.
+
 **`--cache` with `--no-cache` is allowed only beside `--clear-cache`** (`validate`), to name the file to
 delete: refusing it outright left no way to delete a named cache without using
 it, and the window, dropping `--cache` when the cache was off, deleted the

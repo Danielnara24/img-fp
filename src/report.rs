@@ -94,6 +94,28 @@ pub fn check_writable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether writing to `a` and writing to `b` would write one file.
+///
+/// Two files that exist are one when they are one inode, which catches a hard
+/// link and a symlink as well as the same path spelled twice. A file not there
+/// yet is placed where a write would put it — through any symlink, into its
+/// folder's canonical path — and compared by that.
+pub fn same_destination(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+        return (x.dev(), x.ino()) == (y.dev(), y.ino());
+    }
+    let lands = |p: &Path| -> Option<PathBuf> {
+        let t = link_target(p);
+        let dir = match t.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        Some(std::fs::canonicalize(dir).ok()?.join(t.file_name()?))
+    };
+    matches!((lands(a), lands(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// Where writing to `path` would land: `path` itself, or the end of the chain
 /// of symlinks it starts, however far that is from existing.
 fn link_target(path: &Path) -> PathBuf {
@@ -734,6 +756,24 @@ mod tests {
         assert_eq!(bytes(&v["pairs"][1]["b_bytes"]), odd);
         assert!(v["groups"][0]["files"][0].get("path_bytes").is_none(), "a UTF-8 path carries nothing extra");
         assert!(v["pairs"][1].get("a_bytes").is_none());
+    }
+
+    /// One file named two ways is one destination; two files are two.
+    #[test]
+    fn one_file_by_two_names_is_one_destination() {
+        let dir = std::env::temp_dir().join(format!("img-fp-dest-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        assert!(same_destination(&a, &dir.join("sub/../a.txt")), "neither there yet, one place");
+        assert!(!same_destination(&a, &b));
+        std::fs::write(&a, "x").unwrap();
+        std::fs::hard_link(&a, dir.join("hard.txt")).unwrap();
+        std::os::unix::fs::symlink("a.txt", dir.join("soft.txt")).unwrap();
+        assert!(same_destination(&a, &dir.join("hard.txt")));
+        assert!(same_destination(&a, &dir.join("soft.txt")));
+        std::os::unix::fs::symlink("new.txt", dir.join("to-new.txt")).unwrap();
+        assert!(same_destination(&dir.join("to-new.txt"), &dir.join("new.txt")), "a link to a file not there yet");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
