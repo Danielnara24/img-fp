@@ -10,11 +10,11 @@
 //!
 //! A build for a machine that has them gets both at compile time, and nothing
 //! here costs it anything: `v3` is the constant `true` and a `dispatched!`
-//! function is a call to the one it wraps. That is the release, built for `x86-64-v3`, and any
-//! build with `target-cpu=native` on a modern machine.
+//! function is a call to the one it wraps. That is any build with
+//! `target-cpu=native` on a modern machine, or one for `x86-64-v3`.
 //!
-//! **A build for plain x86-64 is the case this exists for**, and it is the one
-//! `cargo install img-fp` makes: `cargo install` reads no `.cargo/config.toml`
+//! **A build for plain x86-64 is the case this exists for**: it is the release
+//! (since 0.30.0), and it is the one `cargo install img-fp` makes: `cargo install` reads no `.cargo/config.toml`
 //! from the package it builds, so the `target-cpu=native` there never reaches
 //! it. That build used to have neither half — no hand-written kernels, since
 //! they were selected with `cfg(target_feature = "avx2")`, and four-lane

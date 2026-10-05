@@ -721,6 +721,21 @@ The parts that are easy to get wrong:
   before and 3,782 / 3,450 / 3,715 after, a band of about five per cent that
   either build lands anywhere in.
 
+- **Files with one working plane share one analysis** (`lib::Planes`). The
+  analysis is a function of the decoded working plane alone, and lossless
+  re-saves — the same photograph as PNG, TIFF and lossless WebP, a JPEG with
+  its metadata stripped — decode to the same plane bit for bit while their
+  bytes differ, so the exact pass cannot see them: **1,113 of 26,886 analysed
+  files on IMGS-ALL (3.9-4.4% of each corpus)**. The plane is hashed with a
+  SipHash keyed at random per run, plus its size; a twin waits on a `OnceLock`
+  for the first one's features and thumbnail, and the word lists are then
+  quantised once per analysis. Everything downstream still treats them as the
+  separate files they are, so reports on all four corpora are byte-identical
+  to the build before (`out/v22-plain-cpu`). It removes 4% of the extractions;
+  end to end, cold A B B A on each corpus, the plain build summed 2,234 ->
+  2,192 CPU-seconds (-1.9%), with single pairs spread over ±3-7%, so the
+  measured figure is the work removed rather than the clock.
+
 ### What still misses
 
 **13,940 pairs at the default, 12,372 at `--work-size 640`** on IMGS. The
@@ -1265,8 +1280,40 @@ Two things stand against it, and neither was visible before:
   `ymm` instructions in the plain binary against 37,519 in v3's. The earlier
   level reading was a cached run, which skips the decoders.
 
-The release stays x86-64-v3. A CPU without AVX2 is served by `cargo install`,
-which is the portable build and says so (`check_cpu`).
+The release stayed x86-64-v3 until 0.30.0, which ships the plain build: it
+runs on any x86-64 CPU, the pairs it loses on IMGS3 are within reach of the
+settings (below), and the profile below puts it level with v3 stage for stage.
+**So the published benchmark figures are now a build away from the shipped
+binary on JPEG XL**, by `jxl-grid`'s FMA rounding, and IMGS3's row in
+particular (F1 0.98486 against 0.98534 at the default).
+
+**Profiled, the plain build is level with v3 stage for stage**
+(`out/v22-plain-cpu`, IMGS-ALL, cold, `--features prof`): 2,967 against 2,977
+CPU-seconds, every hot stage within a few per cent. The two that are not:
+`sift:base` 15-18% heavier against `sift:blur` in the same run (about 12
+thread-seconds; the base blur's plain copy, not found in the listing), and
+`decode:png` about 10% heavier against `decode:jpeg` (the `png` crate, which
+no copy here can reach). JPEG's IDCT already picks AVX2 at run time inside
+`zune-jpeg`. So what is left to take out of the plain build is work, not width.
+
+**And the pairs the portable build loses are not lost for good**
+(`out/v21-plain-recovery`, 0.29.1). Run as v3 and as plain x86-64 at the
+defaults, IMGS, IMGS2 and IMGS4 are pair-for-pair identical; IMGS3 moves 1,302
+true pairs out and 935 in. Of the 1,302, v3 had found 1,046 by propagation,
+193 by corroboration and 63 directly — the ripple runs through the clusters,
+not through the JPEG XL files. Plain's own dump says why it missed them: 407
+never reached a verdict with three points; of the direct verdicts, 508
+failed the aligned-points bar (303 on it alone), 130 correlation alone and 95
+overlap with or without correlation; 125 were propagated and failed on
+correlation, 26 were mirrored or inverted, and 11 cleared all three bars and
+lost to the cluster rules. Loosening plain's settings brings back
+**every one of the 1,302** under some setting: `--min-aligned-points` alone
+recovers up to 77% (9: 30%, 7: 74%), `--min-pixel-correlation` alone 48%,
+`--min-frame-overlap` alone 23%, `-k` 3%; points 7, overlap 0.7 and
+correlation 0.5 together recover 97% with no merge (F1 0.98853 against v3's
+0.98534 at the defaults), and looser combinations reach 99% only by merging
+families. Plain at `--min-aligned-points 9` alone already scores above v3 at
+the defaults (0.98544).
 
 (The fourth pass over the parameters, above, is **level on the clock**: six
 alternating pairs on the full corpus, cooled to a common ceiling before each
@@ -3335,7 +3382,7 @@ colour `decode::preview`, which only the window calls).
   root`. Point `XDG_DATA_HOME` into a scratch folder on the same filesystem
   before testing the Trash.
 - **Other distros, in Docker.** Build with `RUSTFLAGS="-C
-  target-cpu=x86-64-v3"` as the release does, mount the binary into
+  target-cpu=x86-64"` as the release does, mount the binary into
   `ubuntu`, `debian`, `fedora`, `archlinux`, `opensuse/*`, `almalinux`
   images, install that distro's GTK 4 and libheif, and drive it on an Xvfb
   inside the container. Use `--network host`: the bridge has no IPv6 route

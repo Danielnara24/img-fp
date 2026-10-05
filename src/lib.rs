@@ -547,20 +547,72 @@ fn enlarge_below(work: usize, upsample_below: usize) -> usize {
     if work == 0 { upsample_below } else { upsample_below.min(work) }
 }
 
-fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>) -> Item {
+fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> Item {
     let t0 = Instant::now();
     let r = decode::decode_with(path, work, header);
     T_DECODE.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
     match r {
         Ok(d) => {
             let t1 = Instant::now();
-            let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
-            let feats = sift::extract(&d.work, &p);
+            let (feats, thumb) = planes.analysis(&d.work, || {
+                let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
+                let feats = sift::extract(&d.work, &p);
+                let thumb = timed!(4, Thumb::build(&d.work, THUMB_LONG));
+                (feats.into(), thumb.into())
+            });
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
-            let thumb = timed!(4, Thumb::build(&d.work, THUMB_LONG));
-            Item { feats: feats.into(), thumb: thumb.into(), dims: d.size, ok: true, err: None }
+            Item { feats, thumb, dims: d.size, ok: true, err: None }
         }
         Err(e) => Item { err: Some(e.to_string()), ..Default::default() },
+    }
+}
+
+/// The analyses this run has made, by the working plane they were made from,
+/// so that files whose bytes differ and whose pictures do not are described
+/// once.
+///
+/// The analysis — features and thumbnail — is a function of the working plane
+/// and nothing else, so two files that decode to the same plane have the same
+/// analysis, and the second can take the first's. They are common, and the
+/// exact pass cannot see them: a photograph saved again losslessly as PNG,
+/// TIFF or lossless WebP, or a JPEG whose metadata was stripped or edited.
+/// On the four benchmark corpora together 1,113 of 26,886 files are one, 4.1%
+/// of the analysis. Everything after the analysis treats them as the separate
+/// files they are, so the output is the output without this, to the byte.
+///
+/// **The key is a hash of the plane, keyed at random for each run**
+/// (SipHash-1-3 through `RandomState`), with the plane's size beside it, and
+/// keeping every plane to compare it whole is not an option: they are most of
+/// a megabyte each. A shared hash is not a comparison, and the exact pass
+/// compares bytes for that reason — its hash was FNV, which has collisions
+/// built in. This one is a keyed pseudo-random function: no file can be made
+/// to collide with another without the key, which exists only inside the run,
+/// and two planes collide by chance with probability 2^-64, which over a
+/// million files is a pair in some fifty million runs. Hashing costs about
+/// 0.2 ms a plane on one core, against some 60 ms of analysis saved per twin.
+#[derive(Default)]
+struct Planes {
+    keys: std::collections::hash_map::RandomState,
+    made: std::sync::Mutex<HashMap<(usize, usize, u64), Made>>,
+}
+
+type Analysis = (std::sync::Arc<Features>, std::sync::Arc<Thumb>);
+/// An analysis that one file is making and its twins may wait for.
+type Made = std::sync::Arc<std::sync::OnceLock<Analysis>>;
+
+impl Planes {
+    /// The analysis of `g`: one already made from the same plane, or `make`'s.
+    /// A twin that arrives while the first is still being described waits for
+    /// it rather than describing it again; `make` takes no lock and no part of
+    /// the decode budget, so nothing it waits on can be waiting on it.
+    fn analysis(&self, g: &decode::Gray, make: impl FnOnce() -> Analysis) -> Analysis {
+        use std::hash::BuildHasher;
+        // SAFETY: an `f32` is four bytes with no padding, and every bit
+        // pattern of them is a `u8`.
+        let bytes = unsafe { std::slice::from_raw_parts(g.px.as_ptr() as *const u8, std::mem::size_of_val(&g.px[..])) };
+        let key = (g.w, g.h, self.keys.hash_one(bytes));
+        let cell = self.made.lock().unwrap().entry(key).or_default().clone();
+        cell.get_or_init(make).clone()
     }
 }
 
@@ -734,9 +786,9 @@ pub fn cli_main() -> Result<()> {
 
 /// Refuse to run on a CPU that lacks what this binary was compiled for.
 ///
-/// The release is built for x86-64-v3 (AVX2, FMA, BMI2), and the fast kernels
-/// are chosen at compile time. On an older CPU the first of those instructions
-/// ends the process with SIGILL — "Illegal instruction" and nothing else,
+/// A build for x86-64-v3 (AVX2, FMA, BMI2), as `target-cpu=native` makes on a
+/// modern machine, has its fast kernels chosen at compile time. On an older
+/// CPU the first of those instructions ends the process with SIGILL — "Illegal instruction" and nothing else,
 /// which reads as a crash rather than as the wrong build. Asked first, it is a
 /// sentence that says which build to use instead.
 ///
@@ -1346,6 +1398,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
         s.append(&names[i], key, it.dims, &it.feats, &it.thumb)
     };
+    let planes = Planes::default();
     let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
         .into_par_iter()
         .enumerate()
@@ -1361,7 +1414,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             // Keyed before it is read, so that a file changing under the
             // analysis is described again next time rather than trusted.
             let key = store.as_ref().and_then(|_| cache::key_of(f));
-            let it = analyse(f, args.work_size, &sp, header[i].as_ref());
+            let it = analyse(f, args.work_size, &sp, header[i].as_ref(), &planes);
             let span = keep(i, key, &it);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             bar.add(weight[i]);
@@ -1377,6 +1430,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .unzip();
     drop(weight);
     drop(header);
+    drop(planes);
     for (s, a) in span_of.iter_mut().zip(appended) {
         if a.is_some() {
             *s = a;
@@ -1573,10 +1627,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // costs as much again as the lists themselves.
     progress.forecast(|f| f.live_words = Some(vocab.n_live_words()));
     let bar = progress.begin_counted(Stage::Quantise, n_desc_match as u64, n_match, "images");
-    let lists: Vec<WordList> = (0..n)
+    //
+    // Files that share an analysis (see `Planes`) share their words too, so
+    // each analysis is quantised once and its list copied to the rest.
+    let mut first_of: HashMap<*const Features, usize> = HashMap::new();
+    let same_as: Vec<usize> =
+        (0..n).map(|i| if matched[i] { *first_of.entry(std::sync::Arc::as_ptr(&items[i].feats)).or_insert(i) } else { i }).collect();
+    drop(first_of);
+    let mut lists: Vec<WordList> = (0..n)
         .into_par_iter()
         .map(|i| {
-            if !matched[i] {
+            if !matched[i] || same_as[i] != i {
                 return WordList::default();
             }
             let it = &items[i];
@@ -1585,6 +1646,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             wl
         })
         .collect();
+    for i in (0..n).filter(|&i| same_as[i] != i) {
+        lists[i] = lists[same_as[i]].clone();
+        bar.add(items[i].feats.len() as u64);
+    }
+    drop(same_as);
     stage!(t_start, "quantised");
 
     // Inverted file, of every word; see `InvertedFile::build`.
@@ -3317,7 +3383,8 @@ mod tests {
     /// stage — the one compiled for x86-64-v3 and the one any x86-64 runs —
     /// give the same answer to the bit: the features, the vocabulary's words,
     /// the query's scores, the word-list intersection and the verdict. Only
-    /// such a build has two copies; the release, built for x86-64-v3, has one.
+    /// such a build has two copies, the release among them; one built for
+    /// x86-64-v3 has one.
     #[cfg(all(dispatch, not(target_feature = "avx2")))]
     #[test]
     fn the_plain_and_the_v3_copies_agree() {

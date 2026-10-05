@@ -29,9 +29,8 @@ shows each group and moves the images you choose to the Trash.
 
 Linux on x86_64, glibc 2.39 or newer and libheif 1.17 or newer: Ubuntu 24.04+,
 Debian 13+, Fedora 40+, Arch, openSUSE Tumbleweed and Leap 16, RHEL 10 and its
-rebuilds. The release binaries need a CPU with AVX2 (Intel Haswell or newer,
-any AMD Zen). Built from source, img-fp runs on any x86_64 CPU and uses AVX2
-when the CPU has it.
+rebuilds. img-fp runs on any x86_64 CPU and uses AVX2 when the CPU has it
+(Intel Haswell or newer, any AMD Zen).
 
 ## Installation
 
