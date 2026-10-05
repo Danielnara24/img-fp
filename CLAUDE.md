@@ -756,6 +756,68 @@ present in both files. The corpus calls such pairs DIFFERENT on the scramble
 rule and img-fp is caught by it for a defensible reason. Report trap hits and
 real errors separately, the way `BASELINE.md` does for SSCD.
 
+### Elongated pictures: measured, not shipped
+
+**`--work-size` limits the long side, so a picture far from 4:3 is analysed
+at a fraction of the detail.** A full-page screenshot, a long comic or a
+panorama is shrunk by its aspect ratio as well as its size: a 1080x11520 page
+of eight photographs is 48x512 at the default, so each photograph in it is
+48x64. One of them, saved on its own, was found in a 1:9.3 page at no size up
+to 1024 — `--dump` shows the right transform (scale 6.98, correlation 0.85,
+overlap 1.0) on 3 aligned points at 512 and 7 at 1024, against a bar of 10 —
+and in a 1:10.7 page at 2048 but not at `0`, where 600 features are spread over
+the whole page. Up to about 1:6.6 the default found it.
+
+**The rule tried** (`AREA=1` in `out/v19-aspect-texture/img-fp-exp`): a
+picture wider than 4:3 gets the pixels a 4:3 picture of the working size gets
+— the long-side limit times `sqrt(3/4 * long/short)`, never less than 1 — and
+its pixel-check thumbnail the same factor on its 128. A 4:3 or squarer picture
+is untouched to the pixel, so the found corpus (224x224) cannot move; a 16:9
+one gets 591 on its long side at 512, a 1:10 one 1,402. Every picture still
+costs at most what a 4:3 one does.
+
+**On pictures it is for** (`/home/daniel/Documents/IMGS-ELONG`, made by
+`out/v19-aspect-texture/elongated/make.py`: 33 pages of 2 to 10 seed
+photographs from IMGS2-4, each seed used once, 21 vertical and 12 horizontal,
+with one section saved alone and one screen-shaped viewport elsewhere on each;
+68 positives, every other pair a negative):
+
+| `--work-size` | found, shipped rule | found, area rule | pages of 5+ sections | false pairs | CPU-s |
+|---|---|---|---|---|---|
+| 384 | 45 / 68 | **62 / 68** | 12/30 -> 28/30 | 0 -> 1 | 5 -> 7 |
+| **512** | 57 / 68 | **65 / 68** | 24/30 -> **30/30** | 0 -> 0 | 8 -> 10 |
+| 640 | 57 / 68 | 63 / 68 | 25/30 -> 28/30 | 5 -> 2 | 10 -> 12 |
+| 1024 | 60 / 68 | 62 / 68 | 28/30 -> 27/30 | 2 -> 2 | 14 -> 18 |
+
+The area rule at 512 finds more than the shipped rule at 1024.
+
+**On the benchmark corpora**, each run and scored on its own, cold, pooled
+over the four (`out/v19-aspect-texture/tables.py`; † would mark a merge, and
+there is none):
+
+| `--work-size` | pooled F1, shipped -> area | recall | perfect rows (of 4 x 87) | cross-family pairs | CPU (uncooled) |
+|---|---|---|---|---|---|
+| 384 | 0.9671 -> **0.9704** | 93.95% -> 94.59% | 249 -> 254 | 6 -> 88 | +4% |
+| 512 | 0.9798 -> **0.9813** | 96.45% -> 96.75% | 268 -> 272 | 91 -> 91 | +4% |
+| 640 | 0.9828 -> 0.9828 | 97.05% -> 97.07% | 276 -> 271 | 86 -> 170 | +3% |
+
+What moves is containment, because the canvases those rows paste a photograph
+into are wider than 4:3: at 384 `contact_sheet` 167 -> 188 of 304,
+`picture_in_picture` 247 -> 265, `embed_tiny` 154 -> 170, `magazine_spread`
+288 -> 298; at 512 `embed_tiny` 261 -> 274, `crop_micro` 224 -> 232,
+`contact_sheet` 265 -> 270. At 640 it is a wash, and `wall_poster` and
+`pdf_page` lose two seeds each. IMGS alone is the largest mover: 0.9652 ->
+0.9703 at 512, 41 -> 52 perfect rows. The cross-family pairs that arrive are
+each one stray file joining its sibling's family — `game2`/`game3` (82) at
+384, `docks1`/`docks2` (82) at 640 — the clean-anchor rule's lone-file
+allowance, not merges. Both seed halves were recorded per run (`results.jsonl`).
+
+**Why it is not shipped yet:** it changes every published number, it costs
+3-4% CPU on the benchmark corpora (uncooled figures; the photographs there are
+mostly 4:3, the derived canvases are not), and at 640 it trades five perfect
+rows for nothing. The case for it is the IMGS-ELONG table, which the benchmark
+cannot see, and the default-size gain, which it can.
+
 ### Parameters, and the rule about them
 
 **A number earns its place by being derived from something, not by being the
@@ -1115,6 +1177,24 @@ follows the descriptor count — and so does the branching, because depth alone
 could only size the tree to within a factor of sixteen and the coarse end of
 that merges families at ordinary corpus sizes. See *How img-fp works*.
 
+**Two numbers in `index::shared` that nothing derived, swept and found
+inert.** A word shared by more than 64 keypoint pairs between two images was
+dropped as "repeated texture" (`(i - i0) * (j - j0) > 64`), and the list
+stops at `60_000` pairs. Swept with `TEXTURE=N` in
+`out/v19-aspect-texture/img-fp-exp` over 8, 16, 32, 64, 128, 256, 1024 and no
+cut at all, on IMGS, IMGS2, IMGS3 and IMGS4 each at 384, 512 and 640 (84
+cached runs): **pooled F1 is the same to ±0.0001 from 32 to no cut at every
+size**, the per-corpus rows move by a handful of pairs, no setting merges
+anything, and the CPU column does not move (cached runs, uncooled). The cut
+does drop real correspondences — on IMGS at 512 it discards 15,067 words and
+3.5 M candidate pairs, and on `derived/Desktop` removing it raised 142 pairs'
+aligned points by 20 on average — but none of those pairs was near a bar. At
+8 it starts to cost (0.9798 -> 0.9796 at 512). The `60_000` cap binds only
+with no cut at all, 8 and 12 times on IMGS at 512 and 640: the two guard the
+same pathological case of one word on hundreds of keypoints on both sides.
+Not changed; it is a plateau, and removing it is free whenever someone next
+touches the function.
+
 ### Speed and memory, and what has already been tried
 
 **A build that cannot assume AVX2 now picks its kernels when it starts**
@@ -1155,6 +1235,37 @@ a `cfg(dispatch)` build, so run `RUSTFLAGS="-C target-cpu=x86-64" cargo test
 --release --lib` to see it, as `release.yml` does. Rustdoc compiles without
 `.cargo/config.toml`'s flags while `build.rs` sees them, so the cfgs are
 written to cover that disagreement too (it is merely slow).
+
+**So should the release be the portable build? Measured, and no**
+(`out/v20-portable`, on the build after the 0.28.0 audit fixes). The case was
+that the dispatch build had measured level with native, and that a release
+for plain x86-64 would run on the CPUs without AVX2 the v3 release refuses.
+Two things stand against it, and neither was visible before:
+
+- **It is not the same code on JPEG XL.** `jxl-grid` chooses fused
+  multiply-add with `cfg(target_feature = "fma")`, at compile time, with no
+  run-time path, so a build without FMA decodes a JPEG XL a rounding apart.
+  Every other format is bit-identical across x86-64, x86-64-v2 and x86-64-v3
+  (checked per format on `derived/Desktop`), and so is the extractor
+  (`extract_threads` gives the documented checksums under all three) — but
+  `derived/Desktop`'s 29 JPEG XL files moved 60 dump rows. On the corpora it
+  is a vocabulary-sample ripple, not a loss in kind: IMGS, IMGS2, IMGS4 and the
+  found corpus came out pair-for-pair identical, and IMGS3 lost 364 pairs
+  (1,431 out, 1,067 in, 13 and 7 of them touching a JPEG XL file), F1 0.98534
+  -> 0.98486, perfect rows 79 -> 74. The portable binary would not be the
+  benchmarked one.
+- **It is slower everywhere, by 2-5%.** Cold, cooled, cache-evicted,
+  `--no-cache`, in the order v3, plain, plain, v3 (IMGS: three rounds of v3,
+  plain, v2 in rotation), CPU-seconds: IMGS 349.7 -> 356.9 (+2.1%; v2 375.4,
+  +7.3%), IMGS2 446.7 -> 462.5 (+3.5%), IMGS3 623.3 -> 649.6 (+4.2%), IMGS4
+  392.6 -> 401.6 (+2.3%), found 754.6 -> 790.6 (+4.8%); wall the same within a
+  point. The dispatched functions are the hot loops the profiler names, but
+  everything else — the decoders above all — compiles four lanes wide: 6,824
+  `ymm` instructions in the plain binary against 37,519 in v3's. The earlier
+  level reading was a cached run, which skips the decoders.
+
+The release stays x86-64-v3. A CPU without AVX2 is served by `cargo install`,
+which is the portable build and says so (`check_cpu`).
 
 (The fourth pass over the parameters, above, is **level on the clock**: six
 alternating pairs on the full corpus, cooled to a common ceiling before each
@@ -3425,11 +3536,15 @@ and only the first is obvious:
   scan at 640 in the window cost the analysis of every folder the machine had
   scanned at 512, silently, and going back cost it again. Now a run reads the
   records made at its own settings and carries the rest unread, like a record
-  for a file it did not walk (kept while the file exists; under
-  `--prune-cache`, only for files the scan found). The price is that a
-  `--work-size` sweep leaves a copy of the corpus's analysis per size in the
+  for a file it did not walk (kept while the file exists). The price is that
+  a `--work-size` sweep leaves a copy of the corpus's analysis per size in the
   file, which is one more reason a sweep should hand itself a `--cache` of its
-  own. A cache written by a build with a different *format* is still
+  own. **`--prune-cache` drops those copies** as well as the records for files
+  the scan did not find: it keeps only what the scan used. It used to keep
+  them for the files the scan found, so one run at 640 doubled the cache for
+  good — 30.5 MB to 64.4 MB on `derived/Desktop`, which a prune left at 64.4
+  and now takes back to 30.5 — and only `--clear-cache`, which takes every
+  record with it, could give the copy back. A cache written by a build with a different *format* is still
   discarded whole and silently — the magic carries a version, and a file with
   the right prefix and the wrong version is stale rather than damaged.
 
@@ -3475,7 +3590,10 @@ behind its `dds` feature ("The image format `DDS` is not supported"), so every
 is gone from `Cargo.toml` with it. Under `-x '*'` the same held for any format
 `guess_format` names with no decoder built (DDS, PCX): `unmarked_format` now
 asks `reading_enabled`, so such a file is not an image, a skip. `.hdr`
-(Radiance) is decoded and is in the default extensions. **An ICO holding an RGB PNG is read as that
+(Radiance) is decoded and is in the default extensions, and so, since 0.29,
+are `.pam` (PNM's `P7`), `.apng` (a PNG, read for its first frame) and `.dib`
+(a BMP): all three decoded under `-x '*'` and a default walk passed them over
+as "not searched". **An ICO holding an RGB PNG is read as that
 PNG** (`decode::ico_png`). The crate refuses one, as the format says it should,
 and Pillow writes one whenever a picture with no alpha channel is saved as
 `.ico` — `Image.open("logo.jpg").save("favicon.ico")` — under a directory entry
@@ -3490,7 +3608,14 @@ which refused a 15000x12000 TIFF (540 MB of RGB) with "Memory limit exceeded"
 while the same picture as JPEG or PNG decoded. The decode budget decides how
 much decodes at once; this only turns a picture larger than memory into an
 error rather than an abort. The probe and the window's preview use the same
-limits.
+limits. **JPEG XL is held to it too, since 0.29** (`decode::jxl_image`):
+`jxl-oxide` sizes its frame buffers from the header and allocates them whole,
+so a header claiming sixty thousand pixels a side was an allocation failure,
+which ends a Rust process, rather than one file that would not decode. The
+header is refused first against one float plane a channel, and the decoder's
+own `AllocTracker` then counts every buffer against the same limit. HEIF is
+refused from its header the same way; libheif's own limits are fixed and not
+the machine's.
 
 **A HEIF is recognised by any of its `ftyp` brands** (`heif_brands`),
 not only the major one: a `mif2` file listing `mif1, heic` was "not an image"
@@ -3610,6 +3735,15 @@ the change time** (`IMGFPC07`). Both were found by running, not by reading:
   path exists. The window names folders absolutely, so it never shared a
   record with `img-fp .`. `lib::cache_names` canonicalizes each walked file
   for the cache alone; the report still spells paths as the run was given them.
+  **The walk states the canonical path itself** where it knows it, which is
+  everywhere but under `--follow-symlinks`: a root is canonicalized anyway, and
+  below it a walk that follows no links descends only real directories.
+  `canonicalize` is a `readlink` per path component, and on a cached run over
+  `derived/Desktop` those were 4,468 of 8,370 filesystem calls, all failing;
+  now 16 of 2,629. And the report no longer opens each grouped file for its
+  size (649 opens to 24): it takes the analysis's own `dims`, asking the
+  header only of a file that would not decode. Reports on all four corpora are
+  byte-identical either way.
 - Keyed on size and mtime, a file rewritten with a different picture of the
   same size and its mtime put back (`cp -p`, `rsync -a`, `touch -r`,
   `exiftool -P`) kept its old record, and the cached run reported a pair at

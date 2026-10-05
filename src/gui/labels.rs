@@ -41,7 +41,7 @@ pub const USE_CACHE: &str = "_Use a cache";
 pub const CACHE_FILE: &str = "_Cache file";
 pub const CACHE_CHOOSE: &str = "C_hoose…";
 pub const CLEAR_CACHE: &str = "Empt_y the cache before scanning";
-pub const PRUNE_CACHE: &str = "_Prune images this scan does not find";
+pub const PRUNE_CACHE: &str = "_Prune what this scan does not use";
 pub const LOG_FILE: &str = "Write a log _file";
 pub const LOG_CHOOSE: &str = "Bro_wse…";
 

@@ -239,7 +239,7 @@ to stderr.
 | `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
-| `--prune-cache` | Drop cached entries for images this scan did not find. Skipped when the scan was incomplete | off |
+| `--prune-cache` | Drop cached entries this scan did not use: images it did not find, and analyses made at another `--work-size`. Skipped when the scan was incomplete | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
 | `--man` | Print the man page (roff) and exit | |
 
@@ -248,8 +248,8 @@ different photographs together. The defaults are a safe starting point.
 
 ## Formats
 
-JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO, PNM, TGA,
-QOI, OpenEXR, Radiance HDR and farbfeld. Files are identified by their content, so a wrong
+JPEG, PNG and APNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO,
+PNM and PAM, TGA, QOI, OpenEXR, Radiance HDR and farbfeld. Files are identified by their content, so a wrong
 extension doesn't matter, but a folder walk only picks up files whose extension
 is in `-x`. TGA files have no signature and are recognised by the `.tga`
 extension.
@@ -260,7 +260,8 @@ The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis.bin`
 (or `~/.cache/img-fp/analysis.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Use `--prune-cache` to
-keep only the images in the current scan, or `--clear-cache` to start over.
+keep only the images in the current scan at the current `--work-size`, or
+`--clear-cache` to start over.
 
 Pressing Ctrl-C keeps every image analysed so far.
 

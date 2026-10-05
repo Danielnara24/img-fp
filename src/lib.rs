@@ -188,7 +188,8 @@ struct Args {
     #[arg(long)]
     clear_cache: bool,
 
-    /// Drop cached entries for images this scan did not find.
+    /// Drop cached entries this scan did not use: images it did not find, and
+    /// analyses made at another `--work-size`.
     ///
     /// Skipped when the scan could not read everything it was given.
     #[arg(long)]
@@ -318,10 +319,14 @@ fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
 /// current directory. The window always names folders absolutely, so it and
 /// `img-fp .` never shared a record either. A canonical path is one name per
 /// file however it is reached; the report still names files as the run did.
-fn cache_names(files: &[PathBuf]) -> Vec<PathBuf> {
+///
+/// The walk states most of them already (`known`, beside `files`), and the
+/// filesystem is asked only for the rest; see `walk::walk`.
+fn cache_names(files: &[PathBuf], known: Vec<Option<PathBuf>>) -> Vec<PathBuf> {
     files
         .par_iter()
-        .map(|f| std::fs::canonicalize(f).or_else(|_| std::path::absolute(f)).unwrap_or_else(|_| f.clone()))
+        .zip(known)
+        .map(|(f, k)| k.unwrap_or_else(|| std::fs::canonicalize(f).or_else(|_| std::path::absolute(f)).unwrap_or_else(|_| f.clone())))
         .collect()
 }
 
@@ -1143,7 +1148,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         say!("Excluding: {:?}", args.exclude);
     }
     say!("{}", wanted.describe());
-    let files = walk::walk(
+    let (files, canonical) = walk::walk(
         &walk::Request {
             roots: &roots,
             exclude: &args.exclude,
@@ -1169,7 +1174,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             groups: Vec::new(),
             pairs: Vec::new(),
         };
-        match write_reports(args, gui, &out, &files)? {
+        match write_reports(args, gui, &out, &files, &[])? {
             Some(path) => say!("No images found. -> {}", path.display()),
             None => say!("No images found."),
         }
@@ -1206,7 +1211,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // form: two names that are not UTF-8 can print the same and be two files.
     // And on each file's canonical path, not the one this run spells; see
     // `cache_names`.
-    let names: Vec<PathBuf> = if cache_path.is_some() { cache_names(&files) } else { Vec::new() };
+    let names: Vec<PathBuf> = if cache_path.is_some() { cache_names(&files, canonical) } else { Vec::new() };
     let (mut cached, mut store) = match &cache_path {
         Some(p) => {
             progress.begin(Stage::CacheRead);
@@ -1434,15 +1439,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
         entries.extend_from_slice(&kept);
         // And the analyses made at other settings, which this run did not
-        // read: kept while their file is there, and under `--prune-cache` only
-        // for the files this scan found.
-        let walked: std::collections::HashSet<&Path> = if prune { names.iter().map(|p| p.as_path()).collect() } else { Default::default() };
-        let others: Vec<(PathBuf, cache::Span)> = store
-            .other_settings()
-            .iter()
-            .filter(|(p, _)| if prune { walked.contains(p.as_path()) } else { p.exists() })
-            .cloned()
-            .collect();
+        // read: kept while their file is there, and dropped by `--prune-cache`,
+        // which keeps only what this scan used. They used to be kept under it
+        // too, for the files this scan found, so one run at another
+        // `--work-size` doubled the cache for good: nothing short of
+        // `--clear-cache`, which takes every record with it, could give the
+        // copy back.
+        let others: Vec<(PathBuf, cache::Span)> =
+            store.other_settings().iter().filter(|(p, _)| !prune && p.exists()).cloned().collect();
         if !others.is_empty() {
             stage!(t_start, "cache: {} records kept from other working sizes", others.len());
         }
@@ -1450,7 +1454,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         entries.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
         let dropped = cached.len() - kept.len() + others_dropped;
         if prune && dropped > 0 {
-            say!("pruned {dropped} cached record(s) this scan did not find");
+            say!("pruned {dropped} cached record(s) this scan did not use");
         }
         // Every record worth keeping is already in the file, since each went
         // in as it was made. The file needs rewriting only when it holds
@@ -2232,7 +2236,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         count(n_ok, "image", "images"),
         runtime
     );
-    match timed!(36, write_reports(args, gui, &out, &files))? {
+    let dims: Vec<(u32, u32)> = items.iter().map(|it| it.dims).collect();
+    match timed!(36, write_reports(args, gui, &out, &files, &dims))? {
         Some(path) => say!("{summary} -> {}", path.display()),
         None => say!("{summary}"),
     }
@@ -2272,10 +2277,12 @@ fn as_typed(v: f32) -> f64 {
 /// mid-scan — used to end the run before it, so a finished scan showed as a
 /// failed one with nothing to look at. The files' facts are read once for
 /// both.
-fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf]) -> Result<Option<PathBuf>> {
+/// `dims` is each file's size as the analysis found it, indexed like `files`;
+/// see `report::read_facts`.
+fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf], dims: &[(u32, u32)]) -> Result<Option<PathBuf>> {
     let target = report::Target::of(args.output.as_deref(), args.format);
     let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
-    let facts = report::read_facts(out, files);
+    let facts = report::read_facts(out, files, dims);
     if let Some(path) = gui {
         let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
         report::write_with(&target, out, files, &facts)?;

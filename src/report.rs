@@ -331,15 +331,18 @@ fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: b
     writeln!(w, "{}]{}", if xs.is_empty() { "" } else { "\n  " }, if last { "" } else { "," })
 }
 
-/// What the per-file rows say about a file beyond its path. Read from the
-/// file's header and its metadata at report time, for the grouped files only:
-/// the analysis keeps neither, since the picture it describes is the working
-/// image and not the file.
+/// What the per-file rows say about a file beyond its path: its size as
+/// shown, and its length.
 ///
-/// It costs 0.21 s of wall clock on the benchmark corpus (5,372 files probed,
-/// 1.7 thread-seconds, the same whether the analysis was cached or not, and
-/// 0.05 s with the headers in the page cache) and 0.08-0.10 s on the found one
-/// (2,139 files). Against a 77 s and a 126 s cold run that is 0.3% and 0.1%.
+/// The size is the analysis's own (`dims`, indexed like `files`): the picture
+/// decoded, with its orientation applied, which the cache has carried since
+/// it began stating the report's `scale` in the files' pixels. The report used
+/// to open every grouped file again and parse its header for the same figure
+/// — 624 opens on a cached run over 636 files, a seek apiece on a disk that
+/// has to seek. The header is still asked of a file the analysis has no size
+/// for, which is a file that would not decode: a byte-identical pair of broken
+/// pictures is reported, and its header may still say how large it claims to
+/// be. The length is a `stat`, which opens nothing.
 #[derive(Clone, Copy, Default)]
 struct Facts {
     dims: Option<(u32, u32)>,
@@ -350,11 +353,11 @@ struct Facts {
 pub struct FileFacts(HashMap<usize, Facts>);
 
 /// Read the facts every report states about its grouped files.
-pub fn read_facts(out: &Output, files: &[PathBuf]) -> FileFacts {
-    FileFacts(facts(out, files))
+pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)]) -> FileFacts {
+    FileFacts(facts(out, files, dims))
 }
 
-fn facts(out: &Output, files: &[PathBuf]) -> HashMap<usize, Facts> {
+fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)]) -> HashMap<usize, Facts> {
     let mut wanted: Vec<usize> = out.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
     wanted.sort_unstable();
     wanted.dedup();
@@ -362,7 +365,10 @@ fn facts(out: &Output, files: &[PathBuf]) -> HashMap<usize, Facts> {
         .into_par_iter()
         .map(|i| {
             let p = &files[i];
-            let dims = decode::probe(p).map(|pr| (pr.w, pr.h));
+            let dims = match dims.get(i) {
+                Some(&(w, h)) if w > 0 && h > 0 => Some((w, h)),
+                _ => decode::probe(p).map(|pr| (pr.w, pr.h)),
+            };
             let bytes = std::fs::metadata(p).ok().map(|m| m.len());
             (i, Facts { dims, bytes })
         })

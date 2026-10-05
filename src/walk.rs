@@ -66,13 +66,27 @@ fn identity(meta: &std::fs::Metadata) -> Identity {
 /// A name the walk offered, before the names for one file are settled.
 struct Found {
     path: PathBuf,
+    /// Its canonical path, when the walk knows it without asking; see
+    /// [`walk`].
+    canon: Option<PathBuf>,
     id: Identity,
     /// The entry itself is a symlink — not merely reached through a linked
     /// folder, which names the file just as well. See [`settle`].
     link: bool,
 }
 
-/// Every file the request reaches, one path per set of bytes, sorted.
+/// Every file the request reaches, one path per set of bytes, sorted — and
+/// beside each, its canonical path when the walk already knows it.
+///
+/// **It nearly always does, and the cache wants it for every file.** A record
+/// is kept under the file's canonical path (`lib::cache_names`), and asking
+/// the filesystem for one is a `readlink` per component of the path: seven
+/// failed calls a file in a folder six deep, which were half of every
+/// filesystem call a cached run made, and a round trip each on a network
+/// share. But a root is canonicalized here anyway, and a walk that follows no
+/// links descends only real directories, so below a root the canonical path is
+/// the root's plus what follows it. Only a walk under `--follow-symlinks` says
+/// `None`, and the caller asks the filesystem then.
 ///
 /// Everything it passes over it counts, in one of two senses that must not be
 /// confused. What it cannot *read* is a problem: a root that does not exist, a
@@ -81,7 +95,7 @@ struct Found {
 /// does not take, a symlink it does not follow, a loop, a second name for a
 /// file already listed, a root `--exclude` covers. None of the skips touches
 /// the exit code — which is the whole reason the summary keeps two lists.
-pub fn walk(req: &Request, problems: &mut Problems) -> Vec<PathBuf> {
+pub fn walk(req: &Request, problems: &mut Problems) -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
     let excludes = resolve_excludes(req.exclude, problems);
     let set_aside = SetAside::here();
     let depth = if req.recursive { usize::MAX } else { 1 };
@@ -107,6 +121,7 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Vec<PathBuf> {
             found.push(Found {
                 id: identity(&meta),
                 path: root.clone(),
+                canon: Some(canon),
                 link,
             });
         } else if meta.is_dir() {
@@ -203,6 +218,7 @@ fn walk_dir(
         found.push(Found {
             id: identity(&meta),
             link: entry.path_is_symlink(),
+            canon: (!follow).then(|| beneath(entry.path())),
             path: entry.into_path(),
         });
     }
@@ -282,28 +298,25 @@ impl SetAside {
 /// which makes the list, and so the run, independent of directory order.
 ///
 /// Exactly one name is counted per collision either way.
-fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Vec<PathBuf> {
+fn settle(mut found: Vec<Found>, problems: &mut Problems) -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
     found.sort_by(|a, b| a.path.cmp(&b.path));
-    // (path, is a link) per set of bytes, and where each set is in it.
-    let mut kept: Vec<(PathBuf, bool)> = Vec::with_capacity(found.len());
-    let mut held: HashMap<Identity, usize> = HashMap::with_capacity(found.len());
+    // One name per set of bytes, and where each set is in it. A name keeps its
+    // own canonical path: two hard links are one file under two of them.
+    let mut kept: Vec<Found> = Vec::with_capacity(found.len());
+    let mut held: HashMap<(u64, u64), usize> = HashMap::with_capacity(found.len());
     for f in found {
-        let Some(&at) = held.get(&f.id) else {
-            held.insert(f.id, kept.len());
-            kept.push((f.path, f.link));
+        let id = (f.id.0, f.id.1);
+        let Some(&at) = held.get(&id) else {
+            held.insert(id, kept.len());
+            kept.push(f);
             continue;
         };
-        let dropped = if kept[at].1 && !f.link {
-            std::mem::replace(&mut kept[at], (f.path, false)).0
-        } else {
-            f.path
-        };
+        let dropped = if kept[at].link && !f.link { std::mem::replace(&mut kept[at], f).path } else { f.path };
         problems.listed_twice(&dropped.display().to_string());
     }
     // A later real name may have displaced an earlier link.
-    let mut files: Vec<PathBuf> = kept.into_iter().map(|(path, _)| path).collect();
-    files.sort();
-    files
+    kept.sort_by(|a, b| a.path.cmp(&b.path));
+    kept.into_iter().map(|f| (f.path, f.canon)).unzip()
 }
 
 /// Canonicalize the `--exclude` list, so the prefix test is a test of bytes.
@@ -489,7 +502,7 @@ mod tests {
         let (wanted, _) = crate::extensions::normalize(&["jpg".to_string()]).unwrap();
         let log = Log::default();
         let mut problems = Problems::new(&log);
-        let files = walk(
+        let (files, canon) = walk(
             &Request {
                 roots,
                 exclude,
@@ -499,11 +512,34 @@ mod tests {
             },
             &mut problems,
         );
+        // Every canonical path the walk states is the one the filesystem
+        // gives, whatever the case under test.
+        for (f, c) in files.iter().zip(&canon) {
+            if let Some(c) = c {
+                assert_eq!(Some(c), fs::canonicalize(f).ok().as_ref(), "{}", f.display());
+            }
+        }
+        if !follow {
+            assert!(canon.iter().all(Option::is_some), "a walk that follows no links knows every canonical path");
+        }
         Run {
             files,
             problems: problems.count(),
             walk_complete: problems.walk_was_complete(),
         }
+    }
+
+    /// A root spelled through `.` and `..`, and named as a file, gives the
+    /// canonical paths the filesystem gives; `run` checks them.
+    #[test]
+    fn the_canonical_paths_a_walk_states_are_the_filesystems() {
+        let s = Scratch::new();
+        let a = s.file("scan/sub/a.jpg");
+        s.file("scan/b.jpg");
+        let odd = s.0.join("scan/./sub/../sub/..");
+        assert_eq!(run(&[odd.clone()], &[], true, false).files.len(), 2);
+        assert_eq!(run(&[odd.join("sub/a.jpg")], &[], false, false).files, vec![odd.join("sub/a.jpg")]);
+        assert_eq!(fs::canonicalize(odd.join("sub/a.jpg")).unwrap(), a);
     }
 
     #[test]

@@ -48,9 +48,15 @@ pub enum Kind {
 /// What a walk takes when `-x` is not given: every extension this can decode.
 /// A file with none at all is left out by default, as in `vid-fp`, and
 /// `-x '*'` is how to reach it; see `extensions.rs`.
-pub const EXTENSIONS: [&str; 25] = [
-    "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "bmp", "tif", "tiff", "avif", "heic",
-    "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "tga", "qoi", "exr", "hdr", "ff",
+///
+/// Every name a decodable file goes by, not only the commonest: `pam` is the
+/// PNM family's own (`P7`, read by the same decoder as `ppm`), `apng` is a PNG
+/// whose first frame is the picture, and `dib` is a BMP. All three decoded
+/// under `-x '*'` and were passed over by a default walk as "not searched".
+pub const EXTENSIONS: [&str; 28] = [
+    "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp", "dib", "tif", "tiff", "avif",
+    "heic", "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "pam", "tga", "qoi", "exr",
+    "hdr", "ff",
 ];
 
 /// The error `decode` gives for bytes that are no picture format at all, as
@@ -1714,7 +1720,21 @@ fn weights(src: usize, dst: usize) -> Taps {
     t
 }
 
-fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
+/// A JPEG XL decoder for `bytes`, held to `limit` bytes of allocation.
+///
+/// **The limit is `max_alloc`, as it is for every other decoder.** The image
+/// crate, `zune-jpeg` and the PNG rows are all refused a picture larger than
+/// the memory there is, with a message; this one was not, and a header can
+/// claim any size at all. `jxl-oxide` sizes its frame buffers from the header
+/// and allocates them whole, and an allocation that fails ends a Rust process
+/// rather than returning — so a JPEG XL claiming sixty thousand pixels a side
+/// took the whole run down with it instead of being one file that would not
+/// decode. The header is checked first, against one float plane a channel at
+/// the size shown, which is the least the render holds and refuses the absurd
+/// case with a plain message; the decoder's own tracker then counts every
+/// buffer it really makes against the same limit, and fails the decode, not
+/// the process, when they pass it.
+fn jxl_image(bytes: &[u8], limit: u64) -> Result<jxl_oxide::JxlImage> {
     let image = jxl_oxide::JxlImage::builder()
         // jxl-oxide enables rayon by default and its default pool is the
         // *global* one — the same pool the per-image walk runs on. A decode
@@ -1724,8 +1744,32 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
         // Nothing here needs a second level of parallelism anyway; the images
         // are already one per thread.
         .pool(jxl_oxide::JxlThreadPool::none())
+        .alloc_tracker(jxl_oxide::AllocTracker::with_limit(limit.min(usize::MAX as u64) as usize))
         .read(Cursor::new(bytes))
         .map_err(|e| anyhow::anyhow!("jxl: {e}"))?;
+    let meta = &image.image_header().metadata;
+    let channels = if meta.grayscale() { 1 } else { 3 } + meta.alpha().is_some() as u64;
+    too_large("jxl", image.width(), image.height(), channels * 4, limit)?;
+    Ok(image)
+}
+
+/// Refuse a picture whose decode would need more than `limit` bytes, at
+/// `per_px` bytes a pixel — the check the image crate makes from a header
+/// before it allocates, for the decoders that do not make it themselves.
+fn too_large(what: &str, w: u32, h: u32, per_px: u64, limit: u64) -> Result<()> {
+    let need = (w as u64).saturating_mul(h as u64).saturating_mul(per_px);
+    if need > limit {
+        bail!(
+            "{what}: a {w}x{h} picture needs {} MB to decode, more than the {} MB this machine has available",
+            need >> 20,
+            limit >> 20
+        );
+    }
+    Ok(())
+}
+
+fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
+    let image = jxl_image(bytes, max_alloc())?;
     // What the render holds: two frames' worth of float planes at its widest,
     // measured — the decoded frame and the one the colour transform writes.
     // Claimed from the header, before the render that allocates them. The
@@ -1778,6 +1822,9 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
     let ctx = HeifContext::read_from_bytes(bytes).map_err(|e| anyhow::anyhow!("heif: {e}"))?;
     let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
     let has_alpha = handle.has_alpha_channel();
+    // libheif has limits of its own, but they are a fixed size and not this
+    // machine's; the same refusal as every other decoder, from the header.
+    too_large("heif", handle.width(), handle.height(), if has_alpha { 8 } else { 6 }, max_alloc())?;
     let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
     // The decoded interleaved plane, and as much again. The second half used
     // to be a copy of the plane with its stride padding packed out; the rows
@@ -1846,11 +1893,8 @@ fn preview_image_crate(bytes: &[u8], fmt: ImageFormat) -> Result<DynamicImage> {
 }
 
 fn preview_jxl(bytes: &[u8]) -> Result<DynamicImage> {
-    // Its own pool, for the reason `decode_jxl` gives.
-    let image = jxl_oxide::JxlImage::builder()
-        .pool(jxl_oxide::JxlThreadPool::none())
-        .read(Cursor::new(bytes))
-        .map_err(|e| anyhow::anyhow!("jxl: {e}"))?;
+    // Its own pool and the same limit, for the reasons `jxl_image` gives.
+    let image = jxl_image(bytes, max_alloc())?;
     let render = image.render_frame(0).map_err(|e| anyhow::anyhow!("jxl render: {e}"))?;
     let mut stream = render.stream();
     let (w, h, ch) = (stream.width() as usize, stream.height() as usize, stream.channels() as usize);
@@ -1885,6 +1929,7 @@ fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
     let ctx = HeifContext::read_from_bytes(bytes).map_err(|e| anyhow::anyhow!("heif: {e}"))?;
     let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
     let has_alpha = handle.has_alpha_channel();
+    too_large("heif", handle.width(), handle.height(), if has_alpha { 8 } else { 6 }, max_alloc())?;
     let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
     let img = lib.decode(&handle, ColorSpace::Rgb(chroma), None).map_err(|e| anyhow::anyhow!("heif decode: {e}"))?;
     let planes = img.planes();
@@ -2301,6 +2346,60 @@ mod bench {
         let other = dir.join("pic.bin");
         std::fs::write(&other, &tga).unwrap();
         assert_eq!(decode(&other, 384).err().unwrap().to_string(), NOT_AN_IMAGE);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A JPEG XL is held to the allocation limit every other decoder is: a
+    /// picture that needs more fails as one file that would not decode, with
+    /// a message, rather than as an allocation that ends the process.
+    #[test]
+    fn a_jxl_past_the_allocation_limit_is_refused_not_fatal() {
+        // 16x8, lossless, in a container: `cjxl -d 0` of a grey gradient.
+        const JXL: [u8; 96] = [
+            0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70,
+            0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x78, 0x6c, 0x20, 0x00, 0x00, 0x00, 0x09, 0x6a, 0x78, 0x6c, 0x6c,
+            0x0a, 0x00, 0x00, 0x00, 0x37, 0x6a, 0x78, 0x6c, 0x63, 0xff, 0x0a, 0xc1, 0xf1, 0x03, 0x14, 0x17, 0x02, 0x08, 0x02, 0x01,
+            0x00, 0x84, 0x00, 0x4b, 0x18, 0x8b, 0x15, 0x01, 0x12, 0xde, 0x19, 0x65, 0x63, 0x43, 0x30, 0x3f, 0x85, 0x6a, 0xf3, 0x02,
+            0x80, 0x00, 0x88, 0x24, 0x89, 0x24, 0x89, 0x24, 0xc9, 0x24, 0xb9, 0x3d, 0x00, 0x80, 0xf1, 0x2c,
+        ];
+        assert_eq!(sniff(&JXL), Kind::Jxl);
+        let (w, h, g) = decode_jxl(&JXL, 384).unwrap();
+        assert_eq!((w, h, g.w, g.h), (16, 8, 16, 8));
+        // Refused from the header: 16x8 grey is 512 bytes of float plane.
+        let e = jxl_image(&JXL, 500).err().expect("past the limit").to_string();
+        assert!(e.contains("16x8") && e.contains("MB"), "{e}");
+        // Past the header and into the render, the tracker refuses instead.
+        let image = jxl_image(&JXL, 512).unwrap();
+        assert!(image.render_frame(0).is_err(), "the render's own buffers are counted against the limit");
+        assert!(too_large("x", 60_000, 60_000, 4, 8 << 30).is_err());
+        assert!(too_large("x", 4_000, 3_000, 4, 8 << 30).is_ok());
+    }
+
+    /// The default walk takes every name a decodable file goes by. `.pam`,
+    /// `.apng` and `.dib` decoded under `-x '*'` and were skipped by default.
+    #[test]
+    fn every_default_extension_names_a_file_that_decodes() {
+        use image::codecs::pnm::PnmSubtype;
+        let dir = std::env::temp_dir().join(format!("img-fp-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(40, 30, |x, y| image::Rgb([(x * 5) as u8, (y * 7) as u8, 90])));
+        let wanted = crate::extensions::normalize(&EXTENSIONS.map(String::from)).unwrap().0;
+        for (name, fmt) in [("a.pam", None), ("a.apng", Some(ImageFormat::Png)), ("a.dib", Some(ImageFormat::Bmp))] {
+            let mut bytes = Vec::new();
+            match fmt {
+                Some(f) => img.write_to(&mut Cursor::new(&mut bytes), f).unwrap(),
+                None => image::codecs::pnm::PnmEncoder::new(&mut bytes)
+                    .with_subtype(PnmSubtype::ArbitraryMap)
+                    .encode(img.as_bytes(), 40, 30, image::ExtendedColorType::Rgb8)
+                    .unwrap(),
+            }
+            let path = dir.join(name);
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(wanted.accepts(&path), "{name} is not in the default walk");
+            assert!(crate::extensions::names_an_image(&path), "{name}");
+            let d = decode(&path, 384).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(d.size, (40, 30), "{name}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }
