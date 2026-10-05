@@ -15,26 +15,33 @@ build before the clean-anchor rule ran at 87-92% precision.
 margin.** **The baseline is now all four corpora together** — IMGS, IMGS2,
 IMGS3 and IMGS4 as one, `IMGS-ALL`: 27,659 files, 304 seeds, 90
 transformations — since IMGS2-4 are spent and will defend no further rule
-(`benchmark/BASELINE.md`, `out/v17-all4`). There img-fp scores F1 **0.978** at
-99.6% precision and 96.1% recall at the shipped default, `--work-size 512`,
-against SSCD's 0.748 / 85.3% / 66.6%, in 8 minutes against SSCD's 2.5 hours.
-**43 of 87 transformations are handled perfectly** — every one of 304 seeds
-found across the whole range of the amount — and every other tool manages
-**zero**. Its 74 cross-family false pairs are no merge: one stray `Acueducto3`
-file (68 pairs) and six single pairs. On IMGS alone — 5,638 files, 62 seeds —
-it is F1 **0.967** at 99.6% / 94.0% at the default, 47 perfect, and **0.971**
-at 640 (99.6% / 94.7%, 48 perfect); IMGS2 and IMGS3 alone score 0.980 and
-0.984 at the default and 0.984 and 0.986 at 640. Those single-corpus figures
-are `out/v14-fullsweep` and `out/v15-enlargement`; the competitors' IMGS-only
-rows are `out/v5`.
+(`benchmark/BASELINE.md`; the field in `out/v17-all4`, img-fp's row re-measured
+on the 0.30.0 release in `out/v23-plain`). There the released binary scores F1
+**0.979** at 99.6% precision and 96.2% recall at the shipped default,
+`--work-size 512`, against SSCD's 0.748 / 85.3% / 66.6%, in about 5.5 minutes
+and 2,300 CPU-seconds against SSCD's 2.5 hours and 55,000. **46 of 87
+transformations are handled perfectly** — every one of 304 seeds found across
+the whole range of the amount — and every other tool manages **zero**. Its 258
+cross-family false pairs are no merge: three mirrored `algiu2` variants joining
+`algiu1`'s family through the second look (166 pairs), one `crop_micro` of
+`Segovia1` (83), and nine single pairs. At 640 it is F1 0.981 (99.5% / 96.8%),
+42 perfect. On IMGS alone — 5,638 files, 62 seeds — it is F1 **0.965** at
+99.6% / 93.6% at the default, 41 perfect, and **0.972** at 640 (99.6% / 94.9%,
+51 perfect); IMGS2, IMGS3 and IMGS4 alone score 0.981, 0.985 and 0.984 at the
+default and 0.982, 0.987 and 0.987 at 640. All of those are `out/v23-plain`;
+the competitors' IMGS-only rows are `out/v5`.
 
 **Grey has been BT.601 luma since the CPU pass** (*Speed and memory*, the
 pass over the four-corpus baseline's CPU), not the mean of RGB, and a JPEG's
-grey is its own Y plane. That moved the accuracy as well as the clock: on
-IMGS-ALL at the default the current build scores F1 **0.9788** at 99.57% /
-96.24% with **46** perfect transformations, against the 0.9781 / 96.11% / 43
-of the build `out/v17-all4` measured, at about 11% less CPU and wall. The
-figures above and the tables below are that older build's, left as measured.
+grey is its own Y plane. The figures above are on that build; tables in this
+file older than `out/v23-plain` predate it and are left as measured.
+
+**And the release is the plain x86-64 build since 0.30.0**, which decodes JPEG
+XL a rounding apart from the native build `target/release` makes here (*Speed
+and memory*). `bench.py` measures `target/plain` by default for that reason,
+and every figure from `out/v23-plain` on is the shipped binary's: checked byte
+for byte against the downloaded release on all four corpora, the found corpus
+and `derived/Desktop`.
 
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
@@ -47,15 +54,18 @@ the first four fifths of the pipeline, so it is the only knob really connected
 to the clock, and since enlargement stopped at the working size it bounds what
 every picture costs (*Measured trade-offs*). 512 is where that limit stops
 binding: a small picture gets the whole of the enlargement the sweep chose, so
-a library of 224-pixel photographs is analysed as fully at 512 as at 640. 640
-buys 0.7 points of IMGS recall more for about 40% more CPU; 384, the default
-until this change, gave up 3.6 points of recall for a third less CPU on
-photographs and four fifths less on small images, and lost 30% of the found
-corpus's pairs. Precision is not part of that trade. The recall the default
-gives up is concentrated in the one capability nothing else in the field has
-at all, a photograph embedded in a bigger canvas: `embed_tiny` 47/62 against
-52 at 640, `contact_sheet` 43 against 53. **Anyone who cares about that case
-should pass `--work-size 640`.**
+a library of 224-pixel photographs is analysed as fully at 512 as at 640. On
+0.30.0, 640 buys 1.3 points of IMGS recall (0.55 of IMGS-ALL's) for about 21%
+more CPU on photographs and 1% on small images; 384, the default until 0.20,
+gives up 2.7 points of IMGS recall for 27% less CPU on photographs and 74% less
+on small images, and loses 18% of the found corpus's pairs (`out/v23-plain`;
+on 0.20.0 those were 0.7 points for 40%, and 3.6 points and 30% of the pairs
+for a third and four fifths). Precision is not part of that trade. The recall
+the default gives up is concentrated in the one capability nothing else in the
+field has at all, a photograph embedded in a bigger canvas: on IMGS
+`embed_tiny` 45/62 against 53 at 640, `contact_sheet` 49 against 55, and on
+IMGS-ALL 257 and 259 of 304 against 288 and 289. **Anyone who cares about that
+case should pass `--work-size 640`.**
 
 **The weak-anchor join is fixed, and what is left open is the clean-anchor
 merges.** `admit_anchors` now refuses a weak-anchor join between two clusters
@@ -70,9 +80,13 @@ bar 9 down to 3 (bar 9: F1 0.9770 -> 0.9855, cross-family 6,794 -> 165), and at
 five (IMGS2's busts at 5). Measured in `out/v16-weak-join`.
 
 What it does not touch, because it is a different mechanism: *clean*
-cross-family anchors that survive the bridge test — `bust1`/`bust2` on IMGS2
-(bar 5 at 512, 8 at 640), `field2`/`field3` at 640 bar 3, `docks1`/`docks2` at
-640 overlap 0.6 and below, `Acueducto3`/`Acueducto4` at 512 overlap 0.3. Nor
+cross-family anchors that survive the bridge test — on 0.21, `bust1`/`bust2` on
+IMGS2 (bar 5 at 512, 8 at 640), `field2`/`field3` at 640 bar 3, `docks1`/`docks2`
+at 640 overlap 0.6 and below, `Acueducto3`/`Acueducto4` at 512 overlap 0.3. **On
+0.30.0 two are left** (`out/v23-plain`, swept by runs at 512 and 640 on all four
+corpora and IMGS-ALL): `bust` at 640 only, bar 7 on IMGS2 and 8 on IMGS-ALL, and
+`docks` at overlap 0.5 and below at both sizes. Nothing merges at 512 through
+`--min-aligned-points`, `--min-pixel-correlation` or `-k` anywhere in the grid. Nor
 the stray-file allowance at fragment scale: at 384, shipped settings, a
 three-file `game2` fragment (a chain, no cycle) joins `game3`, 249 pairs,
 which is in the published 384 row. The documented "Segovia at 384 bar 7" case
@@ -87,10 +101,10 @@ per-change figures in *Speed and memory* were measured at `--work-size 640`,
 the default when they were taken, and are left as measured.)
 
 Precision holds where it matters. Every false pair on IMGS at the default is a
-deliberate rearrangement trap — 937 of them — and so there is no wrong cluster
-merge. IMGS2 makes one cross-family pair at the default and IMGS3 164: stray
-files joining the sibling photograph's family, which is the lone-file
-allowance of the clean-anchor rule. Watch merges, not pairs: a merge's cost is
+deliberate rearrangement trap — 889 of them on 0.30.0 — and so there is no
+wrong cluster merge. IMGS2 makes three cross-family pairs at the default,
+IMGS3 87 and IMGS4 none: stray files joining the sibling photograph's family,
+which is the lone-file allowance of the clean-anchor rule. Watch merges, not pairs: a merge's cost is
 every pair the two families imply, so it grows with the corpus while a lone
 bad pair does not. Zero should be read as "none survived", not as a guarantee
 — *Parameters* has how close each option sits to one.
@@ -183,6 +197,12 @@ benchmark/
   out/v16-weak-join/  the cycle rule of admit_anchors, replayed on all four
   out/v17-all4/       THE BASELINE: twelve tools on IMGS-ALL, one session
                       (metrics.json, score.txt, analyse.txt, per_transform.csv)
+  out/v23-plain/       0.30.0 re-baselined on the released plain binary: the
+                      release/plain/native identity checks (compare.py), the
+                      IMGS-ALL rows at 512 and 640 (bench512, bench640), every
+                      option swept at 512 and 640 (and 384) on all four corpora
+                      and IMGS-ALL, the work-size table, the plain-vs-native
+                      cost A/B (run.py, score1.py, tables.py, results.jsonl)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -738,11 +758,12 @@ The parts that are easy to get wrong:
 
 ### What still misses
 
-**13,940 pairs at the default, 12,372 at `--work-size 640`** on IMGS. The
-worst rows, out of 62 seeds, with 640 in brackets: `crop_micro` 39 (40),
-`contact_sheet` 43 (53), `embed_tiny` 47 (52), `tiled_watermark` 54 (55),
-`picture_in_picture` 55 (58), `crop_strip_top` and `wave_vertical` 56 (56,
-57), `scale_small` and `halftone` 57 (57, 55).
+**14,828 pairs at the default, 11,834 at `--work-size 640`** on IMGS (0.30.0,
+`out/v23-plain`). The worst rows, out of 62 seeds, with 640 in brackets:
+`crop_micro` 37 (40), `embed_tiny` 45 (53), `contact_sheet` 49 (55),
+`tiled_watermark` 54 (55), `picture_in_picture` 55, `wave_vertical` 55 (54),
+`crop_strip_top` 56 (56), `crop_quarter` and `halftone` 57 (58, 56),
+`scale_small` 58 (56).
 
 Two patterns. The old one is very small crops, heavy downscales, and warps
 that break a fitted affine model. The other is **containment**: the work size
@@ -752,13 +773,15 @@ worth knowing about before recommending the default to anyone whose corpus is
 screenshots, slides or contact sheets.
 
 **Rows where a competitor leads: seven on the four-corpus baseline**, none by
-more than five seeds of 304 (`out/v17-all4`): SSCD on `perspective_top` and
-`keystone_side` (303 against 298), `photo_of_screen`, `scale_nearest` and
-`crop_half`; SSCD and czkawka_tuned on `flip_h` (303 and 302 against 300) and
-`transpose_diag` (301 and 302 against 299); `halftone` is level with PDQ at
-293. The mirrorings are the second look, asked only of files the first pass
-anchored fewer than twice. Where img-fp leads it leads by hundreds:
-`embed_tiny` 254 against 0, `contact_sheet` 262 against 0, `crop_micro` 221
+more than three seeds of 304 (0.30.0 in `out/v23-plain` against the field in
+`out/v17-all4`): SSCD on `perspective_top` and `keystone_side` (303 against
+301), `scale_nearest` (303 against 300), `crop_half` and `scale_mid` (303
+against 302); SSCD and czkawka_tuned on `flip_h` (303 and 302 against 300) and
+`transpose_diag` (301 and 302 against 300). `photo_of_screen` and
+`motion_blur` are level with SSCD at 303, and `halftone` is now img-fp's, 294
+against PDQ's 293. The mirrorings are the second look, asked only of files the
+first pass anchored fewer than twice. Where img-fp leads it leads by hundreds:
+`embed_tiny` 257 against 0, `contact_sheet` 259 against 0, `crop_micro` 222
 against SSCD's 0. On IMGS alone it was two rows at the default — `halftone`
 (PDQ, 58/62 against 57) and `keystone_side` (SSCD, 61 against 60) — four at
 640 and eight at 384.
@@ -875,97 +898,106 @@ once. So sweep for the *cliff*, not the peak, quote the distance to it, and
 split false pairs into rearrangement traps and cross-family errors, because
 loosening a bar buys traps long before it buys a merge.
 
-**The sweep of 0.20.0** (`out/v14-fullsweep` at 384 and 640, `out/v15-enlargement`
-at 512, the default since): every option on IMGS, IMGS2 and IMGS3 alone and on
-all three together, everything else at the shipped value (correlation 0.6),
-about 600 runs. F1 at 512 and 640 below — the 384 tables are in
-`v14-fullsweep/tables.txt` — and **†** marks a run with a family merge, a pair
-of seeds with 300 or more false pairs between them. (A single stray file
-joining its sibling's family is about 80 pairs and is not a merge; IMGS3 has a
-few at every setting.) The `tables.txt` files have precision, recall, trap and
-cross-family counts, the seed halves and the clean-anchor rule's joins and
-refusals for every row.
+**The sweep of 0.30.0** (`out/v23-plain`, 2026-10-05), on the released plain
+x86-64 binary: every option on IMGS, IMGS2, IMGS3 and IMGS4 alone and on
+IMGS-ALL, at 384, 512 and 640, everything else at the shipped value
+(correlation 0.6), plus correlation by hundredths from 0.56 to 0.75 at 640 on
+IMGS3 and IMGS-ALL; about 520 runs, each from a cache at its own work size. The
+tables below are 512 and 640; 384 is in `results.jsonl` and in the margins. **†** marks a
+family merge, a pair of seeds with 300 or more false pairs between them. (A
+single stray file joining its sibling's family is about 80 pairs and is not a
+merge; IMGS3 has a few at every setting.) `results.jsonl` has precision,
+recall, trap and cross-family counts, the seed pairs, both seed halves, the
+perfect rows and the clean-anchor rule's joins and refusals for every run, and
+`tables.py thr detail margins` prints them. The 0.20.0 sweep these replace —
+IMGS, IMGS2, IMGS3 and the three together, at 384 as well — is
+`out/v14-fullsweep` and `out/v15-enlargement`.
 
-| `--min-aligned-points` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
-|---|---|---|---|---|---|---|---|---|
-| 3 | 0.9823 | **0.9733†** | **0.9797†** | **0.9822†** | 0.9828 | **0.9747†** | **0.9822†** | **0.9823†** |
-| 5 | 0.9805 | **0.9729†** | **0.9799†** | **0.9807†** | 0.9812 | **0.9740†** | 0.9889 | **0.9818†** |
-| 6 | 0.9781 | 0.9842 | **0.9790†** | **0.9799†** | 0.9771 | **0.9737†** | 0.9887 | **0.9808†** |
-| 7 | 0.9761 | 0.9832 | **0.9786†** | 0.9827 | 0.9772 | **0.9726†** | 0.9881 | **0.9791†** |
-| 8 | 0.9727 | 0.9825 | **0.9779†** | 0.9808 | 0.9750 | **0.9723†** | 0.9880 | **0.9785†** |
-| 9 | 0.9697 | 0.9814 | **0.9770†** | 0.9792 | 0.9736 | 0.9838 | 0.9871 | 0.9810 |
-| **10** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
-| 11 | 0.9640 | 0.9794 | 0.9828 | 0.9763 | 0.9686 | 0.9823 | 0.9863 | 0.9790 |
-| 12 | 0.9593 | 0.9779 | 0.9822 | 0.9736 | 0.9650 | 0.9811 | 0.9860 | 0.9775 |
-| 14 | 0.9539 | 0.9738 | 0.9772 | 0.9681 | 0.9624 | 0.9795 | 0.9844 | 0.9754 |
-| 16 | 0.9463 | 0.9706 | 0.9728 | 0.9630 | 0.9559 | 0.9784 | 0.9822 | 0.9719 |
-| 20 | 0.9317 | 0.9624 | 0.9642 | 0.9526 | 0.9449 | 0.9733 | 0.9773 | 0.9643 |
+| `--min-aligned-points` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 IMGS4 | 512 ALL | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 IMGS4 | 640 ALL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 3 | 0.9798 | 0.9855 | 0.9887 | 0.9888 | 0.9862 | 0.9816 | **0.9740†** | 0.9891 | 0.9885 | **0.9840†** |
+| 5 | 0.9791 | 0.9847 | 0.9884 | 0.9877 | 0.9854 | 0.9799 | **0.9737†** | 0.9890 | 0.9883 | **0.9832†** |
+| 6 | 0.9777 | 0.9838 | 0.9882 | 0.9865 | 0.9844 | 0.9789 | **0.9731†** | 0.9886 | 0.9889 | **0.9828†** |
+| 7 | 0.9749 | 0.9835 | 0.9874 | 0.9858 | 0.9834 | 0.9781 | **0.9726†** | 0.9885 | 0.9883 | **0.9821†** |
+| 8 | 0.9721 | 0.9825 | 0.9863 | 0.9855 | 0.9823 | 0.9768 | 0.9834 | 0.9882 | 0.9880 | **0.9811†** |
+| 9 | 0.9698 | 0.9814 | 0.9854 | 0.9856 | 0.9806 | 0.9740 | 0.9830 | 0.9879 | 0.9874 | 0.9828 |
+| **10** | **0.9652** | **0.9806** | **0.9849** | **0.9838** | **0.9788** | **0.9719** | **0.9817** | **0.9871** | **0.9871** | **0.9815** |
+| 11 | 0.9625 | 0.9798 | 0.9835 | 0.9813 | 0.9770 | 0.9693 | 0.9815 | 0.9869 | 0.9862 | 0.9807 |
+| 12 | 0.9597 | 0.9783 | 0.9818 | 0.9795 | 0.9749 | 0.9664 | 0.9806 | 0.9863 | 0.9853 | 0.9796 |
+| 14 | 0.9545 | 0.9740 | 0.9776 | 0.9761 | 0.9701 | 0.9591 | 0.9790 | 0.9847 | 0.9835 | 0.9769 |
+| 16 | 0.9470 | 0.9702 | 0.9725 | 0.9733 | 0.9645 | 0.9551 | 0.9766 | 0.9821 | 0.9822 | 0.9741 |
+| 20 | 0.9307 | 0.9632 | 0.9650 | 0.9669 | 0.9544 | 0.9448 | 0.9724 | 0.9769 | 0.9782 | 0.9679 |
 
-| `--min-frame-overlap` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
-|---|---|---|---|---|---|---|---|---|
-| 0.3 | 0.9506 | 0.9635 | **0.9574†** | **0.9563†** | 0.9541 | 0.9664 | **0.9601†** | **0.9592†** |
-| 0.4 | 0.9506 | 0.9638 | 0.9660 | 0.9607 | 0.9545 | 0.9673 | **0.9604†** | **0.9596†** |
-| 0.5 | 0.9509 | 0.9644 | 0.9666 | 0.9612 | 0.9549 | 0.9675 | **0.9612†** | 0.9635 |
-| 0.6 | 0.9605 | 0.9749 | 0.9782 | 0.9723 | 0.9646 | 0.9781 | **0.9790†** | 0.9742 |
-| 0.7 | 0.9646 | 0.9794 | 0.9834 | 0.9766 | 0.9690 | 0.9821 | 0.9856 | 0.9787 |
-| 0.8 | 0.9669 | 0.9810 | 0.9844 | 0.9782 | 0.9708 | 0.9840 | 0.9866 | 0.9803 |
-| **0.85** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
-| 0.9 | 0.9635 | 0.9767 | 0.9797 | 0.9738 | 0.9650 | 0.9801 | 0.9831 | 0.9761 |
-| 0.95 | 0.9528 | 0.9662 | 0.9687 | 0.9629 | 0.9550 | 0.9695 | 0.9710 | 0.9652 |
+| `--min-frame-overlap` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 IMGS4 | 512 ALL | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 IMGS4 | 640 ALL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.3 | 0.9470 | 0.9631 | **0.9591†** | 0.9659 | **0.9587†** | 0.9557 | 0.9650 | **0.9611†** | 0.9703 | **0.9615†** |
+| 0.4 | 0.9468 | 0.9635 | **0.9598†** | 0.9662 | **0.9591†** | 0.9561 | 0.9656 | **0.9617†** | 0.9706 | **0.9620†** |
+| 0.5 | 0.9473 | 0.9642 | **0.9606†** | 0.9667 | **0.9598†** | 0.9563 | 0.9663 | **0.9622†** | 0.9708 | **0.9626†** |
+| 0.6 | 0.9581 | 0.9750 | 0.9793 | 0.9774 | 0.9732 | 0.9665 | 0.9768 | 0.9815 | 0.9816 | 0.9758 |
+| 0.7 | 0.9625 | 0.9793 | 0.9843 | 0.9817 | 0.9775 | 0.9704 | 0.9808 | 0.9863 | 0.9851 | 0.9802 |
+| 0.8 | 0.9656 | 0.9814 | 0.9850 | 0.9840 | 0.9791 | 0.9722 | 0.9825 | 0.9874 | 0.9875 | 0.9820 |
+| **0.85** | **0.9652** | **0.9806** | **0.9849** | **0.9838** | **0.9788** | **0.9719** | **0.9817** | **0.9871** | **0.9871** | **0.9815** |
+| 0.9 | 0.9623 | 0.9771 | 0.9809 | 0.9800 | 0.9749 | 0.9673 | 0.9789 | 0.9838 | 0.9836 | 0.9777 |
+| 0.95 | 0.9529 | 0.9656 | 0.9701 | 0.9694 | 0.9642 | 0.9555 | 0.9683 | 0.9718 | 0.9728 | 0.9667 |
 
-| `--min-pixel-correlation` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
-|---|---|---|---|---|---|---|---|---|
-| 0.2 | 0.9713 | 0.9863 | 0.9878 | 0.9819 | 0.9740 | 0.9878 | **0.9799†** | 0.9835 |
-| 0.4 | 0.9712 | 0.9855 | 0.9877 | 0.9819 | 0.9741 | 0.9878 | **0.9801†** | 0.9836 |
-| 0.5 | 0.9701 | 0.9842 | 0.9870 | 0.9811 | 0.9733 | 0.9871 | **0.9796†** | 0.9829 |
-| 0.55 | 0.9690 | 0.9833 | 0.9857 | 0.9799 | 0.9721 | 0.9861 | **0.9787†** | 0.9819 |
-| **0.6** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
-| 0.65 | 0.9634 | 0.9749 | 0.9808 | 0.9740 | 0.9670 | 0.9782 | 0.9830 | 0.9758 |
-| 0.7 | 0.9584 | 0.9687 | 0.9730 | 0.9678 | 0.9618 | 0.9719 | **0.9685†** | 0.9697 |
-| 0.8 | 0.9365 | 0.9445 | 0.9482 | 0.9444 | 0.9422 | 0.9471 | 0.9522 | 0.9466 |
+| `--min-pixel-correlation` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 IMGS4 | 512 ALL | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 IMGS4 | 640 ALL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.2 | 0.9703 | 0.9858 | 0.9882 | 0.9862 | 0.9820 | 0.9754 | 0.9856 | 0.9900 | 0.9897 | 0.9849 |
+| 0.4 | 0.9706 | 0.9852 | 0.9881 | 0.9865 | 0.9824 | 0.9758 | 0.9861 | 0.9899 | 0.9895 | 0.9852 |
+| 0.5 | 0.9681 | 0.9843 | 0.9875 | 0.9860 | 0.9815 | 0.9748 | 0.9855 | 0.9894 | 0.9890 | 0.9844 |
+| 0.55 | 0.9670 | 0.9830 | 0.9863 | 0.9853 | 0.9805 | 0.9737 | 0.9845 | 0.9884 | 0.9884 | 0.9834 |
+| **0.6** | **0.9652** | **0.9806** | **0.9849** | **0.9838** | **0.9788** | **0.9719** | **0.9817** | **0.9871** | **0.9871** | **0.9815** |
+| 0.65 | 0.9622 | 0.9754 | 0.9816 | 0.9802 | 0.9751 | 0.9689 | 0.9769 | 0.9841 | 0.9834 | 0.9776 |
+| 0.7 | 0.9576 | 0.9687 | 0.9746 | 0.9742 | 0.9688 | 0.9639 | 0.9702 | 0.9770 | 0.9776 | 0.9715 |
+| 0.75 | — | — | — | — | — | — | — | 0.9674 | — | 0.9618 |
+| 0.8 | 0.9359 | 0.9446 | 0.9497 | 0.9510 | 0.9450 | 0.9437 | 0.9473 | 0.9523 | 0.9543 | 0.9484 |
 
-| `-k` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 all 3 | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 all 3 |
-|---|---|---|---|---|---|---|---|---|
-| 10 | 0.9387 | 0.9510 | **0.9519†** | 0.9444 | 0.9364 | 0.9454 | 0.9544 | 0.9483 |
-| 25 | 0.9587 | 0.9699 | 0.9768 | 0.9698 | 0.9645 | 0.9757 | 0.9769 | 0.9723 |
-| 50 | 0.9631 | 0.9733 | 0.9788 | 0.9730 | 0.9666 | 0.9781 | 0.9793 | 0.9745 |
-| 100 | 0.9671 | 0.9799 | 0.9841 | 0.9778 | 0.9705 | 0.9834 | 0.9862 | 0.9797 |
-| **150** | **0.9671** | **0.9803** | **0.9842** | **0.9778** | **0.9706** | **0.9835** | **0.9863** | **0.9799** |
-| 300 | 0.9672 | 0.9803 | 0.9843 | 0.9779 | 0.9707 | 0.9835 | 0.9864 | 0.9800 |
-| 500 | 0.9672 | 0.9803 | 0.9843 | 0.9779 | 0.9707 | 0.9835 | 0.9864 | 0.9800 |
+| `-k` | 512 IMGS | 512 IMGS2 | 512 IMGS3 | 512 IMGS4 | 512 ALL | 640 IMGS | 640 IMGS2 | 640 IMGS3 | 640 IMGS4 | 640 ALL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10 | 0.7555 | 0.7477 | 0.7313 | 0.7305 | 0.7465 | 0.7228 | 0.7480 | 0.7628 | 0.7669 | 0.7441 |
+| 25 | 0.9588 | 0.9743 | 0.9786 | 0.9792 | 0.9716 | 0.9664 | 0.9759 | **0.9810†** | 0.9816 | 0.9752 |
+| 50 | 0.9620 | 0.9779 | 0.9810 | 0.9816 | 0.9743 | 0.9681 | 0.9773 | **0.9820†** | 0.9832 | 0.9770 |
+| 100 | 0.9652 | 0.9806 | 0.9847 | 0.9838 | 0.9788 | 0.9719 | 0.9816 | 0.9867 | 0.9870 | 0.9815 |
+| **150** | **0.9652** | **0.9806** | **0.9849** | **0.9838** | **0.9788** | **0.9719** | **0.9817** | **0.9871** | **0.9871** | **0.9815** |
+| 300 | 0.9652 | 0.9806 | 0.9850 | 0.9838 | 0.9788 | 0.9719 | 0.9818 | 0.9872 | 0.9872 | 0.9816 |
+| 500 | 0.9652 | 0.9806 | 0.9850 | 0.9838 | 0.9788 | 0.9719 | 0.9818 | 0.9872 | 0.9872 | 0.9816 |
 
-**Every merge in those tables is two photographs of one scene** — `Segovia1` /
-`Segovia2`, `docks1` / `docks2`, `field2` / `field3`, `Acueducto3` /
-`Acueducto4` and `Henares1` / `Henares2` on IMGS3, `bust1` / `bust2` on IMGS2
-— most at 5,000-7,000 false pairs. None is two unrelated families, and none is
-on IMGS. That is the finding of the sweep, and it reverses the tables that
-stood here: **every cliff measured on IMGS alone is gone**.
-`--min-aligned-points` merged nine families at 7 (8,148 cross-family pairs),
-`--min-pixel-correlation` merged the two Excel screenshots at 0.40 and twelve
-families at 0.30 (43,540 pairs), `--work-size 896` merged `beach` with
-`panoramic3`; under the clean-anchor rule IMGS makes no merge at bar 3, at
-correlation 0.2 or at any work size. The cliffs did not go away, they moved to
-the corpora that have near misses, and most of them moved **closer** to the
-shipped values than the old ones were:
+**Every merge in those tables is two photographs of one scene, and there are
+three left**: `docks1` / `docks2` at overlap 0.5 and below (IMGS3 and IMGS-ALL
+at 512 and 640, IMGS-ALL alone at 384; 5,900-6,800 false pairs), `bust1` / `bust2` at aligned points 7 and
+below on IMGS2 at 640 and 8 and below on IMGS-ALL (6,500-6,600), and `Segovia1`
+/ `Segovia2` at `-k` 25 and 50 on IMGS3 at 640 (319 and 322, on the line; see
+`-k` below). None is two unrelated families and none is on IMGS or IMGS4.
+0.20.0's sweep had six such pairs, and `Segovia` through aligned points and
+correlation, `field2` / `field3`, `Acueducto3` / `Acueducto4` and `Henares1` /
+`Henares2` now merge nowhere in the grid: the cycle rule of `admit_anchors`,
+and under it luma grey, which moved every anchor. Before the clean-anchor rule
+the cliffs were all on IMGS — `--min-aligned-points` merged nine families at 7
+(8,148 cross-family pairs), `--min-pixel-correlation` the two Excel
+screenshots at 0.40 and twelve families at 0.30 (43,540 pairs), `--work-size
+896` `beach` with `panoramic3` — and IMGS still makes no merge at bar 3, at
+correlation 0.2 or at any work size. The cliffs moved to the corpora with near
+misses, and on 0.30.0 they sit here:
 
-| option | distance from shipped to the nearest merge, 384 | **512 (default)** | 640 | documented before (IMGS, 640) |
+| option | distance from shipped to the nearest merge, 384 | **512 (default)** | 640 | 0.20.0 at 384 / 512 / 640, before the cycle rule |
 |---|---|---|---|---|
-| `--min-aligned-points` 10 | 3 steps (IMGS3 at 7); since the cycle rule, none down to 3 on any one corpus | **1 step** (IMGS3 at 9); since the cycle rule, **5 steps** (IMGS2 at 5) | 2 steps (IMGS2 at 8) | 3 steps (at 7) |
-| `--min-frame-overlap` 0.85 | 0.35 (IMGS3 at 0.5) | **0.55** (IMGS3 at 0.3) | 0.25 (IMGS3 at 0.6) | none in the usable range |
-| `--min-pixel-correlation` 0.6 | none from 0.2 to 0.8 | **none from 0.2 to 0.8** | 0.01 below (IMGS3 at 0.58), 0.09 above (at 0.69); since the cycle rule, none from 0.2 to 0.8 | 0.1 (at 0.40, when 0.50 shipped) |
-| `-k` 150 | 140 (all three at 10) | **140** (IMGS3 at 10) | none from 10 up | none |
+| `--min-aligned-points` 10 | none down to 3 | **none down to 3**, on any corpus or IMGS-ALL | 2 steps (IMGS-ALL at 8; IMGS2 alone at 7) | 3 steps (IMGS3 at 7) / 1 step (IMGS3 at 9) / 2 steps (IMGS2 at 8) |
+| `--min-frame-overlap` 0.85 | 0.35 (IMGS-ALL at 0.5, `docks`; IMGS3 alone never) | **0.35** (IMGS3 and IMGS-ALL at 0.5, `docks`) | 0.35 (the same) | 0.35 / 0.55 / 0.25 |
+| `--min-pixel-correlation` 0.6 | none from 0.2 to 0.8 | **none from 0.2 to 0.8** | none from 0.2 to 0.8, the hundredths included | none / none / 0.01 below and 0.09 above |
+| `-k` 150 | none from 10 up | **none from 10 up** | 100 (IMGS3 at 50, on the line) | 140 / 140 / none from 10 up |
 
-The combined corpus does not simply add its parts: it merges `bust` at bar 8
-at 640 as IMGS2 does, but not `Segovia` at 384 as IMGS3 does, and `docks` at
-overlap 0.4 where IMGS3 alone merges at 0.6. A merge of near-miss siblings
-depends on which anchors happen to exist, and the vocabulary a corpus builds
-changes that — which is also why the three work sizes do not line up. Read the
-margins as the distance to *a* merge, not to a fixed edge. The "since the cycle
-rule" entries are replays of single corpora (`out/v16-weak-join`); the combined
-corpus has not been re-swept.
+The combined corpus still does not simply add its parts: IMGS-ALL merges `bust`
+at bar 8 at 640 where IMGS2 alone holds at 8 and goes at 7, and does not reach
+`Segovia`'s line at `-k` 25 or 50 where IMGS3 alone does. A merge of near-miss
+siblings depends on which anchors happen to exist, and the vocabulary a corpus
+builds changes that — which is also why the work sizes do not line up. Read the
+margins as the distance to *a* merge, not to a fixed edge.
 
 **`--min-aligned-points` at the default was the thin one, and the cycle rule
-closed it** (see the end of this section; the table is the 0.20.0 build).
+closed it** (see the end of this section). Measured on 0.30.0 by runs rather
+than replays, 512 merges nothing at any bar from 20 down to 3, on any of the
+four corpora or on IMGS-ALL; what follows is the 0.20.0 build, where it was one
+step from a merge.
 Recall is still a ramp and F1 still falls at every step above the cliff, so F1
 still prefers the lowest safe bar, and the reason not to follow it is the
 margin — which at 512 is a single step. Replayed off one `--dump` per corpus
@@ -1012,7 +1044,8 @@ Segovia's best is 73 of 80). Tried and rejected on the way: covering the
 larger side too (the legitimate fragments are touched back by 90-96% of the
 family, Segovia by 78% — the wrong way round for a rule), and the density of
 weak anchors across the cut (0.90-0.95 against 0.45-0.52, separable only by a
-fitted cut). 10 stays, now five steps from the nearest merge at 512.
+fitted cut). 10 stays, five steps from the nearest merge at 512 in the replays,
+and with none down to 3 when re-measured on 0.30.0.
 
 **`--min-pixel-correlation` at 640 is not monotone.** Swept by hundredths on
 IMGS3: `Segovia` merges at 0.55-0.58 (7,028-7,058 false pairs), is clean from
@@ -1033,23 +1066,41 @@ anchors exist, so a bar that only removes anchors can create a merge. It is the
 same weakness as the aligned-points margin above, seen through another bar,
 and the cycle rule removes it the same way: replayed, IMGS3 at 640 merges at
 no correlation from 0.2 to 0.8, and 0.55 runs at F1 0.9878 with 2
-cross-family pairs where 0.21 ran at 0.9787 with 7,058.
+cross-family pairs where 0.21 ran at 0.9787 with 7,058. **Re-measured on 0.30.0
+by runs** (`out/v23-plain`): F1 at 640 falls monotonically from 0.2 to 0.8 on
+every corpus and on IMGS-ALL, every hundredth from 0.56 to 0.75 included on
+IMGS3 and IMGS-ALL, and nothing merges. The band is gone.
 
 **`--min-frame-overlap` has a cliff on IMGS3**, and it is the near-miss one:
-`docks1` / `docks2`, one quay framed slightly differently, join at 0.6 and
-below at 640 and at 0.5 and below at 384, and `Acueducto3` / `Acueducto4` at
-0.3 at 512 (5,000-7,000 false pairs). Replayed, the cycle rule changes
-neither, so these are not weak-anchor joins. On
-IMGS and IMGS2 the shape is exactly the documented one — no cliff anywhere,
-loosening buys trap pairs by the thousand (937 at 0.85 to 10,839 at 0.3 on
-IMGS at 512), and F1 is flat to a thousandth between 0.80 and 0.85, so the
-step loose would buy nothing but the distance to a cliff. It does not move.
+`docks1` / `docks2`, one quay framed slightly differently. On 0.30.0 it joins
+at 0.5 and below at both 512 and 640, on IMGS3 and on IMGS-ALL (5,900-6,800
+false pairs); on 0.20.0 it was 0.6 and below at 640 and 0.5 and below at 384,
+with `Acueducto3` / `Acueducto4` at 0.3 at 512, which no longer joins. Replayed
+on the older build, the cycle rule changed neither, so these are not
+weak-anchor joins. On IMGS, IMGS2 and IMGS4 the shape is exactly the
+documented one — no cliff anywhere, loosening buys trap pairs by the thousand
+(889 at 0.85 to 10,884 at 0.3 on IMGS at 512), and F1 is flat to a few
+thousandths between 0.80 and 0.85 (0.8 is a hair *higher* on every corpus at
+both sizes), so the step loose would buy nothing but the distance to a cliff.
+It does not move.
 
-**`-k` is unchanged**: identical to within a handful of pairs from 100 to 500
-on every corpus at every size, the knee between 50 and 100, and the shipped 150
-half the range clear of it. At 10 it merges `Segovia` (322-384 pairs), where a
-candidate list shorter than a family is the whole story. It is not connected
-to a result above 100; do not reach for it to fix anything.
+**`-k` above 100 is unchanged, and below 25 it now costs far more**: identical
+to within a handful of pairs from 100 to 500 on every corpus at both sizes, the
+knee between 50 and 100, and the shipped 150 half the range clear of it. What
+is new is the bottom of the range. At 10, 0.20.0 kept 86-92% recall; 0.30.0
+keeps **58-61%** (F1 0.73-0.77), because the propagation budget is
+`prop_budget` — as many composed pairs a round as the direct pass verified
+candidates, which is files times `-k` — and at `-k 10` it no longer fits the
+corpus's families: on IMGS 45,324 a round against 586,715 at the default, and
+24 clusters (2,049 files) are **starred**, compared with their root alone;
+IMGS-ALL stars 126 clusters, 10,723 files. From 25 up nothing is starred and
+the curve is the old one. So the budget couples propagation to `-k`, which was
+designed in and is harmless at any setting a user would choose; a `-k` sweep
+below 25 now measures the budget, not the candidate list. At 640 IMGS3 puts
+319 and 322 false pairs between `Segovia1` and `Segovia2` at 25 and 50 — on the
+line, about four stray files' worth, and not traced — where at 10, starred, it
+puts none past 300. It is not connected to a result above 100; do not reach for it
+to fix anything.
 
 **`--min-frame-overlap` and `--min-pixel-correlation` are not two strengths of
 one bar.** They sit one line apart in `Verdict::accepted` and each is the only
@@ -1283,9 +1334,35 @@ Two things stand against it, and neither was visible before:
 The release stayed x86-64-v3 until 0.30.0, which ships the plain build: it
 runs on any x86-64 CPU, the pairs it loses on IMGS3 are within reach of the
 settings (below), and the profile below puts it level with v3 stage for stage.
-**So the published benchmark figures are now a build away from the shipped
-binary on JPEG XL**, by `jxl-grid`'s FMA rounding, and IMGS3's row in
-particular (F1 0.98486 against 0.98534 at the default).
+The published figures were then a build away from the shipped binary on JPEG
+XL, by `jxl-grid`'s FMA rounding, IMGS3's row in particular (F1 0.98486
+against 0.98534 at the default); **since `out/v23-plain` they are the shipped
+binary's**, and `bench.py` measures `target/plain` unless told otherwise.
+
+**Re-checked on 0.30.0** (`out/v23-plain`, `compare.py`). The downloaded
+release and a local `RUSTFLAGS="-C target-cpu=x86-64"` build give
+byte-identical reports on IMGS, IMGS2, IMGS3, IMGS4, the found corpus and
+`derived/Desktop`. Against the native build, IMGS and the found corpus are
+byte-identical; IMGS3 moves exactly v21's set again (1,302 true pairs out, 935
+in, 129 and 132 false); IMGS2 and IMGS4 have the same pairs and groups but 22
+and 4 pairs whose `aligned_points` differ by one (and one `scale` in the third
+decimal); `derived/Desktop` moves 13 pairs out and 18 in. The two IMGS2 JPEGs
+behind one of those pairs analyse byte for byte the same under both builds
+(their cache records are identical), so the difference is the vocabulary,
+which is trained on a sample that holds the corpus's JPEG XL files. **With
+every `.jxl` left out (`-x '!jxl'`), plain and native are byte-identical on
+IMGS2, IMGS3 and IMGS4** — so JPEG XL is the whole of the difference, IMGS3's
+2,500-pair ripple included.
+
+**And the cost, A/B'd rather than profiled**: cold, cooled to idle + 3 C,
+evicted, `--no-cache`, A B B A, plain against native. IMGS-ALL 2,330 / 2,284
+CPU-seconds against 2,266 / 2,290, wall 332 / 325 s against 324 / 326; the
+found corpus 764 / 771 against 748 / 748, wall 105 / 106 s against 104 / 103.
+That is **+1.3% of the CPU on IMGS-ALL and +2.6% on the found corpus**,
+averaged over both orders, with wall within 1-2% and the same peak (2,167-2,184
+MB on IMGS-ALL, no swap). It sits between `out/v20-portable`'s +2-5% (0.28,
+each corpus alone) and the profile's "level"; why it is smaller than v20's is
+not traced, and it is not zero.
 
 **Profiled, the plain build is level with v3 stage for stage**
 (`out/v22-plain-cpu`, IMGS-ALL, cold, `--features prof`): 2,967 against 2,977
@@ -3111,37 +3188,37 @@ both of which caught something real in this pass:
 
 Measured trade-offs, so they need not be rediscovered. **`--work-size` is a
 knee, not a peak**, and the shipped default, 512, sits one step below it.
-Accuracy on all three corpora (`out/v15-enlargement` up to 448, where the
-enlargement rule below changed the rows, and `out/v14-fullsweep` from 512,
-where it did not); pairs on the found corpus, which has no ground truth; cost
-on IMGS and the found corpus from one cold, cooled, cache-evicted session on
-`bench.py`'s protocol, on the final build (idle 69 C; the large sizes ran at
-1.5-1.9 GHz and the small ones at 2.5-2.8, which is the clock following the
-load rather than noise):
+0.30.0, the released plain build (`out/v23-plain`): accuracy on all four
+corpora and on IMGS-ALL, each run once at its size; pairs on the found corpus,
+which has no ground truth; cost on IMGS and the found corpus from one cold,
+cooled, cache-evicted session on `bench.py`'s protocol (idle 70-75 C, every run
+at 2.6-3.1 GHz, which this machine reaches in a cool morning; the 0.20.0 table
+this replaces ran at 1.5-2.8 GHz, so compare the ratios, not the seconds). The
+0.20.0 rows are in `out/v14-fullsweep` and `out/v15-enlargement`.
 
-| `--work-size` | IMGS F1 | IMGS recall | IMGS2 F1 | IMGS3 F1 | all 3 F1 | IMGS CPU-s | IMGS wall | found pairs | found CPU-s |
-|---|---|---|---|---|---|---|---|---|---|
-| 64 | 0.0484 | 2.48% | 0.1056 | 0.0847 | 0.0763 | 145 | 24 s | 73 | |
-| 96 | 0.4915 | 32.58% | 0.5464 | 0.5953 | 0.5379 | | | 430 | |
-| 128 | 0.6803 | 51.56% | 0.7501 | 0.7647 | 0.7275 | 166 | 29 s | 830 | 78 |
-| 192 | 0.8461 | 73.39% | 0.8778 | 0.8794 | 0.8619 | 195 | 33 s | 1,279 | |
-| 256 | 0.9005 | 82.07% | 0.9311 | 0.9349 | 0.9209 | 237 | 39 s | 1,706 | 234 |
-| 320 | 0.9272 | 86.67% | 0.9544 | 0.9592 | 0.9454 | 278 | 45 s | 1,706 | |
-| 384 | 0.9466 | 90.17% | 0.9696 | 0.9700 | 0.9601 | 434 | 72 s | 1,706 | 225 |
-| 448 | 0.9566 | 92.02% | 0.9770 | 0.9800 | 0.9712 | 526 | 88 s | 2,438 | 1,179 |
-| **512 (default)** | **0.9671** | **94.01%** | **0.9803** | **0.9842** | **0.9778** | **678 / 618** | **113 / 103 s** | **2,438** | **1,159** |
-| **640 (the knee)** | **0.9706** | **94.69%** | **0.9835** | **0.9863** | **0.9799** | **905** | **150 s** | 2,438 | |
-| 768 | 0.9736 | 95.24% | 0.9818 | 0.9869 | 0.9802 | | | | |
-| 896 | 0.9738 | 95.33% | 0.9843 | 0.9876 | 0.9820 | | | | |
-| 1024 | 0.9733 | 95.23% | 0.9819 | 0.9871 | 0.9812 | | | | |
-| 1280 | 0.9751 | 95.58% | 0.9838 | 0.9871 | 0.9819 | | | | |
-| 0 (full size) | 0.9736 | 95.32% | 0.9823 | 0.9859 | – | | | | |
+| `--work-size` | IMGS F1 | IMGS recall | IMGS2 F1 | IMGS3 F1 | IMGS4 F1 | ALL F1 | ALL recall | IMGS CPU-s | IMGS wall | found pairs | found CPU-s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | 0.0493 | 2.53% | 0.1048 | 0.0873 | 0.0979 | 0.0828 | 4.32% |  |  | 76 |  |
+| 96 | 0.5141 | 34.60% | 0.5625 | 0.5868 | 0.5775 | 0.5420 | 37.18% |  |  | 452 |  |
+| 128 | 0.6838 | 51.96% | 0.7507 | 0.7626 | 0.7717 | 0.7342 | 58.01% | 128 | 22 s | 808 | 69 |
+| 192 | 0.8459 | 73.38% | 0.8763 | 0.8794 | 0.8848 | 0.8635 | 76.03% |  |  | 1,705 |  |
+| 256 | 0.9028 | 82.45% | 0.9335 | 0.9342 | 0.9381 | 0.9223 | 85.75% | 174 | 26 s | 2,028 | 195 |
+| 320 | 0.9288 | 86.94% | 0.9554 | 0.9571 | 0.9596 | 0.9487 | 90.49% |  |  | 2,028 |  |
+| 384 | 0.9507 | 90.90% | 0.9704 | 0.9723 | 0.9711 | 0.9640 | 93.37% | 250 | 35 s | 2,028 | 195 |
+| 448 | 0.9606 | 92.76% | 0.9764 | 0.9806 | 0.9794 | 0.9740 | 95.30% | 300 | 42 s | 2,472 | 703 |
+| **512 (default)** | **0.9652** | **93.63%** | **0.9806** | **0.9849** | **0.9838** | **0.9788** | **96.25%** | **342** | **47 s** | **2,472** | **758** |
+| **640 (the knee)** | **0.9719** | **94.92%** | **0.9817** | **0.9871** | **0.9871** | **0.9815** | **96.80%** | **416** | **57 s** | **2,472** | **768** |
+| 768 | 0.9774 | 96.02% | 0.9832 | 0.9879 | 0.9868 | 0.9827 | 97.05% |  |  |  |  |
+| 896 | 0.9768 | 95.86% | 0.9844 | 0.9875 | 0.9865 | 0.9838 | 97.27% |  |  |  |  |
+| 1024 | 0.9758 | 95.70% | 0.9845 | 0.9869 | 0.9870 | 0.9832 | 97.16% |  |  |  |  |
+| 1280 | 0.9764 | 95.86% | 0.9845 | 0.9880 | 0.9874 | 0.9832 | 97.17% |  |  |  |  |
+| 0 (full size, `-t 2`) | 0.9749 | 95.57% | 0.9825 | 0.9870 | 0.9865 | – | – | | 437 s | | |
 
-Precision is not in the table because it does not move: 99.5-100% at every
+Precision is not in the table because it does not move: 99.4-100% at every
 size on every corpus, a little *higher* at the small sizes, which find fewer
 pairs and so fewer traps. What the work size trades is recall.
 
-**Every column is monotone, and up to 0.20.0 none was below 512.** A small
+**Every column is monotone up to 768, and up to 0.20.0 none was below 512.** A small
 picture is enlarged before it is described (`upsample_below`, below). Until
 0.20.0 that was decided from the picture `extract` was handed and up to 512
 whatever the working size, so two things went wrong. A picture the working size
@@ -3156,8 +3233,10 @@ only up to the working size (`lib::enlarge_below`: `min(work, 512)`, and the
 whole 512 at `0`), which also means a picture the working size shrank is never
 enlarged, since one doubling would pass it. **Nothing is analysed above
 `--work-size`**, so the option bounds what every picture costs, and the found
-corpus now answers to it: 830 pairs at 128, 1,706 at 256-384, 2,438 from 448,
-where its 224-pixel photographs start being doubled — at five times the CPU.
+corpus now answers to it: on 0.30.0, 808 pairs at 128, 2,028 at 256-384,
+2,472 from 448, where its 224-pixel photographs start being doubled — at 3.6
+times the CPU (195 CPU-seconds at 384, 703 at 448; on 0.20.0, 830, 1,706 and
+2,438 pairs, at five times).
 At 512 and above nothing changes, pair for pair and group for group against
 0.20.0 (222,879 pairs at 512, 224,488 at 640); below 512 every row is new. The
 cache format went to `IMGFPC05` with it. The old rows are in
@@ -3166,7 +3245,8 @@ cache format went to `IMGFPC05` with it. The old rows are in
 the enlargement and are gone — no size merges a family now.
 
 What the small sizes are worth is what they cost, and it is not much: the floor
-is decoding, about 145 CPU-seconds on IMGS whatever the size, and below 96
+is decoding, about 145 CPU-seconds on IMGS whatever the size on 0.20.0 (the
+whole run at 128 is 128 on 0.30.0, after the luma decode), and below 96
 there is too little picture left to describe. **There is still no floor to
 set**: nothing breaks, nothing merges, and the curve says plainly what each
 step buys. (`sift::extract` returns no features under 8 pixels a side, so
@@ -3176,29 +3256,33 @@ briefly on a justification — the pixel check's 128-pixel thumbnail — that
 `lib.rs` says so.)
 
 Above 512 recall saturates rather than growing in proportion, because what
-resolution buys is concentrated in one kind of row. From 640 to 1280, IMGS's
-misses fall from 12,372 to 10,282, and the rows that move are containment ones
-— `contact_sheet` 53 -> 61, `embed_tiny` 52 -> 57, `crop_micro` 40 -> 45,
-`picture_in_picture` 58 -> 61 — while `thumbnail` and `scale_small` lose a seed
-or two. A photograph that fills its frame is already described well at 640;
+resolution buys is concentrated in one kind of row. On 0.30.0, from 640 to 768
+IMGS's misses fall from 11,834 to 9,261 and then stop (9,651 at 1280), and the
+rows that move are containment ones — `contact_sheet` 55 -> 58 -> 61,
+`embed_tiny` 53 -> 55 -> 57, `crop_micro` 40 -> 43 -> 46, `picture_in_picture`
+60 -> 62 — while `thumbnail` and `scale_small` lose a seed or two by 1280. A photograph that fills its frame is already described well at 640;
 one that is a small part of its canvas is not.
 
 **The default is 512 and the knee is 640, which is a choice rather than a
 measurement.** 512 is where the enlargement limit stops binding, so a small
 picture is analysed exactly as it is at 640 and only large ones lose detail;
-640 buys 0.7 points of IMGS recall, nearly all of it in the containment rows,
-for about 40% more CPU. 384 now costs a third less on photographs and four
-fifths less on a library of small ones, and gives up 3.8 points of IMGS recall
-and 30% of the found corpus's pairs. Above 640,
-IMGS2 and IMGS3 are flat to 0.003 and IMGS gains 0.005 by 1280 for nearly twice
-the CPU; nothing there is worth asking for.
+on 0.30.0, 640 buys 1.3 points of IMGS recall and 0.55 of IMGS-ALL's, nearly
+all of it in the containment rows, for **21% more CPU on IMGS** (416 against
+342 CPU-seconds) and 1% on the found corpus — where 0.20.0 charged about 40%.
+384 costs 27% less on photographs and 74% less on a library of small ones, and
+gives up 2.7 points of IMGS recall and 18% of the found corpus's pairs. Above
+640, IMGS2, IMGS3 and IMGS4 are flat to 0.003 and IMGS gains 0.005 at 768 and
+nothing more by 1280; nothing there is worth asking for.
 
 **The cliff at the top is gone.** On the builds before the clean-anchor rule
 896 merged `beach` with `panoramic3.jpg` (2,207 cross-family pairs) and full
-size made 14 cross-family pairs; now no size merges a family on any corpus.
+size made 14 cross-family pairs; now no size merges a family on any corpus
+(on 0.30.0, every size from 64 to 1280 on all four corpora and on IMGS-ALL).
 Full size costs two to three gigabytes for a 44-megapixel scale space, which
 the decode budget does not cover — run it at `-t 2` (IMGS: 541 s, 2.9 GB
-peak).
+peak on 0.20.0; on 0.30.0 437 s and 827 CPU-seconds, peak 3.5 GB PSS plus 1.0
+GB swapped, uncooled; IMGS2 3.0 GB, IMGS3 2.3, IMGS4 1.7). IMGS-ALL was not run
+at full size. It scores below 768 on IMGS and level with 640 elsewhere.
 
 **How much a small picture is enlarged (`upsample_below`), swept.** `extract`
 doubles a picture while twice its long side still fits in 512 — and, since
