@@ -1867,12 +1867,16 @@ fn shared_any(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
             while j < nb && bw[j] | KP_MASK == av {
                 j += 1;
             }
-            // A word matching many keypoints on both sides is repeated
-            // texture, not a landmark; it would dominate the list without
-            // helping the fit.
-            if (i - i0) * (j - j0) > 64 {
-                continue;
-            }
+            // Every keypoint pair a shared word offers, however many there
+            // are. A word on many keypoints of both sides used to be dropped
+            // as repeated texture once it offered more than 64 pairs — a
+            // number from nowhere, and one that did nothing: swept from 8 to
+            // no cut at all on four corpora at three working sizes, pooled F1
+            // is the same to 0.0001 from 32 up, nothing merges, and the clock
+            // does not move (CLAUDE.md, *Parameters*). What it dropped were
+            // real correspondences that only ever added inliers to matches
+            // already accepted. The one case it guarded, a word on hundreds
+            // of keypoints of both images, is what `cap` below is for.
             for &ea in &aw[i0..i] {
                 for &eb in &bw[j0..j] {
                     let e = (ea & KP_MASK, eb & KP_MASK);
@@ -1880,6 +1884,9 @@ fn shared_any(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize)
                     out.push(e);
                 }
             }
+            // A bound on the work one pair of images can ask for, not a
+            // filter: with nothing cut before it, it was reached 8 and 12
+            // times on IMGS at 512 and 640, and never on IMGS2-4.
             if out.len() > cap {
                 sort_pairs(out, hi);
                 out.dedup();
@@ -2008,9 +2015,6 @@ mod tests {
                     let j0 = j;
                     while j < b.len() && b.word(j) == w {
                         j += 1;
-                    }
-                    if (i - i0) * (j - j0) > 64 {
-                        continue;
                     }
                     for x in i0..i {
                         for y in j0..j {

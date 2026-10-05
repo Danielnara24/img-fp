@@ -1178,7 +1178,7 @@ could only size the tree to within a factor of sixteen and the coarse end of
 that merges families at ordinary corpus sizes. See *How img-fp works*.
 
 **Two numbers in `index::shared` that nothing derived, swept and found
-inert.** A word shared by more than 64 keypoint pairs between two images was
+inert; the cut is removed (0.29.1), the cap kept.** A word shared by more than 64 keypoint pairs between two images was
 dropped as "repeated texture" (`(i - i0) * (j - j0) > 64`), and the list
 stops at `60_000` pairs. Swept with `TEXTURE=N` in
 `out/v19-aspect-texture/img-fp-exp` over 8, 16, 32, 64, 128, 256, 1024 and no
@@ -1192,8 +1192,9 @@ aligned points by 20 on average — but none of those pairs was near a bar. At
 8 it starts to cost (0.9798 -> 0.9796 at 512). The `60_000` cap binds only
 with no cut at all, 8 and 12 times on IMGS at 512 and 640: the two guard the
 same pathological case of one word on hundreds of keypoints on both sides.
-Not changed; it is a plateau, and removing it is free whenever someone next
-touches the function.
+So the cut went, and the cap stays as the one guard: it is a bound on work
+rather than a filter on evidence. Pair-for-pair, the build without the cut is
+the sweep's `TEXTURE=1000000000` rows.
 
 ### Speed and memory, and what has already been tried
 
