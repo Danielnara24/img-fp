@@ -64,6 +64,19 @@ reads whole files that are no picture; the walk's `stat` is the only one; the
 cache is rewritten only once a quarter of it is unused; and `img-fp-gui`
 answers `--help` and `--version`.
 
+**0.33.0 is a fourth audit, and none of it moves a pair**
+(IMGS pair-for-pair, group-for-group and cache byte-for-byte the same).
+`-o`, `--dump` and `--log-file` refuse to write over a picture — `-o
+photos/a.jpg` wrote the report over the image it then named as a
+representative; hidden folders are skipped during a walk unless `--hidden`
+(and the window's *Include hidden folders*) asks; a cache of another format
+version is left alone instead of emptied; a cached run no longer copies out
+the records it does not unpack; a PNG larger than `max_alloc` is read a row at
+a time instead of whole; and the window's Trash dialog names the groups in
+which every image is marked. `CLUSTER_SLACK_*` and the decode budget's
+divisor were swept (`out/v25-slack-budget`; see *Parameters* and *Speed and
+memory*). Every one is under its section below.
+
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
 similar photographs on real folders, a category IMGS has no negatives for.
@@ -229,6 +242,11 @@ benchmark/
                       corpora and IMGS-ALL at 512 (def_*), and the pixel
                       check's four constants swept on IMGS-ALL (build.sh makes
                       one binary per value, run.py, tables.py, results.jsonl)
+  out/v25-slack-budget/ the cluster slack swept on IMGS-ALL at 512 from v24's
+                      cache (run.py, results.jsonl), and the decode budget's
+                      divisor on IMGS, cold (budget.py, budget.jsonl); one
+                      binary reading both from the environment (img-fp-exp),
+                      the scaffolding since removed from the source
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -1274,6 +1292,39 @@ Three things that did *not* survive deletion, and why they stay:
 - **The cluster margin** (`CLUSTER_SLACK_*`). Without it, corroborated pairs
   face the anchor bar and held-out recall falls from 93.2% to 90.7%; under the
   new rule, dropping it still costs 0.4 points of this corpus's recall.
+
+  **Swept after 0.32.0, and it is a ramp, not a plateau** (`out/v25-slack-
+  budget`, IMGS-ALL at 512 from v24's cache, one value at a time, the other at
+  its shipped value; `pts2` is the shipped row):
+
+  | slack | F1 | recall | perfect | traps | cross-family | halves alt / hash |
+  |---|---|---|---|---|---|---|
+  | correlation 0 | 0.9743 | 95.37% | 45 | 4,570 | 3 | 0.9714 / 0.9740 |
+  | 0.05 | 0.9765 | 95.80% | 45 | 4,638 | 3 | 0.9738 / 0.9767 |
+  | **0.1 (shipped)** | **0.9781** | **96.11%** | **45** | **4,674** | **3** | **0.9756 / 0.9786** |
+  | 0.15 | 0.9787 | 96.22% | 46 | 4,688 | 3 | 0.9763 / 0.9792 |
+  | 0.2 | 0.9789 | 96.27% | 47 | 4,715 | 3 | 0.9766 / 0.9795 |
+  | 0.3 | 0.9790 | 96.29% | 47 | 4,732 | 3 | 0.9767 / 0.9796 |
+  | 0.6 (no bar at all) | 0.9790 | 96.29% | 47 | 4,733 | 3 | 0.9767 / 0.9796 |
+  | points 0 | 0.9779 | 96.07% | 45 | 4,651 | 3 | 0.9754 / 0.9783 |
+  | 1 | 0.9780 | 96.09% | 45 | 4,664 | 3 | 0.9755 / 0.9784 |
+  | **2 (shipped)** | **0.9781** | **96.11%** | **45** | **4,674** | **3** | **0.9756 / 0.9786** |
+  | 3 | 0.9782 | 96.13% | 45 | 4,694 | 3 | 0.9758 / 0.9787 |
+  | 4 | 0.9783 | 96.16% | 45 | 4,704 | 3 | 0.9759 / 0.9788 |
+  | 6 | 0.9785 | 96.20% | 45 | 4,747 | 3 | 0.9761 / 0.9790 |
+
+  Both are monotone and neither has a cliff, which is what the tier's
+  argument predicts: a corroborated pair joins two files already in one
+  cluster, so it cannot merge anything, and the cross-family count is 3 at
+  every setting. Looser buys traps a few dozen at a time and recall to a
+  ceiling at a correlation slack of 0.3, where the bar inside a cluster is gone
+  (0.6 - 0.3 is below every corroborated pair the corpus has). Both halves
+  follow the whole. So **neither 0.1 nor 2 is derived**: each is a point on a
+  ramp, and the benchmark prefers no correlation bar inside a cluster at all.
+  What argues against following it is the thing the corpus cannot see — the
+  0.6 default exists so that merely similar photographs are not grouped, and
+  every point of slack lets pairs below it into the groups a person deletes
+  from (IMGS: 1,620 reported pairs below 0.6, 98% of them true there).
 - **`encloses_centre` and the bridge test**, neither of which is a number.
   Both were re-measured against the shipped build, and both now matter far
   more than they did: without the enclosure test, **36 wrong merges and 18,334
@@ -2318,6 +2369,13 @@ said.** Measured with a sampler reading `mallinfo2` every quarter-second:
   error of any kind — takes the old path, error message and all.
   `png_rows_decode_exactly_as_the_whole_picture_does` holds them together.
   JPEG has no equivalent: zune-jpeg has no row API.
+  **Since 0.33.0 that includes a frame larger than `max_alloc`**, which the
+  row path used to send to the general path so that it would be refused the
+  same way. The general path then held the whole frame: a 32000x32000 RGB PNG
+  peaked at 3.0 GB of RSS, in swap, for 20 s on this 6 GB machine; through the
+  rows it is 31 MB and 3.0 s (a 12000x12000 one was already 18 MB). The limit
+  is there to turn an allocation larger than memory into an error, and the
+  row path makes none. Sixteen-bit PNGs still take the general path.
 - **The found corpus peaked twice, at the same height**: during the vocabulary
   build and during the second look. The build widened its 160,000-descriptor
   sample to floats (82 MB) and carried each level's k-means centres back as
@@ -2346,7 +2404,8 @@ its keypoint into one `u32` would take another 25 MB off the word lists, at the
 price of shifts inside `shared`'s block filter, the matcher's hottest loop; not
 tried. (Tried since, and shipped: see the second memory pass.) Here the peak is now the JXL render itself on top of the analysis, and
 past that the decode budget, which is `MemAvailable / 8` and so is a choice
-about the machine rather than a property of the build.
+about the machine rather than a property of the build. (The 8 is measured
+since; see *The decode budget's divisor* below.)
 
 **A second memory pass, for the four-corpus baseline.** `out/v17-all4` put
 img-fp's peak at **3,051 MB PSS**, third highest of the field, and the first
@@ -3192,6 +3251,37 @@ own, because each worker then spends a larger fraction of its time holding a
 decode buffer; that is what the decode budget is for, and why its claims have
 to cover everything a decode holds.
 
+### The decode budget's divisor, measured
+
+**8 is the knee, and it stays.** The budget is `MemAvailable / 8` (at least 64
+MB), and nothing derived the 8. Swept on IMGS — the corpus whose peak is in
+the analysis, with its 44-megapixel PNGs and JXL renders — cold, evicted,
+`--no-cache`, `-t 8`, cooled to idle + 3 C, `--features prof` for the time
+workers spent waiting on the budget (`decode:permit`, thread-seconds), with
+2.9-3.0 GB available (`out/v25-slack-budget/budget.py`):
+
+| divisor | budget | waiting on it | peak PSS + swap | CPU-s | wall |
+|---|---|---|---|---|---|
+| 1 | 2,997 MB | 0.0 s | 701 MB | 494 | 75 s |
+| 2 | 1,493 MB | 0.0 s | 713 MB | 485 | 74 s |
+| 4 | 746 MB | 0.0 / 0.0 s | 800 / 844 MB | 466 / 479 | 71 / 73 s |
+| **8** | **372 MB** | **5.7 / 9.8 s** | **751 / 739 MB** | **378 / 479** | **57 / 74 s** |
+| 16 | 185 MB | 32 s | 648 MB | 464 | 74 s |
+| 32 | 92 MB | 73 s | 564 MB | 474 | 81 s |
+
+Pairs identical at every divisor (223,557). From 1 to 4 the budget never
+binds, and the peak is the analysis plus whichever large decodes happen to
+coincide (701-844 MB, no order in it). At 8 it starts to: under ten
+thread-seconds of waiting in some 480, and the slot-matched pair against 4
+(479 / 74 s against 479 / 73 s) is level on the clock while 50-100 MB lower.
+Past 8 the waiting grows fast — 32 s at 16, 73 s at 32 — for 90 and 180 MB
+off the peak. So the shipped value is the first one that does anything, and
+the step past it starts to cost. The CPU and wall columns otherwise follow
+this machine's temperature, not the budget (the first run, cooler, is 378
+against 479 for the same setting); the waiting and the peak are what the
+budget owns. On a machine with more free memory the budget is larger and
+binds less, which is the point of taking it from `MemAvailable`.
+
 ### The decode budget could hang, and the shape that did it
 
 **One run in twenty-five deadlocked**, and the mechanism took enough chasing
@@ -3569,6 +3659,15 @@ colour `decode::preview`, which only the window calls).
   single colour can.
 - **Mnemonics live in `gui/labels.rs`** and a test checks each set of
   controls visible together for clashes. Add a label there, not inline.
+- **The Trash dialog names the groups in which every image is marked**
+  ("In groups 4, 9 and 12 every image is marked, so no copy of those pictures
+  would be left"; past twenty, the first twenty and how many more). That is
+  the whole of the warning, by the user's decision: a group with one file
+  left unmarked is not flagged, although its other members were compared
+  with the representative and not with that file.
+- **Hidden folders are a checkbox** (*Include hidden folders*, `--hidden`),
+  off like the CLI's; the window's scans are recursive, which is why the walk
+  skips them by default.
 - **Nothing is pre-marked**, by the user's decision; marks are per *file*,
   since groups overlap. Trash is `gio::File::trash`, never a delete.
 - **Only paths persist** in `$XDG_CONFIG_HOME/img-fp/gui.json`, written when
@@ -3697,6 +3796,11 @@ header size, PNM's digit after whitespace and comments, PAM's field name,
 ICO's entry count and planes, GIF's version), so nothing a decoder can read is
 turned away, and `unmarked_format` no longer lets `guess_format` take those
 bytes back;
+a hidden folder met during a walk without `--hidden` (`walk::is_hidden`: any
+name starting with a dot; one named as a root is scanned) — a home folder's
+dot-folders held some 19,000 images on the author's machine (`.steam`, icon
+themes under `.local/share`, `.themes`, `.vscode`), every copy of a theme's
+icons a group the window offered for the Trash, and its scans are recursive;
 a Trash or a thumbnail cache met during a walk (`walk::SetAside`: `.Trash`,
 `.Trash-UID`, `.Trashes`, `$RECYCLE.BIN`, `RECYCLER`, `.thumbnails` by name,
 and the XDG home Trash and thumbnail cache by place; one named as a root is
@@ -3752,6 +3856,15 @@ rather than noisy — 4 of 5,638 here, all of them crops of night sky or
 low-light seeds (`crop_strip_top` of `earth.jpeg`, two `low-light2` crops, a
 `panoramic.avif` strip), which is a diagnosis of four of that row's misses —
 and **0 of 2,786** photographs from the found corpus.
+
+**None of `-o`, `--dump` and `--log-file` may name a picture**
+(`outputs_are_not_pictures`, through `decode::is_a_picture`: an existing file
+whose head the decoder would take). `img-fp photos -o photos/a.jpg` wrote the
+report over `a.jpg`, exit 0, and named `a.jpg` as its group's representative;
+`img-fp -o *.jpg` is the same thing by a glob, and the log was truncated
+before anything had run. Asked before the log is opened, and by the window's
+`check_args` too. A file that is not a picture — last run's report — is
+written over as it always was.
 
 **Two of `-o`, `--dump` and `--log-file` on one file are refused**
 (`outputs_are_distinct`, through `report::same_destination`: one inode, or
@@ -3819,9 +3932,10 @@ and only the first is obvious:
   them for the files the scan found, so one run at 640 doubled the cache for
   good — 30.5 MB to 64.4 MB on `derived/Desktop`, which a prune left at 64.4
   and now takes back to 30.5 — and only `--clear-cache`, which takes every
-  record with it, could give the copy back. A cache written by a build with a different *format* is still
-  discarded whole and silently — the magic carries a version, and a file with
-  the right prefix and the wrong version is stale rather than damaged.
+  record with it, could give the copy back. A cache written by a build with a different *format* is
+  left as it is, and the run keeps nothing in it — the magic carries a
+  version, and a file with the right prefix and another version is another
+  img-fp's rather than damaged (see *Damage costs what it damaged*, below).
 
 **A cached record is moved into the run, not copied into it.** Every walked
 file's record is `remove`d from the loaded map before the analysis pass, so
@@ -4079,6 +4193,26 @@ is corrupted, because the temporary file a save renames into place carries the
 process id. Two runs sharing one cache is not a case worth locking for — the
 cost of losing is one re-analysis — but two runs sharing one *temporary file*
 would be a damaged cache, which is a case worth a suffix.
+
+**A cache another format version wrote is left as it is** (`Reject::
+OtherVersion`). It used to be replaced by an empty file at once, silently: a
+window from the release and a CLI from `cargo install`, one format apart,
+sharing the default cache, emptied each other's on every run (30.6 MB to 145
+KB, exit 0). Now the run reads nothing from it, appends nothing, compacts
+nothing, and says so in a note (not a problem: nothing failed, and the other
+version's records are intact). `--clear-cache` still deletes it, since that
+is asked for by name.
+
+**A record this run will not unpack is skipped, not copied** (`read_record`'s
+`body`). Every record of every other folder, and of other work sizes, used to
+be read into a buffer of its own and dropped. The body is now passed over
+inside the reader's megabyte buffer: a scan of two files against IMGS-ALL's
+1.4 GB cache, 1.35-1.61 s against 1.65-1.71 with the page cache cold and
+0.40-0.51 against 0.70-0.75 warm. The bytes are still read. A page-sized
+buffer reads a sixth of them, by seeking past the bodies, and is the fastest
+warm (0.25 s) and twice the slowest cold (3.4 s): a chain of small dependent
+reads that defeats readahead. Reading only the heads would need an index the
+format does not have.
 
 **Damage costs what it damaged.** A record whose body will not unpack, or
 whose shape these settings cannot produce, is left out and its image analysed

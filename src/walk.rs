@@ -52,6 +52,8 @@ pub struct Request<'a> {
     pub wanted: &'a Wanted,
     pub recursive: bool,
     pub follow_symlinks: bool,
+    /// `--hidden`: go into folders whose names start with a dot.
+    pub hidden: bool,
 }
 
 /// What one set of bytes is known by: its device and inode.
@@ -198,7 +200,11 @@ fn walk_dir(
                 return true;
             }
             if set_aside.holds(e.path(), &beneath(e.path()), follow) {
-                passed_over.borrow_mut().push(e.path().to_path_buf());
+                passed_over.borrow_mut().push((e.path().to_path_buf(), true));
+                return false;
+            }
+            if !req.hidden && is_hidden(e.path()) {
+                passed_over.borrow_mut().push((e.path().to_path_buf(), false));
                 return false;
             }
             !leads_into(e.path(), &beneath(e.path()), excludes, follow)
@@ -255,13 +261,31 @@ fn walk_dir(
             path: entry.into_path(),
         });
     }
-    for dir in passed_over.into_inner() {
-        problems.set_aside(&dir.display().to_string());
+    for (dir, trash) in passed_over.into_inner() {
+        if trash {
+            problems.set_aside(&dir.display().to_string());
+        } else {
+            problems.hidden(&dir.display().to_string());
+        }
     }
 }
 
+/// Whether a folder met during a walk is hidden: its name starts with a dot.
+///
+/// **They are passed over unless `--hidden` asks**, because what a home
+/// folder keeps in them is the programs' own pictures, not the user's: on
+/// the author's machine some 19,000 images under `.steam`, `.local/share`
+/// (icon themes), `.themes` and `.vscode`, every copy of a theme's icons a
+/// group, every one offered for the Trash by a window whose scans are
+/// recursive. A hidden folder named as a root is scanned, as a Trash is.
+fn is_hidden(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    dir.file_name().is_some_and(|n| n.as_bytes().first() == Some(&b'.'))
+}
+
 /// Folders a walk does not go into, because what is in them is not the
-/// library: a Trash, and a thumbnail cache.
+/// library: a Trash, and a thumbnail cache. (And, unless `--hidden` asks,
+/// any hidden folder; see `is_hidden`. These are set aside even then.)
 ///
 /// **Both are copies of pictures that are somewhere else, or were.** A Trash
 /// holds the files a person already decided to throw away — the window moves
@@ -538,6 +562,10 @@ mod tests {
     }
 
     fn run(roots: &[PathBuf], exclude: &[PathBuf], recursive: bool, follow: bool) -> Run {
+        run_hidden(roots, exclude, recursive, follow, false)
+    }
+
+    fn run_hidden(roots: &[PathBuf], exclude: &[PathBuf], recursive: bool, follow: bool, hidden: bool) -> Run {
         let (wanted, _) = crate::extensions::normalize(&["jpg".to_string()]).unwrap();
         let log = Log::default();
         let mut problems = Problems::new(&log);
@@ -548,6 +576,7 @@ mod tests {
                 wanted: &wanted,
                 recursive,
                 follow_symlinks: follow,
+                hidden,
             },
             &mut problems,
         );
@@ -602,6 +631,26 @@ mod tests {
 
     /// A walk does not go into a Trash or a thumbnail cache, by name or by
     /// place, and scans one that is named as a root.
+    /// A hidden folder is passed over during a walk unless `--hidden` asks,
+    /// and scanned when it is named; a hidden *file* is a file like another.
+    /// A Trash is set aside either way.
+    #[test]
+    fn a_hidden_folder_waits_for_hidden() {
+        let s = Scratch::new();
+        let a = s.file("home/Pictures/a.jpg");
+        let dot = s.file("home/Pictures/.b.jpg");
+        let icon = s.file("home/.local/share/icons/c.jpg");
+        let deep = s.file("home/Pictures/.git/d.jpg");
+        s.file("home/.Trash-1000/files/e.jpg");
+        let home = s.0.join("home");
+        assert_eq!(run(&[home.clone()], &[], true, false).files, vec![dot.clone(), a.clone()]);
+        let mut all = vec![icon.clone(), deep.clone(), dot.clone(), a.clone()];
+        all.sort();
+        assert_eq!(run_hidden(&[home.clone()], &[], true, false, true).files, all);
+        // Named, it is scanned without the flag.
+        assert_eq!(run(&[s.0.join("home/.local")], &[], true, false).files, vec![icon]);
+    }
+
     #[test]
     fn a_trash_or_thumbnail_cache_is_passed_over() {
         let s = Scratch::new();

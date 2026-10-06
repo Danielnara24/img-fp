@@ -523,6 +523,19 @@ pub fn may_be_image(path: &Path) -> bool {
     }
 }
 
+/// Whether `path` is an existing file whose head says it is a picture, by the
+/// same test `decode` turns a file away on. `false` for anything that cannot
+/// be opened. The outputs a run writes ask it before they write: see
+/// `lib::outputs_are_not_pictures`.
+pub fn is_a_picture(path: &Path) -> bool {
+    use std::io::Read;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let mut head = Vec::with_capacity(HEAD);
+    std::fs::File::open(path).and_then(|f| f.take(HEAD as u64).read_to_end(&mut head)).is_ok() && head_is_image(&head, path)
+}
+
 /// The rest of a file `open_if_image` has begun.
 fn read_rest(mut f: std::fs::File, mut bytes: Vec<u8>, len: u64, path: &Path) -> Result<Vec<u8>> {
     use std::io::Read;
@@ -1075,10 +1088,17 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
 ///
 /// `None` means "take the general path", and it is what this says about
 /// anything it is not sure it would read identically: an interlaced or
-/// animated file, sixteen bits a channel, a frame the general path's
-/// allocation limit would refuse — and
-/// any error at all, so that a broken file fails with the message the general
-/// path gives it. That costs a truncated file a second decode, which is a
+/// animated file, sixteen bits a channel — and any error at all, so that a
+/// broken file fails with the message the general path gives it.
+///
+/// **A frame larger than `max_alloc` is read here too.** It used to be sent
+/// to the general path, to be refused there as it would have been — but the
+/// limit exists to turn an allocation larger than memory into an error, and
+/// this path makes no such allocation. So the pictures it was written for
+/// were exactly the ones it turned away: a 32000x32000 PNG, 3 GB of RGB, went
+/// to the general path, held it all and peaked at 3.0 GB of RSS in swap on a
+/// 6 GB machine, where a 12000x12000 one through here peaked at 18 MB. On a
+/// machine with less free it would have been "Memory limit exceeded". That costs a truncated file a second decode, which is a
 /// price only broken files pay.
 fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     // What `image` asks of the `png` crate, so that the rows are the rows it
@@ -1087,6 +1107,8 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     // low bit depths to eight bits and a transparency chunk to an alpha
     // channel.
     let image_max_alloc = max_alloc() as usize;
+    // The limit is the `png` crate's for what *it* allocates — text chunks,
+    // an ICC profile, a row — which is never the frame here.
     let mut dec = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: image_max_alloc });
     dec.set_ignore_text_chunk(false);
     dec.set_transformations(png::Transformations::EXPAND);
@@ -1104,7 +1126,7 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let (w, h) = (info.width, info.height);
     let (color, depth) = reader.output_color_type();
-    if depth != png::BitDepth::Eight || reader.output_buffer_size()? > image_max_alloc {
+    if depth != png::BitDepth::Eight {
         return None;
     }
     let (wu, hu) = (w as usize, h as usize);

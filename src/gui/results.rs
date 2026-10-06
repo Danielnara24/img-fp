@@ -898,7 +898,15 @@ impl Results {
             let mut paths: Vec<PathBuf> = s.marked.iter().cloned().collect();
             paths.sort();
             let bytes: u64 = paths.iter().filter_map(|p| s.sizes.get(p)).sum();
-            let whole = s.groups.iter().filter(|g| g.files.iter().all(|f| s.marked.contains(&f.path))).count();
+            // The groups, by the number the list shows them under, in which
+            // every image is marked.
+            let whole: Vec<usize> = s
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.files.iter().all(|f| s.marked.contains(&f.path)))
+                .map(|(gi, _)| gi + 1)
+                .collect();
             (paths, bytes, whole)
         };
         if paths.is_empty() {
@@ -911,11 +919,13 @@ impl Results {
             size(bytes),
             if n == 1 { "It" } else { "They" }
         );
-        if whole > 0 {
+        if !whole.is_empty() {
+            let one = whole.len() == 1;
             detail.push_str(&format!(
-                "\n\nIn {whole} group{} every image is marked, so no copy of {} would be left.",
-                if whole == 1 { "" } else { "s" },
-                if whole == 1 { "that picture" } else { "those pictures" }
+                "\n\nIn {} {} every image is marked, so no copy of {} would be left.",
+                if one { "group" } else { "groups" },
+                numbers(&whole),
+                if one { "that picture" } else { "those pictures" }
             ));
         }
         let dialog = gtk::AlertDialog::builder()
@@ -999,6 +1009,21 @@ impl Results {
     }
 }
 
+/// Group numbers as a sentence names them: "4", "4 and 9", "4, 9 and 12",
+/// and past twenty, the first twenty and how many more.
+fn numbers(ns: &[usize]) -> String {
+    const SHOWN: usize = 20;
+    let words: Vec<String> = ns.iter().take(SHOWN).map(|n| n.to_string()).collect();
+    if ns.len() > SHOWN {
+        return format!("{} and {} more", words.join(", "), ns.len() - SHOWN);
+    }
+    match words.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -1061,3 +1086,15 @@ fn facts(m: &Member) -> String {
     parts.join(" · ")
 }
 
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn group_numbers_read_as_a_sentence() {
+        assert_eq!(super::numbers(&[4]), "4");
+        assert_eq!(super::numbers(&[4, 9]), "4 and 9");
+        assert_eq!(super::numbers(&[4, 9, 12]), "4, 9 and 12");
+        let many: Vec<usize> = (1..=23).collect();
+        assert!(super::numbers(&many).ends_with("19, 20 and 3 more"));
+    }
+}

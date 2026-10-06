@@ -101,6 +101,14 @@ struct Args {
     #[arg(long)]
     follow_symlinks: bool,
 
+    /// Also walk hidden folders, whose names start with a dot.
+    ///
+    /// They are left out by default: in a home folder they hold programs'
+    /// icons and themes rather than photos. A hidden folder named as a path
+    /// to scan is scanned either way.
+    #[arg(long)]
+    hidden: bool,
+
     /// Extensions a folder walk treats as images, comma-separated or repeated.
     ///
     /// `-x '*'` takes every file. An entry starting with `!` is an exception:
@@ -865,6 +873,7 @@ where
 {
     let args = Args::try_parse_from(argv).map_err(|e| e.to_string())?;
     validate(&args)?;
+    outputs_are_not_pictures(&args).map_err(|e| e.to_string())?;
     outputs_are_distinct(&args).map_err(|e| e.to_string())
 }
 
@@ -927,6 +936,7 @@ pub use decode::preview;
 fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
     validate(args).map_err(anyhow::Error::msg)?;
     stdout_has_one_reader(args, gui)?;
+    outputs_are_not_pictures(args)?;
     outputs_are_distinct(args)?;
     // Opened before any work, so that a log file that cannot be written is an
     // ordinary fatal error at the top of the run rather than a discovery made
@@ -975,6 +985,27 @@ fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
     if on_stdout.len() > 1 {
         let fix = if on_stdout[0] == "the report" { "; send the report to a file with -o" } else { "" };
         anyhow::bail!("{} would both be written to stdout{fix}", on_stdout.join(" and "));
+    }
+    Ok(())
+}
+
+/// Refuse an `-o`, `--dump` or `--log-file` that names a picture.
+///
+/// Each of the three replaces whatever file it names, and nothing asked what
+/// that file was: `img-fp photos -o photos/a.jpg` wrote the report over
+/// `a.jpg`, exit 0, and the report it wrote named `a.jpg` as its group's
+/// representative. The plausible way to get there is a glob — `img-fp -o
+/// *.jpg` is `-o` the first JPEG and a scan of the rest — and the log is the
+/// worst of the three, truncated before anything else has run. A picture is
+/// what this tool is asked to look after, so it never writes over one; a file
+/// that is not a picture, such as last run's report, is written over as
+/// before. Asked before the log is opened, so before anything is written.
+fn outputs_are_not_pictures(args: &Args) -> Result<()> {
+    for (flag, p) in [("-o", &args.output), ("--dump", &args.dump), ("--log-file", &args.log_file)] {
+        let Some(p) = p.as_deref().filter(|p| *p != stdout_path()) else { continue };
+        if decode::is_a_picture(p) {
+            anyhow::bail!("{flag} {} is a picture, and img-fp will not write over one; name another file", p.display());
+        }
     }
     Ok(())
 }
@@ -1161,7 +1192,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // it does any of it, so a run's log says which settings produced it.
     say!(
         "Settings -> Work size: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
-         Min pixel correlation: {}, Threads: {}, Recursive: {}, Follow symlinks: {}",
+         Min pixel correlation: {}, Threads: {}, Recursive: {}, Follow symlinks: {}, Hidden folders: {}",
         args.work_size,
         args.candidates,
         args.min_aligned_points,
@@ -1169,7 +1200,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         args.min_pixel_correlation,
         rayon::current_num_threads(),
         args.recursive,
-        args.follow_symlinks
+        args.follow_symlinks,
+        args.hidden
     );
     if let Some(note) = &extensions_note {
         say!("{note}");
@@ -1216,6 +1248,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             wanted: &wanted,
             recursive: args.recursive,
             follow_symlinks: args.follow_symlinks,
+            hidden: args.hidden,
         },
         problems,
     );
@@ -1292,6 +1325,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
         None => Default::default(),
     };
+    // A cache another version of img-fp wrote is that version's, and this run
+    // leaves it as it is; see `cache::MAGIC`.
+    if let (Some(p), Some(v)) = (&cache_path, store.as_ref().and_then(|s| s.other_version())) {
+        say!(
+            "Note: {} was written by another version of img-fp ({v}; this one reads {}), so it is left as it is \
+             and this run keeps nothing in it. Give this version a file of its own with --cache, or replace that \
+             one with --clear-cache.",
+            p.display(),
+            cache::FORMAT
+        );
+    }
     // Records in the file that the map does not hold, and that are not this
     // file's records at other settings: each superseded by a later one for
     // the same path. Something to compact away, if nothing else is.

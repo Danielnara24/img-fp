@@ -37,6 +37,7 @@ pub const EXCLUDE: &str = "_Exclude";
 pub const ADD_EXCLUDE: &str = "Add e_xcluded folder…";
 pub const REMOVE_EXCLUDE: &str = "_Remove";
 pub const SYMLINKS: &str = "Follow symlin_ks";
+pub const HIDDEN: &str = "_Include hidden folders";
 pub const USE_CACHE: &str = "_Use a cache";
 pub const CACHE_FILE: &str = "_Cache file";
 pub const CACHE_CHOOSE: &str = "C_hoose…";
@@ -98,7 +99,7 @@ mod tests {
             MIN_CORRELATION, CANDIDATES, REPORT, REPORT_CHOOSE, REPORT_FORMAT,
         ];
         let advanced = [
-            THREADS, EXTENSIONS, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE, SYMLINKS, USE_CACHE,
+            THREADS, EXTENSIONS, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE, SYMLINKS, HIDDEN, USE_CACHE,
             CACHE_FILE, CACHE_CHOOSE, CLEAR_CACHE, PRUNE_CACHE, LOG_FILE, LOG_CHOOSE,
         ];
         distinct("general tab", &[&page[..], &general[..]].concat());

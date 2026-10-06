@@ -83,9 +83,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The last two bytes are the format's version. A file carrying the prefix and
-/// another version is a cache this build cannot read, which is a *stale* cache
-/// and not a damaged one: it was written by img-fp, it will be rewritten by
-/// img-fp, and there is nothing for anyone to do about it.
+/// another version is a cache this build cannot read, which is a cache of
+/// *another version* and not a damaged one: it was written by img-fp, older or
+/// newer, and another copy of img-fp on the machine is using it.
+///
+/// **It is left as it is.** It used to be replaced by an empty file, which
+/// is right for an old cache nobody will read again and wrong for the common
+/// case: a window from the release and a command line from `cargo install`,
+/// one version apart, sharing the default cache, each emptying the other's
+/// on every run — a 30 MB cache came out of one run at 145 KB, with exit 0
+/// and nothing said. Now the run keeps nothing, says why, and `--clear-cache`
+/// or another `--cache` is how to start a new one.
 ///
 /// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
 /// 05: a small picture is enlarged no further than the working size
@@ -105,6 +113,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// which moves the edge the reduction trims on every turned picture.
 const MAGIC: &[u8; 8] = b"IMGFPC10";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
+
+/// The format this build reads and writes, for messages.
+pub const FORMAT: &str = match std::str::from_utf8(MAGIC) {
+    Ok(s) => s,
+    Err(_) => panic!(),
+};
 
 /// Records packed or unpacked in one parallel batch. Large enough that the
 /// threads are not synchronising over nothing, small enough that a batch of
@@ -529,15 +543,14 @@ fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<F
 
 /// Why a cache file produced nothing.
 ///
-/// The two are worth keeping apart because only one of them is worth telling
-/// anyone about. A cache written by a build with another format is replaced
-/// whole, and that is the format doing its job — see the note on `MAGIC`. A
-/// file that is not a cache at all, or that is corrupt in the middle, is a
-/// file the user pointed at and will keep pointing at, and it costs a full
-/// re-analysis every run until it is noticed.
+/// The two are told apart because they are handled apart. A cache written by
+/// a build with another format belongs to that build, and is left alone — see
+/// the note on `MAGIC`. A file that is not a cache at all, or that is corrupt
+/// in the middle, is a file the user pointed at and will keep pointing at, and
+/// it costs a full re-analysis every run until it is noticed.
 enum Reject {
-    /// Written by a build with another format. By design.
-    Stale,
+    /// Written by a build with another format: its magic, as text.
+    OtherVersion(String),
     /// Not a cache, or corrupt: something to say out loud.
     Damaged(anyhow::Error),
 }
@@ -602,6 +615,9 @@ pub struct Store {
     /// on every run that reads the file, so a file holding one is compacted
     /// whatever else it holds; see `worth_compacting`.
     damaged: usize,
+    /// The file is another format version's, whose magic this is, and is
+    /// left as it is; see the note on `MAGIC`.
+    other_version: Option<String>,
 }
 
 /// Open the cache at `path`, read what is usable out of it, and keep it open
@@ -629,7 +645,8 @@ pub struct Store {
 /// that walks its path: the framing is still checked here, and the body is
 /// checked the first time anything unpacks it.
 ///
-/// A file that is stale or damaged is replaced by an empty one straight away,
+/// A file another format version wrote is left as it is, and the run keeps
+/// nothing (see the note on `MAGIC`). A damaged one is replaced by an empty one straight away,
 /// rather than at the end of the run, since this run's records go into
 /// whatever file it holds from here on.
 pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<PathBuf, Entry>, Store) {
@@ -643,10 +660,19 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
         failed: Mutex::new(None),
         broken: Default::default(),
         damaged: 0,
+        other_version: None,
     };
     match OpenOptions::new().read(true).append(true).open(path) {
         Ok(f) => {
-            if let Some(tail) = read_file(&f, path, want, walked, &mut out, &mut store.others, problems) {
+            let tail = match read_file(&f, path, want, walked, &mut out, &mut store.others, problems) {
+                Found::Usable(tail) => Some(tail),
+                Found::OtherVersion(v) => {
+                    store.other_version = Some(v);
+                    return (out, store);
+                }
+                Found::Unusable => None,
+            };
+            if let Some(tail) = tail {
                 // A partial record at the end would sit in front of every
                 // record appended after it, and turn a lost record into a
                 // damaged file. So would a record whose framing is damaged,
@@ -674,9 +700,13 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             // appended: the caller measures how many records a later one
             // superseded against this, and a count of zero beside a full map
             // was an underflow.
-            if let Some(tail) = File::open(path).ok().and_then(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
-                store.records = AtomicUsize::new(tail.count);
-                store.damaged = tail.damaged;
+            match File::open(path).map(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
+                Ok(Found::Usable(tail)) => {
+                    store.records = AtomicUsize::new(tail.count);
+                    store.damaged = tail.damaged;
+                }
+                Ok(Found::OtherVersion(v)) => store.other_version = Some(v),
+                _ => {}
             }
             return (out, store);
         }
@@ -688,8 +718,16 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
     (out, store)
 }
 
-/// Read `f` into `out`; `None`, having said so if it is worth saying, when
-/// nothing in it is usable.
+/// What reading a cache file came to.
+enum Found {
+    Usable(Tail),
+    /// Written by another format version, whose magic this is.
+    OtherVersion(String),
+    /// Nothing in it is usable, and that has been said.
+    Unusable,
+}
+
+/// Read `f` into `out`.
 fn read_file(
     f: &File,
     path: &Path,
@@ -698,8 +736,17 @@ fn read_file(
     out: &mut HashMap<PathBuf, Entry>,
     others: &mut Vec<(PathBuf, Span)>,
     problems: &mut Problems,
-) -> Option<Tail> {
+) -> Found {
     let size = f.metadata().map_or(u64::MAX, |m| m.len());
+    // A megabyte at a time, and the bodies this run does not unpack skipped
+    // inside it rather than copied out (see `read_record`). A smaller buffer
+    // turns the skips into seeks, and reads a sixth of the bytes — but the
+    // reads are then a chain of small dependent ones that defeat readahead,
+    // and a scan of two files against a 1.4 GB cache, page cache cold, took
+    // 3.4 s against 1.7 for the whole file read in order. Warm, the page
+    // buffer was 0.25 s; this is 0.40-0.51 against 0.70-0.75 before, and
+    // cold 1.35-1.61. What would read only the heads is an index, which
+    // the format does not have.
     match read_stream(std::io::BufReader::with_capacity(1 << 20, f), size, want, walked, out, others) {
         Ok(tail) => {
             if let Some(why) = &tail.broken_at {
@@ -716,18 +763,18 @@ fn read_file(
                     path.display()
                 ));
             }
-            Some(tail)
+            Found::Usable(tail)
         }
-        Err(Reject::Stale) => {
+        Err(Reject::OtherVersion(v)) => {
             out.clear();
             others.clear();
-            None
+            Found::OtherVersion(v)
         }
         Err(Reject::Damaged(e)) => {
             problems.cache(format!("ignoring {}: {e}", path.display()));
             out.clear();
             others.clear();
-            None
+            Found::Unusable
         }
     }
 }
@@ -764,6 +811,12 @@ impl Store {
                 None
             }
         }
+    }
+
+    /// The format the file was written in, when it is another version's and
+    /// this run therefore reads nothing from it and keeps nothing in it.
+    pub fn other_version(&self) -> Option<&str> {
+        self.other_version.as_deref()
     }
 
     /// Records the file holds, whether or not anything will keep them.
@@ -899,6 +952,16 @@ impl<R: Read> Rd<R> {
             }
         }
     }
+    /// Pass over `n` bytes without reading them, which `need` has already
+    /// found are in the file.
+    fn skip(&mut self, n: u64) -> Result<()>
+    where
+        R: Skip,
+    {
+        self.r.skip(n).map_err(|_| anyhow!("cache truncated"))?;
+        self.pos += n;
+        Ok(())
+    }
     fn take(&mut self, n: usize) -> Result<Vec<u8>> {
         let mut v = vec![0u8; n];
         self.fill(&mut v)?;
@@ -942,11 +1005,33 @@ impl<R: Read> Rd<R> {
     }
 }
 
+/// A reader that can pass over bytes it has no use for. A `BufReader` over a
+/// file moves within its buffer when it can and seeks when it cannot; a plain
+/// `Seek` would discard the buffer every time.
+trait Skip {
+    fn skip(&mut self, n: u64) -> std::io::Result<()>;
+}
+
+impl<R: Read + Seek> Skip for std::io::BufReader<R> {
+    fn skip(&mut self, n: u64) -> std::io::Result<()> {
+        self.seek_relative(i64::try_from(n).map_err(std::io::Error::other)?)
+    }
+}
+
 /// A record's path is written before its shape, so a file claiming an absurd
 /// one must not be allowed to ask for that much memory first.
 const MAX_PATH: usize = 1 << 16;
 
-fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
+/// One record, and its packed half when `body` asks for it. A record this run
+/// will not unpack — made at other settings, or for a path it does not walk —
+/// is wanted for its key and its span alone, and its body is passed over
+/// rather than copied into a buffer of its own: the file holds every folder
+/// the machine has scanned, and every one of them was allocated, copied and
+/// dropped on every run, whatever the run was looking at.
+fn read_record<R: Read>(r: &mut Rd<R>, body: impl Fn(&Head) -> bool) -> Result<Option<(Head, Vec<u8>)>>
+where
+    R: Skip,
+{
     let Some(len) = r.len_or_eof()? else { return Ok(None) };
     if len > MAX_PATH {
         bail!("record claims a {len}-byte path");
@@ -961,14 +1046,19 @@ fn read_record<R: Read>(r: &mut Rd<R>) -> Result<Option<(Head, Vec<u8>)>> {
     let scale = r.f32()?;
     let packed = r.u64()?;
     r.need(packed)?;
-    let blob = r.take(packed as usize)?;
     // Held as read, not narrowed, so that `read_stream` can tell a thumbnail
     // side of 65,600 from one of 64.
     let head = Head { path, settings, key, dims, w, h, n, tw, th, scale };
+    let blob = if body(&head) {
+        r.take(packed as usize)?
+    } else {
+        r.skip(packed)?;
+        Vec::new()
+    };
     Ok(Some((head, blob)))
 }
 
-fn read_stream<R: Read>(
+fn read_stream<R: Read + Skip>(
     r: R,
     size: u64,
     want: Settings,
@@ -984,7 +1074,7 @@ fn read_stream<R: Read>(
     if &magic != MAGIC {
         // A cache this build cannot read, written by a build that could. See
         // the note on MAGIC: that is the format changing, not a damaged file.
-        return Err(Reject::Stale);
+        return Err(Reject::OtherVersion(String::from_utf8_lossy(&magic).into_owned()));
     }
     // The latest record for each path made at other settings, and where it
     // is in `others`.
@@ -993,7 +1083,7 @@ fn read_stream<R: Read>(
     let mut batch: Vec<(Head, Vec<u8>, Span)> = Vec::with_capacity(BATCH);
     loop {
         let at = r.pos;
-        match read_record(&mut r) {
+        match read_record(&mut r, |h| h.settings == want && walked(&h.path)) {
             Ok(None) => break,
             Ok(Some((head, blob))) => {
                 tail.end = r.pos;
@@ -1478,10 +1568,10 @@ mod tests {
     }
 
     /// Compaction keeps exactly what it is handed, copied rather than packed
-    /// again, and a cache from another format is replaced by an empty one on
-    /// opening.
+    /// again, and a cache from another format version is left as it is: read
+    /// for nothing, written to by nothing.
     #[test]
-    fn compaction_keeps_what_it_is_given_and_a_stale_file_starts_again() {
+    fn compaction_keeps_what_it_is_given_and_another_versions_file_is_left_alone() {
         let dir = scratch("compact");
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
@@ -1504,11 +1594,19 @@ mod tests {
         drop(store);
 
         let file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.write_all_at(b"IMGFPC08", 0).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        for other in [b"IMGFPC08", b"IMGFPC99"] {
+            file.write_all_at(other, 0).unwrap();
+            let (got, store, bad) = reopen(&path);
+            assert!(got.is_empty() && !bad && store.records() == 0);
+            assert_eq!(store.other_version(), Some(std::str::from_utf8(other).unwrap()));
+            let (f, t) = analysis(6, 4);
+            assert!(store.append("d.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).is_none());
+            assert!(!store.worth_compacting(&[], true));
+            drop(store);
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "the file is not touched");
+        }
         drop(file);
-        let (got, store, bad) = reopen(&path);
-        assert!(got.is_empty() && !bad && store.records() == 0);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), HEADER_LEN);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -139,7 +139,13 @@ A file reached through a symlink, a hard link or two overlapping folders is
 scanned once. Symlinks met inside a folder are skipped unless you pass
 `--follow-symlinks`. Trash folders and thumbnail caches met inside a folder are
 skipped too, since they hold copies of pictures that are elsewhere or were
-deleted; name one directly to scan it.
+deleted; name one directly to scan it. Hidden folders (names starting with a
+dot) are skipped unless you pass `--hidden`, since in a home folder they hold
+programs' icons and themes rather than photos; a hidden folder named directly is
+scanned.
+
+`-o`, `--dump` and `--log-file` never write over an image: naming one is
+refused before anything runs.
 
 ## Desktop app
 
@@ -222,6 +228,7 @@ to stderr.
 | `-r`, `--recursive` | Include subfolders | off |
 | `-e`, `--exclude <PATH>` | Leave out a folder or file; repeat for several | |
 | `--follow-symlinks` | Follow symlinks met while walking a folder | off |
+| `--hidden` | Also walk hidden folders, whose names start with a dot | off |
 | `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken only by those two forms | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
@@ -264,6 +271,11 @@ faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Use `--prune-cache` to
 keep only the images in the current scan at the current `--work-size`, or
 `--clear-cache` to start over.
+
+A cache written by another version of img-fp is left as it is, and the run keeps
+nothing in it, so two versions installed side by side do not empty each other's
+cache. Give each its own file with `--cache`, or use `--clear-cache` to replace
+it.
 
 Pressing Ctrl-C keeps every image analysed so far.
 

@@ -233,6 +233,7 @@ pub struct Setup {
     extensions: gtk::Entry,
     exclude: Rc<PathList>,
     symlinks: gtk::CheckButton,
+    hidden: gtk::CheckButton,
     use_cache: gtk::CheckButton,
     cache_path: gtk::Entry,
     clear_cache: gtk::CheckButton,
@@ -316,6 +317,11 @@ impl Setup {
         let extensions = entry();
         let exclude = PathList::new(window, l::ADD_EXCLUDE, l::REMOVE_EXCLUDE, "Nothing left out.", 90);
         let symlinks = gtk::CheckButton::with_mnemonic(l::SYMLINKS);
+        let hidden = gtk::CheckButton::with_mnemonic(l::HIDDEN);
+        hidden.set_tooltip_text(Some(
+            "Also look in folders whose names start with a dot. They hold programs' icons and themes rather than photos, \
+             so they are left out unless one is added as a folder to scan.",
+        ));
         let use_cache = gtk::CheckButton::with_mnemonic(l::USE_CACHE);
         let cache_path = entry();
         cache_path.set_placeholder_text(Some("the default: ~/.cache/img-fp/analysis.bin"));
@@ -343,7 +349,10 @@ impl Setup {
         exclude_label.set_valign(gtk::Align::Start);
         a.attach(&exclude_label, 0, 4, 1, 1);
         a.attach(&exclude.root, 1, 4, 2, 1);
-        a.attach(&symlinks, 1, 5, 2, 1);
+        let walk_box = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        walk_box.append(&symlinks);
+        walk_box.append(&hidden);
+        a.attach(&walk_box, 1, 5, 2, 1);
         a.attach(&section("Cache"), 0, 6, 3, 1);
         a.attach(&use_cache, 0, 7, 3, 1);
         a.attach(&hint("Keeps each image's analysis, so a folder scanned again only analyses what changed."), 0, 8, 3, 1);
@@ -437,6 +446,7 @@ impl Setup {
             extensions,
             exclude,
             symlinks,
+            hidden,
             use_cache,
             cache_path,
             clear_cache,
@@ -603,6 +613,7 @@ impl Setup {
         self.extensions.set_text(&s.extensions);
         self.exclude.set(s.exclude.clone());
         self.symlinks.set_active(s.follow_symlinks);
+        self.hidden.set_active(s.hidden);
         self.use_cache.set_active(s.use_cache);
         self.cache_path.set_text(&s.cache_path);
         self.clear_cache.set_active(s.clear_cache);
@@ -632,6 +643,7 @@ impl Setup {
             extensions: self.extensions.text().to_string(),
             exclude: self.exclude.paths(),
             follow_symlinks: self.symlinks.is_active(),
+            hidden: self.hidden.is_active(),
             use_cache: self.use_cache.is_active(),
             cache_path: self.cache_path.text().to_string(),
             clear_cache: self.clear_cache.is_active(),

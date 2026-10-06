@@ -86,6 +86,8 @@ pub struct Settings {
     #[serde(skip)]
     pub follow_symlinks: bool,
     #[serde(skip)]
+    pub hidden: bool,
+    #[serde(skip)]
     pub use_cache: bool,
     /// Empty for img-fp's own default.
     pub cache_path: String,
@@ -118,6 +120,7 @@ impl Default for Settings {
             extensions: d.extensions.join(","),
             exclude: Vec::new(),
             follow_symlinks: false,
+            hidden: false,
             use_cache: true,
             cache_path: String::new(),
             clear_cache: false,
@@ -272,6 +275,9 @@ impl Settings {
         if self.follow_symlinks {
             a.push("--follow-symlinks".into());
         }
+        if self.hidden {
+            a.push("--hidden".into());
+        }
         if self.clear_cache {
             a.push("--clear-cache".into());
         }
@@ -367,6 +373,7 @@ mod tests {
         s.log_path = "/tmp/l.txt".into();
         s.exclude = vec!["/tmp/a".into()];
         s.follow_symlinks = true;
+        s.hidden = true;
         s.recursive = false;
         s.extensions = "*".into();
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
