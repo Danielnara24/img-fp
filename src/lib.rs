@@ -105,8 +105,8 @@ struct Args {
     ///
     /// `-x '*'` takes every file. An entry starting with `!` is an exception:
     /// `-x '!gif'` takes every file but GIFs. A file with no extension is
-    /// taken when its contents are one of the listed formats, and a file named
-    /// on the command line is scanned whatever its extension.
+    /// taken only by those two forms, and a file named on the command line is
+    /// scanned whatever its extension.
     #[arg(
         short = 'x',
         long = "extensions",
@@ -331,12 +331,13 @@ fn cache_names(files: &[PathBuf], known: Vec<Option<PathBuf>>) -> Vec<PathBuf> {
         .collect()
 }
 
-fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
+/// Sets of byte-identical files, by index. `stats` is the walk's, for each
+/// file's size; `comparable` says whether a file is worth reading at all, and
+/// is asked only of files that share a size with another.
+fn exact_groups(files: &[PathBuf], stats: &[walk::Stat], comparable: impl Fn(usize) -> bool + Sync) -> Vec<Vec<usize>> {
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, f) in files.iter().enumerate() {
-        if let Ok(md) = std::fs::metadata(f) {
-            by_size.entry(md.len()).or_default().push(i);
-        }
+    for (i, st) in stats.iter().enumerate() {
+        by_size.entry(st.len).or_default().push(i);
     }
     // Files that share a size are told apart first by a few pieces of each,
     // and only files that agree on those are read whole. Every same-size file
@@ -351,7 +352,12 @@ fn exact_groups(files: &[PathBuf]) -> Vec<Vec<usize>> {
         .collect::<Vec<_>>()
         .par_iter()
         .flat_map_iter(|(len, group)| {
-            group.iter().filter_map(move |&i| sample_hash(&files[i], *len).map(|h| ((*len, h), i))).collect::<Vec<_>>()
+            let comparable = &comparable;
+            group
+                .iter()
+                .filter(move |&&i| comparable(i))
+                .filter_map(move |&i| sample_hash(&files[i], *len).map(|h| ((*len, h), i)))
+                .collect::<Vec<_>>()
         })
         .collect();
     let mut by_sample: HashMap<(u64, u128), Vec<usize>> = HashMap::new();
@@ -1203,7 +1209,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         say!("Excluding: {:?}", args.exclude);
     }
     say!("{}", wanted.describe());
-    let (files, canonical) = walk::walk(
+    let walk::Listing { files, canonical, stats } = walk::walk(
         &walk::Request {
             roots: &roots,
             exclude: &args.exclude,
@@ -1229,7 +1235,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             groups: Vec::new(),
             pairs: Vec::new(),
         };
-        match write_reports(args, gui, &out, &files, &[], &[])? {
+        match write_reports(args, gui, &out, &files, &[], &[], &[])? {
             Some(path) => say!("No images found. -> {}", path.display()),
             None => say!("No images found."),
         }
@@ -1247,7 +1253,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
 
     // Byte-identical copies, before anything is decoded.
     progress.begin(Stage::Identical);
-    let mut exact = timed!(33, exact_groups(&files));
+    // Under a wildcard, a file is compared byte for byte only if its head may
+    // be a picture or its name says it is one: anything else is dropped from
+    // the groups below once it fails to decode, and reading two copies of a
+    // video whole to find that out was gigabytes for nothing. A list walk
+    // took only image names, so it asks nothing.
+    let guessed = wanted.is_a_guess_at_images();
+    let comparable = |i: usize| guessed || extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
+    let mut exact = timed!(33, exact_groups(&files, &stats, comparable));
     stage!(t_start, "exact duplicates: {} groups", exact.len());
 
     // Decode and describe.
@@ -1304,7 +1317,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .map(|(i, _)| {
             let got = cached.remove(names.get(i)?)?;
             in_cache += 1;
-            let k = cache::key_of(&files[i])?;
+            let k = stats[i].key?;
             if got.0 != k {
                 return None;
             }
@@ -1366,9 +1379,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             if twin_of[i] != i || mine[i].is_some() {
                 return (0, None);
             }
-            let bytes = std::fs::metadata(&files[i]).map(|m| m.len()).unwrap_or(0);
             let probe = decode::probe(&files[i]);
-            (progress::analysis_cost(probe.as_ref(), bytes, args.work_size, sp.upsample_below), probe)
+            (progress::analysis_cost(probe.as_ref(), stats[i].len, args.work_size, sp.upsample_below), probe)
         })
         .unzip();
     stage!(t_start, "{todo} files to analyse");
@@ -1416,9 +1428,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 return (it, None);
             }
             let f = &files[i];
-            // Keyed before it is read, so that a file changing under the
-            // analysis is described again next time rather than trusted.
-            let key = store.as_ref().and_then(|_| cache::key_of(f));
+            // Keyed before it is read — by the walk, before anything was —
+            // so that a file changing under the analysis is described again
+            // next time rather than trusted.
+            let key = store.as_ref().and_then(|_| stats[i].key);
             let it = analyse(f, args.work_size, &sp, header[i].as_ref(), &planes);
             let span = keep(i, key, &it);
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1513,7 +1526,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         // `--clear-cache`, which takes every record with it, could give the
         // copy back.
         let others: Vec<(PathBuf, cache::Span)> =
-            store.other_settings().iter().filter(|(p, _)| !prune && p.exists()).cloned().collect();
+            store.other_settings().par_iter().filter(|(p, _)| !prune && p.exists()).cloned().collect();
         if !others.is_empty() {
             stage!(t_start, "cache: {} records kept from other working sizes", others.len());
         }
@@ -1524,15 +1537,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             say!("pruned {dropped} cached record(s) this scan did not use");
         }
         // Every record worth keeping is already in the file, since each went
-        // in as it was made. The file needs rewriting only when it holds
-        // something else as well — a record superseded, dropped or pruned —
-        // and then the rewrite is a copy; see `cache::Store::compact`.
-        //
-        // Nothing to rewrite is worth noticing rather than rewriting anyway. A
-        // threshold sweep is a dozen runs over one unchanged corpus, and every
-        // one of them finds the file already says what it would write.
-        if store.records() == entries.len() || !store.writable() {
-            stage!(t_start, "cache: {} records, none to compact", store.records());
+        // in as it was made. The file is rewritten only when what else it
+        // holds — records superseded, for files that have gone, or pruned —
+        // is worth a copy of the rest; see `cache::Store::worth_compacting`.
+        // A threshold sweep, a dozen runs over one unchanged corpus, finds the
+        // file already says what it would write and writes nothing.
+        if !store.worth_compacting(&entries, prune) {
+            let dead = store.records().saturating_sub(entries.len());
+            stage!(t_start, "cache: {} records, {dead} of them unused, not compacted", store.records());
         } else if let Err(e) = store.compact(&mut entries) {
             problems.cache(format!("could not write {}: {e}", p.display()));
         }
@@ -2343,7 +2355,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     );
     let dims: Vec<(u32, u32)> = items.iter().map(|it| it.dims).collect();
     let damaged: Vec<bool> = items.iter().map(|it| it.damaged.is_some()).collect();
-    match timed!(36, write_reports(args, gui, &out, &files, &dims, &damaged))? {
+    let sizes: Vec<u64> = stats.iter().map(|s| s.len).collect();
+    match timed!(36, write_reports(args, gui, &out, &files, &dims, &damaged, &sizes))? {
         Some(path) => say!("{summary} -> {}", path.display()),
         None => say!("{summary}"),
     }
@@ -2383,12 +2396,20 @@ fn as_typed(v: f32) -> f64 {
 /// mid-scan — used to end the run before it, so a finished scan showed as a
 /// failed one with nothing to look at. The files' facts are read once for
 /// both.
-/// `dims` is each file's size as the analysis found it, indexed like `files`;
-/// see `report::read_facts`.
-fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool]) -> Result<Option<PathBuf>> {
+/// `dims` is each file's size as the analysis found it, and `sizes` its
+/// length as the walk found it, indexed like `files`; see `report::read_facts`.
+fn write_reports(
+    args: &Args,
+    gui: Option<&Path>,
+    out: &Output,
+    files: &[PathBuf],
+    dims: &[(u32, u32)],
+    damaged: &[bool],
+    sizes: &[u64],
+) -> Result<Option<PathBuf>> {
     let target = report::Target::of(args.output.as_deref(), args.format);
     let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
-    let facts = report::read_facts(out, files, dims, damaged);
+    let facts = report::read_facts(out, files, dims, damaged, sizes);
     if let Some(path) = gui {
         let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
         report::write_with(&target, out, files, &facts)?;
@@ -3309,10 +3330,34 @@ mod tests {
                 p
             })
             .collect();
-        assert_eq!(exact_groups(&files), vec![vec![0, 1, 2], vec![4, 5]]);
+        let groups = |files: &[PathBuf]| {
+            let stats: Vec<walk::Stat> =
+                files.iter().map(|f| walk::Stat { len: std::fs::metadata(f).unwrap().len(), key: None }).collect();
+            exact_groups(files, &stats, |_| true)
+        };
+        assert_eq!(groups(&files), vec![vec![0, 1, 2], vec![4, 5]]);
         // A pair alone is compared straight away.
-        assert_eq!(exact_groups(&[files[0].clone(), files[3].clone()]), Vec::<Vec<usize>>::new());
-        assert_eq!(exact_groups(&[files[0].clone(), files[1].clone()]), vec![vec![0, 1]]);
+        assert_eq!(groups(&[files[0].clone(), files[3].clone()]), Vec::<Vec<usize>>::new());
+        assert_eq!(groups(&[files[0].clone(), files[1].clone()]), vec![vec![0, 1]]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Under a wildcard, two copies of a file that is no picture are not read
+    /// to be compared, and so are no group; two copies of one that names an
+    /// image are compared as before, whatever is in them.
+    #[test]
+    fn a_wildcard_walk_compares_only_what_may_be_a_picture() {
+        let dir = std::env::temp_dir().join(format!("img-fp-exact-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = vec![7u8; 100_000];
+        let names = ["a.mkv", "b.mkv", "c.jpg", "d.jpg"];
+        let files: Vec<PathBuf> = names.iter().map(|n| dir.join(n)).collect();
+        for f in &files {
+            std::fs::write(f, &video).unwrap();
+        }
+        let stats: Vec<walk::Stat> = files.iter().map(|_| walk::Stat { len: video.len() as u64, key: None }).collect();
+        let comparable = |i: usize| extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
+        assert_eq!(exact_groups(&files, &stats, comparable), vec![vec![2, 3]]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

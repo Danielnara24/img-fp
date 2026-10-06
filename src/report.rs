@@ -346,7 +346,7 @@ fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: b
 /// has to seek. The header is still asked of a file the analysis has no size
 /// for, which is a file that would not decode: a byte-identical pair of broken
 /// pictures is reported, and its header may still say how large it claims to
-/// be. The length is a `stat`, which opens nothing.
+/// be. The length is the walk's own (`sizes`), which asks nothing again.
 #[derive(Clone, Copy, Default)]
 struct Facts {
     dims: Option<(u32, u32)>,
@@ -359,11 +359,11 @@ struct Facts {
 pub struct FileFacts(HashMap<usize, Facts>);
 
 /// Read the facts every report states about its grouped files.
-pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool]) -> FileFacts {
-    FileFacts(facts(out, files, dims, damaged))
+pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool], sizes: &[u64]) -> FileFacts {
+    FileFacts(facts(out, files, dims, damaged, sizes))
 }
 
-fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool]) -> HashMap<usize, Facts> {
+fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool], sizes: &[u64]) -> HashMap<usize, Facts> {
     let mut wanted: Vec<usize> = out.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
     wanted.sort_unstable();
     wanted.dedup();
@@ -375,7 +375,7 @@ fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool])
                 Some(&(w, h)) if w > 0 && h > 0 => Some((w, h)),
                 _ => decode::probe(p).map(|pr| (pr.w, pr.h)),
             };
-            let bytes = std::fs::metadata(p).ok().map(|m| m.len());
+            let bytes = sizes.get(i).copied();
             (i, Facts { dims, bytes, damaged: damaged.get(i).copied().unwrap_or(false) })
         })
         .collect()

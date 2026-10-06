@@ -170,11 +170,11 @@ impl<'a> Problems<'a> {
     // ---- skips
 
     /// A file the walk's extension list turned away — by default, one whose
-    /// extension names a format img-fp does not read, or that has none and
-    /// whose first bytes are no picture. The filter is why a scan of a home
-    /// directory is not an attempt to decode it, and it is also the one thing
-    /// that can hide a photograph: a JPEG saved as `.txt` is passed over here
-    /// and never sniffed unless `-x '*'` asks for it. Hence the count.
+    /// extension names a format img-fp does not read, or that has none. The
+    /// filter is why a scan of a home directory is not an attempt to decode
+    /// it, and it is also the one thing that can hide a photograph: a JPEG
+    /// saved as `.txt`, or with no extension, is passed over here and never
+    /// sniffed unless `-x '*'` asks for it. Hence the count.
     pub fn not_an_image(&mut self, path: &str) {
         record(self.log, &mut self.not_an_image, "skip/not-an-image", path.into());
     }
@@ -279,7 +279,7 @@ impl<'a> Problems<'a> {
 
     fn skips(&self) -> [(&Tally, &'static str); 7] {
         [
-            (&self.not_an_image, "file(s) whose extension is not searched, or with none and no picture inside (see -x)"),
+            (&self.not_an_image, "file(s) whose extension is not searched, or with none (see -x)"),
             (&self.set_aside, "Trash or thumbnail folder(s), not gone into (name one to scan it)"),
             (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
             (&self.symlink, "symlink(s), which are not followed (see --follow-symlinks)"),

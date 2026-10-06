@@ -68,46 +68,6 @@ pub const EXTENSIONS: [&str; 37] = [
     "hdr", "ff",
 ];
 
-/// The extensions a file's first bytes say it could go by, read without
-/// trusting its name: what a walk asks of a file with no extension at all, to
-/// decide whether `-x` takes it. Empty for anything this cannot read, and for
-/// the formats with no signature to read (TGA) or one `sniff` does not look
-/// for (Radiance).
-pub fn sniffed_extensions(path: &Path) -> &'static [&'static str] {
-    use std::io::Read;
-    let mut head = [0u8; HEAD];
-    let got = std::fs::File::open(path).and_then(|f| {
-        let mut n = 0;
-        let mut f = f.take(HEAD as u64);
-        loop {
-            match f.read(&mut head[n..]) {
-                Ok(0) => return Ok(n),
-                Ok(k) => n += k,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-    });
-    let Ok(got) = got else { return &[] };
-    match sniff(&head[..got]) {
-        Kind::Image(ImageFormat::Jpeg) => &["jpg", "jpeg", "jpe", "jfif", "jif", "jfi", "pjpeg", "pjp", "jpg_large", "jpg_orig"],
-        Kind::Image(ImageFormat::Png) => &["png", "apng", "png_large"],
-        Kind::Image(ImageFormat::Gif) => &["gif"],
-        Kind::Image(ImageFormat::WebP) => &["webp"],
-        Kind::Image(ImageFormat::Bmp) => &["bmp", "dib"],
-        Kind::Image(ImageFormat::Tiff) => &["tif", "tiff"],
-        Kind::Image(ImageFormat::Ico) => &["ico"],
-        Kind::Image(ImageFormat::Pnm) => &["pnm", "pbm", "pgm", "ppm", "pam"],
-        Kind::Image(ImageFormat::Qoi) => &["qoi"],
-        Kind::Image(ImageFormat::OpenExr) => &["exr"],
-        Kind::Image(ImageFormat::Farbfeld) => &["ff"],
-        Kind::Image(_) => &[],
-        Kind::Jxl => &["jxl"],
-        Kind::Heif => &["avif", "avifs", "heic", "heics", "heif", "hif"],
-        Kind::Unknown => &[],
-    }
-}
-
 /// The error `decode` gives for bytes that are no picture format at all, as
 /// opposed to a picture that would not decode. Under a wildcard walk the first
 /// is a file that never claimed to be an image, and is a skip, not a problem.
@@ -533,11 +493,34 @@ fn open_if_image(path: &Path) -> Result<(std::fs::File, Vec<u8>, u64)> {
     let mut f = std::fs::File::open(path).with_context(ctx)?;
     let mut bytes = Vec::with_capacity(HEAD);
     (&mut f).take(HEAD as u64).read_to_end(&mut bytes).with_context(ctx)?;
-    if sniff(&bytes) == Kind::Unknown && unmarked_format(&bytes, path).is_none() {
+    if !head_is_image(&bytes, path) {
         bail!(NOT_AN_IMAGE);
     }
     let len = f.metadata().map_or(bytes.len() as u64, |m| m.len());
     Ok((f, bytes, len))
+}
+
+/// Whether a file's head says it may be a picture: the test `decode` makes
+/// before it reads any more of the file, and refuses with `NOT_AN_IMAGE`.
+fn head_is_image(head: &[u8], path: &Path) -> bool {
+    sniff(head) != Kind::Unknown || unmarked_format(head, path).is_some()
+}
+
+/// `false` when `decode` would turn this file away as `NOT_AN_IMAGE` on its
+/// head alone; `true` when it may be a picture, and when the file cannot be
+/// read, which is the decode's to report.
+///
+/// The exact pass asks it of a wildcard walk's same-size files before reading
+/// them whole: those are what the pass compares byte for byte, and under
+/// `-x '*'` two copies of a 4 GB video are one comparison of 8 GB, for a pair
+/// the run then drops as no picture at all.
+pub fn may_be_image(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(HEAD);
+    match std::fs::File::open(path).and_then(|f| f.take(HEAD as u64).read_to_end(&mut head)) {
+        Ok(_) => head_is_image(&head, path),
+        Err(_) => true,
+    }
 }
 
 /// The rest of a file `open_if_image` has begun.
@@ -2459,24 +2442,23 @@ mod bench {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A file with no extension is asked by its first bytes.
+    /// A file with no extension is taken by a wildcard and by no list, even
+    /// when it holds a picture of a listed format: a browser's cache is files
+    /// like that.
     #[test]
-    fn a_file_with_no_extension_is_known_by_its_bytes() {
-        let dir = std::env::temp_dir().join(format!("img-fp-sniffed-{}", std::process::id()));
+    fn a_file_with_no_extension_is_taken_only_by_a_wildcard() {
+        let dir = std::env::temp_dir().join(format!("img-fp-bare-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pic = image::DynamicImage::ImageRgb8(image::RgbImage::new(16, 16));
         let mut png = Vec::new();
         pic.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
         std::fs::write(dir.join("picture"), &png).unwrap();
-        std::fs::write(dir.join("notes"), b"BMW service record, nothing to see here").unwrap();
-        assert!(sniffed_extensions(&dir.join("picture")).contains(&"png"));
-        assert!(sniffed_extensions(&dir.join("notes")).is_empty());
-        assert!(sniffed_extensions(&dir.join("absent")).is_empty());
         let (default, _) = crate::extensions::normalize(&EXTENSIONS.map(String::from)).unwrap();
-        assert!(default.accepts(&dir.join("picture")));
-        assert!(!default.accepts(&dir.join("notes")));
-        let (gifs, _) = crate::extensions::normalize(&["gif".to_string()]).unwrap();
-        assert!(!gifs.accepts(&dir.join("picture")), "a list takes only the formats it names");
+        assert!(!default.accepts(&dir.join("picture")));
+        let (all, _) = crate::extensions::normalize(&["*".to_string()]).unwrap();
+        assert!(all.accepts(&dir.join("picture")));
+        // Taken, it is still read as the picture it is.
+        assert!(decode(&dir.join("picture"), 64).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 

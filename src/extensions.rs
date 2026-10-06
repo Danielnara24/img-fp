@@ -6,8 +6,8 @@
 //! Case-insensitive, a leading `.` or `*.` optional. `-x '*'` takes every file
 //! whatever it is called; `-x '!gif'` is every file but those, and
 //! `-x 'jpg,png,!png'` is a list with one taken back out. A file with no
-//! extension at all is taken by a list when its first bytes are a format the
-//! list names — unlike `vid-fp`, which cannot sniff a video that cheaply.
+//! extension at all is taken only by the two wildcard forms, as in `vid-fp`:
+//! a list names extensions, and such a file has none to name.
 //!
 //! What a walk hands over under a wildcard is identified by its bytes, as
 //! every file is. One that turns out not to be a picture is a *skip* rather
@@ -34,8 +34,8 @@ pub enum Wanted {
     /// `-x '!gif'`. Every file except the ones named — and a file with no
     /// extension is not named by anything, so it is still taken.
     AnythingBut(HashSet<String>),
-    /// Files whose extension is in this set, lowercased and dot-free — and
-    /// files with none whose first bytes are one of these formats.
+    /// Files whose extension is in this set, lowercased and dot-free. A file
+    /// with no extension is never one of them; see `accepts`.
     OneOf(HashSet<String>),
 }
 
@@ -53,16 +53,14 @@ impl Wanted {
         match self {
             Wanted::Anything => true,
             Wanted::AnythingBut(refused) => extension().is_none_or(|e| !refused.contains(e.as_str())),
-            // A file with no extension says nothing by its name, so it is asked
-            // by its first bytes instead: taken when they are a format whose
-            // extensions the list holds. Without this the only way to reach
-            // one was `-x '*'`, which takes every other file in the walk too —
-            // and a phone backup, a browser's saved picture or a file fetched
-            // from a URL with no suffix is a picture with no extension.
-            Wanted::OneOf(wanted) => match extension() {
-                Some(e) => wanted.contains(e.as_str()),
-                None => path.extension().is_none() && crate::decode::sniffed_extensions(path).iter().any(|e| wanted.contains(*e)),
-            },
+            // A file with no extension is not taken, and is not opened to ask.
+            // 0.31 read the first bytes of every such file and took it when
+            // they were a picture, and a browser keeps its cache that way:
+            // Firefox's `cache2/entries` held 9,055 pictures with no extension
+            // on one machine, every one of them taken by a recursive scan of
+            // a home folder, which is what the window does by default. `-x
+            // '*'` reaches an extensionless picture, as it does in `vid-fp`.
+            Wanted::OneOf(wanted) => extension().is_some_and(|e| wanted.contains(e.as_str())),
         }
     }
 

@@ -214,9 +214,13 @@ pub fn locate(explicit: Option<&Path>) -> PathBuf {
     }
 }
 
-pub fn key_of(path: &Path) -> Option<Key> {
+/// The key of a file whose metadata is in hand: the walk's own, which it has
+/// already read for every file it lists. Each later stage used to ask the
+/// filesystem again — the exact pass for the size, the cache for the key, the
+/// header probe and the report for the size once more — and three of those on
+/// one thread, which a network share charges a round trip apiece.
+pub fn key_from(md: &std::fs::Metadata) -> Option<Key> {
     use std::os::unix::fs::MetadataExt;
-    let md = std::fs::metadata(path).ok()?;
     let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as i64;
     let ctime = md.ctime().checked_mul(1_000_000_000)?.checked_add(md.ctime_nsec())?;
     Some(Key { len: md.len(), mtime, ctime })
@@ -594,6 +598,10 @@ pub struct Store {
     /// Set by the first append that fails; the rest are not attempted.
     failed: Mutex<Option<String>>,
     broken: std::sync::atomic::AtomicBool,
+    /// Records that were framed whole and would not unpack. Each is reported
+    /// on every run that reads the file, so a file holding one is compacted
+    /// whatever else it holds; see `worth_compacting`.
+    damaged: usize,
 }
 
 /// Open the cache at `path`, read what is usable out of it, and keep it open
@@ -634,6 +642,7 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
         records: AtomicUsize::new(0),
         failed: Mutex::new(None),
         broken: Default::default(),
+        damaged: 0,
     };
     match OpenOptions::new().read(true).append(true).open(path) {
         Ok(f) => {
@@ -650,6 +659,7 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
                 }
                 store.file = Some(f);
                 store.records = AtomicUsize::new(tail.count);
+                store.damaged = tail.damaged;
                 return (out, store);
             }
         }
@@ -666,6 +676,7 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             // was an underflow.
             if let Some(tail) = File::open(path).ok().and_then(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
                 store.records = AtomicUsize::new(tail.count);
+                store.damaged = tail.damaged;
             }
             return (out, store);
         }
@@ -765,6 +776,7 @@ impl Store {
         self.failed.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 
+    #[cfg(test)]
     pub fn writable(&self) -> bool {
         self.file.is_some() && !self.broken.load(Ordering::Relaxed)
     }
@@ -773,6 +785,40 @@ impl Store {
     /// for each path and settings.
     pub fn other_settings(&self) -> &[(PathBuf, Span)] {
         &self.others
+    }
+
+    /// Whether rewriting the file to hold `entries` is worth what it costs.
+    ///
+    /// **A rewrite loses nothing and re-describes nothing**: it copies the
+    /// records worth keeping, byte for byte. What it costs is that copy, and
+    /// it used to be paid for any record at all that nothing would read again
+    /// — one deleted photograph made the next run copy every other folder's
+    /// analysis to drop it, 263 MB for one record of 9 KB, and the window's
+    /// first scan after a trip to the Trash paid it every time.
+    ///
+    /// So the dead records stay in the file until they are a quarter of it.
+    /// That is not a figure read off a corpus; it is the trade every
+    /// log-structured store makes, and a quarter states both sides of it: the
+    /// file is never more than a third larger than what it holds, and a
+    /// rewrite copies at most three bytes worth keeping for every byte it
+    /// drops. A dead record is harmless meanwhile — a later record for the
+    /// same path replaces it as the file is read, and one for a file that has
+    /// gone is passed over as it was. Two things compact whatever the share:
+    /// `--prune-cache`, which asks for it, and a damaged record, which is
+    /// otherwise reported on every run.
+    pub fn worth_compacting(&self, entries: &[(&Path, Span)], prune: bool) -> bool {
+        let Some(f) = &self.file else { return false };
+        if self.records() == entries.len() || self.broken.load(Ordering::Relaxed) {
+            return false;
+        }
+        if prune || self.damaged > 0 {
+            return true;
+        }
+        let Ok(size) = f.metadata().map(|m| m.len()) else { return true };
+        // The records' bytes, the header aside.
+        let held = size.saturating_sub(MAGIC.len() as u64);
+        let live: u64 = entries.iter().map(|e| e.1.len).sum();
+        held.saturating_sub(live) * 4 >= held
     }
 
     /// Rewrite the file to hold `entries` and nothing else, sorted, so that
@@ -1065,8 +1111,10 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
 /// than an afternoon, and that is a cheap enough mistake to make
 /// automatically.
 pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
+    // On every thread: one `stat` per record of every other folder this cache
+    // has seen, which on a network share is a round trip apiece.
     cached
-        .iter()
+        .par_iter()
         .filter(|(path, _)| path.exists())
         .map(|(path, e)| (path.as_path(), e.2))
         .collect()
@@ -1404,6 +1452,28 @@ mod tests {
         assert_eq!(names, [PathBuf::from("a.jpg"), PathBuf::from("other/x.jpg")]);
         assert_eq!(store.records(), 4, "counted, so that the run compacts it away");
         assert!(store.writable());
+        // However little of the file it is.
+        let keep: Vec<(&Path, Span)> = Vec::new();
+        assert!(store.worth_compacting(&keep, false));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Records nothing will read are left in the file until they are a quarter
+    /// of it, and `--prune-cache` compacts whatever the share.
+    #[test]
+    fn a_file_is_compacted_once_a_quarter_of_it_is_unused() {
+        let dir = scratch("share");
+        let path = dir.join(FILE_NAME);
+        let (_, store, _) = reopen(&path);
+        let (f, t) = analysis(20, 5);
+        let names: Vec<String> = (0..8).map(|i| format!("{i}.jpg")).collect();
+        let spans: Vec<Span> =
+            names.iter().map(|p| store.append(p, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap()).collect();
+        let keeping = |k: usize| -> Vec<(&Path, Span)> { (0..k).map(|i| (Path::new(names[i].as_str()), spans[i])).collect() };
+        assert!(!store.worth_compacting(&keeping(8), false), "nothing unused");
+        assert!(!store.worth_compacting(&keeping(7), false), "one record of eight is not a quarter");
+        assert!(store.worth_compacting(&keeping(7), true), "unless asked");
+        assert!(store.worth_compacting(&keeping(6), false), "two of eight is");
         std::fs::remove_dir_all(&dir).ok();
     }
 

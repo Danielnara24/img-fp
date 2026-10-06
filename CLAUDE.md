@@ -47,7 +47,7 @@ and `derived/Desktop`.
 on the plain build of the same source). Six fixes — files that decode to one picture
 matched as one, an EXIF orientation applied after the reduction, cut-off JPEGs
 called damaged, no `rayon` in `image`, more extensions and extensionless files
-sniffed, libheif loaded at run time — move IMGS-ALL at 512 to F1 **0.9781**
+sniffed (since taken back: see *Conventions*), libheif loaded at run time — move IMGS-ALL at 512 to F1 **0.9781**
 (99.58% / 96.11%, 45 perfect) from 0.9788, and its cross-family false pairs
 **from 258 to 3**: the three mirrored `algiu2` variants and the `Segovia1`
 `crop_micro` no longer join, and nothing else does. IMGS alone goes 0.9652 ->
@@ -55,6 +55,14 @@ sniffed, libheif loaded at run time — move IMGS-ALL at 512 to F1 **0.9781**
 IMGS4 0.9838 -> 0.9827; every move but the cross-family one is the vocabulary
 sample changing, since the twins no longer sample twice. The figures in the
 paragraphs below are 0.30.0's until a `bench.py` row re-baselines them.
+
+**0.32.0 changes no pair on the benchmark** (IMGS under `-x '*'`, the way
+`bench.py` runs it, is pair-for-pair and group-for-group 0.31.0's). A list
+walk no longer takes a file with no extension, which 0.31.0 had started doing
+and which reached browser caches; under `-x '*'` the exact pass no longer
+reads whole files that are no picture; the walk's `stat` is the only one; the
+cache is rewritten only once a quarter of it is unused; and `img-fp-gui`
+answers `--help` and `--version`.
 
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
@@ -735,6 +743,14 @@ The parts that are easy to get wrong:
   nothing changed, read 270 MB, and now 2.5 MB. Four pieces rather than the
   start, because an uncompressed scan's first and last rows are header and
   white margin.
+
+  **Under a wildcard, a same-size file is read only if it may be a picture**
+  (`decode::may_be_image`: the 64-byte head test `decode` itself refuses
+  `NOT_AN_IMAGE` on, or a name that says image). Such files used to be
+  hashed and compared whole and then dropped from the groups once they failed
+  to decode: two identical 200 MB `.mkv` files under `-x '*'` cost 400 MB of
+  reads and an "identical copy" in the header line, now 128 bytes. The later
+  `not_asked` retain stays as the backstop, so the groups are what they were.
 - **Byte-identical copies are matched through their original, not beside
   it.** Each exact group elects one member (one the cache already holds, if
   any) and everything from the vocabulary to corroboration runs over the
@@ -3824,10 +3840,20 @@ a free, and the run is dominated by a stage this did not touch.
 packed by its worker and appended to the file the moment it exists — which is
 what makes Ctrl-C keep the work for free, see *Exit codes* — so the file holds
 every record worth keeping by the time the analysis ends. It is rewritten only
-when it also holds something not worth keeping: a record superseded by a later
-one for the same path, a file that has gone, a `--prune-cache`. Then the
-rewrite is a **copy** of the records worth keeping, byte for byte and sorted,
-with nothing unpacked or deflated again. So a sweep's cached runs write
+when what else it holds — records superseded by a later one for the same path,
+for files that have gone, at other settings for files that have gone — is **a
+quarter of its records' bytes** (`Store::worth_compacting`), or when a
+`--prune-cache` asks or a damaged record would otherwise be reported on every
+run. Then the rewrite is a **copy** of the records worth keeping, byte for
+byte and sorted, with nothing unpacked or deflated again. It used to be any
+such record at all: one deleted photograph made the next run copy every other
+folder's analysis to drop 9 KB of it (263 MB of IMGS's), and the window's
+first scan after a trip to the Trash always paid it. The quarter is the
+log-structured store's trade rather than a fitted figure: the file is never
+more than a third larger than what it holds, and a rewrite copies at most three
+bytes worth keeping per byte it drops. A dead record costs nothing meanwhile —
+a later record for its path replaces it as the file is read, and one for a
+file that has gone is passed over. So a sweep's cached runs write
 nothing at all, and a cold run no longer has a save phase: the deflate that
 used to run over the whole corpus after the analysis runs on each worker as it
 finishes an image. Measured on `derived/Desktop`, interrupted twice and then
@@ -3874,14 +3900,15 @@ are `.pam` (PNM's `P7`), `.apng` (a PNG, read for its first frame) and `.dib`
 (a BMP): all three decoded under `-x '*'` and a default walk passed them over
 as "not searched". The same audit added `.avifs` and `.heics` (whose first
 picture libheif reads), `.jif`, `.jfi`, `.pjpeg`, `.pjp`, and Twitter's
-`.jpg_large`, `.jpg_orig` and `.png_large`. **And a file with no extension is
-read by its first 64 bytes** (`decode::sniffed_extensions`): a list takes it
-when they are a format the list names, so the default walk finds an
-extensionless picture and `-x gif` only an extensionless GIF. Until then the
-only way to reach one was `-x '*'`, which takes every other file too; one of
-IMGS's own seeds, `beach`, has no extension. A file with none and no picture
-inside is the same skip as before. (`vid-fp` cannot sniff a video that
-cheaply, and still does not.) **An ICO holding an RGB PNG is read as that
+`.jpg_large`, `.jpg_orig` and `.png_large`. **A file with no extension is
+taken only by `-x '*'` (and the `!` forms), as in `vid-fp`.** 0.31.0 read the
+first 64 bytes of every such file and let a list take it when they were a
+format the list names, and that reached browser caches: Firefox keeps
+`~/.cache/mozilla/.../cache2/entries` as extensionless files, 9,055 of them
+pictures on this machine, and a recursive scan of a home folder — the
+window's default — took every one. A list walk now neither takes nor opens a
+file with no extension; IMGS's `beach` needs `-x '*'` again, which
+`bench.py` always passed. **An ICO holding an RGB PNG is read as that
 PNG** (`decode::ico_png`). The crate refuses one, as the format says it should,
 and Pillow writes one whenever a picture with no alpha channel is saved as
 `.ico` — `Image.open("logo.jpg").save("favicon.ico")` — under a directory entry
@@ -4032,6 +4059,14 @@ the change time** (`IMGFPC07`). Both were found by running, not by reading:
   size (649 opens to 24): it takes the analysis's own `dims`, asking the
   header only of a file that would not decode. Reports on all four corpora are
   byte-identical either way.
+- **And the walk's own `stat` is the only one** (`walk::Stat`). It already
+  read every file's metadata for its identity; the exact pass then asked
+  again for the size, the cache for the key, the header probe and the report
+  for the size once more — 2,529 `statx` for 636 files on a cached run over
+  `derived/Desktop`, three a file on one thread. They take the walk's size
+  and key now, and the existence checks for other folders' records run on
+  every thread. The key is therefore taken at the walk, which is still before
+  the file is read.
 - Keyed on size and mtime, a file rewritten with a different picture of the
   same size and its mtime put back (`cp -p`, `rsync -a`, `touch -r`,
   `exiftool -P`) kept its old record, and the cached run reported a pair at

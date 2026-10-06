@@ -222,7 +222,7 @@ to stderr.
 | `-r`, `--recursive` | Include subfolders | off |
 | `-e`, `--exclude <PATH>` | Leave out a folder or file; repeat for several | |
 | `--follow-symlinks` | Follow symlinks met while walking a folder | off |
-| `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken when its contents are a listed format | every supported format |
+| `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken only by those two forms | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--work-size <PX>` | Long side, in pixels, the images are analysed at. Larger images are shrunk to it and small ones enlarged up to it. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `512` |
@@ -249,7 +249,8 @@ different photographs together. The defaults are a safe starting point.
 JPEG, PNG and APNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO,
 PNM and PAM, TGA, QOI, OpenEXR, Radiance HDR and farbfeld. Files are identified by their content, so a wrong
 extension doesn't matter, but a folder walk only picks up files whose extension
-is in `-x`, or that have no extension and whose contents are a format in `-x`.
+is in `-x`. Files with no extension are picked up only with `-x '*'` (or an
+exception such as `-x '!gif'`).
 TGA files have no signature and are recognised by the `.tga` extension.
 
 A JPEG that is cut off, such as an interrupted download, is still analysed as

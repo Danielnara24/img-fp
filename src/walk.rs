@@ -73,6 +73,37 @@ struct Found {
     /// The entry itself is a symlink — not merely reached through a linked
     /// folder, which names the file just as well. See [`settle`].
     link: bool,
+    stat: Stat,
+}
+
+/// What the walk's own `stat` of a file says, kept for the stages after it.
+///
+/// The walk has to read every file's metadata — its identity is how two names
+/// for one file are told apart — and the size and times come with it. The
+/// exact pass, the cache, the header probe and the report each asked the
+/// filesystem for them again, three of them on one thread: four calls a file
+/// on a cached run where one is needed. Through a link, as everywhere here,
+/// they are the target's.
+#[derive(Clone, Copy, Debug)]
+pub struct Stat {
+    pub len: u64,
+    /// `None` when the file's times cannot make one, as for a modification
+    /// time before 1970; such a file is not cached.
+    pub key: Option<crate::cache::Key>,
+}
+
+impl Stat {
+    fn of(meta: &std::fs::Metadata) -> Stat {
+        Stat { len: meta.len(), key: crate::cache::key_from(meta) }
+    }
+}
+
+/// Every file a walk lists, in order, with what is known about each.
+pub struct Listing {
+    pub files: Vec<PathBuf>,
+    /// Each file's canonical path when the walk knows it; see [`walk`].
+    pub canonical: Vec<Option<PathBuf>>,
+    pub stats: Vec<Stat>,
 }
 
 /// Every file the request reaches, one path per set of bytes, sorted — and
@@ -95,7 +126,7 @@ struct Found {
 /// does not take, a symlink it does not follow, a loop, a second name for a
 /// file already listed, a root `--exclude` covers. None of the skips touches
 /// the exit code — which is the whole reason the summary keeps two lists.
-pub fn walk(req: &Request, problems: &mut Problems) -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
+pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
     let excludes = resolve_excludes(req.exclude, problems);
     let set_aside = SetAside::here();
     let depth = if req.recursive { usize::MAX } else { 1 };
@@ -120,6 +151,7 @@ pub fn walk(req: &Request, problems: &mut Problems) -> (Vec<PathBuf>, Vec<Option
             let link = std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink());
             found.push(Found {
                 id: identity(&meta),
+                stat: Stat::of(&meta),
                 path: root.clone(),
                 canon: Some(canon),
                 link,
@@ -217,6 +249,7 @@ fn walk_dir(
         };
         found.push(Found {
             id: identity(&meta),
+            stat: Stat::of(&meta),
             link: entry.path_is_symlink(),
             canon: (!follow).then(|| beneath(entry.path())),
             path: entry.into_path(),
@@ -298,7 +331,7 @@ impl SetAside {
 /// which makes the list, and so the run, independent of directory order.
 ///
 /// Exactly one name is counted per collision either way.
-fn settle(mut found: Vec<Found>, problems: &mut Problems) -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
+fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
     found.sort_by(|a, b| a.path.cmp(&b.path));
     // One name per set of bytes, and where each set is in it. A name keeps its
     // own canonical path: two hard links are one file under two of them.
@@ -316,7 +349,13 @@ fn settle(mut found: Vec<Found>, problems: &mut Problems) -> (Vec<PathBuf>, Vec<
     }
     // A later real name may have displaced an earlier link.
     kept.sort_by(|a, b| a.path.cmp(&b.path));
-    kept.into_iter().map(|f| (f.path, f.canon)).unzip()
+    let mut out = Listing { files: Vec::with_capacity(kept.len()), canonical: Vec::with_capacity(kept.len()), stats: Vec::with_capacity(kept.len()) };
+    for f in kept {
+        out.files.push(f.path);
+        out.canonical.push(f.canon);
+        out.stats.push(f.stat);
+    }
+    out
 }
 
 /// Canonicalize the `--exclude` list, so the prefix test is a test of bytes.
@@ -502,7 +541,7 @@ mod tests {
         let (wanted, _) = crate::extensions::normalize(&["jpg".to_string()]).unwrap();
         let log = Log::default();
         let mut problems = Problems::new(&log);
-        let (files, canon) = walk(
+        let Listing { files, canonical: canon, stats } = walk(
             &Request {
                 roots,
                 exclude,
@@ -512,6 +551,10 @@ mod tests {
             },
             &mut problems,
         );
+        // And every size it states is the one the filesystem gives.
+        for (f, st) in files.iter().zip(&stats) {
+            assert_eq!(st.len, fs::metadata(f).unwrap().len(), "{}", f.display());
+        }
         // Every canonical path the walk states is the one the filesystem
         // gives, whatever the case under test.
         for (f, c) in files.iter().zip(&canon) {

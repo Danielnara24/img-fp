@@ -36,15 +36,42 @@ use std::rc::Rc;
 
 const APP_ID: &str = "io.github.danielnara24.img-fp";
 
+/// The window's own command line: folders to start with, and the two flags
+/// every program answers.
+///
+/// Every argument used to be taken as a folder, so `img-fp-gui --help` opened
+/// the window with a folder named `--help` in its list, and `--version` the
+/// same. Parsed by clap, as `img-fp`'s is, they print and exit; anything else
+/// starting with `-` is refused with clap's message, and `--` ends the flags
+/// for a folder whose name starts with one.
+#[derive(clap::Parser)]
+#[command(
+    name = "img-fp-gui",
+    version,
+    about = "Find duplicate and near-duplicate images, and choose which to move to the Trash.",
+    long_about = None
+)]
+struct GuiArgs {
+    /// Folders to scan, in place of the ones remembered from last time.
+    #[arg(value_name = "FOLDER")]
+    folders: Vec<PathBuf>,
+}
+
 fn main() -> glib::ExitCode {
-    // Before anything else, for the reason `check_cpu` gives.
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == scan::WORKER_FLAG) {
+        // Before anything else, for the reason `check_cpu` gives.
+        if let Err(e) = img_fp::check_cpu_for_window() {
+            eprintln!("Error: {e:#}");
+            return glib::ExitCode::FAILURE;
+        }
+        return worker(args.split_off(2));
+    }
+    // `--help` and `--version` answer on any CPU; nothing else has run yet.
+    let folders = <GuiArgs as clap::Parser>::parse_from(&args).folders;
     if let Err(e) = img_fp::check_cpu_for_window() {
         eprintln!("Error: {e:#}");
         return glib::ExitCode::FAILURE;
-    }
-    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    if args.get(1).is_some_and(|a| a == scan::WORKER_FLAG) {
-        return worker(args.split_off(2));
     }
     // Drawn in software unless someone asks otherwise. The window is a form
     // and a grid of still pictures, which a GPU does not draw any better, and
@@ -57,9 +84,8 @@ fn main() -> glib::ExitCode {
         unsafe { std::env::set_var("GSK_RENDERER", "cairo") };
     }
     quiet_theme_errors();
-    // Anything else on the command line is a folder to start with, which is
+    // The folders on the command line are the ones to start with, which is
     // what a file manager's "Open With" hands over.
-    let folders: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
     let app = gtk::Application::builder().application_id(APP_ID).flags(gio::ApplicationFlags::NON_UNIQUE).build();
     let folders = RefCell::new(Some(folders));
     app.connect_activate(move |app| {
