@@ -27,25 +27,18 @@ shows each group and moves the images you choose to the Trash.
 
 ## Requirements
 
-Linux on x86_64, glibc 2.39 or newer and libheif 1.17 or newer: Ubuntu 24.04+,
-Debian 13+, Fedora 40+, Arch, openSUSE Tumbleweed and Leap 16, RHEL 10 and its
-rebuilds. img-fp runs on any x86_64 CPU and uses AVX2 when the CPU has it
-(Intel Haswell or newer, any AMD Zen).
+Linux on x86_64 with glibc 2.34 or newer: Ubuntu 22.04+, Debian 12+, Fedora
+35+, Arch, openSUSE Tumbleweed and Leap 15.4+, RHEL 9+ and its rebuilds.
+img-fp runs on any x86_64 CPU and uses AVX2 when the CPU has it (Intel Haswell
+or newer, any AMD Zen).
+
+HEIC, HEIF and AVIF files are read through the system's libheif (1.12 or
+newer), when it is installed. Without it those files are reported as
+unreadable and every other format works.
 
 ## Installation
 
 ### Prebuilt binary
-
-First install libheif and its decoders:
-
-```bash
-sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d  # Ubuntu, Debian
-sudo dnf install libheif                                                # Fedora, RHEL 10 (EPEL)
-sudo pacman -S libheif                                                  # Arch
-sudo zypper install libheif1 libheif-dav1d                              # openSUSE
-```
-
-Then the binary:
 
 ```bash
 curl -L -o img-fp \
@@ -54,8 +47,15 @@ chmod +x img-fp
 sudo install -m 755 img-fp /usr/local/bin/img-fp
 ```
 
-libheif must be installed for the binary to start. The decoders are only
-needed to read HEIC and AVIF files.
+To read HEIC and AVIF files, install libheif and its decoders:
+
+```bash
+sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d  # Ubuntu 24.04+, Debian 13+
+sudo apt install libheif1                                               # Ubuntu 22.04, Debian 12
+sudo dnf install libheif                                                # Fedora, RHEL (EPEL)
+sudo pacman -S libheif                                                  # Arch
+sudo zypper install libheif1 libheif-dav1d                              # openSUSE
+```
 
 Fedora, openSUSE and RHEL leave out the HEIC decoder. Without it HEIC files are
 reported as unreadable and everything else works. On Fedora it is
@@ -70,15 +70,14 @@ sha256sum -c img-fp-x86_64-linux-gnu.sha256
 
 ### From source
 
-Requires the Rust toolchain and libheif's development package:
+Requires the Rust toolchain:
 
 ```bash
-sudo apt install libheif-dev pkg-config                  # Ubuntu, Debian
-sudo dnf install libheif-devel pkgconf-pkg-config        # Fedora, RHEL 10 (EPEL)
-sudo pacman -S libheif pkgconf                           # Arch
-sudo zypper install libheif-devel pkg-config             # openSUSE
 cargo install img-fp --locked
 ```
+
+libheif is not needed to build; it is loaded when the first HEIC or AVIF file
+is read, as for the prebuilt binary.
 
 ### Shell completions and man page
 
@@ -147,7 +146,7 @@ deleted; name one directly to scan it.
 `img-fp-gui` is a window over the same scan: pick folders and options, watch
 the progress, then go through the groups and choose which images to move to the
 Trash. Nothing is marked for you. It has the same requirements as `img-fp`,
-plus GTK 4.10 or newer. With the libheif packages above installed:
+plus GTK 4.10 or newer (Ubuntu 24.04+, Debian 13+, Fedora 38+):
 
 ```bash
 sudo apt install libgtk-4-1          # Ubuntu, Debian
@@ -164,10 +163,10 @@ From source, with the `gui` feature, which installs both `img-fp` and
 `img-fp-gui`:
 
 ```bash
-sudo apt install libgtk-4-dev libheif-dev pkg-config                # Ubuntu, Debian
-sudo dnf install gtk4-devel libheif-devel pkgconf-pkg-config        # Fedora, RHEL 10 (EPEL)
-sudo pacman -S gtk4 libheif pkgconf                                 # Arch
-sudo zypper install gtk4-devel libheif-devel pkg-config             # openSUSE
+sudo apt install libgtk-4-dev pkg-config                # Ubuntu, Debian
+sudo dnf install gtk4-devel pkgconf-pkg-config         # Fedora, RHEL 10
+sudo pacman -S gtk4 pkgconf                            # Arch
+sudo zypper install gtk4-devel pkg-config              # openSUSE
 cargo install img-fp --locked --features gui
 ```
 
@@ -223,7 +222,7 @@ to stderr.
 | `-r`, `--recursive` | Include subfolders | off |
 | `-e`, `--exclude <PATH>` | Leave out a folder or file; repeat for several | |
 | `--follow-symlinks` | Follow symlinks met while walking a folder | off |
-| `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file, including ones with no extension; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs | every supported format |
+| `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken when its contents are a listed format | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--work-size <PX>` | Long side, in pixels, the images are analysed at. Larger images are shrunk to it and small ones enlarged up to it. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `512` |
@@ -250,8 +249,11 @@ different photographs together. The defaults are a safe starting point.
 JPEG, PNG and APNG, GIF, WebP, BMP, TIFF, AVIF, HEIC/HEIF, JPEG XL, ICO,
 PNM and PAM, TGA, QOI, OpenEXR, Radiance HDR and farbfeld. Files are identified by their content, so a wrong
 extension doesn't matter, but a folder walk only picks up files whose extension
-is in `-x`. TGA files have no signature and are recognised by the `.tga`
-extension.
+is in `-x`, or that have no extension and whose contents are a format in `-x`.
+TGA files have no signature and are recognised by the `.tga` extension.
+
+A JPEG that is cut off, such as an interrupted download, is still analysed as
+far as it goes, and is marked `DAMAGED` in the report.
 
 ## Cache
 
@@ -282,5 +284,5 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
 
-The released binary links the system's `libheif` (LGPL-3.0) dynamically; it is
-not bundled.
+The released binary loads the system's `libheif` (LGPL-3.0) at run time when
+it is installed; it is not bundled.

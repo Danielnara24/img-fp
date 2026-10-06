@@ -4,9 +4,10 @@
 //! here, so a user who knows one knows the other. The default is the list of
 //! extensions img-fp can decode (`decode::EXTENSIONS`); `-x` *replaces* it.
 //! Case-insensitive, a leading `.` or `*.` optional. `-x '*'` takes every file
-//! whatever it is called, which is the only way to reach a file with no
-//! extension at all; `-x '!gif'` is every file but those, and
-//! `-x 'jpg,png,!png'` is a list with one taken back out.
+//! whatever it is called; `-x '!gif'` is every file but those, and
+//! `-x 'jpg,png,!png'` is a list with one taken back out. A file with no
+//! extension at all is taken by a list when its first bytes are a format the
+//! list names — unlike `vid-fp`, which cannot sniff a video that cheaply.
 //!
 //! What a walk hands over under a wildcard is identified by its bytes, as
 //! every file is. One that turns out not to be a picture is a *skip* rather
@@ -33,7 +34,8 @@ pub enum Wanted {
     /// `-x '!gif'`. Every file except the ones named — and a file with no
     /// extension is not named by anything, so it is still taken.
     AnythingBut(HashSet<String>),
-    /// Files whose extension is in this set, lowercased and dot-free.
+    /// Files whose extension is in this set, lowercased and dot-free — and
+    /// files with none whose first bytes are one of these formats.
     OneOf(HashSet<String>),
 }
 
@@ -51,7 +53,16 @@ impl Wanted {
         match self {
             Wanted::Anything => true,
             Wanted::AnythingBut(refused) => extension().is_none_or(|e| !refused.contains(e.as_str())),
-            Wanted::OneOf(wanted) => extension().is_some_and(|e| wanted.contains(e.as_str())),
+            // A file with no extension says nothing by its name, so it is asked
+            // by its first bytes instead: taken when they are a format whose
+            // extensions the list holds. Without this the only way to reach
+            // one was `-x '*'`, which takes every other file in the walk too —
+            // and a phone backup, a browser's saved picture or a file fetched
+            // from a URL with no suffix is a picture with no extension.
+            Wanted::OneOf(wanted) => match extension() {
+                Some(e) => wanted.contains(e.as_str()),
+                None => path.extension().is_none() && crate::decode::sniffed_extensions(path).iter().any(|e| wanted.contains(*e)),
+            },
         }
     }
 

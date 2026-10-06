@@ -100,7 +100,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 09: the settings moved from the header into each record, so that one file
 /// holds the analyses of several working sizes; and a record carries the
 /// picture's own size, which the report's `scale` is stated in.
-const MAGIC: &[u8; 8] = b"IMGFPC09";
+/// 10: an EXIF orientation is applied to the working plane after the
+/// reduction rather than to the decoded picture before it (`decode::orient`),
+/// which moves the edge the reduction trims on every turned picture.
+const MAGIC: &[u8; 8] = b"IMGFPC10";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// Records packed or unpacked in one parallel batch. Large enough that the

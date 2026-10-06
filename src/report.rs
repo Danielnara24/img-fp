@@ -169,6 +169,10 @@ pub struct OutPair {
     pub inverted: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub identical: bool,
+    /// Not the same bytes, but decoded to the same picture: a lossless
+    /// re-save, a JPEG with its metadata stripped. See `lib::same_analysis`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub same_pixels: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub propagated: bool,
     /// A direct match admitted only because an anchor had already put both
@@ -347,17 +351,19 @@ fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: b
 struct Facts {
     dims: Option<(u32, u32)>,
     bytes: Option<u64>,
+    /// Decoded only in part; see `problems::Problems::damaged`.
+    damaged: bool,
 }
 
 /// What `facts` read, for `write_with`.
 pub struct FileFacts(HashMap<usize, Facts>);
 
 /// Read the facts every report states about its grouped files.
-pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)]) -> FileFacts {
-    FileFacts(facts(out, files, dims))
+pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool]) -> FileFacts {
+    FileFacts(facts(out, files, dims, damaged))
 }
 
-fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)]) -> HashMap<usize, Facts> {
+fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool]) -> HashMap<usize, Facts> {
     let mut wanted: Vec<usize> = out.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
     wanted.sort_unstable();
     wanted.dedup();
@@ -370,7 +376,7 @@ fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)]) -> HashMap<usize,
                 _ => decode::probe(p).map(|pr| (pr.w, pr.h)),
             };
             let bytes = std::fs::metadata(p).ok().map(|m| m.len());
-            (i, Facts { dims, bytes })
+            (i, Facts { dims, bytes, damaged: damaged.get(i).copied().unwrap_or(false) })
         })
         .collect()
 }
@@ -381,13 +387,16 @@ fn pair_index(out: &Output) -> HashMap<(usize, usize), &OutPair> {
     out.pairs.iter().map(|p| ((p.ia.min(p.ib), p.ia.max(p.ib)), p)).collect()
 }
 
-/// `identical` for the same bytes, `propagated` for a transform composed along
+/// `identical` for the same bytes, `same_pixels` for files that decode to the
+/// same picture, `propagated` for a transform composed along
 /// a path and then checked against the pixels, `direct` for one fitted to
 /// keypoints the two files share, and `corroborated` for a direct one that
 /// cleared only the lower bar a pair inside an existing cluster faces.
 fn relation(p: &OutPair) -> &'static str {
     if p.identical {
         "identical"
+    } else if p.same_pixels {
+        "same_pixels"
     } else if p.propagated {
         "propagated"
     } else if p.corroborated {
@@ -441,6 +450,9 @@ struct Row<'a> {
     pixel_correlation: Option<f32>,
     mirrored: Option<bool>,
     inverted: Option<bool>,
+    /// The file decoded only in part. Written only when it did.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    damaged: bool,
 }
 
 /// A group's rows, representative first. A file in two groups has a row in
@@ -472,6 +484,7 @@ fn rows<'a>(
             pixel_correlation: p.map(|p| p.pixel_correlation),
             mirrored: p.map(|p| p.mirrored),
             inverted: p.map(|p| p.inverted),
+            damaged: f.damaged,
         }
     })
 }
@@ -494,9 +507,10 @@ fn write_txt(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
                 _ => "-".into(),
             };
             let size = r.size.as_deref().unwrap_or("-");
+            let damaged = if r.damaged { "DAMAGED, " } else { "" };
             // The path as its own bytes, as `ls` would print it: a name that
             // is not UTF-8 is still the name of the file.
-            write!(w, "\t{role:<ROLE_COLUMN$} {dims}, {size}, {}", evidence(&r))?;
+            write!(w, "\t{role:<ROLE_COLUMN$} {dims}, {size}, {damaged}{}", evidence(&r))?;
             w.write_all(r.raw.as_os_str().as_bytes())?;
             writeln!(w)?;
         }
@@ -513,6 +527,7 @@ fn evidence(r: &Row) -> String {
     };
     let mut s = match (how, r.aligned_points) {
         ("identical", _) => "identical".to_string(),
+        ("same_pixels", _) => "same pixels".to_string(),
         ("corroborated", Some(n)) => format!("corroborated, {n} points, overlap {ov:.2}, correlation {corr:.2}"),
         (_, Some(n)) => format!("{n} points, overlap {ov:.2}, correlation {corr:.2}"),
         (how, None) => format!("{how}, overlap {ov:.2}, correlation {corr:.2}"),
@@ -528,7 +543,7 @@ fn evidence(r: &Row) -> String {
 }
 
 /// The CSV's columns: `group`, then a `Row`'s fields in its order.
-const CSV_HEADER: [&str; 13] = [
+const CSV_HEADER: [&str; 14] = [
     "group",
     "role",
     "path",
@@ -542,6 +557,7 @@ const CSV_HEADER: [&str; 13] = [
     "pixel_correlation",
     "mirrored",
     "inverted",
+    "damaged",
 ];
 
 /// One row per file per group, `;`-separated as `vid-fp`'s is, an unmeasured
@@ -571,6 +587,7 @@ fn write_csv(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
                     cell(r.pixel_correlation).as_bytes(),
                     cell(r.mirrored).as_bytes(),
                     cell(r.inverted).as_bytes(),
+                    if r.damaged { b"true".as_slice() } else { b"".as_slice() },
                 ],
             )?;
         }
@@ -626,6 +643,7 @@ mod tests {
             mirrored: false,
             inverted: false,
             identical: false,
+            same_pixels: false,
             propagated: false,
             corroborated: false,
             ia,
@@ -677,7 +695,7 @@ mod tests {
     fn a_text_row_is_the_members_pair_with_its_representative() {
         let out = output();
         let facts: HashMap<usize, Facts> =
-            [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000) })].into_iter().collect();
+            [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000), damaged: false })].into_iter().collect();
         let mut buf = Vec::new();
         write_txt(&mut buf, &out, &files(), &facts).unwrap();
         assert_eq!(
@@ -697,9 +715,9 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], CSV_HEADER.join(";"));
-        assert_eq!(lines[1], "group_1;representative;/0.jpg;;;;;;;;;;");
-        assert_eq!(lines[2], "group_1;match;/1.jpg;;;;;identical;;0.987;0.912;false;false");
-        assert_eq!(lines[3], "group_1;match;\"/2;x.jpg\";;;;;direct;42;0.987;0.912;true;false");
+        assert_eq!(lines[1], "group_1;representative;/0.jpg;;;;;;;;;;;");
+        assert_eq!(lines[2], "group_1;match;/1.jpg;;;;;identical;;0.987;0.912;false;false;");
+        assert_eq!(lines[3], "group_1;match;\"/2;x.jpg\";;;;;direct;42;0.987;0.912;true;false;");
     }
 
     #[test]
@@ -707,7 +725,7 @@ mod tests {
         let out = output();
         let mut buf = Vec::new();
         let facts: HashMap<usize, Facts> =
-            [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000) })].into_iter().collect();
+            [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000), damaged: false })].into_iter().collect();
         write_json(&mut buf, &out, &files(), &facts, true).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         let g = &v["groups"][0];

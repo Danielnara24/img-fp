@@ -238,7 +238,7 @@ pub struct Member {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub size_bytes: Option<u64>,
-    /// How this file came to be in its group: `identical`, `direct`,
+    /// How this file came to be in its group: `identical`, `same_pixels`, `direct`,
     /// `corroborated` or `propagated`; `None` for the representative.
     #[serde(default)]
     pub relation: Option<String>,
@@ -252,6 +252,9 @@ pub struct Member {
     pub mirrored: Option<bool>,
     #[serde(default)]
     pub inverted: Option<bool>,
+    /// The file decoded only in part: it is cut off.
+    #[serde(default)]
+    pub damaged: bool,
 }
 
 impl Member {

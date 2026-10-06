@@ -43,6 +43,19 @@ and every figure from `out/v23-plain` on is the shipped binary's: checked byte
 for byte against the downloaded release on all four corpora, the found corpus
 and `derived/Desktop`.
 
+**0.31.0 is the audit after 0.30.0** (`out/v24-constants`, `def_*`, measured
+on the plain build of the same source). Six fixes — files that decode to one picture
+matched as one, an EXIF orientation applied after the reduction, cut-off JPEGs
+called damaged, no `rayon` in `image`, more extensions and extensionless files
+sniffed, libheif loaded at run time — move IMGS-ALL at 512 to F1 **0.9781**
+(99.58% / 96.11%, 45 perfect) from 0.9788, and its cross-family false pairs
+**from 258 to 3**: the three mirrored `algiu2` variants and the `Segovia1`
+`crop_micro` no longer join, and nothing else does. IMGS alone goes 0.9652 ->
+**0.9687** (41 -> 52 perfect), IMGS2 0.9806 -> 0.9811, IMGS3 0.9849 -> 0.9843,
+IMGS4 0.9838 -> 0.9827; every move but the cross-family one is the vocabulary
+sample changing, since the twins no longer sample twice. The figures in the
+paragraphs below are 0.30.0's until a `bench.py` row re-baselines them.
+
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
 similar photographs on real folders, a category IMGS has no negatives for.
@@ -131,6 +144,7 @@ src/
   main.rs             `img-fp`: three lines calling `cli_main`
   gui/                `img-fp-gui` (feature `gui`, GTK 4.10+); see *The window*
   decode.rs           format sniffing and decode to one grayscale plane
+  heif.rs             libheif, loaded at run time (libloading), not linked
   sift.rs             scale-invariant local features
   index.rs            vocabulary tree, inverted file, containment scoring
   verify.rs           correspondence, geometry, pixel agreement, the policy
@@ -203,6 +217,10 @@ benchmark/
                       option swept at 512 and 640 (and 384) on all four corpora
                       and IMGS-ALL, the work-size table, the plain-vs-native
                       cost A/B (run.py, score1.py, tables.py, results.jsonl)
+  out/v24-constants/  the audit after 0.30.0: the fixed build on all four
+                      corpora and IMGS-ALL at 512 (def_*), and the pixel
+                      check's four constants swept on IMGS-ALL (build.sh makes
+                      one binary per value, run.py, tables.py, results.jsonl)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -749,12 +767,27 @@ The parts that are easy to get wrong:
   files on IMGS-ALL (3.9-4.4% of each corpus)**. The plane is hashed with a
   SipHash keyed at random per run, plus its size; a twin waits on a `OnceLock`
   for the first one's features and thumbnail, and the word lists are then
-  quantised once per analysis. Everything downstream still treats them as the
-  separate files they are, so reports on all four corpora are byte-identical
-  to the build before (`out/v22-plain-cpu`). It removes 4% of the extractions;
-  end to end, cold A B B A on each corpus, the plain build summed 2,234 ->
-  2,192 CPU-seconds (-1.9%), with single pairs spread over ±3-7%, so the
-  measured figure is the work removed rather than the clock.
+  quantised once per analysis. It removes 4% of the extractions; end to end,
+  cold A B B A on each corpus, the plain build summed 2,234 -> 2,192
+  CPU-seconds (-1.9%), with single pairs spread over ±3-7%, so the measured
+  figure is the work removed rather than the clock.
+
+  **And since the audit after 0.30.0 they are matched as one file**
+  (`lib::same_analysis`), the way byte-identical copies are. 0.30.0 left
+  everything downstream treating them as separate files, and that brought back
+  the copy bug word for word: each twin counted the others as matches, so a
+  picture held in three lossless formats was never re-asked mirrored or
+  inverted. Eight photographs and their mirror images, each saved as PNG, TIFF
+  and lossless WebP (48 files): the second look re-asked **0** files, found
+  **9 of 72** photograph-mirror pairs and made **15 groups for 8**; now 72 of
+  72 and 8 groups. A set is decided from the *analysis* (keypoints and
+  thumbnail hashed, then features and thumbnail compared whole) rather than
+  from the plane, so a cached run, which decodes nothing, decides it alike; a
+  featureless file is never in one, since two blank pictures stretch to the
+  same thumbnail. One member of each set is matched, the others take its pairs
+  through `with_copies` (now handed `match_of`, a byte original's pixel
+  original), and every pair inside a set is stated as `same_pixels`, a
+  relation of its own in all three reports and on the window's cards.
 
 ### What still misses
 
@@ -1261,6 +1294,69 @@ same pathological case of one word on hundreds of keypoints on both sides.
 So the cut went, and the cap stays as the one guard: it is a bound on work
 rather than a filter on evidence. Pair-for-pair, the build without the cut is
 the sweep's `TEXTURE=1000000000` rows.
+
+**The pixel check's four constants, swept after the 0.30.0 audit**
+(`out/v24-constants`, `tables.py`). `THUMB_LONG` 128, `GRID` 48, `BLOCK` 8 and
+the flat-block bar of 4 grey levels were in the first commit and had never been
+measured. Each was built in at a value (`build.sh`, an `option_env!` read since
+removed) and run on IMGS-ALL at 512, cached, everything else shipped; the
+thumbnail needs a cold run per size. † is a merge (a seed pair with 300 or more
+false pairs).
+
+| run | F1 | recall | perfect | cross-family | halves alt / hash | peak MB |
+|---|---|---|---|---|---|---|
+| **shipped** | **0.9781** | **96.11%** | **45** | **3** | 0.9756 / 0.9786 | 2,137 |
+| thumb 64 | 0.9740 | 95.30% | 43 | 89 | 0.9711 / 0.9744 | 1,923 |
+| thumb 96 | 0.9771 | 95.94% | 43 | 355 (`sea_photo` 255) | 0.9745 / 0.9777 | 2,028 |
+| thumb 192 | 0.9782 | 96.12% | 45 | 4 | 0.9753 / 0.9789 | 2,518 |
+| thumb 256 | 0.9790 | 96.29% | 44 | 91 | 0.9768 / 0.9798 | 2,988 |
+| grid 32 | 0.9680 | 96.33% | 45 | **26,247†** | 0.9765 / 0.9639 | |
+| grid 40 | 0.9730 | 96.23% | 46 | **13,243†** | 0.9759 / 0.9739 | |
+| grid 56 | 0.9761 | 95.73% | 44 | 7 | 0.9728 / 0.9767 | |
+| grid 64 | 0.9751 | 95.53% | 45 | 9 | 0.9722 / 0.9755 | |
+| grid 80 | 0.9720 | 94.93% | 44 | 7 | 0.9692 / 0.9720 | |
+| block 4 | 0.9775 | 96.02% | 45 | 252 (`Henares` 248) | 0.9752 / 0.9775 | |
+| block 6 | 0.9779 | 96.06% | 45 | 8 | 0.9756 / 0.9783 | |
+| block 12 | 0.9703 | 96.26% | 46 | **20,024†** | 0.9762 / 0.9683 | |
+| block 16 | 0.9514 | 96.21% | 46 | **64,571†** | 0.9759 / 0.9582 | |
+| flat 0 | 0.9613 | 92.71% | **2** | 7 | 0.9577 / 0.9570 | |
+| flat 1 | 0.9775 | 95.98% | 45 | 4 | 0.9749 / 0.9781 | |
+| flat 2 | 0.9776 | 96.01% | 45 | 4 | 0.9750 / 0.9780 | |
+| flat 3 | 0.9780 | 96.08% | 45 | 4 | 0.9754 / 0.9783 | |
+| flat 6 | 0.9788 | 96.26% | 46 | 3 | 0.9762 / 0.9798 | |
+| flat 8 | 0.9761 | 96.35% | 45 | **7,298†** | 0.9767 / 0.9745 | |
+| flat 12 | 0.9739 | 96.53% | 46 | **14,303†** | 0.9771 / 0.9753 | |
+
+What they say, one at a time:
+
+- **The thumbnail is on a plateau, and 128 is its low edge.** 192 is level
+  (0.9782) for 380 MB more peak; 256 is +0.0009 for 850 MB more and puts a
+  stray `Segovia` file back; 96 and 64 lose recall. No size merges. It stays.
+- **`GRID` and `BLOCK` are one number, and it is the thin one.** What decides
+  is the blocks a side, `GRID / BLOCK`: 4 and 5 merge (grid 32 and 40, block
+  12; `Segovia`, `Henares`, `bust`, `game`, `sea_photo` — the near-miss
+  siblings), 3 merges worst (block 16), and 6 (shipped), 7 and 8 are clean.
+  Fewer, larger blocks average a near miss's disagreeing patch away, and the
+  clean-anchor rule reads its worst block (`blk_min`), which a coarse grid
+  hides. So **the shipped value is one step from a cliff on both axes**, the
+  only constant here that is. More samples at the same blocks a side cost
+  recall (grid 56, 64, 80 at block 8 are 7, 8, 10 blocks a side, and fall
+  monotonically); block 6 (8 a side at 48 samples) is level, 0.9779, clean,
+  and two steps from the cliff in the block direction. Not changed: it moves
+  every published figure for a margin that has not yet been needed, and it
+  should be re-run on the single corpora and at 640 before anyone does.
+  Block 4 (12 a side, 16 samples a block) lets a stray `Henares` file in:
+  blocks that small are noisy.
+- **The flat bar's plateau runs from 1 to 6, and 8 merges.** At 0 no block
+  abstains, and dim or plain pictures fail the check: 45 perfect rows to 2,
+  which is the defect the bar exists for. 6 tops the F1 column (0.9788) one
+  step from `Segovia`'s merge at 8; 4 is two steps from it and stays.
+  Loosening it buys traps and then a merge, the documented shape.
+
+The seed halves do see these merges, unlike the thresholds' near-miss ones:
+the hash half falls with every one (0.9582-0.9753 against the shipped
+0.9786) while the alt half rises, so a split of the siblings across halves
+cannot be counted on in either direction.
 
 ### Speed and memory, and what has already been tried
 
@@ -2497,6 +2593,19 @@ analysis phase's transient — a JPEG's decode buffer a third the size, no
 full-size grey plane before the resample, no Gaussian planes in an octave — is
 below that peak here, and is what a corpus that peaks in its analysis gets.
 
+**An EXIF orientation is applied to the working plane, not to the picture**
+(`decode::orient`, since the audit after 0.30.0). The decoded picture used to
+be turned at full size before it was reduced: a second full-size buffer for the
+turn, walked column-wise, a cache miss a pixel — and a phone stores most of its
+portraits that way. Twenty-four 4032x3024 JPEGs at `-t 1`, orientation 6
+against the same pictures stored upright: decode 3 s against 2, total 3.83
+against 2.98 CPU-s and 46 MB against 34 MB peak before; **3.36 against 3.24
+CPU-s and level on memory after**. The mapping is `apply_orientation`'s pixel
+for pixel (`orienting_the_plane_is_orienting_the_picture`); what moves is which
+edge the box reduction trims when the size does not divide, so the cache went
+to `IMGFPC10`. The PNG row path now reads an `eXIf` chunk and orients the same
+way instead of falling back to the whole-picture path.
+
 ### What the second look costs, and the seven ways not to fix it
 
 It is **41% of a found corpus's run** and 1.5% of this one's. Profiled on the
@@ -3595,7 +3704,25 @@ mistyped root arrives as one `ENOENT`, which is what stops a two-root run
 silently scanning one of them; a followed link to nothing is one too, since it
 is the shape of a link into an unmounted drive, and it stops `--prune-cache`),
 an `--exclude` path that does not resolve and so excluded nothing, an image that described to **no
-features at all**, and a cache that could not be read, written or created.
+features at all**, a JPEG that is **cut off**, and a cache that could not be
+read, written or created.
+
+**A cut-off JPEG is analysed and called damaged** (`decode::jpeg_cut_off`).
+`zune-jpeg` decodes leniently, as browsers do, so a JPEG cut off at a third of
+its length was a picture two-thirds grey, analysed and matched as if whole —
+once chosen as its group's representative over the file it was cut from —
+while a cut-off PNG or WebP is refused (`Foto 38622.png`). It is still
+analysed, since what is there may be worth matching, but it is a problem, its
+rows say `DAMAGED` (`damaged: true` in the JSON, a `damaged` CSV column, a
+line on the window's card), and it is never cached, so every run says so. The
+test is structural, not the decoder's strict mode: segments by their lengths,
+then image data to the first marker that is not stuffing, a restart or fill;
+a file that ends before the end-of-image marker was cut off, and trailers after
+it are not read. Strict mode was tried first and rejected: it called one of
+IMGS's ffmpeg-written JPEGs, which libjpeg and PIL read, "Bad Huffman Code".
+The structural test flags **0 of 28,640** JPEGs across the four corpora, the
+found corpus and `~/Pictures`. Corruption inside data that does reach its end
+is not looked for.
 
 None of them changes a pair, which is the point — the results line reads the
 same either way, and the exit code is the only part of the difference a script
@@ -3714,7 +3841,27 @@ so the binary is the same size either way. What it cost was the build: two
 cooled clean `--release` builds of each, alternated, 519 / 522 CPU-s and 141 /
 144 s with it against 425 / 416 CPU-s and 132 / 128 s without, and 161 crates
 compiled against 124. Every format IMGS holds, plus BMP, GIF, PNM, TGA, TIFF,
-WebP and QOI, decodes to the same `--dump` bytes.
+WebP and QOI, decodes to the same `--dump` bytes. **Nor `rayon`**, since the
+audit after 0.30.0: all it did was let the `exr` crate build a thread pool of
+its own, one thread per core, for every compressed EXR it decoded — `-t 1`
+over eleven EXR files created 68 threads, 4 without it — and its blocks
+decompress to the same pixels in order.
+
+**libheif is loaded at run time, not linked** (`src/heif.rs`, through
+`libloading`), since the same audit. Linked, `libheif.so.1` was in the
+binary's `DT_NEEDED`, so the loader refused to start img-fp at all on a
+machine without it, a folder of JPEGs included, and `libheif-rs` 3.0's floor
+(1.17) was every user's. Now a missing library makes each HEIF file a problem
+naming it ("HEIF and AVIF need libheif, which is not installed") and nothing
+else changes; any libheif from 1.12 serves (`heif_init` is called when it
+exists, which is how 1.14+ finds its decoder plugins). Checked in Docker: the
+plain release binary runs on Debian 12 (libheif 1.15) and Ubuntu 22.04
+(1.12), with and without libheif, decoding HEIC and AVIF where it is there;
+and every HEIC and AVIF record of `derived/Desktop` is byte-identical to the
+`libheif-rs` build's. The CLI's real glibc floor was never 2.39, which the
+README said: it is 2.34, what Rust's std asks for, and `release.yml` now
+fails if that moves. The window still wants GTK 4.10, which no distribution
+with an older glibc ships.
 
 **DDS is not in the default extensions.** `image` 0.25 has no DDS decoder
 behind its `dds` feature ("The image format `DDS` is not supported"), so every
@@ -3725,7 +3872,16 @@ asks `reading_enabled`, so such a file is not an image, a skip. `.hdr`
 (Radiance) is decoded and is in the default extensions, and so, since 0.29,
 are `.pam` (PNM's `P7`), `.apng` (a PNG, read for its first frame) and `.dib`
 (a BMP): all three decoded under `-x '*'` and a default walk passed them over
-as "not searched". **An ICO holding an RGB PNG is read as that
+as "not searched". The same audit added `.avifs` and `.heics` (whose first
+picture libheif reads), `.jif`, `.jfi`, `.pjpeg`, `.pjp`, and Twitter's
+`.jpg_large`, `.jpg_orig` and `.png_large`. **And a file with no extension is
+read by its first 64 bytes** (`decode::sniffed_extensions`): a list takes it
+when they are a format the list names, so the default walk finds an
+extensionless picture and `-x gif` only an extensionless GIF. Until then the
+only way to reach one was `-x '*'`, which takes every other file too; one of
+IMGS's own seeds, `beach`, has no extension. A file with none and no picture
+inside is the same skip as before. (`vid-fp` cannot sniff a video that
+cheaply, and still does not.) **An ICO holding an RGB PNG is read as that
 PNG** (`decode::ico_png`). The crate refuses one, as the format says it should,
 and Pillow writes one whenever a picture with no alpha channel is saved as
 `.ico` — `Image.open("logo.jpg").save("favicon.ico")` — under a directory entry

@@ -142,6 +142,7 @@ pub struct Problems<'a> {
     unscannable: Tally,
     unreadable: Tally,
     featureless: Tally,
+    damaged: Tally,
     cache: Tally,
 }
 
@@ -160,6 +161,7 @@ impl<'a> Problems<'a> {
             unscannable: Tally::default(),
             unreadable: Tally::default(),
             featureless: Tally::default(),
+            damaged: Tally::default(),
             cache: Tally::default(),
         }
     }
@@ -168,11 +170,11 @@ impl<'a> Problems<'a> {
     // ---- skips
 
     /// A file the walk's extension list turned away — by default, one whose
-    /// extension names a format img-fp does not read, or that has none. The
-    /// filter is why a scan of a home directory is not an attempt to decode
-    /// it, and it is also the one thing that can hide a photograph: a JPEG
-    /// saved as `.txt`, or with no extension, is passed over here and never
-    /// sniffed unless `-x '*'` asks for it. Hence the count.
+    /// extension names a format img-fp does not read, or that has none and
+    /// whose first bytes are no picture. The filter is why a scan of a home
+    /// directory is not an attempt to decode it, and it is also the one thing
+    /// that can hide a photograph: a JPEG saved as `.txt` is passed over here
+    /// and never sniffed unless `-x '*'` asks for it. Hence the count.
     pub fn not_an_image(&mut self, path: &str) {
         record(self.log, &mut self.not_an_image, "skip/not-an-image", path.into());
     }
@@ -254,6 +256,16 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.featureless, "problem/featureless", path.into());
     }
 
+    /// An image that decoded only in part: a JPEG cut off in its image data,
+    /// which the decoder fills out with grey rather than refuse.
+    /// It is analysed — what is there may still be worth matching — and its
+    /// rows in the report say `damaged`, because a damaged file is the one
+    /// copy not to keep, and nothing about its pairs says so. Every other
+    /// format refuses such a file outright, which is `unreadable`.
+    pub fn damaged(&mut self, path: &str, err: &str) {
+        record(self.log, &mut self.damaged, "problem/damaged", format!("{path}: {err}"));
+    }
+
     /// The `--cache` file could not be read or could not be written. Nothing
     /// about the result changes — the cache is an optimisation and a run
     /// without it computes the same pairs — but the user asked for it, the
@@ -267,7 +279,7 @@ impl<'a> Problems<'a> {
 
     fn skips(&self) -> [(&Tally, &'static str); 7] {
         [
-            (&self.not_an_image, "file(s) whose extension is not searched (see -x)"),
+            (&self.not_an_image, "file(s) whose extension is not searched, or with none and no picture inside (see -x)"),
             (&self.set_aside, "Trash or thumbnail folder(s), not gone into (name one to scan it)"),
             (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
             (&self.symlink, "symlink(s), which are not followed (see --follow-symlinks)"),
@@ -277,7 +289,7 @@ impl<'a> Problems<'a> {
         ]
     }
 
-    fn problems(&self) -> [(&Tally, &'static str); 5] {
+    fn problems(&self) -> [(&Tally, &'static str); 6] {
         [
             (&self.unresolved_exclude, "--exclude path(s) could not be resolved; nothing was excluded for them"),
             (&self.unscannable, "path(s) could not be scanned"),
@@ -286,6 +298,7 @@ impl<'a> Problems<'a> {
             // label says what it costs the user rather than what the code did,
             // because the count is only worth printing for that consequence.
             (&self.featureless, "image(s) have no features and can only match a byte-identical copy"),
+            (&self.damaged, "image(s) are cut off and were analysed as far as they could be read"),
             (&self.cache, "cache problem(s)"),
         ]
     }

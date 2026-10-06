@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.30.0"
+version = "0.31.0"
 edition = "2024"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
@@ -24,10 +24,13 @@ flate2 = "1.1.10"
 indicatif = "0.17"
 # The decoders and nothing else. The default set adds `avif`, which is the
 # ravif/rav1e AV1 *encoder* and some sixty crates with it, and nothing here
-# encodes; AVIF is decoded by libheif. `rayon` is kept because it is how the
-# EXR decoder runs, so pixels stay what they were.
+# encodes; AVIF is decoded by libheif. Nor `rayon`: all it did here was let
+# the EXR decoder build a thread pool of its own, one thread per core, for
+# every compressed file — eight more threads per EXR whatever `-t` said, and
+# sixty-four with eight workers. Its blocks decompress to the same pixels in
+# order.
 image = { version = "0.25", default-features = false, features = [
-    "bmp", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp", "rayon",
+    "bmp", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp",
 ] }
 # The decoder `image` itself uses for PNG, asked directly so that a PNG can be
 # read a row at a time into the reduction; see `decode_png_rows`. Kept at the
@@ -39,7 +42,13 @@ png = "0.18"
 zune-jpeg = "0.5.15"
 zune-core = "0.5.3"
 jxl-oxide = "0.12.6"
-libheif-rs = { version = "3.0.0", default-features = false, features = ["v1_17"] }
+# libheif, for HEIC, HEIF and AVIF, is loaded when the first such file is met
+# rather than linked, so that a machine without it scans every other format;
+# see `src/heif.rs`.
+libloading = "0.8"
+# Already in the build through serde_json; finds the markers in a JPEG's image
+# data, to tell a cut-off file from a whole one (`decode::jpeg_cut_off`).
+memchr = "2"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

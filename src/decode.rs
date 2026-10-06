@@ -35,6 +35,10 @@ pub struct Decoded {
     /// The picture's own width and height, as shown: an EXIF orientation that
     /// turns it on its side is applied, as it is to `work`.
     pub size: (u32, u32),
+    /// What was wrong with a file that decoded only in part: a JPEG cut off
+    /// in its image data, which the decoder fills out with grey rather than
+    /// refuse. See `jpeg_cut_off`.
+    pub damaged: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,11 +57,56 @@ pub enum Kind {
 /// PNM family's own (`P7`, read by the same decoder as `ppm`), `apng` is a PNG
 /// whose first frame is the picture, and `dib` is a BMP. All three decoded
 /// under `-x '*'` and were passed over by a default walk as "not searched".
-pub const EXTENSIONS: [&str; 28] = [
-    "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp", "dib", "tif", "tiff", "avif",
-    "heic", "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "pam", "tga", "qoi", "exr",
+/// So were `avifs` and `heics`, the sequence forms, whose first picture
+/// libheif reads; the JPEG names `jif`, `jfi`, `pjpeg` and `pjp`; and
+/// `jpg_large`, `jpg_orig` and `png_large`, which is how a picture saved from
+/// Twitter is named.
+pub const EXTENSIONS: [&str; 37] = [
+    "jpg", "jpeg", "jpe", "jfif", "jif", "jfi", "pjpeg", "pjp", "jpg_large", "jpg_orig", "png",
+    "apng", "png_large", "gif", "webp", "bmp", "dib", "tif", "tiff", "avif", "avifs", "heic",
+    "heics", "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "pam", "tga", "qoi", "exr",
     "hdr", "ff",
 ];
+
+/// The extensions a file's first bytes say it could go by, read without
+/// trusting its name: what a walk asks of a file with no extension at all, to
+/// decide whether `-x` takes it. Empty for anything this cannot read, and for
+/// the formats with no signature to read (TGA) or one `sniff` does not look
+/// for (Radiance).
+pub fn sniffed_extensions(path: &Path) -> &'static [&'static str] {
+    use std::io::Read;
+    let mut head = [0u8; HEAD];
+    let got = std::fs::File::open(path).and_then(|f| {
+        let mut n = 0;
+        let mut f = f.take(HEAD as u64);
+        loop {
+            match f.read(&mut head[n..]) {
+                Ok(0) => return Ok(n),
+                Ok(k) => n += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    });
+    let Ok(got) = got else { return &[] };
+    match sniff(&head[..got]) {
+        Kind::Image(ImageFormat::Jpeg) => &["jpg", "jpeg", "jpe", "jfif", "jif", "jfi", "pjpeg", "pjp", "jpg_large", "jpg_orig"],
+        Kind::Image(ImageFormat::Png) => &["png", "apng", "png_large"],
+        Kind::Image(ImageFormat::Gif) => &["gif"],
+        Kind::Image(ImageFormat::WebP) => &["webp"],
+        Kind::Image(ImageFormat::Bmp) => &["bmp", "dib"],
+        Kind::Image(ImageFormat::Tiff) => &["tif", "tiff"],
+        Kind::Image(ImageFormat::Ico) => &["ico"],
+        Kind::Image(ImageFormat::Pnm) => &["pnm", "pbm", "pgm", "ppm", "pam"],
+        Kind::Image(ImageFormat::Qoi) => &["qoi"],
+        Kind::Image(ImageFormat::OpenExr) => &["exr"],
+        Kind::Image(ImageFormat::Farbfeld) => &["ff"],
+        Kind::Image(_) => &[],
+        Kind::Jxl => &["jxl"],
+        Kind::Heif => &["avif", "avifs", "heic", "heics", "heif", "hif"],
+        Kind::Unknown => &[],
+    }
+}
 
 /// The error `decode` gives for bytes that are no picture format at all, as
 /// opposed to a picture that would not decode. Under a wildcard walk the first
@@ -579,10 +628,15 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     let _claim = Claim::new(len + header.map_or(0, |p| decode_estimate(p, work_size)));
     let bytes = timed!(0, read_rest(f, head, len, path)?);
     let kind = sniff(&bytes);
+    let mut damaged = None;
     let (w, h, gray) = match kind {
         // The two formats that are almost all of a real corpus get their own
         // line in the profile; everything else shares `decode:codec`.
-        Kind::Image(ImageFormat::Jpeg) => timed!(22, decode_jpeg(&bytes, work_size)?),
+        Kind::Image(ImageFormat::Jpeg) => {
+            let (w, h, g, damage) = timed!(22, decode_jpeg(&bytes, work_size)?);
+            damaged = damage;
+            (w, h, g)
+        }
         Kind::Image(ImageFormat::Png) => timed!(23, decode_image_crate(&bytes, ImageFormat::Png, work_size)?),
         Kind::Image(ImageFormat::WebP) => timed!(24, decode_image_crate(&bytes, ImageFormat::WebP, work_size)?),
         Kind::Image(ImageFormat::Tiff) => timed!(25, decode_image_crate(&bytes, ImageFormat::Tiff, work_size)?),
@@ -601,7 +655,7 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
             None => bail!(NOT_AN_IMAGE),
         },
     };
-    Ok(Decoded { work: gray, size: (w, h) })
+    Ok(Decoded { work: gray, size: (w, h), damaged })
 }
 
 /// What a file's header says, read without decoding anything: its format and
@@ -648,12 +702,8 @@ pub fn probe(path: &Path) -> Option<Probe> {
             // Through a reader rather than `read_from_file`, which takes the
             // path as `&str`: a HEIC whose name is not UTF-8 had no size in
             // any report or on its card. libheif reads only what it seeks to.
-            let file = std::fs::File::open(path).ok()?;
-            let size = file.metadata().ok()?.len();
-            let reader = libheif_rs::StreamReader::new(std::io::BufReader::new(file), size);
-            let ctx = libheif_rs::HeifContext::read_from_reader(Box::new(reader)).ok()?;
-            let handle = ctx.primary_image_handle().ok()?;
-            (handle.width(), handle.height())
+            let p = crate::heif::Primary::from_file(std::fs::File::open(path).ok()?).ok()?;
+            (p.width(), p.height())
         }
         Kind::Unknown => {
             let mut rd = image::ImageReader::new(r).with_guessed_format().ok()?;
@@ -835,10 +885,81 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
 
 /// A JPEG, decoded to its luma plane when it has one and through the general
 /// path when it does not.
-fn decode_jpeg(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
-    match decode_jpeg_luma(bytes, work) {
-        Some(done) => Ok(done),
-        None => decode_whole(bytes, ImageFormat::Jpeg, work),
+fn decode_jpeg(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray, Option<String>)> {
+    let (w, h, g) = match decode_jpeg_luma(bytes, work) {
+        Some(done) => done,
+        None => decode_whole(bytes, ImageFormat::Jpeg, work)?,
+    };
+    let damage = jpeg_cut_off(bytes).then(|| "the file ends before its image data does".to_string());
+    Ok((w, h, g, damage))
+}
+
+/// Whether a JPEG stops before its picture does: its segments, read by their
+/// lengths, and then its image data, run off the end of the file before the
+/// marker that ends the image.
+///
+/// **This is how a cut-off JPEG is told from a whole one**, and it is asked of
+/// the file rather than of the decoder. Decoded leniently, as browsers do, a
+/// JPEG cut off at a third of its length is a picture whose last two thirds
+/// are grey, and it was analysed and matched as if nothing were wrong —
+/// chosen, once, as its group's representative over the intact file it was
+/// cut from. PNG, WebP and the rest refuse such a file, so it was a problem in
+/// every format but the commonest. The decoder's strict mode says so too, and
+/// says it as well of whole files it merely dislikes: one of IMGS's
+/// ffmpeg-written JPEGs, which libjpeg and PIL read, was "Bad Huffman Code".
+/// The structure is what a truncation breaks, and the structure is unambiguous:
+/// inside image data a 0xFF is followed by a stuffed zero, a restart marker or
+/// fill, so the first other marker is the next segment, and a file that ends
+/// first was cut off. What follows the end of the image — the trailers some
+/// cameras append — is not read. Corruption inside data that does reach its
+/// end is not caught, and is not what this is for.
+///
+/// A header this cannot read is the decoder's to judge, and is not called cut
+/// off here.
+fn jpeg_cut_off(b: &[u8]) -> bool {
+    let mut i = 2;
+    loop {
+        // A marker, after any fill.
+        if i >= b.len() {
+            return true;
+        }
+        if b[i] != 0xFF {
+            return false;
+        }
+        while i < b.len() && b[i] == 0xFF {
+            i += 1;
+        }
+        let Some(&m) = b.get(i) else { return true };
+        i += 1;
+        match m {
+            0xD9 => return false,
+            0x01 | 0xD0..=0xD8 => continue,
+            _ => {}
+        }
+        let Some(len) = b.get(i..i + 2).map(|l| u16::from_be_bytes([l[0], l[1]]) as usize) else { return true };
+        if len < 2 {
+            return false;
+        }
+        i += len;
+        if i > b.len() {
+            return true;
+        }
+        if m != 0xDA {
+            continue;
+        }
+        // Image data, to the next marker that is not part of it.
+        loop {
+            match memchr::memchr(0xFF, &b[i..]) {
+                None => return true,
+                Some(k) => i += k,
+            }
+            match b.get(i + 1) {
+                None => return true,
+                Some(0x00) | Some(0xD0..=0xD7) => i += 2,
+                Some(0xFF) => i += 1,
+                Some(_) => break,
+            }
+        }
     }
 }
 
@@ -874,23 +995,59 @@ fn decode_jpeg_luma(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
         .exif()
         .and_then(|e| image::metadata::Orientation::from_exif_chunk(e))
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let rotates = !matches!(
-        orientation,
-        image::metadata::Orientation::NoTransforms
-            | image::metadata::Orientation::FlipHorizontal
-            | image::metadata::Orientation::FlipVertical
-            | image::metadata::Orientation::Rotate180
-    );
-    let _permit = cover(bytes.len() as u64 + n as u64 * (1 + rotates as u64) + working_bytes(dw, dh, work));
+    let _permit = cover(bytes.len() as u64 + n as u64 + working_bytes(dw, dh, work));
     let mut buf = vec![0u8; n];
     timed!(1, dec.decode_into(&mut buf).ok()?);
-    let mut img = DynamicImage::ImageLuma8(image::GrayImage::from_raw(dw as u32, dh as u32, buf)?);
-    if orientation != image::metadata::Orientation::NoTransforms {
-        img.apply_orientation(orientation);
+    let gray = timed!(2, reduce_to_gray(dw, dh, &buf, 1, false, work));
+    drop(buf);
+    let (w, h) = shown_size(dw as u32, dh as u32, orientation);
+    Some((w, h, orient(gray, orientation)))
+}
+
+/// The size a picture stored at `w` x `h` is shown at.
+fn shown_size(w: u32, h: u32, o: image::metadata::Orientation) -> (u32, u32) {
+    if turns(o) { (h, w) } else { (w, h) }
+}
+
+/// A working plane, turned the way an EXIF orientation says to show it.
+///
+/// **The picture is reduced first and turned after**, as a plane of a few
+/// hundred pixels a side. It used to be the other way round: the decoded
+/// picture was turned at full size, which held a second copy of it for the
+/// turn and walked the first column-wise, a cache miss a pixel — and a phone
+/// stores most of its portraits that way. Twenty-four 4032x3024 JPEGs with
+/// orientation 6 decoded in 3 CPU-seconds against 2 for the same pictures
+/// stored upright, and held 12 MB more a worker. The mapping is
+/// `apply_orientation`'s, pixel for pixel; what differs is only which edge the
+/// box reduction trims when the size does not divide.
+fn orient(g: Gray, o: image::metadata::Orientation) -> Gray {
+    use image::metadata::Orientation::*;
+    if o == NoTransforms {
+        return g;
     }
-    let (w, h) = (img.width(), img.height());
-    let gray = timed!(2, dynamic_to_gray(&img, work));
-    Some((w, h, gray))
+    let (w, h) = (g.w, g.h);
+    let (ow, oh) = if turns(o) { (h, w) } else { (w, h) };
+    // Where output pixel (x, y) is read from.
+    let from = |x: usize, y: usize| -> (usize, usize) {
+        match o {
+            Rotate90 => (y, h - 1 - x),
+            Rotate180 => (w - 1 - x, h - 1 - y),
+            Rotate270 => (w - 1 - y, x),
+            FlipHorizontal => (w - 1 - x, y),
+            FlipVertical => (x, h - 1 - y),
+            Rotate90FlipH => (y, x),
+            Rotate270FlipH => (w - 1 - y, h - 1 - x),
+            NoTransforms => (x, y),
+        }
+    };
+    let mut out = Gray::new(ow, oh);
+    for y in 0..oh {
+        for x in 0..ow {
+            let (sx, sy) = from(x, y);
+            out.px[y * ow + x] = g.px[sy * w + sx];
+        }
+    }
+    out
 }
 
 /// Any format `image` reads, decoded whole and then reduced.
@@ -899,17 +1056,10 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
     reader.limits(limits());
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
-    // The header already says how large the pixels will be. A rotation holds
-    // two of them for a moment, since it cannot be done in place, and a
-    // channel layout the reduction has no specialisation for is converted to
-    // RGBA8 first, which holds another.
-    let rotates = !matches!(
-        orientation,
-        image::metadata::Orientation::NoTransforms
-            | image::metadata::Orientation::FlipHorizontal
-            | image::metadata::Orientation::FlipVertical
-            | image::metadata::Orientation::Rotate180
-    );
+    // The header already says how large the pixels will be. A channel layout
+    // the reduction has no specialisation for is converted to RGBA8 first,
+    // which holds another copy. An orientation is applied to the working
+    // plane, not to this (see `orient`).
     let converts = !matches!(
         decoder.color_type(),
         image::ColorType::Rgb8 | image::ColorType::Rgba8 | image::ColorType::L8 | image::ColorType::La8
@@ -917,17 +1067,15 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
     let (dw, dh) = decoder.dimensions();
     let _permit = cover(
         bytes.len() as u64
-            + decoder.total_bytes().saturating_mul(1 + rotates as u64)
+            + decoder.total_bytes()
             + if converts { dw as u64 * dh as u64 * 4 } else { 0 }
             + working_bytes(dw as usize, dh as usize, work),
     );
-    let mut img = timed!(1, DynamicImage::from_decoder(decoder)?);
-    if orientation != image::metadata::Orientation::NoTransforms {
-        img.apply_orientation(orientation);
-    }
-    let (w, h) = (img.width(), img.height());
+    let img = timed!(1, DynamicImage::from_decoder(decoder)?);
     let gray = timed!(2, dynamic_to_gray(&img, work));
-    Ok((w, h, gray))
+    let (w, h) = shown_size(img.width(), img.height(), orientation);
+    drop(img);
+    Ok((w, h, orient(gray, orientation)))
 }
 
 /// A PNG decoded a row at a time straight into the box reduction, so that the
@@ -944,8 +1092,8 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
 ///
 /// `None` means "take the general path", and it is what this says about
 /// anything it is not sure it would read identically: an interlaced or
-/// animated file, sixteen bits a channel, an EXIF chunk that might rotate the
-/// picture, a frame the general path's allocation limit would refuse — and
+/// animated file, sixteen bits a channel, a frame the general path's
+/// allocation limit would refuse — and
 /// any error at all, so that a broken file fails with the message the general
 /// path gives it. That costs a truncated file a second decode, which is a
 /// price only broken files pay.
@@ -961,9 +1109,16 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     dec.set_transformations(png::Transformations::EXPAND);
     let mut reader = dec.read_info().ok()?;
     let info = reader.info();
-    if info.interlaced || info.animation_control.is_some() || info.exif_metadata.is_some() {
+    if info.interlaced || info.animation_control.is_some() {
         return None;
     }
+    // Read where the general path reads it — the eXIf chunk ahead of the
+    // pixels — and applied the same way, to the working plane.
+    let orientation = info
+        .exif_metadata
+        .as_deref()
+        .and_then(image::metadata::Orientation::from_exif_chunk)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
     let (w, h) = (info.width, info.height);
     let (color, depth) = reader.output_color_type();
     if depth != png::BitDepth::Eight || reader.output_buffer_size()? > image_max_alloc {
@@ -980,7 +1135,8 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
         png::ColorType::GrayscaleAlpha => png_rows::<_, 2, true>(&mut reader, wu, hu, work)?,
         png::ColorType::Indexed => return None,
     });
-    Some((w, h, reduced))
+    let (w, h) = shown_size(w, h, orientation);
+    Some((w, h, orient(reduced, orientation)))
 }
 
 fn png_rows<R: std::io::BufRead + std::io::Seek, const CH: usize, const ALPHA: bool>(
@@ -1817,34 +1973,26 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
 }
 
 fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
-    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
-    let lib = LibHeif::new();
-    let ctx = HeifContext::read_from_bytes(bytes).map_err(|e| anyhow::anyhow!("heif: {e}"))?;
-    let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
-    let has_alpha = handle.has_alpha_channel();
+    let p = crate::heif::Primary::from_bytes(bytes)?;
+    let has_alpha = p.has_alpha();
     // libheif has limits of its own, but they are a fixed size and not this
     // machine's; the same refusal as every other decoder, from the header.
-    too_large("heif", handle.width(), handle.height(), if has_alpha { 8 } else { 6 }, max_alloc())?;
-    let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
+    too_large("heif", p.width(), p.height(), if has_alpha { 8 } else { 6 }, max_alloc())?;
     // The decoded interleaved plane, and as much again. The second half used
     // to be a copy of the plane with its stride padding packed out; the rows
     // now go to the reduction from where they lie, and the claim is left as it
     // was rather than guessed down to what libheif holds while it converts.
     let _permit = cover(
         bytes.len() as u64
-            + (handle.width() as u64) * (handle.height() as u64) * if has_alpha { 8 } else { 6 }
-            + working_bytes(handle.width() as usize, handle.height() as usize, work),
+            + (p.width() as u64) * (p.height() as u64) * if has_alpha { 8 } else { 6 }
+            + working_bytes(p.width() as usize, p.height() as usize, work),
     );
-    let img = lib
-        .decode(&handle, ColorSpace::Rgb(chroma), None)
-        .map_err(|e| anyhow::anyhow!("heif decode: {e}"))?;
-    let planes = img.planes();
-    let plane = planes.interleaved.context("heif: no interleaved plane")?;
-    let (w, h) = (plane.width as usize, plane.height as usize);
+    let img = p.decode()?;
+    let (data, stride, w, h) = img.plane();
     let ch = if has_alpha { 4 } else { 3 };
     let mut y = 0;
     let g = reduce_rows(w, h, ch, has_alpha, work, |line| {
-        line.copy_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * ch]);
+        line.copy_from_slice(&data[y * stride..y * stride + w * ch]);
         y += 1;
     });
     Ok((w as u32, h as u32, g))
@@ -1924,21 +2072,15 @@ fn preview_jxl(bytes: &[u8]) -> Result<DynamicImage> {
 }
 
 fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
-    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
-    let lib = LibHeif::new();
-    let ctx = HeifContext::read_from_bytes(bytes).map_err(|e| anyhow::anyhow!("heif: {e}"))?;
-    let handle = ctx.primary_image_handle().map_err(|e| anyhow::anyhow!("heif: {e}"))?;
-    let has_alpha = handle.has_alpha_channel();
-    too_large("heif", handle.width(), handle.height(), if has_alpha { 8 } else { 6 }, max_alloc())?;
-    let chroma = if has_alpha { RgbChroma::Rgba } else { RgbChroma::Rgb };
-    let img = lib.decode(&handle, ColorSpace::Rgb(chroma), None).map_err(|e| anyhow::anyhow!("heif decode: {e}"))?;
-    let planes = img.planes();
-    let plane = planes.interleaved.context("heif: no interleaved plane")?;
-    let (w, h) = (plane.width as usize, plane.height as usize);
+    let p = crate::heif::Primary::from_bytes(bytes)?;
+    let has_alpha = p.has_alpha();
+    too_large("heif", p.width(), p.height(), if has_alpha { 8 } else { 6 }, max_alloc())?;
+    let img = p.decode()?;
+    let (data, stride, w, h) = img.plane();
     let ch = if has_alpha { 4 } else { 3 };
     let mut packed = Vec::with_capacity(w * h * ch);
     for y in 0..h {
-        packed.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * ch]);
+        packed.extend_from_slice(&data[y * stride..y * stride + w * ch]);
     }
     Ok(if has_alpha {
         DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w as u32, h as u32, packed).context("heif: frame size")?)
@@ -2264,6 +2406,77 @@ mod bench {
             .write_to(&mut Cursor::new(&mut rgba_icon), ImageFormat::Ico)
             .unwrap();
         assert!(decode_image_crate(&rgba_icon, ImageFormat::Ico, 384).is_ok(), "a valid icon takes the crate's own path");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Turning the working plane is turning the picture: for a picture small
+    /// enough that nothing is reduced, every orientation gives the plane the
+    /// picture turned first would have given, value for value.
+    #[test]
+    fn orienting_the_plane_is_orienting_the_picture() {
+        use image::metadata::Orientation::*;
+        let (w, h) = (37u32, 23u32);
+        let pic = image::GrayImage::from_fn(w, h, |x, y| image::Luma([((x * 7 + y * 31) % 251) as u8]));
+        let plane = reduce_to_gray(w as usize, h as usize, pic.as_raw(), 1, false, 512);
+        for o in [NoTransforms, Rotate90, Rotate180, Rotate270, FlipHorizontal, FlipVertical, Rotate90FlipH, Rotate270FlipH] {
+            let mut turned = DynamicImage::ImageLuma8(pic.clone());
+            turned.apply_orientation(o);
+            let want = reduce_to_gray(turned.width() as usize, turned.height() as usize, turned.as_bytes(), 1, false, 512);
+            let got = orient(plane.clone(), o);
+            assert_eq!((got.w, got.h), (want.w, want.h), "{o:?}");
+            assert_eq!(got.px, want.px, "{o:?}");
+            assert_eq!(shown_size(w, h, o), (turned.width(), turned.height()), "{o:?}");
+        }
+    }
+
+    /// A JPEG cut off part-way decodes — the decoder fills the rest with grey
+    /// — and says it is damaged; the whole file does not.
+    #[test]
+    fn a_cut_off_jpeg_decodes_and_says_it_is_damaged() {
+        let pic = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 300, |x, y| {
+            image::Rgb([((x * 13 + y * 7) % 256) as u8, ((x ^ y) % 256) as u8, ((x * y) % 256) as u8])
+        }));
+        let mut jpg = Vec::new();
+        pic.write_to(&mut Cursor::new(&mut jpg), ImageFormat::Jpeg).unwrap();
+        let dir = std::env::temp_dir().join(format!("img-fp-damaged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (whole, cut) = (dir.join("whole.jpg"), dir.join("cut.jpg"));
+        std::fs::write(&whole, &jpg).unwrap();
+        std::fs::write(&cut, &jpg[..jpg.len() / 3]).unwrap();
+        let d = decode(&whole, 512).unwrap();
+        assert!(d.damaged.is_none(), "{:?}", d.damaged);
+        let d = decode(&cut, 512).unwrap();
+        assert!(d.damaged.is_some(), "a third of a JPEG is damaged");
+        assert_eq!(d.size, (400, 300), "and is still decoded at its size");
+        // What follows the end of the image is a trailer, not damage.
+        let mut trailer = jpg.clone();
+        trailer.extend(b"SEFT trailer \xff\xd8 written by a camera");
+        assert!(!jpeg_cut_off(&trailer));
+        // Cut anywhere in the image data, it is cut off.
+        for at in [jpg.len() / 2, jpg.len() - 3, jpg.len() - 1] {
+            assert!(jpeg_cut_off(&jpg[..at]), "cut at {at} of {}", jpg.len());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file with no extension is asked by its first bytes.
+    #[test]
+    fn a_file_with_no_extension_is_known_by_its_bytes() {
+        let dir = std::env::temp_dir().join(format!("img-fp-sniffed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pic = image::DynamicImage::ImageRgb8(image::RgbImage::new(16, 16));
+        let mut png = Vec::new();
+        pic.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+        std::fs::write(dir.join("picture"), &png).unwrap();
+        std::fs::write(dir.join("notes"), b"BMW service record, nothing to see here").unwrap();
+        assert!(sniffed_extensions(&dir.join("picture")).contains(&"png"));
+        assert!(sniffed_extensions(&dir.join("notes")).is_empty());
+        assert!(sniffed_extensions(&dir.join("absent")).is_empty());
+        let (default, _) = crate::extensions::normalize(&EXTENSIONS.map(String::from)).unwrap();
+        assert!(default.accepts(&dir.join("picture")));
+        assert!(!default.accepts(&dir.join("notes")));
+        let (gifs, _) = crate::extensions::normalize(&["gif".to_string()]).unwrap();
+        assert!(!gifs.accepts(&dir.join("picture")), "a list takes only the formats it names");
         std::fs::remove_dir_all(&dir).ok();
     }
 

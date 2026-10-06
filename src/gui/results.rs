@@ -1025,6 +1025,9 @@ fn evidence(m: &Member) -> String {
     if m.relation.as_deref() == Some("identical") {
         return "identical copy of the reference".into();
     }
+    if m.relation.as_deref() == Some("same_pixels") {
+        return "same picture as the reference, saved differently".into();
+    }
     let (Some(ov), Some(corr)) = (m.frame_overlap, m.pixel_correlation) else {
         return String::new();
     };
@@ -1050,6 +1053,10 @@ fn facts(m: &Member) -> String {
     }
     if let Some(b) = m.size_bytes {
         parts.push(size(b));
+    }
+    // The one copy not to keep, and nothing else on the card says so.
+    if m.damaged {
+        parts.push("damaged file".into());
     }
     parts.join(" · ")
 }
