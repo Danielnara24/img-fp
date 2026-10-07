@@ -117,7 +117,10 @@ jobs:
         # brings, plus, for the window, GTK 4 and the libraries it is built
         # on. Anything else -- libheif linked again, a stray libjxl, libwebp,
         # libdav1d -- is a dependency no release note tells the user about.
-        # And the CLI asks for no glibc newer than 2.34.
+        # And neither binary asks for a glibc newer than 2.34. The window
+        # once did, through std::process::Command's weak pidfd symbols
+        # (GLIBC_2.39): harmless, but the loader of every older glibc
+        # printed a warning on each start.
         run: |
           BASE='libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libstdc\+\+\.so\.6|ld-linux-x86-64\.so\.2'
           GTK='libgtk-4\.so\.1|libgio-2\.0\.so\.0|libgobject-2\.0\.so\.0|libglib-2\.0\.so\.0|libgmodule-2\.0\.so\.0|libpango-1\.0\.so\.0|libpangocairo-1\.0\.so\.0|libcairo\.so\.2|libcairo-gobject\.so\.2|libgdk_pixbuf-2\.0\.so\.0|libgraphene-1\.0\.so\.0|libharfbuzz\.so\.0'
@@ -129,15 +132,19 @@ jobs:
               exit 1
             fi
           }
+          glibc_floor() {
+            NEWEST="$(objdump -T "$1" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
+            echo "$1 newest glibc symbol: $NEWEST"
+            if [ "$(printf '%s\nGLIBC_2.34\n' "$NEWEST" | sort -V | tail -1)" != "GLIBC_2.34" ]; then
+              echo "::error::$1 needs $NEWEST; the README promises glibc 2.34"
+              exit 1
+            fi
+          }
           target/release/img-fp --version
           check target/release/img-fp "$BASE"
-          NEWEST="$(objdump -T target/release/img-fp | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
-          echo "newest glibc symbol: $NEWEST"
-          if [ "$(printf '%s\nGLIBC_2.34\n' "$NEWEST" | sort -V | tail -1)" != "GLIBC_2.34" ]; then
-            echo "::error::img-fp needs $NEWEST; the README promises glibc 2.34"
-            exit 1
-          fi
+          glibc_floor target/release/img-fp
           check target/release/img-fp-gui "$BASE|$GTK"
+          glibc_floor target/release/img-fp-gui
           # The window's scan runs without a display, so it can be smoke
           # tested: an empty folder is a clean run that finds nothing.
           mkdir -p "$RUNNER_TEMP/empty"
@@ -190,8 +197,9 @@ jobs:
             without them those files are reported as problems and every other
             format works.
 
-            The desktop app, `img-fp-gui`, also needs GTK 4.10 or newer, which
-            Ubuntu 24.04 and later have:
+            The desktop app, `img-fp-gui`, also needs GTK 4.10 or newer
+            (Ubuntu 24.04+, Debian 13+, Fedora 38+, RHEL 9+, openSUSE Leap
+            15.6+):
 
             ```bash
             sudo apt install libgtk-4-1

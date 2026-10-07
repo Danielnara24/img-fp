@@ -3579,6 +3579,16 @@ colour `decode::preview`, which only the window calls).
   ended by SIGKILL is "did not answer the cancel" only when Cancel was
   pressed; otherwise it is named as killed, since the OOM killer sends the
   same signal and was being reported as the user's own cancel.
+  **And it is started by a fork and `execv` of its own** (`scan::spawn`),
+  not `std::process::Command`, since 0.33.1. `Command` references
+  `pidfd_spawnp` and `pidfd_getpid` weakly at `GLIBC_2.39`, and the loader of
+  every older glibc printed "weak version `GLIBC_2.39' not found" on each
+  start (RHEL 9, Leap 15.6), though nothing failed. With a `pre_exec`,
+  `Command` forked anyway, and `spawn` is that fork step for step: three
+  `dup2`s, SIGPIPE to its default, the death signal, exec. GLib's spawn takes
+  UTF-8 arguments, and a path need not be. `release.yml` now holds the
+  window to glibc 2.34 as it does the CLI; checked in Docker on Rocky 9.8 and
+  Leap 15.6 (scan, Cancel, Trash, the window killed mid-scan).
 - **The GTK base follows the desktop's text colour** (`follow_dark_text`).
   A plain GTK 4 app gets GTK's light default plus the user's
   `~/.config/gtk-4.0/gtk.css`, and desktops that theme libadwaita put a whole

@@ -20,12 +20,22 @@
 //!
 //! **If the window dies first**, the kernel sends the worker SIGTERM
 //! (`PR_SET_PDEATHSIG`), which img-fp treats as Ctrl-C.
+//!
+//! **Why not `std::process::Command`.** It references `pidfd_spawnp` and
+//! `pidfd_getpid` as weak symbols versioned `GLIBC_2.39`, and the loader of
+//! any older glibc prints "weak version `GLIBC_2.39' not found" on every
+//! start of the window (RHEL 9, Leap 15.6, Fedora 38 and 39), though nothing
+//! fails. With a `pre_exec` it forks anyway, so `spawn` below is the fork it
+//! made, step for step: the three `dup2`s, SIGPIPE back to its default, the
+//! death signal, `execv`. GLib's spawn would do as well, but it takes its
+//! arguments as UTF-8 and a path need not be.
 
-use std::ffi::OsString;
-use std::io::BufRead;
-use std::os::unix::process::CommandExt;
+use std::ffi::{CString, OsString};
+use std::io::{BufRead, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -60,11 +70,104 @@ pub struct Scan {
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
+    fn fork() -> i32;
+    fn dup2(old: i32, new: i32) -> i32;
+    fn signal(sig: i32, handler: usize) -> usize;
+    fn execv(path: *const std::ffi::c_char, argv: *const *const std::ffi::c_char) -> i32;
+    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn __errno_location() -> *mut i32;
+    fn _exit(code: i32) -> !;
 }
 const SIGINT: i32 = 2;
 const SIGKILL: i32 = 9;
+const SIGPIPE: i32 = 13;
 const SIGTERM: i32 = 15;
+const SIG_DFL: usize = 0;
 const PR_SET_PDEATHSIG: i32 = 1;
+const EINTR: i32 = 4;
+
+/// What a started worker hands back: its pid and the read ends of its stdout
+/// and stderr.
+struct Child {
+    pid: i32,
+    stdout: std::io::PipeReader,
+    stderr: std::io::PipeReader,
+}
+
+fn c_string(s: &std::ffi::OsStr) -> std::io::Result<CString> {
+    CString::new(s.as_bytes()).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "an argument holds a NUL byte"))
+}
+
+/// Run `program` with `argv` (its first entry is the child's `argv[0]`),
+/// stdin from `/dev/null` and stdout and stderr piped, as
+/// `std::process::Command` does with a `pre_exec`; see the module's note.
+fn spawn(program: &Path, argv: &[OsString]) -> std::io::Result<Child> {
+    // Everything the child touches is made before the fork: between fork and
+    // exec only async-signal-safe calls are allowed, so no allocation.
+    let program = c_string(program.as_os_str())?;
+    let argv = argv.iter().map(|a| c_string(a)).collect::<std::io::Result<Vec<_>>>()?;
+    let mut argp: Vec<*const std::ffi::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    argp.push(std::ptr::null());
+    // Every one of these is opened close-on-exec, and `dup2` clears that on
+    // the copy it makes, so the child keeps its stdio and nothing else.
+    let null: OwnedFd = std::fs::File::open("/dev/null")?.into();
+    let (out_r, out_w) = std::io::pipe()?;
+    let (err_r, err_w) = std::io::pipe()?;
+    // How the child says exec failed: its errno, or nothing once exec has
+    // closed the pipe.
+    let (mut fail_r, fail_w) = std::io::pipe()?;
+    let (null_fd, out_fd, err_fd, fail_fd) = (null.as_raw_fd(), out_w.as_raw_fd(), err_w.as_raw_fd(), fail_w.as_raw_fd());
+
+    // SAFETY: the child runs only async-signal-safe calls on memory made
+    // before the fork, and leaves by `execv` or `_exit`.
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        unsafe {
+            if dup2(null_fd, 0) >= 0 && dup2(out_fd, 1) >= 0 && dup2(err_fd, 2) >= 0 {
+                signal(SIGPIPE, SIG_DFL);
+                prctl(PR_SET_PDEATHSIG, SIGTERM as u64, 0, 0, 0);
+                execv(program.as_ptr(), argp.as_ptr());
+            }
+            let errno = (*__errno_location()).to_ne_bytes();
+            write(fail_fd, errno.as_ptr(), errno.len());
+            _exit(127);
+        }
+    }
+    if pid < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    drop((null, out_w, err_w, fail_w));
+    let mut errno = [0u8; 4];
+    let mut got = 0;
+    while got < 4 {
+        match fail_r.read(&mut errno[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    if got == 4 {
+        let _ = wait(pid);
+        return Err(std::io::Error::from_raw_os_error(i32::from_ne_bytes(errno)));
+    }
+    Ok(Child { pid, stdout: out_r, stderr: err_r })
+}
+
+/// Wait for `pid` to end and reap it.
+fn wait(pid: i32) -> std::io::Result<std::process::ExitStatus> {
+    let mut status = 0;
+    loop {
+        if unsafe { waitpid(pid, &mut status, 0) } == pid {
+            return Ok(std::process::ExitStatus::from_raw(status));
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(EINTR) {
+            return Err(e);
+        }
+    }
+}
 
 impl Scan {
     /// Start a scan of `argv`, an img-fp command line, and a channel of what
@@ -80,29 +183,19 @@ impl Scan {
         // is, which is also the worker it should run.
         let exe = std::env::current_exe()?;
         let proc_exe = Path::new("/proc/self/exe");
-        let mut cmd = if proc_exe.exists() { Command::new(proc_exe) } else { Command::new(&exe) };
-        cmd.arg0(&exe);
-        cmd.arg(WORKER_FLAG).arg(&result).args(argv);
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // SAFETY: `prctl` is async-signal-safe and touches nothing of the
-        // parent's; it is the only thing run between fork and exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                prctl(PR_SET_PDEATHSIG, SIGTERM as u64, 0, 0, 0);
-                Ok(())
-            });
-        }
-        let mut child = match cmd.spawn() {
+        let program = if proc_exe.exists() { proc_exe } else { exe.as_path() };
+        let mut args = vec![exe.clone().into_os_string(), WORKER_FLAG.into(), result.clone().into_os_string()];
+        args.extend(argv.iter().cloned());
+        let child = match spawn(program, &args) {
             Ok(c) => c,
             Err(e) => {
                 let _ = result.parent().map(std::fs::remove_dir);
                 return Err(e);
             }
         };
-        let pid = child.id() as i32;
+        let pid = child.pid;
         let (tx, rx) = async_channel::unbounded();
-        let out = child.stdout.take().expect("piped");
-        let err = child.stderr.take().expect("piped");
+        let (out, err) = (child.stdout, child.stderr);
         let readers = [
             {
                 let tx = tx.clone();
@@ -133,13 +226,12 @@ impl Scan {
         {
             let exited = exited.clone();
             std::thread::spawn(move || {
-                let status = child.wait();
+                let status = wait(pid);
                 exited.store(true, Ordering::SeqCst);
                 // Everything it wrote before it ended arrives before this does.
                 for r in readers {
                     let _ = r.join();
                 }
-                use std::os::unix::process::ExitStatusExt;
                 let (code, signal) = match status {
                     Ok(s) => (s.code(), s.signal()),
                     Err(_) => (None, None),

@@ -152,11 +152,12 @@ refused before anything runs.
 `img-fp-gui` is a window over the same scan: pick folders and options, watch
 the progress, then go through the groups and choose which images to move to the
 Trash. Nothing is marked for you. It has the same requirements as `img-fp`,
-plus GTK 4.10 or newer (Ubuntu 24.04+, Debian 13+, Fedora 38+):
+plus GTK 4.10 or newer (Ubuntu 24.04+, Debian 13+, Fedora 38+, RHEL 9+,
+openSUSE Tumbleweed and Leap 15.6+, Arch):
 
 ```bash
 sudo apt install libgtk-4-1          # Ubuntu, Debian
-sudo dnf install gtk4                # Fedora, RHEL 10
+sudo dnf install gtk4                # Fedora, RHEL 9+
 sudo pacman -S gtk4                  # Arch
 sudo zypper install libgtk-4-1       # openSUSE
 curl -L -o img-fp-gui \
