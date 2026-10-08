@@ -324,7 +324,7 @@ impl Setup {
         ));
         let use_cache = gtk::CheckButton::with_mnemonic(l::USE_CACHE);
         let cache_path = entry();
-        cache_path.set_placeholder_text(Some("the default: ~/.cache/img-fp/analysis.bin"));
+        cache_path.set_placeholder_text(Some(&format!("the default: ~/.cache/img-fp/{}", img_fp::cache_file_name())));
         let cache_choose = gtk::Button::with_mnemonic(l::CACHE_CHOOSE);
         let clear_cache = gtk::CheckButton::with_mnemonic(l::CLEAR_CACHE);
         let prune_cache = gtk::CheckButton::with_mnemonic(l::PRUNE_CACHE);
@@ -494,7 +494,7 @@ impl Setup {
             let me = Rc::downgrade(&me);
             move |_| {
                 if let Some(me) = me.upgrade() {
-                    me.choose_file(me.cache_path.clone(), "Cache file", "analysis.bin");
+                    me.choose_file(me.cache_path.clone(), "Cache file", &img_fp::cache_file_name());
                 }
             }
         });

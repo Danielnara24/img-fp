@@ -46,6 +46,7 @@ mod sift;
 mod simd;
 mod suggest;
 pub use suggest::{by_group, Action, Mode as SuggestMode, Seat};
+pub use cache::file_name as cache_file_name;
 mod verify;
 mod walk;
 
@@ -184,9 +185,10 @@ struct Args {
 
     /// Use this cache file instead of the default one.
     ///
-    /// The default is `$XDG_CACHE_HOME/img-fp/analysis.bin`, or
-    /// `~/.cache/img-fp/analysis.bin`. A folder gets the default file name
-    /// inside it.
+    /// The default is `analysis-FORMAT.bin` in `$XDG_CACHE_HOME/img-fp`, or in
+    /// `~/.cache/img-fp`, where FORMAT is the cache format this version
+    /// writes, so each version keeps a default file of its own. A folder gets
+    /// the default file name inside it.
     // Allowed beside `--no-cache` only to say which file `--clear-cache`
     // deletes; see `validate`.
     #[arg(long, value_name = "PATH")]

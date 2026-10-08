@@ -94,7 +94,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// one version apart, sharing the default cache, each emptying the other's
 /// on every run — a 30 MB cache came out of one run at 145 KB, with exit 0
 /// and nothing said. Now the run keeps nothing, says why, and `--clear-cache`
-/// or another `--cache` is how to start a new one.
+/// or another `--cache` is how to start a new one. Since the default file's
+/// name carries the format (`file_name`), that is met only through a
+/// `--cache` naming another version's file: two versions never share the
+/// default.
 ///
 /// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
 /// 05: a small picture is enlarged no further than the working size
@@ -177,9 +180,23 @@ pub struct Key {
     pub ctime: i64,
 }
 
-/// The default cache is one file in one directory, named the way `vid-fp`
-/// names its own.
-const FILE_NAME: &str = "analysis.bin";
+/// The default cache file's name, which carries the format: `analysis-IMGFPC11.bin`.
+///
+/// **Each format has a default file of its own**, so that a format change
+/// starts a new file beside the old one instead of meeting it. With one name
+/// for every format, an upgrade found the old version's file there, left it
+/// alone (see the note on `MAGIC`), and so cached nothing on any run until
+/// someone thought of `--clear-cache`, which the window's users would not.
+/// Now two versions installed side by side each keep their own default, and
+/// an upgraded one starts afresh. The price is that an old format's file stays
+/// in the directory after nothing reads it; it is not removed, by the user's
+/// decision, since telling an unused one from another installed copy's can
+/// only be guessed. (Up to `IMGFPC11` the file was `analysis.bin`.)
+///
+/// A file named with `--cache` is used as named, whatever format it holds.
+pub fn file_name() -> String {
+    format!("analysis-{FORMAT}.bin")
+}
 
 /// Where the cache lives when `--cache` does not say.
 ///
@@ -227,9 +244,9 @@ pub fn locate(explicit: Option<&Path>) -> PathBuf {
     match explicit {
         Some(given) => {
             let names_a_dir = given.is_dir() || given.to_string_lossy().ends_with('/');
-            if names_a_dir { given.join(FILE_NAME) } else { given.to_path_buf() }
+            if names_a_dir { given.join(file_name()) } else { given.to_path_buf() }
         }
-        None => default_dir().join(FILE_NAME),
+        None => default_dir().join(file_name()),
     }
 }
 
@@ -1254,12 +1271,12 @@ mod tests {
         // An existing directory, and a path written as one.
         assert_eq!(
             resolve_path(Some(&dir), &mut problems).unwrap(),
-            dir.join(FILE_NAME)
+            dir.join(file_name())
         );
         let trailing = PathBuf::from(format!("{}/", dir.join("sub").display()));
         assert_eq!(
             resolve_path(Some(&trailing), &mut problems).unwrap(),
-            dir.join("sub").join(FILE_NAME)
+            dir.join("sub").join(file_name())
         );
         // And the parent of a named file is created, as the default one is.
         let deep = dir.join("one/two/three.bin");
@@ -1379,7 +1396,7 @@ mod tests {
     #[test]
     fn records_this_run_does_not_walk_are_framed_not_unpacked() {
         let dir = scratch("walked");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
@@ -1405,7 +1422,7 @@ mod tests {
     #[test]
     fn appended_records_are_read_back_and_the_last_one_wins() {
         let dir = scratch("append");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (got, store, bad) = reopen(&path);
         assert!(got.is_empty() && !bad);
         let (f1, t1) = analysis(3, 1);
@@ -1434,7 +1451,7 @@ mod tests {
     fn a_read_only_cache_counts_what_it_holds() {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("readonly");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
@@ -1457,7 +1474,7 @@ mod tests {
     #[test]
     fn a_torn_final_record_costs_that_record_and_nothing_else() {
         let dir = scratch("torn");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
         store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -1495,7 +1512,7 @@ mod tests {
     #[test]
     fn an_impossible_length_is_a_torn_tail_not_an_abort() {
         let dir = scratch("absurd");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
         store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -1517,7 +1534,7 @@ mod tests {
     #[test]
     fn damaged_framing_keeps_the_records_before_it() {
         let dir = scratch("framing");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
         store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -1539,7 +1556,7 @@ mod tests {
     #[test]
     fn a_damaged_record_costs_itself_and_not_the_cache() {
         let dir = scratch("body");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(40, 3);
         store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -1574,7 +1591,7 @@ mod tests {
     #[test]
     fn a_file_is_compacted_once_a_quarter_of_it_is_unused() {
         let dir = scratch("share");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(20, 5);
         let names: Vec<String> = (0..8).map(|i| format!("{i}.jpg")).collect();
@@ -1588,13 +1605,22 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The default file is named for the format, so that a format change
+    /// starts a new file rather than meeting the old one and caching nothing.
+    #[test]
+    fn the_default_file_is_named_for_its_format() {
+        assert_eq!(file_name(), format!("analysis-{FORMAT}.bin"));
+        assert_eq!(locate(None).file_name().unwrap().to_str().unwrap(), file_name());
+        assert_eq!(locate(None).parent().unwrap(), default_dir());
+    }
+
     /// Compaction keeps exactly what it is handed, copied rather than packed
     /// again, and a cache from another format version is left as it is: read
     /// for nothing, written to by nothing.
     #[test]
     fn compaction_keeps_what_it_is_given_and_another_versions_file_is_left_alone() {
         let dir = scratch("compact");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(6, 4);
         let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
@@ -1638,7 +1664,7 @@ mod tests {
     #[test]
     fn records_made_at_other_settings_are_kept_not_read() {
         let dir = scratch("settings");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(6, 4);
         store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -1683,7 +1709,7 @@ mod tests {
     #[test]
     fn names_that_are_not_utf8_keep_their_own_records() {
         let dir = scratch("bytes");
-        let path = dir.join(FILE_NAME);
+        let path = dir.join(file_name());
         let fe = PathBuf::from(OsString::from_vec(b"x\xfe.jpg".to_vec()));
         let ff = PathBuf::from(OsString::from_vec(b"x\xff.jpg".to_vec()));
         assert_eq!(fe.display().to_string(), ff.display().to_string());

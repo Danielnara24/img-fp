@@ -4135,7 +4135,8 @@ else that shells out to img-fp needs the same treatment, or it will read a
 finished run as a failed one.
 
 **The cache is on by default, and it is one file for the machine.**
-`$XDG_CACHE_HOME/img-fp/analysis.bin`, `~/.cache/img-fp/analysis.bin` without
+`$XDG_CACHE_HOME/img-fp/analysis-IMGFPC11.bin` (the name carries the format;
+see below), `~/.cache/img-fp/` without
 that variable, `/tmp/img-fp/` without `HOME` — the same lookup `vid-fp` does
 for `fingerprints.redb`, and `--cache PATH` overrides it the same way, naming
 the file unless it names a directory or ends in a slash. Three things follow
@@ -4179,6 +4180,14 @@ and only the first is obvious:
   left as it is, and the run keeps nothing in it — the magic carries a
   version, and a file with the right prefix and another version is another
   img-fp's rather than damaged (see *Damage costs what it damaged*, below).
+  **And the default file is named for its format** (`cache::file_name`,
+  after 0.34.0). With one name for every format, that rule made an upgrade
+  cache nothing at all: the new build met the old file, left it alone, and
+  kept nothing on any run until `--clear-cache`. Now each format has a
+  default of its own, so an upgrade starts a new file and two versions side
+  by side never meet; only a `--cache` naming another version's file hits the
+  rule. Old formats' files stay in the directory, by the user's decision
+  (deleting those unused for a month was offered and declined).
 
 **A cached record is moved into the run, not copied into it.** Every walked
 file's record is `remove`d from the loaded map before the analysis pass, so

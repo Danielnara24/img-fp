@@ -273,7 +273,7 @@ to stderr.
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
 | `--dump <FILE>` | Write every candidate pair considered, accepted or not, to a CSV. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC11.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--prune-cache` | Drop cached entries this scan did not use: images it did not find, and analyses made at another `--work-size`. Skipped when the scan was incomplete | off |
@@ -297,17 +297,21 @@ far as it goes, and is marked `DAMAGED` in the report.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis.bin`
-(or `~/.cache/img-fp/analysis.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC11.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC11.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Use `--prune-cache` to
 keep only the images in the current scan at the current `--work-size`, or
 `--clear-cache` to start over.
 
-A cache written by another version of img-fp is left as it is, and the run keeps
-nothing in it, so two versions installed side by side do not empty each other's
-cache. Give each its own file with `--cache`, or use `--clear-cache` to replace
-it.
+The part of the name after `analysis-` is the cache format, which changes
+between some versions. Each format has its own default file, so two versions
+installed side by side keep separate caches, and after an upgrade the new
+version starts a new one. The old file is left in place; delete it by hand to
+reclaim the space (versions before 0.35 used `analysis.bin`).
+
+A file named with `--cache` that was written by another version is left as it
+is, and the run keeps nothing in it. Use `--clear-cache` to replace it.
 
 Pressing Ctrl-C keeps every image analysed so far.
 
