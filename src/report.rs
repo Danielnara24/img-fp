@@ -22,6 +22,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::decode;
+use crate::suggest::Action;
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -211,6 +212,9 @@ pub struct Output {
     /// are not duplicates of each other appears under both.
     pub groups: Vec<OutGroup>,
     pub pairs: Vec<OutPair>,
+    /// What to do with each file, by index: see `suggest.rs`. `None` for a
+    /// file in no pair, which no group holds.
+    pub actions: Vec<Option<Action>>,
 }
 
 /// Write the report where `target` says, in the layout it says.
@@ -277,7 +281,7 @@ fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMa
             group: group_name(gi),
             representative: &g.representative,
             representative_bytes: raw_bytes(&files[g.rep]),
-            files: rows(g, files, &pairs, facts).collect(),
+            files: rows(g, &out.actions, files, &pairs, facts).collect(),
         })
         .collect();
     writeln!(w, "{{")?;
@@ -440,6 +444,9 @@ struct Row<'a> {
     #[serde(skip)]
     raw: &'a Path,
     role: &'static str,
+    /// KEEP, DELETE or REVIEW: what the run suggests doing with the file,
+    /// which is one answer for the file in every group it is in.
+    action: Option<&'static str>,
     width: Option<u32>,
     height: Option<u32>,
     size: Option<String>,
@@ -460,6 +467,7 @@ struct Row<'a> {
 /// group's representative.
 fn rows<'a>(
     g: &'a OutGroup,
+    actions: &'a [Option<Action>],
     files: &'a [PathBuf],
     pairs: &'a HashMap<(usize, usize), &'a OutPair>,
     facts: &'a HashMap<usize, Facts>,
@@ -474,6 +482,7 @@ fn rows<'a>(
             path_bytes: raw_bytes(&files[i]),
             raw: &files[i],
             role: if i == g.rep { "representative" } else { "match" },
+            action: actions.get(i).copied().flatten().map(Action::as_str),
             width: f.dims.map(|d| d.0),
             height: f.dims.map(|d| d.1),
             size: f.bytes.map(format_size),
@@ -491,6 +500,8 @@ fn rows<'a>(
 
 /// Width of the role column, comma included: `MATCH,`.
 const ROLE_COLUMN: usize = 6;
+/// Width of the action column, comma included: `DELETE,`.
+const ACTION_COLUMN: usize = 7;
 
 /// One block per group, representative first, the layout `vid-fp`'s text
 /// report has: the role leads at a fixed width so it forms a column, and the
@@ -500,8 +511,9 @@ fn write_txt(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
     let pairs = pair_index(out);
     for (gi, g) in out.groups.iter().enumerate() {
         writeln!(w, "{}: {} files", group_name(gi), g.members.len())?;
-        for r in rows(g, files, &pairs, facts) {
+        for r in rows(g, &out.actions, files, &pairs, facts) {
             let role = if r.role == "representative" { "REP," } else { "MATCH," };
+            let action = format!("{},", r.action.unwrap_or("-"));
             let dims = match (r.width, r.height) {
                 (Some(w), Some(h)) => format!("{w}x{h}"),
                 _ => "-".into(),
@@ -510,7 +522,7 @@ fn write_txt(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
             let damaged = if r.damaged { "DAMAGED, " } else { "" };
             // The path as its own bytes, as `ls` would print it: a name that
             // is not UTF-8 is still the name of the file.
-            write!(w, "\t{role:<ROLE_COLUMN$} {dims}, {size}, {damaged}{}", evidence(&r))?;
+            write!(w, "\t{role:<ROLE_COLUMN$} {action:<ACTION_COLUMN$} {dims}, {size}, {damaged}{}", evidence(&r))?;
             w.write_all(r.raw.as_os_str().as_bytes())?;
             writeln!(w)?;
         }
@@ -543,9 +555,10 @@ fn evidence(r: &Row) -> String {
 }
 
 /// The CSV's columns: `group`, then a `Row`'s fields in its order.
-const CSV_HEADER: [&str; 14] = [
+const CSV_HEADER: [&str; 15] = [
     "group",
     "role",
+    "action",
     "path",
     "width",
     "height",
@@ -570,12 +583,13 @@ fn write_csv(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
     csv_row(w, &CSV_HEADER.map(str::as_bytes))?;
     for (gi, g) in out.groups.iter().enumerate() {
         let group = group_name(gi);
-        for r in rows(g, files, &pairs, facts) {
+        for r in rows(g, &out.actions, files, &pairs, facts) {
             csv_row(
                 w,
                 &[
                     group.as_bytes(),
                     r.role.as_bytes(),
+                    r.action.unwrap_or_default().as_bytes(),
                     r.raw.as_os_str().as_bytes(),
                     cell(r.width).as_bytes(),
                     cell(r.height).as_bytes(),
@@ -674,6 +688,7 @@ mod tests {
                 members: vec![0, 1, 2],
             }],
             pairs: vec![identical, mirrored],
+            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review)],
         }
     }
 
@@ -701,9 +716,9 @@ mod tests {
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "group_1: 3 files\n\
-             \tREP,   4032x3024, 3.1MB, /0.jpg\n\
-             \tMATCH, -, -, identical, /1.jpg\n\
-             \tMATCH, -, -, 42 points, overlap 0.99, correlation 0.91, mirrored, /2;x.jpg\n\n"
+             \tREP,   KEEP,   4032x3024, 3.1MB, /0.jpg\n\
+             \tMATCH, DELETE, -, -, identical, /1.jpg\n\
+             \tMATCH, REVIEW, -, -, 42 points, overlap 0.99, correlation 0.91, mirrored, /2;x.jpg\n\n"
         );
     }
 
@@ -715,9 +730,9 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], CSV_HEADER.join(";"));
-        assert_eq!(lines[1], "group_1;representative;/0.jpg;;;;;;;;;;;");
-        assert_eq!(lines[2], "group_1;match;/1.jpg;;;;;identical;;0.987;0.912;false;false;");
-        assert_eq!(lines[3], "group_1;match;\"/2;x.jpg\";;;;;direct;42;0.987;0.912;true;false;");
+        assert_eq!(lines[1], "group_1;representative;KEEP;/0.jpg;;;;;;;;;;;");
+        assert_eq!(lines[2], "group_1;match;DELETE;/1.jpg;;;;;identical;;0.987;0.912;false;false;");
+        assert_eq!(lines[3], "group_1;match;REVIEW;\"/2;x.jpg\";;;;;direct;42;0.987;0.912;true;false;");
     }
 
     #[test]
@@ -733,7 +748,7 @@ mod tests {
         assert_eq!(g["representative"], "/0.jpg");
         assert_eq!(
             g["files"][0],
-            serde_json::json!({"path": "/0.jpg", "role": "representative", "width": 4032, "height": 3024,
+            serde_json::json!({"path": "/0.jpg", "role": "representative", "action": "KEEP", "width": 4032, "height": 3024,
                 "size": "3.1MB", "size_bytes": 3_250_000, "relation": null, "aligned_points": null,
                 "frame_overlap": null, "pixel_correlation": null, "mirrored": null, "inverted": null})
         );
@@ -783,7 +798,7 @@ mod tests {
         write_txt(&mut txt, &out, &files(), &facts).unwrap();
         assert!(String::from_utf8(txt)
             .unwrap()
-            .contains("\tMATCH, -, -, corroborated, 9 points, overlap 0.99, correlation 0.54, mirrored, /2;x.jpg\n"));
+            .contains("\tMATCH, REVIEW, -, -, corroborated, 9 points, overlap 0.99, correlation 0.54, mirrored, /2;x.jpg\n"));
         let mut csv = Vec::new();
         write_csv(&mut csv, &out, &files(), &facts).unwrap();
         assert!(String::from_utf8(csv).unwrap().contains(";corroborated;9;0.987;0.54;true;false"));

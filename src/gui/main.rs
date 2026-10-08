@@ -359,7 +359,7 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     let setup = setup::Setup::new(app.clone(), settings, results.clone());
     stack.add_named(&setup.root, Some("setup"));
     stack.add_named(&results.root, Some("results"));
-    results.set_new_scan({
+    results.set_to_settings({
         let app = app.clone();
         let setup = setup.clone();
         move || {

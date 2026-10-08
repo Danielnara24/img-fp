@@ -14,7 +14,7 @@
 //! come to several times the wall clock.
 #![allow(dead_code)]
 
-pub const N: usize = 44;
+pub const N: usize = 45;
 
 #[rustfmt::skip]
 pub static NAMES: [&str; N] = [
@@ -48,6 +48,9 @@ pub static NAMES: [&str; N] = [
     // Note that `propagate` is timed outside its own `par_iter`, so that slot
     // is one thread's wall clock and not a sum over the workers.
     "pixel_check:prop",
+    // The keep/delete suggestion, on one thread over every component's
+    // workers: its wall clock.
+    "suggest",
 ];
 
 pub static ACC: [std::sync::atomic::AtomicU64; N] =

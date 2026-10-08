@@ -347,12 +347,35 @@ pub struct Member {
     /// The file decoded only in part: it is cut off.
     #[serde(default)]
     pub damaged: bool,
+    /// What the scan suggests doing with the file: `KEEP`, `DELETE` or
+    /// `REVIEW`. The same in every group the file is in.
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 impl Member {
     /// The file every other member of its group was matched against.
     pub fn is_representative(&self) -> bool {
         self.role == "representative"
+    }
+
+    /// What the scan suggested for the file, by its own rule.
+    pub fn suggested(&self) -> Option<img_fp::Action> {
+        match self.action.as_deref()? {
+            "KEEP" => Some(img_fp::Action::Keep),
+            "DELETE" => Some(img_fp::Action::Delete),
+            "REVIEW" => Some(img_fp::Action::Review),
+            _ => None,
+        }
+    }
+
+    /// How well it agrees with its group's representative: 1 for the
+    /// representative itself and for the same bytes or pixels.
+    pub fn correlation(&self) -> f32 {
+        match self.relation.as_deref() {
+            None | Some("identical") | Some("same_pixels") => 1.0,
+            _ => self.pixel_correlation.unwrap_or(0.0),
+        }
     }
 }
 
@@ -365,12 +388,23 @@ pub struct Group {
 struct Report {
     groups: Vec<Group>,
     files_analysed: usize,
+    #[serde(default)]
+    config: Config,
     // `pairs` and the rest are not read.
+}
+
+#[derive(Default, serde::Deserialize)]
+struct Config {
+    #[serde(default)]
+    min_pixel_correlation: Option<f32>,
 }
 
 pub struct Found {
     pub groups: Vec<Group>,
     pub analysed: usize,
+    /// The correlation bar the scan ran at, which the correlation rule cuts
+    /// from.
+    pub min_correlation: f32,
 }
 
 /// The groups from a finished scan's report.
@@ -386,7 +420,7 @@ pub struct Found {
 pub fn read_report(path: &Path) -> Result<Found, String> {
     let f = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), analysed: 0 }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), analysed: 0, min_correlation: img_fp::defaults().min_pixel_correlation }),
         Err(e) => return Err(format!("could not read the scan's results: {e}")),
     };
     let r: Report = serde_json::from_reader(std::io::BufReader::new(f)).map_err(|e| format!("could not read the scan's results: {e}"))?;
@@ -397,7 +431,8 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
             m.path = PathBuf::from(OsString::from_vec(bytes));
         }
     }
-    Ok(Found { groups, analysed: r.files_analysed })
+    let min_correlation = r.config.min_pixel_correlation.unwrap_or_else(|| img_fp::defaults().min_pixel_correlation);
+    Ok(Found { groups, analysed: r.files_analysed, min_correlation })
 }
 
 #[cfg(test)]
@@ -430,7 +465,7 @@ mod tests {
         std::fs::write(
             &report,
             r#"{"files_analysed": 2, "groups": [{"files": [
-                {"path": "/p/a.jpg", "role": "representative", "width": 4, "height": 3, "size_bytes": 10},
+                {"path": "/p/a.jpg", "role": "representative", "action": "DELETE", "width": 4, "height": 3, "size_bytes": 10},
                 {"path": "/p/b\ufffd.jpg", "path_bytes": [47,112,47,98,255,46,106,112,103], "role": "match"}]}]}"#,
         )
         .unwrap();
@@ -439,7 +474,9 @@ mod tests {
         assert_eq!(files[0].path, PathBuf::from("/p/a.jpg"));
         assert_eq!(files[1].path.as_os_str().as_bytes(), b"/p/b\xff.jpg");
         assert_eq!(found.analysed, 2);
+        assert_eq!(files[0].suggested(), Some(img_fp::Action::Delete));
         assert_eq!(files[1].relation, None, "a field the report leaves out is not needed");
+        assert_eq!(files[1].suggested(), None, "a report without suggestions suggests nothing");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

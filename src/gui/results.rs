@@ -5,6 +5,15 @@
 //! it was matched to the file at its head (its reference image); which of them
 //! to keep is left to the person looking.
 //!
+//! **The scan's suggestion is shown and offered, never applied.** Each card
+//! says what img-fp suggests for its file (keep, delete, or "weak match"), and
+//! a weak match is tinted. *Mark suggested deletions* makes the marks
+//! exactly the files suggested for deletion, in every group, unmarking any
+//! other, by the user's decision; the person still moves them to the Trash
+//! themselves. *Suggestion rule* chooses the rule,
+//! and changes the suggestions at once: the scan's own (`Mode::Content`) came
+//! with the report, and the other two read only the groups.
+//!
 //! Two things about groups decide how marks work here:
 //!
 //! - **Groups overlap.** A file matched by two reference images is in both
@@ -22,6 +31,7 @@ use crate::labels as l;
 use crate::scan::{Found, Group, Member};
 use crate::thumbs::{show_on, Latest, Shown, Thumbs};
 use crate::App;
+use img_fp::{Action, SuggestMode};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
@@ -39,7 +49,9 @@ const AHEAD: usize = 16;
 const CSS: &str = "
 flowboxchild.card { border-radius: 8px; padding: 6px; }
 flowboxchild.card.picked { outline: 3px solid @theme_selected_bg_color; outline-offset: -3px; }
+flowboxchild.card.review { background-color: alpha(@warning_color, 0.16); }
 flowboxchild.card.marked { background-color: alpha(@error_color, 0.16); }
+flowboxchild.card label.suggest-review { color: mix(@warning_color, @theme_fg_color, 0.5); font-weight: bold; }
 flowboxchild.card.marked checkbutton label { color: mix(@error_color, @theme_fg_color, 0.6); font-weight: bold; }
 flowbox.tools > flowboxchild { padding: 0; }
 ";
@@ -57,10 +69,24 @@ struct State {
     /// For each file, the groups it is in.
     member_of: HashMap<PathBuf, Vec<usize>>,
     sizes: HashMap<PathBuf, u64>,
+    /// What each rule suggests for each file, in `MODES`' order, worked out
+    /// when the results arrive: once a reference image is in the Trash, its
+    /// group no longer says what was kept for its files.
+    by_mode: Vec<HashMap<PathBuf, Action>>,
+    /// The rule chosen: an index into `MODES`.
+    mode: usize,
     current: usize,
     problems: bool,
     analysed: usize,
     has_results: bool,
+}
+
+impl State {
+    /// What the chosen rule suggests.
+    fn actions(&self) -> &HashMap<PathBuf, Action> {
+        static NONE: std::sync::OnceLock<HashMap<PathBuf, Action>> = std::sync::OnceLock::new();
+        self.by_mode.get(self.mode).unwrap_or_else(|| NONE.get_or_init(HashMap::new))
+    }
 }
 
 struct Card {
@@ -81,6 +107,7 @@ pub struct Results {
     note: gtk::Label,
     status: gtk::Label,
     trash: gtk::Button,
+    mark_suggested: gtk::Button,
     group_buttons: Vec<gtk::Widget>,
     cards: RefCell<Vec<Card>>,
     /// The image the buttons act on: the last one clicked or reached with
@@ -93,8 +120,8 @@ pub struct Results {
     /// the first; New scan could replace the results the first was about to
     /// edit.
     trashing: Cell<bool>,
-    new_scan_button: gtk::Button,
-    new_scan: RefCell<Option<Box<dyn Fn()>>>,
+    settings_button: gtk::Button,
+    to_settings: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 impl Results {
@@ -174,6 +201,27 @@ impl Results {
             .max_children_per_line(6)
             .css_classes(["tools"])
             .build();
+        // The rule the suggestions follow, and the button that applies them:
+        // they are about every group, not the one shown, and have a row of
+        // their own under the group's buttons.
+        let rule = gtk::DropDown::from_strings(RULES);
+        rule.set_tooltip_text(Some(
+            "Keep all content: delete only an image that a kept image shows all of, at about the same detail.\n\
+             By correlation: keep each group's reference image, delete the images that agree with it closely, keep the rest, and call weak matches weak.\n\
+             Reference images only: keep each group's reference image and delete everything else.\n\
+             The last two can suggest deleting an image that shows something the reference image does not, such as a collage or the uncropped photo.",
+        ));
+        let rule_label = gtk::Label::with_mnemonic(l::SUGGEST_RULE);
+        rule_label.set_mnemonic_widget(Some(&rule));
+        let rule_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        rule_box.append(&rule_label);
+        rule_box.append(&rule);
+        let mark_suggested = gtk::Button::with_mnemonic(l::MARK_SUGGESTED);
+        mark_suggested.set_tooltip_text(Some(
+            "Mark exactly the images the rule suggests deleting, in every group. Every other mark is removed, including ones made by hand.",
+        ));
+        mark_suggested.set_sensitive(false);
+        rule_box.append(&mark_suggested);
         for b in [&prev, &next, &mark_others, &unmark, &open, &folder] {
             // The slot takes no focus of its own: Tab goes from button to
             // button, as it did in a box.
@@ -188,6 +236,7 @@ impl Results {
         right.append(&head);
         right.append(&note);
         right.append(&tools);
+        right.append(&rule_box);
         right.append(&flow_scroll);
 
         // A box, not a pane: the groups keep the width their text needs and
@@ -207,7 +256,7 @@ impl Results {
             .css_classes(["dim-label", "caption"])
             .build();
         let log = gtk::Button::with_mnemonic(l::RESULTS_LOG);
-        let new_scan = gtk::Button::with_mnemonic(l::NEW_SCAN);
+        let to_settings = gtk::Button::with_mnemonic(l::TO_SETTINGS);
         let trash = gtk::Button::with_mnemonic(l::TRASH);
         trash.add_css_class("destructive-action");
         trash.set_sensitive(false);
@@ -219,7 +268,7 @@ impl Results {
         bottom.append(&status);
         bottom.append(&hint);
         bottom.append(&log);
-        bottom.append(&new_scan);
+        bottom.append(&to_settings);
         bottom.append(&trash);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -241,13 +290,14 @@ impl Results {
             note,
             status,
             trash,
+            mark_suggested: mark_suggested.clone(),
             group_buttons,
             cards: RefCell::new(Vec::new()),
             picked: Cell::new(0),
             quiet: Cell::new(false),
             trashing: Cell::new(false),
-            new_scan_button: new_scan.clone(),
-            new_scan: RefCell::new(None),
+            settings_button: to_settings.clone(),
+            to_settings: RefCell::new(None),
         });
 
         let weak = Rc::downgrade(&me);
@@ -266,8 +316,17 @@ impl Results {
         open.connect_clicked(with(|me| me.launch(false)));
         folder.connect_clicked(with(|me| me.launch(true)));
         me.trash.connect_clicked(with(|me| me.confirm_trash()));
-        new_scan.connect_clicked(with(|me| {
-            if let Some(f) = me.new_scan.borrow().as_ref() {
+        mark_suggested.connect_clicked(with(|me| me.mark_suggested()));
+        rule.connect_selected_notify({
+            let weak = Rc::downgrade(&me);
+            move |d| {
+                if let Some(me) = weak.upgrade() {
+                    me.set_mode((d.selected() as usize).min(MODES.len() - 1));
+                }
+            }
+        });
+        to_settings.connect_clicked(with(|me| {
+            if let Some(f) = me.to_settings.borrow().as_ref() {
                 f();
             }
         }));
@@ -343,8 +402,8 @@ impl Results {
         me
     }
 
-    pub fn set_new_scan(&self, f: impl Fn() + 'static) {
-        *self.new_scan.borrow_mut() = Some(Box::new(f));
+    pub fn set_to_settings(&self, f: impl Fn() + 'static) {
+        *self.to_settings.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn has_results(&self) -> bool {
@@ -353,10 +412,12 @@ impl Results {
 
     /// A finished scan's groups, replacing whatever was shown.
     pub fn show(self: &Rc<Self>, found: Found, problems: bool) {
-        let Found { groups, analysed } = found;
+        let Found { groups, analysed, min_correlation } = found;
         {
             let mut s = self.state.borrow_mut();
-            *s = State { problems, analysed, has_results: true, ..State::default() };
+            // The rule chosen stays chosen from one scan to the next.
+            let mode = s.mode;
+            *s = State { problems, analysed, has_results: true, mode, ..State::default() };
             for g in groups {
                 let Group { files } = g;
                 for f in &files {
@@ -366,6 +427,7 @@ impl Results {
                 }
                 s.groups.push(GroupState { files, reference_gone: false });
             }
+            s.by_mode = MODES.iter().map(|&m| suggestions(&s.groups, m, min_correlation)).collect();
         }
         self.thumbs.clear_queue();
         self.rebuild(0);
@@ -530,6 +592,11 @@ impl Results {
             .max_width_chars(28)
             .css_classes(["dim-label", "caption"])
             .build();
+        let action = self.state.borrow().actions().get(&m.path).copied();
+        let suggestion = gtk::Label::builder().label(suggestion(action)).css_classes(["caption"]).build();
+        if action == Some(Action::Review) {
+            suggestion.add_css_class("suggest-review");
+        }
         let check = gtk::CheckButton::with_label("Move to Trash");
         check.set_halign(gtk::Align::Center);
         check.set_focusable(false);
@@ -542,10 +609,14 @@ impl Results {
         body.append(&dir);
         body.append(&facts);
         body.append(&why);
+        body.append(&suggestion);
         body.append(&check);
         let child = gtk::FlowBoxChild::new();
         child.set_child(Some(&body));
         child.add_css_class("card");
+        if action == Some(Action::Review) {
+            child.add_css_class("review");
+        }
         if marked {
             child.add_css_class("marked");
         }
@@ -680,6 +751,45 @@ impl Results {
         self.move_to(keep as i64);
     }
 
+    /// Make the marks the chosen rule's deletions, exactly: every file it
+    /// suggests deleting is marked and every other mark goes, whoever made
+    /// it, so a second rule replaces the first rather than adding to it.
+    fn mark_suggested(self: &Rc<Self>) {
+        let (off, on): (Vec<PathBuf>, Vec<PathBuf>) = {
+            let s = self.state.borrow();
+            let delete = |p: &PathBuf| s.actions().get(p) == Some(&Action::Delete);
+            (
+                s.marked.iter().filter(|p| !delete(p)).cloned().collect(),
+                s.actions().keys().filter(|p| delete(p) && !s.marked.contains(*p)).cloned().collect(),
+            )
+        };
+        for p in &off {
+            self.mark_path(p, false);
+        }
+        for p in &on {
+            self.mark_path(p, true);
+        }
+        self.update_status();
+    }
+
+    /// Suggest by `MODES[mode]` from now on, and show it.
+    fn set_mode(self: &Rc<Self>, mode: usize) {
+        let current = {
+            let mut s = self.state.borrow_mut();
+            if s.mode == mode {
+                return;
+            }
+            s.mode = mode;
+            s.current
+        };
+        if self.state.borrow().groups.get(current).is_some() {
+            let picked = self.picked.get();
+            self.show_group(current);
+            self.pick(picked);
+        }
+        self.update_status();
+    }
+
     fn unmark_group(self: &Rc<Self>) {
         let paths: Vec<PathBuf> = self.cards.borrow().iter().map(|c| c.path.clone()).collect();
         for p in &paths {
@@ -715,13 +825,20 @@ impl Results {
         let n = s.marked.len();
         let bytes: u64 = s.marked.iter().filter_map(|p| s.sizes.get(p)).sum();
         let groups = s.groups.len();
-        let text = if n == 0 {
+        let suggested = s.actions().values().filter(|a| **a == Action::Delete).count();
+        let text = if n == 0 && suggested > 0 {
+            format!("{groups} group{}. {suggested} suggested for deletion.", if groups == 1 { "" } else { "s" })
+        } else if n == 0 {
             format!("{groups} group{}. Nothing marked.", if groups == 1 { "" } else { "s" })
         } else {
             format!("{n} image{} marked, {}.", if n == 1 { "" } else { "s" }, size(bytes))
         };
         self.status.set_text(&text);
         self.trash.set_sensitive(n > 0);
+        // Off only when the marks already are the suggestion.
+        let deletes = s.actions().iter().filter(|(_, a)| **a == Action::Delete);
+        let same = deletes.clone().count() == s.marked.len() && deletes.into_iter().all(|(p, _)| s.marked.contains(p));
+        self.mark_suggested.set_sensitive(!same);
     }
 
     /// Open the picked image, or its folder.
@@ -792,7 +909,10 @@ impl Results {
                 drop(cards);
                 win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at.get() + 1)));
                 let text = match &member {
-                    Some(m) => format!("{}  ·  {}  ·  {}", path.display(), facts(m), evidence(m)),
+                    Some(m) => {
+                        let action = me.state.borrow().actions().get(&m.path).copied();
+                        format!("{}  ·  {}  ·  {}  ·  {}", path.display(), facts(m), evidence(m), suggestion(action))
+                    }
                     None => path.display().to_string(),
                 };
                 info.set_text(&text);
@@ -949,7 +1069,8 @@ impl Results {
             return;
         }
         self.trash.set_sensitive(false);
-        self.new_scan_button.set_sensitive(false);
+        self.mark_suggested.set_sensitive(false);
+        self.settings_button.set_sensitive(false);
         let n = paths.len();
         let mut gone: HashSet<PathBuf> = HashSet::new();
         let mut failed: Vec<String> = Vec::new();
@@ -967,7 +1088,7 @@ impl Results {
             }
         }
         self.trashing.set(false);
-        self.new_scan_button.set_sensitive(true);
+        self.settings_button.set_sensitive(true);
         for p in &gone {
             self.thumbs.forget(p);
             self.app.log_line(&format!("moved to the Trash: {}", p.display()));
@@ -977,6 +1098,9 @@ impl Results {
             for p in &gone {
                 s.marked.remove(p);
                 s.sizes.remove(p);
+                for m in s.by_mode.iter_mut() {
+                    m.remove(p);
+                }
             }
             for g in s.groups.iter_mut() {
                 if g.files.iter().any(|f| f.is_representative() && gone.contains(&f.path)) {
@@ -1068,6 +1192,41 @@ fn evidence(m: &Member) -> String {
         s.push_str(" · inverted");
     }
     s
+}
+
+/// The rules the picker offers, in its order.
+const RULES: &[&str] = &["Keep all content", "By correlation", "Reference images only"];
+const MODES: [SuggestMode; 3] = [SuggestMode::Content, SuggestMode::Correlation, SuggestMode::Representative];
+
+/// What `mode` suggests for every file of `groups`. The scan's own rule came
+/// with the report; the other two read the groups, as the command line's do
+/// (`img_fp::by_group`).
+fn suggestions(groups: &[GroupState], mode: SuggestMode, min_correlation: f32) -> HashMap<PathBuf, Action> {
+    let files = || groups.iter().flat_map(|g| g.files.iter());
+    if mode == SuggestMode::Content {
+        return files().filter_map(|m| Some((m.path.clone(), m.suggested()?))).collect();
+    }
+    let mut index: HashMap<&Path, usize> = HashMap::new();
+    let mut paths: Vec<&Path> = Vec::new();
+    for m in files() {
+        index.entry(&m.path).or_insert_with(|| {
+            paths.push(&m.path);
+            paths.len() - 1
+        });
+    }
+    let seats = files().map(|m| img_fp::Seat { file: index[m.path.as_path()], representative: m.is_representative(), correlation: m.correlation() });
+    let actions = img_fp::by_group(mode, paths.len(), seats, min_correlation);
+    paths.iter().zip(actions).filter_map(|(p, a)| Some((p.to_path_buf(), a?))).collect()
+}
+
+/// What is suggested for a file, in a few words.
+fn suggestion(action: Option<Action>) -> &'static str {
+    match action {
+        Some(Action::Keep) => "suggested: keep",
+        Some(Action::Delete) => "suggested: delete",
+        Some(Action::Review) => "weak match",
+        None => "",
+    }
 }
 
 /// Dimensions and size, as far as the report knows them.

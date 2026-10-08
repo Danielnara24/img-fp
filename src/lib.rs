@@ -44,6 +44,8 @@ use progress::Stage;
 mod report;
 mod sift;
 mod simd;
+mod suggest;
+pub use suggest::{by_group, Action, Mode as SuggestMode, Seat};
 mod verify;
 mod walk;
 
@@ -170,6 +172,10 @@ struct Args {
     // CLAUDE.md for the sweep and the cliff.
     #[arg(long, value_name = "F", default_value_t = 0.6, value_parser = parse_fraction)]
     min_pixel_correlation: f32,
+
+    /// How each file's KEEP, DELETE or REVIEW is decided.
+    #[arg(long, value_enum, value_name = "RULE", default_value = "content")]
+    suggest: suggest::Mode,
 
     /// Write every candidate pair considered, accepted or not, to this CSV.
     /// `-` is stdout.
@@ -492,6 +498,8 @@ struct Item {
     err: Option<String>,
     /// Decoded only in part; see `decode::Decoded::damaged`.
     damaged: Option<String>,
+    /// What the keep/delete suggestion reads beyond the analysis.
+    traits: decode::Traits,
 }
 
 /// Exit code for a run that finished and reported everything it found, but
@@ -578,10 +586,27 @@ fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::P
                 (feats.into(), thumb.into())
             });
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
-            Item { feats, thumb, dims: d.size, ok: true, err: None, damaged: d.damaged }
+            let traits = decode::Traits { grid: grey_grid(&d.work), ..d.traits };
+            Item { feats, thumb, dims: d.size, ok: true, err: None, damaged: d.damaged, traits }
         }
         Err(e) => Item { err: Some(e.to_string()), ..Default::default() },
     }
+}
+
+/// The mean grey (0..=255) of each cell of a 4x4 grid over a working plane,
+/// row by row: `Traits::grid`.
+fn grey_grid(g: &decode::Gray) -> [f32; 16] {
+    let mut sum = [0f64; 16];
+    let mut n = [0u32; 16];
+    for y in 0..g.h {
+        let cy = (y * 4 / g.h.max(1)).min(3);
+        for (x, &v) in g.px[y * g.w..(y + 1) * g.w].iter().enumerate() {
+            let c = cy * 4 + (x * 4 / g.w.max(1)).min(3);
+            sum[c] += v as f64;
+            n[c] += 1;
+        }
+    }
+    std::array::from_fn(|c| if n[c] > 0 { (sum[c] / n[c] as f64 * 255.0) as f32 } else { 0.0 })
 }
 
 /// The analyses this run has made, by the working plane they were made from,
@@ -1267,6 +1292,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             runtime_seconds: 0.0,
             groups: Vec::new(),
             pairs: Vec::new(),
+            actions: Vec::new(),
         };
         match write_reports(args, gui, &out, &files, &[], &[], &[])? {
             Some(path) => say!("No images found. -> {}", path.display()),
@@ -1457,7 +1483,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         if !it.ok || it.damaged.is_some() {
             return None;
         }
-        s.append(&names[i], key, it.dims, &it.feats, &it.thumb)
+        s.append(&names[i], key, it.dims, &it.traits, &it.feats, &it.thumb)
     };
     let planes = Planes::default();
     let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
@@ -1468,7 +1494,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 return (Item::default(), None);
             }
             if let Some((rec, _)) = rec {
-                let it = Item { feats: rec.feats.into(), thumb: rec.thumb.into(), dims: rec.dims, ok: true, err: None, damaged: None };
+                let it = Item {
+                    feats: rec.feats.into(),
+                    thumb: rec.thumb.into(),
+                    dims: rec.dims,
+                    ok: true,
+                    err: None,
+                    damaged: None,
+                    traits: rec.traits,
+                };
                 return (it, None);
             }
             let f = &files[i];
@@ -1516,6 +1550,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             ok: items[r].ok,
             err: items[r].err.clone(),
             damaged: items[r].damaged.clone(),
+            traits: items[r].traits,
         };
     }
     // Who answers for each file from the vocabulary to corroboration: its
@@ -2184,10 +2219,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             Box::new(std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?)
         };
         let mut w = std::io::BufWriter::new(sink);
-        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min")?;
+        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min,m0,m1,m2,m3,m4,m5,aw,ah,bw,bh")?;
         let all_direct: Vec<Edge> = all_direct.iter().map(direct_edge).collect();
         for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
-            for (a, b, _, iv, v) in set.iter() {
+            for (a, b, m, iv, v) in set.iter() {
                 // The paths as their own bytes, quoted the way CSV quotes:
                 // written with `{:?}`, a name holding a quote or a comma split
                 // into two columns, and a tab or a non-UTF-8 byte came out as
@@ -2208,6 +2243,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                     (*iv as u8).to_string(),
                     format!("{:.4}", v.blk_min),
                 ];
+                // The transform from `a`'s working image to `b`'s, and the two
+                // working images' sizes, which the suggestion's frame tests read.
+                let figures: Vec<String> = figures
+                    .into_iter()
+                    .chain(m.iter().map(|x| format!("{x:.6}")))
+                    .chain([items[*a].feats.w, items[*a].feats.h, items[*b].feats.w, items[*b].feats.h].map(|x| x.to_string()))
+                    .collect();
                 let mut row: Vec<&[u8]> = vec![files[*a].as_os_str().as_bytes(), files[*b].as_os_str().as_bytes()];
                 row.extend(figures.iter().map(|f| f.as_bytes()));
                 report::csv_row_with(&mut w, &row, b',')?;
@@ -2287,6 +2329,30 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         stated.push(Stated::Edge(e, corroborated));
     }
     drop(seen);
+    // What to do with each file, read off the same pairs. The other rules
+    // read the groups, and are applied once those exist.
+    let actions = if args.suggest != suggest::Mode::Content { Vec::new() } else { timed!(44, {
+        let pics: Vec<suggest::Picture> = items
+            .iter()
+            .zip(&stats)
+            .map(|(it, st)| suggest::Picture {
+                dims: it.dims,
+                work: (it.feats.w, it.feats.h),
+                thumb: &it.thumb,
+                traits: &it.traits,
+                bytes: st.len,
+            })
+            .collect();
+        let links: Vec<(usize, usize, suggest::Link)> = graph
+            .iter()
+            .zip(&stated)
+            .map(|(&(a, b), s)| match *s {
+                Stated::Identical | Stated::SamePixels => (a, b, suggest::Link::Exact),
+                Stated::Edge((_, _, m, inv, v), _) => (a, b, suggest::Link::Edge(v, *m, *inv)),
+            })
+            .collect();
+        suggest::suggest(&pics, &links, args.min_pixel_correlation, |i| decode::colour_of(&files[i]).unwrap_or(0.0))
+    })};
     let names: Vec<String> = files.par_iter().map(|f| f.display().to_string()).collect();
     let mut out_pairs: Vec<OutPair> = graph
         .par_iter()
@@ -2376,6 +2442,30 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // Cleared before anything is written to stdout, which shares the terminal.
     progress.finish();
     let runtime = t_start.elapsed().as_secs_f64();
+    let actions = if args.suggest == suggest::Mode::Content {
+        actions
+    } else {
+        let corr: HashMap<(usize, usize), f32> = out_pairs
+            .iter()
+            .map(|p| ((p.ia.min(p.ib), p.ia.max(p.ib)), if p.identical || p.same_pixels { 1.0 } else { p.pixel_correlation }))
+            .collect();
+        let seats = groups.iter().flat_map(|g| {
+            let corr = &corr;
+            g.members.iter().map(move |&i| suggest::Seat {
+                file: i,
+                representative: i == g.rep,
+                correlation: corr.get(&(i.min(g.rep), i.max(g.rep))).copied().unwrap_or(0.0),
+            })
+        });
+        suggest::by_group(args.suggest, files.len(), seats, args.min_pixel_correlation)
+    };
+    stage!(
+        t_start,
+        "suggested: {} to keep, {} to delete, {} to review",
+        actions.iter().filter(|a| **a == Some(suggest::Action::Keep)).count(),
+        actions.iter().filter(|a| **a == Some(suggest::Action::Delete)).count(),
+        actions.iter().filter(|a| **a == Some(suggest::Action::Review)).count()
+    );
     let out = Output {
         tool: "img-fp",
         config: run_config(args),
@@ -2388,6 +2478,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         runtime_seconds: (runtime * 1000.0).round() / 1000.0,
         groups,
         pairs: out_pairs,
+        actions,
     };
 
     let summary = format!(
@@ -2418,6 +2509,7 @@ fn run_config(args: &Args) -> serde_json::Value {
         "min_frame_overlap": as_typed(args.min_frame_overlap),
         "min_pixel_correlation": as_typed(args.min_pixel_correlation),
         "stages": "anchor, propagate, corroborate",
+        "suggest": format!("{:?}", args.suggest).to_lowercase(),
     })
 }
 
@@ -3116,6 +3208,7 @@ mod tests {
             ok: true,
             err: None,
             damaged: None,
+            traits: Default::default(),
         };
         let items = vec![
             item(feats(1), 9),

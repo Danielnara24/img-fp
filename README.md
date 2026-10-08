@@ -151,7 +151,12 @@ refused before anything runs.
 
 `img-fp-gui` is a window over the same scan: pick folders and options, watch
 the progress, then go through the groups and choose which images to move to the
-Trash. Nothing is marked for you. It has the same requirements as `img-fp`,
+Trash. Each image shows what the scan suggests doing with it, and weak matches
+are tinted. *Suggestion rule* switches between the three rules of `--suggest`
+without scanning again. Nothing is marked for you: *Mark suggested deletions*
+marks exactly the images suggested for deletion, replacing any marks already
+made, and you move them to the Trash yourself. *Scan settings* goes back to the folders and options, keeping the
+results. It has the same requirements as `img-fp`,
 plus GTK 4.10 or newer (Ubuntu 24.04+, Debian 13+, Fedora 38+, RHEL 9+,
 openSUSE Tumbleweed and Leap 15.6+, Arch):
 
@@ -199,11 +204,35 @@ that matched it (don't interpret the representative as the source image):
 
 ```
 group_1: 4 files
-	REP,   2000x3000, 2.1MB, /photos/beach.jpg
-	MATCH, 2000x3000, 2.1MB, identical, /backup/beach.jpg
-	MATCH, 1000x1500, 250.8KB, 43 points, overlap 1.00, correlation 0.99, /phone/beach-crop.jpg
-	MATCH, 666x1000, 85.4KB, 172 points, overlap 1.00, correlation 1.00, /phone/beach-small.jpg
+	REP,   KEEP,   2000x3000, 2.1MB, /photos/beach.jpg
+	MATCH, DELETE, 2000x3000, 2.1MB, identical, /backup/beach.jpg
+	MATCH, DELETE, 1000x1500, 250.8KB, 43 points, overlap 1.00, correlation 0.99, /phone/beach-crop.jpg
+	MATCH, DELETE, 666x1000, 85.4KB, 172 points, overlap 1.00, correlation 1.00, /phone/beach-small.jpg
 ```
+
+The second column suggests what to do with each file. img-fp never deletes
+anything itself.
+
+- `KEEP`: the best copy of the picture, a file that shows something the
+  others don't, such as a collage, a slide or a meme made from it, or a
+  different photo that only looks similar
+- `DELETE`: everything in it, apart perhaps from a thin strip at an edge, is
+  also in a file marked to stay, at about the same detail or better
+- `REVIEW`: a weak match, probably a copy, such as one tinted or
+  watermarked, that could not be confirmed. Look at it before deciding
+
+A file has the same suggestion in every group it appears in. That is the
+default rule, `--suggest content`. Two simpler rules read only the groups:
+
+- `--suggest correlation`: each group's representative is `KEEP`. Another
+  file is `DELETE` when it agrees with a representative closely, from halfway
+  between `--min-pixel-correlation` and 1 (0.8 by default), `KEEP` when it agrees less, and `REVIEW` below
+  `--min-pixel-correlation`
+- `--suggest representative`: each group's representative is `KEEP` and
+  every other file is `DELETE`
+
+Both can suggest deleting a file that holds something the representative
+doesn't, such as a collage or the uncropped photo.
 
 - `points`: matching points the two images share
 - `overlap`: how much of one image lies inside the other
@@ -215,7 +244,8 @@ Every member was checked against the representative, not against the other
 members. A file that matches two representatives appears in both groups.
 
 `-o` picks the format from the file extension (`.txt`, `.csv` or `.json`), and
-`--format` sets it explicitly. CSV has the same rows, `;`-separated. JSON also
+`--format` sets it explicitly. CSV has the same rows, `;`-separated, with the
+suggestion in the `action` column. JSON also
 lists every matched pair. The report goes to stdout; progress and the summary go
 to stderr.
 
@@ -238,6 +268,7 @@ to stderr.
 | `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3 | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
+| `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |

@@ -67,6 +67,7 @@
 //! later record for the same path, one for a file that has gone — and the run
 //! compacts it when it does, by copying bytes rather than packing them again.
 
+use crate::decode::Traits;
 use crate::problems::Problems;
 use crate::sift::{Features, Keypoint, DESC_LEN};
 use crate::verify::Thumb;
@@ -111,7 +112,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 10: an EXIF orientation is applied to the working plane after the
 /// reduction rather than to the decoded picture before it (`decode::orient`),
 /// which moves the edge the reduction trims on every turned picture.
-const MAGIC: &[u8; 8] = b"IMGFPC10";
+/// 11: a record carries the file's `decode::Traits`, which the keep/delete
+/// suggestion reads: measured while the file is decoded, and not otherwise
+/// to be had from a cached record.
+const MAGIC: &[u8; 8] = b"IMGFPC11";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -143,6 +147,7 @@ pub struct Record {
     /// The picture's own size, as shown (EXIF orientation applied); `feats`
     /// holds the working image's.
     pub dims: (u32, u32),
+    pub traits: Traits,
 }
 
 /// What the loaded cache says about one path: its key, its analysis — only
@@ -428,7 +433,7 @@ impl<W: Write> Buf<W> {
 /// UTF-8 is still a name, and two of them that read the same once made
 /// printable — `x\xfe.jpg` and `x\xff.jpg` — are two files: keyed on the
 /// printable form, one was handed the other's analysis.
-fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), f: &Features, t: &Thumb) -> Result<Vec<u8>> {
+fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), tr: &Traits, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     let blob = pack(f, t)?;
     let path = path.as_os_str().as_bytes();
     let mut b = Buf(Vec::with_capacity(path.len() + 84 + blob.len()));
@@ -441,6 +446,10 @@ fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), f: &Features, t: &
     b.i64(k.ctime)?;
     b.u32(dims.0)?;
     b.u32(dims.1)?;
+    for v in tr.detail.iter().chain([&tr.colour]).chain(tr.grid.iter()) {
+        b.f32(*v)?;
+    }
+    b.u32(tr.lossless as u32 | (tr.exif as u32) << 1)?;
     b.u32(f.w)?;
     b.u32(f.h)?;
     b.u32(f.kps.len() as u32)?;
@@ -783,12 +792,12 @@ impl Store {
     /// Put one analysis into the file, and say where it went. Called by the
     /// workers as they finish; the packing runs outside the lock, and only
     /// the write is inside it.
-    pub fn append(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), f: &Features, t: &Thumb) -> Option<Span> {
+    pub fn append(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) -> Option<Span> {
         let file = self.file.as_ref()?;
         if self.broken.load(Ordering::Relaxed) {
             return None;
         }
-        let wrote = record(path.as_ref(), self.settings, key, dims, f, t).and_then(|rec| {
+        let wrote = record(path.as_ref(), self.settings, key, dims, traits, f, t).and_then(|rec| {
             let _held = lock(&WRITING);
             let mut w = file;
             w.write_all(&rec)?;
@@ -910,6 +919,7 @@ struct Head {
     settings: Settings,
     key: Key,
     dims: (u32, u32),
+    traits: Traits,
     w: u32,
     h: u32,
     n: usize,
@@ -1041,6 +1051,13 @@ where
     let settings = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
     let key = Key { len: r.u64()?, mtime: r.i64()?, ctime: r.i64()? };
     let dims = (r.u32()?, r.u32()?);
+    let mut traits = Traits::default();
+    for v in traits.detail.iter_mut().chain([&mut traits.colour]).chain(traits.grid.iter_mut()) {
+        *v = r.f32()?;
+    }
+    let flags = r.u32()?;
+    traits.lossless = flags & 1 != 0;
+    traits.exif = flags & 2 != 0;
     let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
     let (tw, th) = (r.u32()?, r.u32()?);
     let scale = r.f32()?;
@@ -1048,7 +1065,7 @@ where
     r.need(packed)?;
     // Held as read, not narrowed, so that `read_stream` can tell a thumbnail
     // side of 65,600 from one of 64.
-    let head = Head { path, settings, key, dims, w, h, n, tw, th, scale };
+    let head = Head { path, settings, key, dims, traits, w, h, n, tw, th, scale };
     let blob = if body(&head) {
         r.take(packed as usize)?
     } else {
@@ -1160,6 +1177,7 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
                         feats: Features { w: h.w, h: h.h, kps, desc },
                         thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px),
                         dims: h.dims,
+                        traits: h.traits,
                     }),
                     *span,
                 ),
@@ -1365,9 +1383,9 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
         let (all, _, _) = reopen(&path);
 
@@ -1392,9 +1410,9 @@ mod tests {
         assert!(got.is_empty() && !bad);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         assert_eq!(store.records(), 3);
         drop(store);
 
@@ -1419,9 +1437,9 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
         drop(store);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         let (got, store, bad) = reopen(&path);
@@ -1442,8 +1460,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         for cut in [1, 9, b.len / 2, b.len - 1] {
             let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1453,7 +1471,7 @@ mod tests {
             assert!(!bad, "a torn tail is not a damaged cache");
             assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
-            store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+            store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
             drop(store);
             let (got, _, bad) = reopen(&path);
             assert!(!bad && got.len() == 2);
@@ -1463,8 +1481,11 @@ mod tests {
 
     /// Where a record's packed length sits: after its path, its settings, the
     /// key, the picture's size and the six fields of its shape.
+    /// The bytes of a record's head before its keypoint count: the path,
+    /// the settings, the key, the dimensions and the traits.
+    const TRAITS: u64 = 23 * 4 + 4;
     fn packed_len_at(s: Span, path: &str) -> u64 {
-        s.at + 8 + path.len() as u64 + 12 + 24 + 8 + 6 * 4
+        s.at + 8 + path.len() as u64 + 12 + 24 + 8 + TRAITS + 6 * 4
     }
 
     /// A length damaged into something the file cannot hold is a torn tail,
@@ -1477,9 +1498,9 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
@@ -1499,8 +1520,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         // A path length past `MAX_PATH` but inside the file's size.
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1521,17 +1542,17 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(40, 3);
-        store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
-        let shape = store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap();
+        store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let shape = store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         // b's first stream: its length is intact, its deflate is not.
         let body = packed_len_at(b, "b.jpg") + 8 + 8;
         file.write_all_at(&[0xff; 24], body).unwrap();
         // c claims more keypoints than a run of these settings describes.
-        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 12 + 24 + 8 + 8).unwrap();
+        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 12 + 24 + 8 + TRAITS + 8).unwrap();
         drop(file);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
@@ -1558,7 +1579,7 @@ mod tests {
         let (f, t) = analysis(20, 5);
         let names: Vec<String> = (0..8).map(|i| format!("{i}.jpg")).collect();
         let spans: Vec<Span> =
-            names.iter().map(|p| store.append(p, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f, &t).unwrap()).collect();
+            names.iter().map(|p| store.append(p, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap()).collect();
         let keeping = |k: usize| -> Vec<(&Path, Span)> { (0..k).map(|i| (Path::new(names[i].as_str()), spans[i])).collect() };
         assert!(!store.worth_compacting(&keeping(8), false), "nothing unused");
         assert!(!store.worth_compacting(&keeping(7), false), "one record of eight is not a quarter");
@@ -1578,7 +1599,7 @@ mod tests {
         let (f, t) = analysis(6, 4);
         let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
             .iter()
-            .map(|p| store.append(p, Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).unwrap())
+            .map(|p| store.append(p, Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap())
             .collect();
         let mut store = store;
         let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
@@ -1601,7 +1622,7 @@ mod tests {
             assert!(got.is_empty() && !bad && store.records() == 0);
             assert_eq!(store.other_version(), Some(std::str::from_utf8(other).unwrap()));
             let (f, t) = analysis(6, 4);
-            assert!(store.append("d.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).is_none());
+            assert!(store.append("d.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).is_none());
             assert!(!store.worth_compacting(&[], true));
             drop(store);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "the file is not touched");
@@ -1620,8 +1641,8 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(6, 4);
-        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).unwrap();
-        store.append("b.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f, &t).unwrap();
+        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.append("b.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
 
         let log = crate::problems::Log::default();
@@ -1631,7 +1652,7 @@ mod tests {
         assert!(got.is_empty() && !problems.any());
         assert_eq!((store.records(), store.other_settings().len()), (2, 2));
         let (f2, t2) = analysis(3, 9);
-        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &f2, &t2).unwrap();
+        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
 
         // Back at the first size: its two records, and the 640 one carried.
@@ -1669,8 +1690,8 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append(&fe, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f1, &t1).unwrap();
-        store.append(&ff, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &f2, &t2).unwrap();
+        store.append(&fe, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.append(&ff, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad);

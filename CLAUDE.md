@@ -77,6 +77,14 @@ which every image is marked. `CLUSTER_SLACK_*` and the decode budget's
 divisor were swept (`out/v25-slack-budget`; see *Parameters* and *Speed and
 memory*). Every one is under its section below.
 
+**Every report now suggests KEEP, DELETE or REVIEW per file** (0.34.0,
+*Keep, delete, review* under *How img-fp works*): on IMGS-ALL no deletion loses
+picture content but three synthetic composites in 17,877, against the
+generated ground truth. It reads two new facts
+per file measured at decode, so the cache format is `IMGFPC11`; the pairs are
+unchanged. The window shows it on each card, tints REVIEW, and marks the
+DELETEs on request (*Mark suggested deletions*).
+
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
 similar photographs on real folders, a category IMGS has no negatives for.
@@ -177,6 +185,9 @@ src/
                       when nothing says, and how a record is packed
   report.rs           the results as text, CSV or JSON (vid-fp's three), and
                       which one -o / --format asked for
+  suggest.rs          KEEP / DELETE / REVIEW for every grouped file: the
+                      `action` column of all three reports; see *Keep,
+                      delete, review*
   problems.rs         what was skipped, what could not be done, the exit code
                       that says so, and --log-file
   progress.rs         one progress bar for the whole run: each stage owns a
@@ -197,6 +208,9 @@ benchmark/
                       false pairs split into traps and cross-family errors,
                       the family merges those imply, and the same run
                       re-scored on two disjoint halves of the seeds
+  suggest_score.py    scores a report's `action` column against the ground
+                      truth: deletions that lose picture content (must be
+                      none), and which families still keep their original
   replay.py           replays the anchor tier and drop_weak_bridges off one
                       --dump, to count cross-family anchors *before* the
                       bridge test — the margin an output table cannot show
@@ -822,6 +836,209 @@ The parts that are easy to get wrong:
   through `with_copies` (now handed `match_of`, a byte original's pixel
   original), and every pair inside a set is stated as `same_pixels`, a
   relation of its own in all three reports and on the window's cards.
+
+### Keep, delete, review
+
+**Every grouped file carries an `action`** (`suggest.rs`), in the text
+report's second column, the CSV's `action` and each JSON row. One answer per
+file, whatever group it is read in. **The requirement, set by the user, is
+that a deletion loses no picture content**; which copy is kept is secondary,
+and the original, a lossless copy, a re-encode or a composite that holds the
+whole photograph (a collage, a slide, a meme) are all acceptable keeps.
+REVIEW is for weak matches close enough to be a copy (a tint, a watermark),
+which nothing may act on; the window tints them and marks only DELETE. The user's second round loosened that to the photograph's
+level: a thin strip at the edge, or a crop stretched back to the same square,
+is not content worth keeping a second file for.
+
+**How it is scored** (`benchmark/suggest_score.py`). A DELETE is a loss unless
+a file that is not deleted holds it: for a trap or a composite (whose canvas
+is content of its own) only an identical copy does; otherwise a file of the
+same seed whose region contains the deleted one's (2% slack), at no less
+effective resolution (5%), and unedited if the deleted one is unedited (an
+edit can stand in for an edit, never for the original). `blur_fill` is not a
+composite (its canvas is the photo blurred) and `video_call_frame` is not
+either (a crop recompressed; the manifest's coverage 0.9 is nominal).
+
+**Measured on IMGS-ALL at 512**, plain build: of 27,216 grouped files,
+**KEEP 7,183, DELETE 17,877, REVIEW 2,156; three deletions lose content** — a
+`browser_window` (earth) deleted by an `embed_small`, a `picture_in_picture`
+(red_rocks_sign1) by an `embed_tiny`, and an `embed_small` on IMGS3,
+composites the generator lays on canvases of one size with the photograph in
+one place, so they line up exactly and differ only in flat furniture — and
+**none rests on a pair between two families**. 266 of 304 families keep the
+original or an exact or lossless copy. **On the found corpus** (no ground
+truth): 1,147 KEEP, 463 DELETE, 195 REVIEW. The first version deleted 60
+there and the second 300 (792 KEEP, 713 REVIEW); the user's examples showed
+why so few each time (below), and 48 new deletions sampled at random from
+each round were each the same photograph as the file kept for it.
+
+**The second round: half the found corpus was REVIEW.** The user's three
+largest groups (47, 21 and 19 files) were nearly all REVIEW. Looked at, most
+of those files are **different specimens of one species** — the matcher's
+known leak on that corpus (*Near-miss families*, "Open") — and REVIEW, not
+DELETE, was right for them; what was wrong was calling them anything but
+KEEP. Of the found corpus's REVIEWs whose best pair agrees at 0.9 or more,
+nearly all were one photograph tinted, saturated or watermarked; between 0.8
+and 0.9 about half; below, almost none. And 276 pairs agreeing at 0.9 with a
+clean worst block had neither file deleted. A trace of each refusal said
+why: of the REVIEWs at 0.9 and over, 116 failed *holds* (each file a crop of
+the other by 2-11%, or a crop stretched back to 224x224 at 0.2-0.4 octave),
+34 the whole-frame check, 3 the composite rule. Swept on both corpora (the
+`out/v26-suggest` scorer plus undeleted 0.9 clean pairs on the found corpus):
+
+| change (on the first table's shipped row) | IMGS-ALL DELETE | content lost | found D / R | undeleted pairs |
+|---|---|---|---|---|
+| before | 17,872 | 2 composites | 300 / 713 | 276 |
+| a deleted file may lie 5% outside its keeper | 17,768 | 2 | 326 / 710 | 251 |
+| ... 10% | 17,662 | 7 | 366 / 710 | 216 |
+| ... 15% | 17,848 | 17 | 361 / 743 | 219 |
+| a keeper may shrink 0.5 octave before detail is asked | 17,874 | 2 | 427 / 689 | 157 |
+| weak pairs delete at 0.90 / 0.85 / 0.80 | 18,291 / 18,421 / 18,464 | 3 + 1 trap each | 324-329 / ~660 | 276 |
+| whole-frame residual 16, weak 0.85 | 18,859 | 4 + 3 traps | 344 / 631 | |
+| two crops each missing <= 10% count as one frame, + shrink 0.5 | 17,769 | 3 | 457 / 680 | 137 |
+| ... 15% | 17,691 | 6 | 472 / 696 | 123 |
+| ... 10%, + weak 0.85 | 18,318 | 5 + 1 trap | 496 / 604 | 139 |
+| **10% (between deleting pairs only), shrink 0.5, REVIEW only at 0.9 (shipped)** | **17,877** | **3** | **463 / 195** | **131** |
+
+The mutual-crop rule first applied to every pair, and a weak pair between two
+specimens framed alike then made each "plain", which turned the composite
+rule on and kept two settled pairs (330/1693, 1892/1497 in the user's
+groups); it is now asked only of pairs that may delete. Lowering the weak
+bar was the obvious move for the tinted copies and buys almost nothing: they
+fail *holds* or the whole-frame check, not the bar. What is left in the
+user's groups: 1643/3685, where 3685 holds 1643 with a strip of background
+more and the composite rule keeps both; 2895/5722, each missing 21% of the
+other.
+
+**Why the first version deleted so little on a real folder.** The found corpus
+resized every photograph to a 224x224 square, so its copies are stretched on
+one axis, cropped, and sometimes watermarked; three rules each stopped them:
+the clean bar (a watermark or a recoloured background drops the worst block
+to 0.76-0.79 at 0.96 overall), the detail test on small resamples (a 9%
+squash or a watermark read as "real extra detail"), and the composite rule
+(a file deleted one it held whole only if it had a same-frame copy of its own,
+which in a group of two files nothing has). Swept on IMGS-ALL and the found
+corpus together, each against the ground truth's content loss and against
+deletions resting on another family (scaffolding since removed):
+
+| change | IMGS-ALL DELETE | content lost | found DELETE |
+|---|---|---|---|
+| first version | 17,632 | 0 | 60 |
+| clean bar 0.85 -> 0.5 (alone) | 18,502 | 1 composite | 72 |
+| + weak pairs delete at >= 0.95, a set with no same-frame copy, `SAME` 0.2 (**first round**) | **17,872** | **2 composites** | **300** |
+| weak pairs delete at any correlation | 18,460 | 1 composite, 1 trap | 74 |
+| "file with no copy" for any file, not only a set without one | 18,075 | 2 composites, 3 traps | 300 |
+| + two crops each with a strip <= 20% the other lacks count as one frame | 17,479 | 5 composites | 362 |
+| frame tolerance by area, 10% | 17,551 | 12 composites | 440 |
+
+Of the user's three found-corpus groups, one is now settled
+(`Image_6478.jpg` DELETE, its watermarked copy; `Image_868.jpg` KEEP). The
+other two hold content each way: `Image_6463.jpg` is `Image_685.jpg`
+squashed 16% across with a 16% strip of its own (685 has 9%), which only the
+two-crops rule settles, at three more composites lost on IMGS-ALL; and
+`Image_632.jpg` is a sharper, enlarged crop of `Image_6497.jpg` (twice its
+fine detail), while 6497 shows 38% more of the scene with its background
+recoloured.
+
+Tried in the same sweep and not kept: requiring weak deletions to spare any
+file holding a plain picture, and judging composites by area rather than by
+corners — each cost several hundred good deletions and left the same two
+composite losses.
+
+**Two simpler rules, by the user's request** (`--suggest correlation |
+representative`, `suggest::by_group`), which read only the groups and so are
+also what the window switches between without a scan. `representative`
+keeps every representative and deletes the rest. `correlation` keeps every
+representative and judges any other file by its best correlation with one:
+under `--min-pixel-correlation` REVIEW, from the bar to the cut KEEP, at or
+above the cut DELETE. The user proposed the cut halfway, `(min + 1) / 2`;
+the sweep below put it three quarters of the way (0.9 at 0.6), and the user
+then chose halfway (0.8) after all, so that is `CUT`. Swept offline from
+the shipped build's reports (scratch `corr_sweep.py`, the content rule's
+report regrouped):
+
+| cut at 0.6 (ratio) | IMGS-ALL DELETE | content lost | originals kept | found DELETE |
+|---|---|---|---|---|
+| 0.60 (0) | 26,433 | 4,466 | 153 | 1,027 |
+| **0.80 (0.5, shipped)** | **24,582** | **3,875** | **153** | **747** |
+| 0.84 (0.6) | 23,970 | 3,688 | 154 | 709 |
+| 0.88 (0.7) | 23,099 | 3,370 | 157 | 667 |
+| 0.90 (0.75) | 22,591 | 3,183 | 158 | 649 |
+| 0.94 (0.85) | 20,629 | 2,558 | 166 | 594 |
+| 0.98 (0.95) | 14,498 | 987 | 200 | 389 |
+| 1.00 | 6,123 | 132 | 254 | 12 |
+| representative rule | 26,522 | 4,490 | 153 | 1,034 |
+| content rule | 17,877 | 3 | 266 | 466 |
+
+The ground truth has no knee to offer: losses fall steadily to the top, and
+nearly all are composites (2,835 at 0.9) — a collage, a slide, a frame agree
+with their representative over the photograph they share — plus originals
+whose representative is a crop or an edit. So the cut was set on the found
+corpus, by eye, sixteen random matches a band against their representative:
+0.80-0.90 ten of sixteen another specimen of the species, 0.90-0.95 one,
+0.95 and up none. 0.9 is where the found corpus's matches become copies; at
+0.8 the rule deletes other specimens of a species.
+Neither rule answers to the content requirement; the window says so in its
+tooltip and the README says so in words.
+
+**The pieces** (each is in `suggest.rs` with its reason):
+
+- A pair is clean at `Policy::clean`'s 0.85. A pair that is not may delete
+  when it agrees at 0.95 overall (`WEAK_DELETES`); below that, or inverted,
+  it decides nothing. A file left reached only through such pairs is REVIEW
+  when one of them agrees at 0.9 (`REVIEW`), KEEP below, unless a deletion
+  rests on it.
+- Two crops each missing at most 10% of the other's area (`CROPS`), on a
+  pair that may delete, are one frame.
+- *Holds* is by the frames' four corners (2% plus 3 of the file's pixels), not
+  by `frame_overlap`: its 16x16 grid read a 15% caption strip as 6%.
+- *Holds* also needs the keeper not to shrink the picture by more than 0.5
+  octave (1.4 times) on either axis (`SHRINK`; 0.2, `SAME`, in the first
+  round), unless the extra pixels hold no detail an enlargement would lack:
+  the `Traits::detail` figures, measured at full resolution during decode.
+  Without them only 6 of 304 families kept their original (the upscale won).
+- **A whole-frame check before every deletion** (`whole_worst`): both
+  thumbnails Gaussian-blurred to one sample's footprint, a linear tone fit,
+  and every 8x8-sample block of 32x32 within 12 grey levels. The pixel check
+  lets flat blocks abstain, and a caption bar's white strip "matched" a
+  slide's white margin, deleting the caption. A file refused three times is
+  not asked again (`WHOLE_TRIES`).
+- A file that strictly holds a picture with its own same-frame copies is a
+  composite: deleted only by a copy of itself, and it never stands in for the
+  plain picture (so the photo and its memes are all kept).
+- Of files that hold each other, one is kept: near the group in grey
+  (`Traits::grid`), not softer than the rest, then lossless, EXIF, smaller;
+  pixel-identical files stand as one; colour over grey, asked lazily —
+  a JPEG's colour is not decoded by the analysis, so the few tied JPEG
+  front-runners are decoded for it (`decode::colour_of`, 262 on IMGS-ALL).
+  Without colour, 5 more families kept the greyscale copy.
+
+**What it costs.** The decision is about **3.5 s of wall on IMGS-ALL** (8
+threads, cached run of ~100 s; under 0.1 s on the found corpus), almost all of it
+the whole-frame checks' blurs (~20,000, one per file) and the colour decodes.
+The decode-time measure costs the reduction **+1.3 ms on a 12-megapixel luma
+JPEG** (`reduce_timings` l8 4000x3000: 5.3 -> 6.6 ms; rgb8 9.5 -> 11.5),
+measured every eighth row; every fourth, with one float accumulator, it had
+tripled the reduction. The cache went to `IMGFPC11` for the traits.
+
+**End to end it is level with 0.33.1** (`out/v26-suggest`, `bench.py`'s
+protocol: cold, cooled, evicted, `--no-cache`, plain builds). IMGS-ALL in the
+order old new new old: CPU 2,730.8 / 2,522.5 old against 2,645.6 / 2,588.0
+new, wall 435.4 / 397.7 against 418.2 / 409.5 s, peak 2,167 / 2,144 against
+2,146 / 2,170 MB — **-0.4% of the CPU and -0.6% of the wall** on the means,
+the session cooling as it went. The found corpus twice, old new new old then
+new old old new: CPU 745.1 / 896.9 / 919.3 / 886.5 old against 829.8 / 877.6
+/ 855.3 / 855.3 new, wall 131.4 against 130.0 s on the means, peak 990 MB
+both — **-0.9% of the CPU**, the session heating 20% over the first four
+runs. What the pieces predict is about +0.5% on IMGS-ALL (the decode measure
+some 10 CPU-seconds, the suggestion about 20, the colour decodes 4) and
+nothing on the found corpus; neither is resolvable at this machine's spread.
+
+Tried and not kept: a mip pyramid in place of the blur (the 2x2 grid lands
+differently on each side: `crop_strip_top` against its original read 16 grey
+levels against the blur's 2.7, and some 230 more crops and rotations were kept);
+skipping the whole-frame check when the pixel check scored all 36 blocks
+(-30% time, and it deleted a `quadrant_rotate` trap the check had caught).
 
 ### What still misses
 
@@ -3679,7 +3896,23 @@ colour `decode::preview`, which only the window calls).
   off like the CLI's; the window's scans are recursive, which is why the walk
   skips them by default.
 - **Nothing is pre-marked**, by the user's decision; marks are per *file*,
-  since groups overlap. Trash is `gio::File::trash`, never a delete.
+  since groups overlap. **The suggestion is offered, not applied**: each card
+  says "suggested: keep", "suggested: delete" or "weak match" (`suggestion`;
+  the user's wording), a REVIEW card is tinted `alpha(@warning_color, 0.16)`
+  under the marked tint, and *Mark suggested deletions* (Alt+D) makes the
+  marks exactly the rule's DELETEs in every group, unmarking everything else,
+  hand-made marks included (the user's decision: running a second rule
+  replaces the first), and is off while the marks already are that set.
+  *Suggestion rule* (Alt+R) picks `--suggest`'s rule without a scan: the
+  content rule's actions come with the report, the other two are worked out
+  from the groups by `img_fp::by_group`, and all three are computed when the
+  results arrive, because once a representative is in the Trash its group no
+  longer says what was kept for its files. The choice lasts for the session.
+  The report `-o` writes is the command line's, the content rule unless the
+  scan was given another. *Scan settings* (Alt+S; it was *New scan*, which
+  read as starting one) goes back to the setup page and keeps the results. No group of IMGS-ALL's 694 or
+  the found corpus's 771 is DELETE throughout, so the Trash dialog's "every
+  image is marked" warning is not set off by the suggestion alone. Trash is `gio::File::trash`, never a delete.
 - **Only paths persist** in `$XDG_CONFIG_HOME/img-fp/gui.json`, written when
   a scan starts: folders, excludes, and the report, log and cache file names.
   Every option opens at the command line's default. It used to save every

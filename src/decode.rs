@@ -39,6 +39,180 @@ pub struct Decoded {
     /// in its image data, which the decoder fills out with grey rather than
     /// refuse. See `jpeg_cut_off`.
     pub damaged: Option<String>,
+    /// What the keep/delete suggestion asks of the file beyond its analysis.
+    pub traits: Traits,
+}
+
+/// What the suggestion of which copy to keep needs to know about a file that
+/// its working plane cannot say, because the working plane is the picture
+/// shrunk to `--work-size` with its contrast left as it was and its colour
+/// gone: whether its pixels hold real detail at its own size, whether it has
+/// colour, and whether its format loses anything. Measured while the decoded
+/// rows go through the reduction (`Reducer::push`), so a picture is read once
+/// for both; see `suggest.rs` for how each is used.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Traits {
+    /// The mean absolute difference in grey (0..=255) between pixels 1, 2, 4
+    /// and 8 apart along a row, then 1 and 2 apart down a column, at the
+    /// file's own size, over every eighth row. An upscale's pixels differ
+    /// little from their neighbours a pixel away and much from those eight
+    /// away; the picture it was made from does not.
+    pub detail: [f32; 6],
+    /// The mean of |r - g| + |g - b| over the pixels sampled for `detail`:
+    /// near nothing for a picture with no colour. Negative where it was not
+    /// measured, which is a JPEG decoded to its luma plane alone.
+    pub colour: f32,
+    /// The mean grey (0..=255) of each cell of a 4x4 grid over the working
+    /// plane, row by row.
+    pub grid: [f32; 16],
+    /// Stored losslessly: PNG, TIFF, lossless WebP and the like.
+    pub lossless: bool,
+    /// The file carries an EXIF block.
+    pub exif: bool,
+}
+
+/// `Traits::detail` and `colour` as they are summed, one decode per thread.
+#[derive(Default)]
+struct Measure {
+    sums: [f64; 6],
+    rows_h: f64,
+    rows_v: f64,
+    colour: f64,
+    colour_n: f64,
+    /// The colour channels were not decoded: `colour` means nothing.
+    colourless: bool,
+    prev: Vec<f32>,
+}
+
+thread_local! {
+    static MEASURE: std::cell::RefCell<Measure> = std::cell::RefCell::new(Measure::default());
+}
+
+/// How far apart the rows `detail` is measured on are.
+const MEASURE_STRIDE: usize = 8;
+
+/// Start measuring the next decode on this thread.
+fn measure_begin() {
+    MEASURE.with(|m| {
+        let mut m = m.borrow_mut();
+        let prev = std::mem::take(&mut m.prev);
+        *m = Measure { prev, ..Default::default() };
+    });
+}
+
+/// The decode's colour channels were never decoded.
+fn measure_colourless() {
+    MEASURE.with(|m| m.borrow_mut().colourless = true);
+}
+
+/// What this thread measured since `measure_begin`, as a file's traits.
+fn measure_end() -> Traits {
+    MEASURE.with(|m| {
+        let m = m.borrow();
+        let mut t = Traits::default();
+        for k in 0..4 {
+            t.detail[k] = if m.rows_h > 0.0 { (m.sums[k] / m.rows_h) as f32 } else { 0.0 };
+        }
+        for k in 4..6 {
+            t.detail[k] = if m.rows_v > 0.0 { (m.sums[k] / m.rows_v) as f32 } else { 0.0 };
+        }
+        t.colour = if m.colourless { -1.0 } else if m.colour_n > 0.0 { (m.colour / m.colour_n) as f32 } else { 0.0 };
+        t
+    })
+}
+
+/// One source row's share of the measure: `grey` is its grey values, 0..=255,
+/// and `line` its bytes. Every fourth row is measured along itself and kept;
+/// the one and the two after it are measured against it.
+#[inline]
+fn measure_row<const CH: usize, const ALPHA: bool>(sy: usize, line: &[u8], grey: &[f32]) {
+    let phase = sy % MEASURE_STRIDE;
+    if phase > 2 {
+        return;
+    }
+    let w = grey.len();
+    MEASURE.with(|m| {
+        let mut m = m.borrow_mut();
+        let m = &mut *m;
+        if phase == 0 {
+            if w > 8 {
+                let n = w - 8;
+                let base = &grey[..n];
+                for (k, d) in [1usize, 2, 4, 8].into_iter().enumerate() {
+                    m.sums[k] += abs_diff_sum(&grey[d..d + n], base) as f64 / n as f64;
+                }
+                m.rows_h += 1.0;
+            }
+            m.prev.clear();
+            m.prev.extend_from_slice(grey);
+            let colour_ch = if ALPHA { CH - 1 } else { CH };
+            if colour_ch == 3 {
+                let mut c = 0u32;
+                let mut n = 0u32;
+                for p in line.chunks_exact(CH).step_by(4) {
+                    c += (p[0] as i32 - p[1] as i32).unsigned_abs() + (p[1] as i32 - p[2] as i32).unsigned_abs();
+                    n += 1;
+                }
+                m.colour += c as f64;
+                m.colour_n += n as f64;
+            } else {
+                m.colour_n += 1.0;
+            }
+        } else if m.prev.len() == w && w > 0 {
+            m.sums[3 + phase] += abs_diff_sum(grey, &m.prev) as f64 / w as f64;
+            if phase == 1 {
+                m.rows_v += 1.0;
+            }
+        }
+    });
+}
+
+/// The sum of |a - b| over two rows, in eight lanes of their own: one float
+/// accumulator is a chain of dependent adds the compiler may not reorder, and
+/// it held the measure to a pixel at a time, which tripled the reduction's
+/// cost.
+#[inline]
+fn abs_diff_sum(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0f32; 8];
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            acc[k] += (x[k] - y[k]).abs();
+        }
+    }
+    let mut tail = 0f32;
+    for (x, y) in ra.iter().zip(rb) {
+        tail += (x - y).abs();
+    }
+    acc.iter().sum::<f32>() + tail
+}
+
+/// Whether a file's format keeps every pixel it was given.
+fn lossless_format(kind: Kind, bytes: &[u8]) -> bool {
+    match kind {
+        Kind::Image(ImageFormat::WebP) => bytes.get(12..16) == Some(b"VP8L"),
+        Kind::Image(
+            ImageFormat::Png
+            | ImageFormat::Tiff
+            | ImageFormat::Bmp
+            | ImageFormat::Pnm
+            | ImageFormat::Tga
+            | ImageFormat::Qoi
+            | ImageFormat::Ico
+            | ImageFormat::OpenExr
+            | ImageFormat::Hdr,
+        ) => true,
+        _ => false,
+    }
+}
+
+/// Whether a file carries an EXIF block where formats put one: within its
+/// first 128 KB, as JPEG's APP1, WebP's and HEIF's `Exif\0\0`, or PNG's
+/// `eXIf` chunk.
+fn has_exif(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1 << 17)];
+    memchr::memmem::find(head, b"Exif\0\0").is_some() || memchr::memmem::find(head, b"eXIf").is_some()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,6 +799,7 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     let bytes = timed!(0, read_rest(f, head, len, path)?);
     let kind = sniff(&bytes);
     let mut damaged = None;
+    measure_begin();
     let (w, h, gray) = match kind {
         // The two formats that are almost all of a real corpus get their own
         // line in the profile; everything else shares `decode:codec`.
@@ -651,7 +826,10 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
             None => bail!(NOT_AN_IMAGE),
         },
     };
-    Ok(Decoded { work: gray, size: (w, h), damaged })
+    let mut traits = measure_end();
+    traits.lossless = lossless_format(kind, &bytes);
+    traits.exif = has_exif(&bytes);
+    Ok(Decoded { work: gray, size: (w, h), damaged, traits })
 }
 
 /// What a file's header says, read without decoding anything: its format and
@@ -987,6 +1165,7 @@ fn decode_jpeg_luma(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     if n != dw * dh || n as u64 > max_alloc() {
         return None;
     }
+    let chroma = dec.input_colorspace()? == ColorSpace::YCbCr;
     let orientation = dec
         .exif()
         .and_then(|e| image::metadata::Orientation::from_exif_chunk(e))
@@ -996,6 +1175,9 @@ fn decode_jpeg_luma(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     timed!(1, dec.decode_into(&mut buf).ok()?);
     let gray = timed!(2, reduce_to_gray(dw, dh, &buf, 1, false, work));
     drop(buf);
+    if chroma {
+        measure_colourless();
+    }
     let (w, h) = shown_size(dw as u32, dh as u32, orientation);
     Some((w, h, orient(gray, orientation)))
 }
@@ -1380,6 +1562,7 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
             // it is still in the first-level cache; the full-size plane it
             // used to be written into first is gone.
             grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
+            measure_row::<CH, ALPHA>(sy, &line[..w * CH], &self.grey[..w]);
             let inv = self.inv;
             let out = &mut self.grey[..self.ow];
             for g in out.iter_mut() {
@@ -1392,6 +1575,7 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
             self.row.fill(0.0);
         }
         grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
+        measure_row::<CH, ALPHA>(sy, &line[..w * CH], &self.grey[..w]);
         box_row(k, &self.grey[..w], &mut self.row);
         // The last row of a box: `k` rows in, or the picture's last row when
         // the picture is shorter than one box.
@@ -2001,6 +2185,59 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
         y += 1;
     });
     Ok((w as u32, h as u32, g))
+}
+
+/// `Traits::colour` of a file whose decode did not measure it: a JPEG, whose
+/// colour channels the analysis never decodes. The suggestion asks it of the
+/// few JPEGs a group could keep, and only until one has colour. A JPEG with
+/// a Y plane is decoded to its YCbCr planes, which skips the colour
+/// conversion, and measured as |Cb - 128| + |Cr - 128| over every fourth
+/// pixel of every fourth row: none at all for a grey picture, as the RGB
+/// measure gives none. Anything else is read through `preview`.
+pub fn colour_of(path: &Path) -> Option<f32> {
+    let bytes = std::fs::read(path).ok()?;
+    if let Kind::Image(ImageFormat::Jpeg) = sniff(&bytes) {
+        use zune_core::colorspace::ColorSpace;
+        let opts = zune_core::options::DecoderOptions::default()
+            .set_strict_mode(false)
+            .set_max_width(usize::MAX)
+            .set_max_height(usize::MAX)
+            .jpeg_set_out_colorspace(ColorSpace::YCbCr);
+        let mut dec = zune_jpeg::JpegDecoder::new_with_options(zune_core::bytestream::ZCursor::new(&bytes[..]), opts);
+        dec.decode_headers().ok()?;
+        match dec.input_colorspace()? {
+            ColorSpace::Luma => return Some(0.0),
+            ColorSpace::YCbCr => {
+                let (w, h) = dec.dimensions()?;
+                let n = dec.output_buffer_size()?;
+                if n == w * h * 3 && (n as u64) <= max_alloc() {
+                    let _permit = cover(bytes.len() as u64 + n as u64);
+                    let mut buf = vec![0u8; n];
+                    dec.decode_into(&mut buf).ok()?;
+                    let (mut sum, mut count) = (0u64, 0u64);
+                    for y in (0..h).step_by(4) {
+                        for p in buf[y * w * 3..(y + 1) * w * 3].chunks_exact(3).step_by(4) {
+                            sum += ((p[1] as i32 - 128).unsigned_abs() + (p[2] as i32 - 128).unsigned_abs()) as u64;
+                            count += 1;
+                        }
+                    }
+                    return (count > 0).then(|| sum as f32 / count as f32);
+                }
+            }
+            _ => {}
+        }
+    }
+    drop(bytes);
+    let (_, _, rgba) = preview(path, 256).ok()?;
+    let n = rgba.len() / 4;
+    if n == 0 {
+        return None;
+    }
+    let sum: u64 = rgba
+        .chunks_exact(4)
+        .map(|p| ((p[0] as i32 - p[1] as i32).unsigned_abs() + (p[1] as i32 - p[2] as i32).unsigned_abs()) as u64)
+        .sum();
+    Some(sum as f32 / n as f32)
 }
 
 /// A picture for a person to look at rather than for the analysis: colour,

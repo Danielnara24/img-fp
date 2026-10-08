@@ -55,8 +55,10 @@ pub const MARK_OTHERS: &str = "Mark all _except this";
 pub const UNMARK_GROUP: &str = "_Unmark group";
 pub const OPEN: &str = "_Open";
 pub const SHOW_FOLDER: &str = "Show in _folder";
+pub const MARK_SUGGESTED: &str = "Mark suggested _deletions";
 pub const TRASH: &str = "Move marked to _Trash…";
-pub const NEW_SCAN: &str = "New _scan";
+pub const TO_SETTINGS: &str = "Scan _settings";
+pub const SUGGEST_RULE: &str = "Suggestion _rule";
 pub const RESULTS_LOG: &str = "Scan _log";
 
 // The preview.
@@ -107,7 +109,7 @@ mod tests {
         assert_eq!(letter(SCAN), letter(CANCEL));
         distinct(
             "results",
-            &[GROUPS, IMAGES, NEXT_GROUP, PREV_GROUP, MARK_OTHERS, UNMARK_GROUP, OPEN, SHOW_FOLDER, TRASH, NEW_SCAN, RESULTS_LOG],
+            &[GROUPS, IMAGES, NEXT_GROUP, PREV_GROUP, MARK_OTHERS, UNMARK_GROUP, OPEN, SHOW_FOLDER, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG],
         );
         distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE]);
         distinct("confirmation", &[CONFIRM_CANCEL, CONFIRM_TRASH]);
