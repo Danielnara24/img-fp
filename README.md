@@ -149,19 +149,35 @@ refused before anything runs.
 
 ## Desktop app
 
-`img-fp-gui` is a window over the same scan: pick folders and options, watch
-the progress, then go through the groups and choose which images to move to the
-Trash. Each group fills the window with its images. Point at one, or select
-it with the arrow keys, to see its details and what the scan suggests doing
-with it in the bar below; weak matches have a yellow corner. The menu button,
-or a right click, opens the image or its folder and marks or unmarks a whole
-group, and each of these has an Alt shortcut. *Suggestion rule* switches between the three rules of `--suggest`
-without scanning again. Nothing is marked for you: *Mark suggested deletions*
-marks exactly the images suggested for deletion, replacing any marks already
-made, and you move them to the Trash yourself. *Scan settings* goes back to the folders and options, keeping the
-results. It has the same requirements as `img-fp`,
-plus GTK 4.10 or newer (Ubuntu 24.04+, Debian 13+, Fedora 38+, RHEL 9+,
-openSUSE Tumbleweed and Leap 15.6+, Arch):
+`img-fp-gui` is a window over the same scan. Pick folders and options, start
+the scan, then go through the groups and choose which images to move to the
+Trash.
+
+- The groups are listed down the left side, each shown by one of its pictures
+  with the number of images in it, and how many are marked once you mark some.
+- A group's images fill the rest of the window. Point at an image, or select
+  it with the arrow keys, to see its name, size, how it matched and what the
+  scan suggests doing with it, in the bar at the bottom. The reference image,
+  the one the others were matched against, is labelled, and weak matches have
+  a yellow corner.
+- Click the circle on an image, or press Space, to mark it for the Trash.
+  Double click or Enter opens it large.
+- The menu button at the top right, or a right click on an image, opens the
+  image or its folder, marks every other image in the group, or unmarks the
+  group or every group.
+- *Suggestion rule* switches between the three rules of `--suggest` without
+  scanning again. Nothing is marked for you: *Mark suggested deletions* marks
+  exactly the images suggested for deletion, replacing any marks already made.
+- The Trash button moves the marked images to the Trash, where they can be
+  restored. *Scan settings* goes back to the folders and options, keeping the
+  results.
+
+Every control can be reached from the keyboard. Underlined letters are Alt
+shortcuts, the menu shows its own, and F1 lists every key.
+
+It has the same requirements as `img-fp`, plus GTK 4.10 or newer (Ubuntu
+24.04+, Debian 13+, Fedora 38+, RHEL 9+, openSUSE Tumbleweed and Leap 15.6+,
+Arch):
 
 ```bash
 sudo apt install libgtk-4-1          # Ubuntu, Debian
@@ -196,9 +212,6 @@ install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
 Folders given on its command line are the ones to scan, in place of the ones
 remembered from last time: `img-fp-gui ~/Pictures`. With the desktop entry
 installed, file managers offer it under "Open With" for a folder.
-
-Every control can be reached from the keyboard; the underlined letter of each
-button and field is its Alt shortcut. F1 lists every key.
 
 ## Output
 
