@@ -171,6 +171,10 @@ Trash.
 - The Trash button moves the marked images to the Trash, where they can be
   restored. *Scan settings* goes back to the folders and options, keeping the
   results.
+- The results of the last scan are kept in `~/.cache/img-fp/last-scan/` and
+  shown again the next time the window opens, with the images you marked still
+  marked and without the images already moved to the Trash. The next scan to
+  finish replaces them.
 
 Every control can be reached from the keyboard. Underlined letters are Alt
 shortcuts, the menu shows its own, and F1 lists every key.
@@ -210,7 +214,8 @@ install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
 ```
 
 Folders given on its command line are the ones to scan, in place of the ones
-remembered from last time: `img-fp-gui ~/Pictures`. With the desktop entry
+remembered from last time: `img-fp-gui ~/Pictures`. It then opens on the scan
+settings, with the last scan's results one click away. With the desktop entry
 installed, file managers offer it under "Open With" for a folder.
 
 ## Output

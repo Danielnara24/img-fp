@@ -3986,6 +3986,35 @@ colour `decode::preview`, which only the window calls).
   which declares `inode/directory` for "Open With") **replace** the
   remembered ones for that session; they used to be appended, so opening the
   window on one folder scanned every folder it had ever been pointed at.
+- **The last finished scan is kept** (`gui/last.rs`) in
+  `$XDG_CACHE_HOME/img-fp/last-scan/` (mode 0700): the worker's report,
+  copied out of `$XDG_RUNTIME_DIR` once it has been read, and `scan.json`
+  with the problems flag, the time taken, when it finished and the log. One
+  scan only: a scan that finishes with results replaces it, written as a new
+  folder and renamed in, and a cancelled or failed one leaves it, as it leaves
+  the page. On start it is read off the main thread, from before the window
+  is built, and the window opens on an empty results page saying so (opening
+  on the settings flashed them first); or on the settings, with the results
+  behind *Back to results*, when it was opened on folders. **What a load
+  costs, on the user's saved IMGS-ALL scan** (703 groups, 50,935 entries, a
+  15.5 MB report, Xvfb): process start to page filled ~0.84 s -> ~0.36-0.45 s.
+  The JSON is parsed from memory, not through a reader (`read_report`);
+  `results::prepare` numbers the files and works out the three rules' suggestions by
+  number rather than by path off the main thread, for a finished scan too
+  (it was ~0.2 s frozen in `show`); the gone check is one `stat` a file on
+  every thread; and the strip makes the rows on screen first and the rest
+  in idle chunks (`add_rows`, `strip_generation`), since 703 rows of five
+  widgets were 0.1 s on every rebuild, Trash included. The window is
+  presented at ~0.22 s and the report is ready ~0.08 s later. Files gone
+  since (not found, as the Trash counts it) are taken off the page by the
+  same `drop_gone` the Trash uses, after the suggestions are worked out with
+  them. A report that will not read is deleted. **The marks are kept too**
+  (`marks.json`, written 400 ms after they stop changing and on close, by
+  `Results::flush_marks`), under the scan's `id`, its finish time in
+  nanoseconds: they are read back only beside that scan, so a mark saved as
+  a new scan replaces the folder, or for a scan whose own save failed
+  (`Found::kept` is then `None` and nothing is written), cannot land on
+  another scan's files.
 - **Testing on the real display:** Cinnamon's focus-stealing prevention
   ignores `xdotool windowactivate`, and keys then go to whatever window has
   focus. Activate with `wmctrl -i -a`, and check `xdotool getactivewindow`

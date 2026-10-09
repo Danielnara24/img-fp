@@ -37,6 +37,7 @@
 //! every button has an Alt mnemonic.
 
 use crate::labels as l;
+use crate::last;
 use crate::mosaic::Mosaic;
 use crate::scan::{Found, Group, Member};
 use crate::still::Still;
@@ -49,6 +50,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Long side of the large view's picture.
 const LARGE: u32 = 1600;
@@ -59,6 +61,11 @@ const STRIP_W: i32 = 96;
 const STRIP_H: i32 = 72;
 /// Rows of the strip around the shown group whose pictures go first.
 const STRIP_NEAR: usize = 8;
+/// Strip rows made before the page is drawn, past the group to select: more
+/// than a screen holds.
+const STRIP_FIRST: usize = 24;
+/// And how many are made at a time after it.
+const STRIP_CHUNK: usize = 64;
 
 /// Long side a group's pictures are decoded at: a group of a few fills the
 /// page with each, one of dozens shares it out.
@@ -126,6 +133,9 @@ struct State {
     problems: bool,
     analysed: usize,
     has_results: bool,
+    /// The scan kept on disk for the next window, whose marks are kept with
+    /// it (`last.rs`); `None` when this one could not be kept.
+    kept: Option<u64>,
 }
 
 impl State {
@@ -240,6 +250,11 @@ pub struct Results {
     /// the first; New scan could replace the results the first was about to
     /// edit.
     trashing: Cell<bool>,
+    /// A save of the marks is waiting to be written.
+    marks_pending: Cell<bool>,
+    /// Which rebuild the strip's rows are being made for; a later one stops
+    /// an earlier one's.
+    strip_generation: Cell<u64>,
     settings_button: gtk::Button,
     to_settings: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -266,6 +281,10 @@ impl Results {
             // As wide as a row of the strip, and not as wide as its pictures
             // ask: a picture's natural width is the size it was decoded at.
             .min_content_width(STRIP_W + 16)
+            // And while it is empty, which `min_content_width` does not
+            // cover: the page waiting for the last scan was narrower here,
+            // and moved when the groups came.
+            .width_request(STRIP_W + 16)
             .propagate_natural_width(false)
             .hexpand(false)
             .build();
@@ -462,6 +481,8 @@ impl Results {
             follow_pointer: Cell::new(false),
             image_actions: RefCell::new(Vec::new()),
             trashing: Cell::new(false),
+            marks_pending: Cell::new(false),
+            strip_generation: Cell::new(0),
             settings_button: to_settings.clone(),
             to_settings: RefCell::new(None),
         });
@@ -691,39 +712,85 @@ impl Results {
     }
 
     /// A finished scan's groups, replacing whatever was shown.
-    pub fn show(self: &Rc<Self>, found: Found, problems: bool) {
-        let Found { groups, analysed, min_correlation } = found;
+    pub fn show(self: &Rc<Self>, prepared: Prepared, problems: bool) {
+        let Prepared { groups, paths, sizes, by_mode, analysed, kept } = prepared;
         {
             let mut s = self.state.borrow_mut();
             // The rule chosen stays chosen from one scan to the next.
             let mode = s.mode;
-            *s = State { problems, analysed, has_results: true, mode, ..State::default() };
-            let mut ids: HashMap<PathBuf, u32> = HashMap::new();
-            for g in groups {
-                let Group { mut files } = g;
-                for f in files.iter_mut() {
-                    f.id = *ids.entry(f.path.clone()).or_insert_with(|| {
-                        s.paths.push(f.path.clone());
-                        s.sizes.push(f.size_bytes.unwrap_or(0));
-                        (s.paths.len() - 1) as u32
-                    });
-                }
-                s.groups.push(GroupState { files, reference_gone: false });
-            }
-            let n = s.paths.len();
-            s.marked = vec![false; n];
-            s.gone = vec![false; n];
-            s.by_mode = MODES
-                .iter()
-                .map(|&m| {
-                    let by_path = suggestions(&s.groups, m, min_correlation);
-                    s.paths.iter().map(|p| by_path.get(p).copied()).collect()
-                })
-                .collect();
+            let n = paths.len();
+            *s = State {
+                groups,
+                paths,
+                sizes,
+                by_mode,
+                marked: vec![false; n],
+                gone: vec![false; n],
+                problems,
+                analysed,
+                has_results: true,
+                mode,
+                kept,
+                ..State::default()
+            };
         }
+        self.marks_pending.set(false);
         self.thumbs.clear_queue();
         self.strip_thumbs.clear_queue();
         self.rebuild(0);
+    }
+
+    /// The scan kept from last time, as it was left: its groups and marks,
+    /// less the files that have gone since (to the Trash before the window
+    /// closed, or any other way), whose suggestions are worked out with them
+    /// first, as they were when the scan was shown.
+    pub fn restore(self: &Rc<Self>, prepared: Prepared, problems: bool, marks: &[u32], gone: &HashSet<PathBuf>) {
+        self.show(prepared, problems);
+        self.mark_ids(marks, true);
+        if !gone.is_empty() {
+            self.drop_gone(gone);
+        }
+        self.update_status();
+        self.refresh_bar();
+    }
+
+    /// An empty page while the last scan's results are read, so that the
+    /// window opens where it will be rather than on the settings.
+    pub fn loading(&self) {
+        self.title.set_text("");
+        self.note.set_text("Loading the last scan's results…");
+        self.note.set_visible(true);
+        self.status.set_text("");
+        for b in &self.group_buttons {
+            b.set_sensitive(false);
+        }
+        self.trash.set_sensitive(false);
+        self.mark_suggested.set_sensitive(false);
+    }
+
+    /// The marks have changed: write them for the next window, once they
+    /// stop changing for a moment, so that a run of clicks is one write.
+    fn marks_changed(self: &Rc<Self>) {
+        if self.state.borrow().kept.is_none() || self.marks_pending.replace(true) {
+            return;
+        }
+        let me = Rc::downgrade(self);
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            if let Some(me) = me.upgrade() {
+                me.flush_marks();
+            }
+        });
+    }
+
+    /// Write the marks now, if a save is waiting: the window is closing.
+    pub fn flush_marks(&self) {
+        if !self.marks_pending.replace(false) {
+            return;
+        }
+        let s = self.state.borrow();
+        let Some(kept) = s.kept else { return };
+        let paths = s.marked_ids().filter(|&id| !s.gone[id as usize]).map(|id| s.paths[id as usize].clone()).collect();
+        last::save_marks(kept, paths);
     }
 
     /// Keyboard to the page: the selected image, else the first, or the
@@ -766,23 +833,30 @@ impl Results {
             let s = self.state.borrow();
             s.groups.iter().map(|g| (face(&g.files).map(|f| f.path.clone()).unwrap_or_default(), g.files.len())).collect()
         };
-        let mut rows = Vec::with_capacity(heads.len());
-        for (head, _) in &heads {
-            let picture = Still::new(STRIP_W, STRIP_H);
-            picture.set_overflow(gtk::Overflow::Hidden);
-            let count = gtk::Label::builder().css_classes(["badge"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(4).margin_bottom(4).build();
-            let marked = gtk::Label::builder().css_classes(["badge", "marked"]).halign(gtk::Align::Start).valign(gtk::Align::End).margin_start(4).margin_bottom(4).visible(false).build();
-            let overlay = gtk::Overlay::builder().child(&picture).build();
-            overlay.add_overlay(&count);
-            overlay.add_overlay(&marked);
-            let row = gtk::ListBoxRow::builder().child(&overlay).build();
-            self.list.append(&row);
-            self.strip_thumbs.request(head, STRIP_W as u32 * 2 * scale, Shown::Still(picture.clone()), false);
-            rows.push(Row { picture, count, marked, row, shown: Cell::new(None) });
-        }
-        *self.rows.borrow_mut() = rows;
-        for gi in 0..heads.len() {
-            self.update_row(gi);
+        self.rows.borrow_mut().clear();
+        // The rows on screen, and the one to select, now; the rest a chunk
+        // at a time once the page is drawn. Each row is five widgets, and
+        // IMGS-ALL's 703 groups took a tenth of a second to make, on every
+        // scan, restore and trip to the Trash.
+        let generation = self.strip_generation.get() + 1;
+        self.strip_generation.set(generation);
+        let heads: Rc<Vec<PathBuf>> = Rc::new(heads.into_iter().map(|(h, _)| h).collect());
+        let first = (select + STRIP_FIRST).min(heads.len());
+        self.add_rows(&heads, 0..first, scale);
+        if first < heads.len() {
+            let me = Rc::downgrade(self);
+            let heads = heads.clone();
+            let mut next = first;
+            glib::idle_add_local(move || {
+                let Some(me) = me.upgrade() else { return glib::ControlFlow::Break };
+                if me.strip_generation.get() != generation {
+                    return glib::ControlFlow::Break;
+                }
+                let end = (next + STRIP_CHUNK).min(heads.len());
+                me.add_rows(&heads, next..end, scale);
+                next = end;
+                if next < heads.len() { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
+            });
         }
         let empty = heads.is_empty();
         for b in &self.group_buttons {
@@ -807,6 +881,26 @@ impl Results {
             self.list.select_row(Some(&row));
         }
         self.update_status();
+    }
+
+    /// The strip's rows for groups `range`, whose pictures are `heads`.
+    fn add_rows(&self, heads: &[PathBuf], range: std::ops::Range<usize>, scale: u32) {
+        for gi in range.clone() {
+            let picture = Still::new(STRIP_W, STRIP_H);
+            picture.set_overflow(gtk::Overflow::Hidden);
+            let count = gtk::Label::builder().css_classes(["badge"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(4).margin_bottom(4).build();
+            let marked = gtk::Label::builder().css_classes(["badge", "marked"]).halign(gtk::Align::Start).valign(gtk::Align::End).margin_start(4).margin_bottom(4).visible(false).build();
+            let overlay = gtk::Overlay::builder().child(&picture).build();
+            overlay.add_overlay(&count);
+            overlay.add_overlay(&marked);
+            let row = gtk::ListBoxRow::builder().child(&overlay).build();
+            self.list.append(&row);
+            self.strip_thumbs.request(&heads[gi], STRIP_W as u32 * 2 * scale, Shown::Still(picture.clone()), false);
+            self.rows.borrow_mut().push(Row { picture, count, marked, row, shown: Cell::new(None) });
+        }
+        for gi in range {
+            self.update_row(gi);
+        }
     }
 
     fn update_row(&self, gi: usize) {
@@ -1156,7 +1250,7 @@ impl Results {
     /// its row, and every file searched the images shown: Mark suggested
     /// deletions on IMGS-ALL, 17,850 files, held the window for 0.9 s, and
     /// Unmark all groups as long.
-    fn mark_ids(&self, ids: &[u32], on: bool) {
+    fn mark_ids(self: &Rc<Self>, ids: &[u32], on: bool) {
         let groups: HashSet<usize> = {
             let mut s = self.state.borrow_mut();
             let mut groups = HashSet::new();
@@ -1173,6 +1267,9 @@ impl Results {
                 let marked = s.is_marked(c.id);
                 set_class(&c.child, "marked", marked);
             }
+        }
+        if !groups.is_empty() {
+            self.marks_changed();
         }
         for gi in groups {
             self.update_row(gi);
@@ -1532,14 +1629,39 @@ impl Results {
         self.trashing.set(false);
         self.settings_button.set_sensitive(true);
         for p in &gone {
-            self.thumbs.forget(p);
             self.app.log_line(&format!("moved to the Trash: {}", p.display()));
         }
+        self.drop_gone(&gone);
+        if !failed.is_empty() {
+            let more = failed.len().saturating_sub(10);
+            let mut detail = failed.iter().take(10).cloned().collect::<Vec<_>>().join("\n");
+            if more > 0 {
+                detail.push_str(&format!("\n… and {more} more"));
+            }
+            let d = gtk::AlertDialog::builder()
+                .message(format!("{} image{} could not be moved to the Trash", failed.len(), if failed.len() == 1 { "" } else { "s" }))
+                .detail(detail)
+                .modal(true)
+                .build();
+            d.show(Some(&self.app.window));
+        }
+    }
+
+    /// Take files that are no longer there off the page, as the Trash does:
+    /// unmarked, out of their groups, and a group left with one file gone.
+    /// What each rule suggested for the others stays what it was with them.
+    fn drop_gone(self: &Rc<Self>, gone: &HashSet<PathBuf>) {
+        for p in gone {
+            self.thumbs.forget(p);
+        }
+        let mut unmarked = false;
         let select = {
             let mut s = self.state.borrow_mut();
             let ids: Vec<u32> = (0..s.paths.len() as u32).filter(|&id| gone.contains(&s.paths[id as usize])).collect();
             for id in ids {
-                s.set_mark(id, false);
+                if s.set_mark(id, false) {
+                    unmarked = true;
+                }
                 s.gone[id as usize] = true;
                 for m in s.by_mode.iter_mut() {
                     m[id as usize] = None;
@@ -1557,22 +1679,12 @@ impl Results {
             s.groups.retain(|g| g.files.len() >= 2);
             current.saturating_sub(before)
         };
+        if unmarked {
+            self.marks_changed();
+        }
         self.thumbs.clear_queue();
         self.rebuild(select);
         self.focus();
-        if !failed.is_empty() {
-            let more = failed.len().saturating_sub(10);
-            let mut detail = failed.iter().take(10).cloned().collect::<Vec<_>>().join("\n");
-            if more > 0 {
-                detail.push_str(&format!("\n… and {more} more"));
-            }
-            let d = gtk::AlertDialog::builder()
-                .message(format!("{} image{} could not be moved to the Trash", failed.len(), if failed.len() == 1 { "" } else { "s" }))
-                .detail(detail)
-                .modal(true)
-                .build();
-            d.show(Some(&self.app.window));
-        }
     }
 }
 
@@ -1686,25 +1798,76 @@ const MENU: &[&[(&str, &str)]] = &[
 const RULES: &[&str] = &["Keep all content", "By correlation", "Reference images only"];
 const MODES: [SuggestMode; 3] = [SuggestMode::Content, SuggestMode::Correlation, SuggestMode::Representative];
 
-/// What `mode` suggests for every file of `groups`. The scan's own rule came
-/// with the report; the other two read the groups, as the command line's do
-/// (`img_fp::by_group`).
-fn suggestions(groups: &[GroupState], mode: SuggestMode, min_correlation: f32) -> HashMap<PathBuf, Action> {
+/// What `mode` suggests for each of `n` files of `groups`, by number. The
+/// scan's own rule came with the report; the other two read the groups, as
+/// the command line's do (`img_fp::by_group`). A file is numbered in the
+/// order the groups first name it, which is the order `by_group` asks for.
+fn suggestions(groups: &[GroupState], n: usize, mode: SuggestMode, min_correlation: f32) -> Vec<Option<Action>> {
     let files = || groups.iter().flat_map(|g| g.files.iter());
     if mode == SuggestMode::Content {
-        return files().filter_map(|m| Some((m.path.clone(), m.suggested()?))).collect();
+        let mut v = vec![None; n];
+        for m in files() {
+            if let Some(a) = m.suggested() {
+                v[m.id as usize] = Some(a);
+            }
+        }
+        return v;
     }
-    let mut index: HashMap<&Path, usize> = HashMap::new();
-    let mut paths: Vec<&Path> = Vec::new();
-    for m in files() {
-        index.entry(&m.path).or_insert_with(|| {
-            paths.push(&m.path);
-            paths.len() - 1
-        });
+    let seats = files().map(|m| img_fp::Seat { file: m.id as usize, representative: m.is_representative(), correlation: m.correlation() });
+    img_fp::by_group(mode, n, seats, min_correlation)
+}
+
+/// A scan's report made ready for the page, off the main thread: every
+/// file numbered, and what each rule suggests for it. On IMGS-ALL's report
+/// that is a fifth of a second the window used to spend frozen.
+pub struct Prepared {
+    groups: Vec<GroupState>,
+    paths: Vec<PathBuf>,
+    sizes: Vec<u64>,
+    by_mode: Vec<Vec<Option<Action>>>,
+    analysed: usize,
+    kept: Option<u64>,
+}
+
+impl Prepared {
+    /// Each file's path, by number.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
     }
-    let seats = files().map(|m| img_fp::Seat { file: index[m.path.as_path()], representative: m.is_representative(), correlation: m.correlation() });
-    let actions = img_fp::by_group(mode, paths.len(), seats, min_correlation);
-    paths.iter().zip(actions).filter_map(|(p, a)| Some((p.to_path_buf(), a?))).collect()
+
+    pub fn groups(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn analysed(&self) -> usize {
+        self.analysed
+    }
+
+    /// It is the scan kept on disk as `id` (`last::Notes::id`).
+    pub fn set_kept(&mut self, id: u64) {
+        self.kept = Some(id);
+    }
+}
+
+pub fn prepare(found: Found) -> Prepared {
+    let Found { groups: report, analysed, min_correlation, kept } = found;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut sizes: Vec<u64> = Vec::new();
+    let mut ids: HashMap<PathBuf, u32> = HashMap::new();
+    let mut groups = Vec::with_capacity(report.len());
+    for Group { mut files } in report {
+        for f in files.iter_mut() {
+            f.id = *ids.entry(f.path.clone()).or_insert_with(|| {
+                paths.push(f.path.clone());
+                sizes.push(f.size_bytes.unwrap_or(0));
+                (paths.len() - 1) as u32
+            });
+        }
+        groups.push(GroupState { files, reference_gone: false });
+    }
+    let n = paths.len();
+    let by_mode = MODES.iter().map(|&m| suggestions(&groups, n, m, min_correlation)).collect();
+    Prepared { groups, paths, sizes, by_mode, analysed, kept }
 }
 
 /// What is suggested for a file, in a few words.

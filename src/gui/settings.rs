@@ -137,7 +137,7 @@ impl Default for Settings {
 /// serde writes a `PathBuf` as a string and refuses one that is not UTF-8,
 /// and one such folder in the list made the whole save fail — silently, since
 /// a save that fails says nothing — so nothing at all was remembered.
-mod paths {
+pub(crate) mod paths {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::ffi::OsString;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};

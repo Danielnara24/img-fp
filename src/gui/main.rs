@@ -16,12 +16,15 @@
 //! - `scan.rs`    the child process and what it says
 //! - `results.rs` the groups, for choosing what to move to the Trash
 //! - `thumbs.rs`  pictures for the results, decoded off the main thread
+//! - `last.rs`    the last finished scan, kept so that a closed window does
+//!   not cost it
 //! - `labels.rs`  every mnemonic in the window, checked for clashes by a test
 //!
 //! Every control can be reached from the keyboard: Tab and the arrow keys move
 //! focus, and every labelled control has an Alt mnemonic.
 
 mod labels;
+mod last;
 mod mosaic;
 mod results;
 mod scan;
@@ -342,6 +345,13 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     window.set_child(Some(&stack));
     let app = Rc::new(App { window: window.clone(), stack: stack.clone(), log: gtk::TextBuffer::new(None), log_window: Rc::default() });
 
+    // The last scan's results are read from the start, beside building the
+    // window, and the window opens on them, an empty page saying so until
+    // they come: opening on the settings flashed them first. Not when it was
+    // opened on folders, which is asking for a new scan: then the results
+    // wait behind "Back to results".
+    let open_on_last = start.is_empty() && last::exists();
+    let kept = gio::spawn_blocking(last::load);
     let mut settings = settings::Settings::load();
     // Folders handed over at start — "Open With" in a file manager — are what
     // to scan, in place of the ones remembered from last time. They used to be
@@ -376,15 +386,22 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
             setup.focus_scan();
         }
     });
-    app.show_setup();
+    if open_on_last {
+        results.loading();
+        app.show_results();
+    } else {
+        app.show_setup();
+    }
 
     // Closing the window stops a scan the way Cancel does, and does not wait
     // for it: the worker answers the signal on its own, and it is also told
     // to stop by the kernel should this process die first.
     window.connect_close_request({
         let setup = setup.clone();
+        let results = results.clone();
         move |_| {
             setup.stop_scan();
+            results.flush_marks();
             glib::Propagation::Proceed
         }
     });
@@ -406,5 +423,10 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     // when it is set, and a label added later does not look it up.
     keep_mnemonics_visible(&window);
     window.present();
-    setup.focus_scan();
+    if !open_on_last {
+        setup.focus_scan();
+    }
+    glib::spawn_future_local(async move {
+        setup.restore(kept.await.ok().flatten());
+    });
 }

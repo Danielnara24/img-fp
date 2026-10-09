@@ -7,7 +7,8 @@
 //! below both.
 
 use crate::labels as l;
-use crate::results::Results;
+use crate::last;
+use crate::results::{self, Prepared, Results};
 use crate::scan::{self, Event, Scan};
 use crate::settings::{ReportFormat, Settings};
 use crate::App;
@@ -783,7 +784,29 @@ impl Setup {
                                 if code != Some(scan::EXIT_FATAL) || path.exists() =>
                             {
                                 me.status.set_text("Reading the results…");
-                                let read = gio::spawn_blocking(move || scan::read_report(&path)).await;
+                                // Kept for the next window, once it has been
+                                // read: a report that will not read is not
+                                // worth restoring.
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                                let notes = last::Notes {
+                                    problems: code != Some(0),
+                                    took: me.took(),
+                                    finished: now.as_secs(),
+                                    id: now.as_nanos() as u64,
+                                    log: me.app.log.text(&me.app.log.start_iter(), &me.app.log.end_iter(), false).to_string(),
+                                };
+                                // Made ready for the page here too, off the
+                                // main thread (`results::prepare`).
+                                let read = gio::spawn_blocking(move || {
+                                    let mut prepared = scan::read_report(&path).map(results::prepare);
+                                    if let Ok(p) = prepared.as_mut() {
+                                        if path.exists() && last::save(&path, &notes) {
+                                            p.set_kept(notes.id);
+                                        }
+                                    }
+                                    prepared
+                                })
+                                .await;
                                 Some(read.unwrap_or_else(|_| Err("reading the scan's results failed".into())))
                             }
                             _ => None,
@@ -821,10 +844,9 @@ impl Setup {
     }
 
     /// The scan has ended. `found` is its report, read, when it ended with one.
-    fn finished(self: &Rc<Self>, code: Option<i32>, signal: Option<i32>, stderr: &[String], found: Option<Result<scan::Found, String>>) {
+    fn finished(self: &Rc<Self>, code: Option<i32>, signal: Option<i32>, stderr: &[String], found: Option<Result<Prepared, String>>) {
         let scan = self.scan.borrow_mut().take();
-        let secs = self.started.get().map_or(0, |t| t.elapsed().as_secs());
-        let took = format!("{}:{:02}", secs / 60, secs % 60);
+        let took = self.took();
         // The one-off cache requests have been carried out, or given up on.
         self.clear_cache.set_active(false);
         self.prune_cache.set_active(false);
@@ -886,16 +908,65 @@ impl Setup {
 }
 
 impl Setup {
+    /// How long the running scan has taken, as the clock beside the bar says.
+    fn took(&self) -> String {
+        let secs = self.started.get().map_or(0, |t| t.elapsed().as_secs());
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+
+    /// The scan kept from the last window, read: on the results page as it
+    /// was left, unless a scan has been started since this window opened. If
+    /// the window opened on the results page to wait for it, they are shown
+    /// there; otherwise they wait behind "Back to results". With none to
+    /// show, a window waiting for them goes to the settings.
+    pub fn restore(self: &Rc<Self>, kept: Option<last::Last>) {
+        let waiting = self.app.stack.visible_child_name().as_deref() == Some("results");
+        if self.scanning() || self.results.has_results() {
+            return;
+        }
+        let Some(kept) = kept else {
+            if waiting {
+                self.app.show_setup();
+                self.focus_scan();
+            }
+            return;
+        };
+        let last::Last { prepared: mut found, notes, gone, marks } = kept;
+        found.set_kept(notes.id);
+        self.app.log.set_text(&notes.log);
+        let when = glib::DateTime::from_unix_local(notes.finished as i64)
+            .and_then(|t| t.format("%e %b %Y, %H:%M"))
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
+        let groups = found.groups();
+        self.progress.set_fraction(1.0);
+        self.progress.set_text(Some("100%"));
+        self.elapsed.set_text(&notes.took);
+        self.idle(&format!(
+            "The last scan's results, from {when}: {groups} group{} among {} image{}, done in {}.{}",
+            if groups == 1 { "" } else { "s" },
+            found.analysed(),
+            if found.analysed() == 1 { "" } else { "s" },
+            notes.took,
+            if notes.problems { " It had problems with some files; see the scan log." } else { "" }
+        ));
+        self.results.restore(found, notes.problems, &marks, &gone);
+        self.back_button.set_visible(true);
+        if waiting {
+            self.results.focus();
+        }
+    }
+
     /// A finished scan's groups, on the results page.
-    fn show_found(self: &Rc<Self>, found: scan::Found, problems: bool, took: &str) {
+    fn show_found(self: &Rc<Self>, found: Prepared, problems: bool, took: &str) {
         self.progress.set_fraction(1.0);
         self.progress.set_text(Some("100%"));
         let summary = format!(
             "Done in {took}: {} group{} among {} image{}.{}",
-            found.groups.len(),
-            if found.groups.len() == 1 { "" } else { "s" },
-            found.analysed,
-            if found.analysed == 1 { "" } else { "s" },
+            found.groups(),
+            if found.groups() == 1 { "" } else { "s" },
+            found.analysed(),
+            if found.analysed() == 1 { "" } else { "s" },
             if problems { " It had problems with some files; see the scan log." } else { "" }
         );
         self.idle(&summary);

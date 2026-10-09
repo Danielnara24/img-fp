@@ -413,6 +413,9 @@ pub struct Found {
     /// The correlation bar the scan ran at, which the correlation rule cuts
     /// from.
     pub min_correlation: f32,
+    /// Which scan this is (`last::Notes::id`), if it is the one kept on disk
+    /// for the next window; its marks are kept with it under that.
+    pub kept: Option<u64>,
 }
 
 /// The groups from a finished scan's report.
@@ -426,12 +429,15 @@ pub struct Found {
 /// not there, answers "not found" — which the results page counts as already
 /// gone. So the window reported the file moved and left it where it was.
 pub fn read_report(path: &Path) -> Result<Found, String> {
-    let f = match std::fs::File::open(path) {
+    // Read whole and parsed from memory: serde_json reading through a
+    // reader takes each byte through a call of its own, which was most of
+    // the time on a large report.
+    let f = match std::fs::read(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), analysed: 0, min_correlation: img_fp::defaults().min_pixel_correlation }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), analysed: 0, min_correlation: img_fp::defaults().min_pixel_correlation, kept: None }),
         Err(e) => return Err(format!("could not read the scan's results: {e}")),
     };
-    let r: Report = serde_json::from_reader(std::io::BufReader::new(f)).map_err(|e| format!("could not read the scan's results: {e}"))?;
+    let r: Report = serde_json::from_slice(&f).map_err(|e| format!("could not read the scan's results: {e}"))?;
     let mut groups = r.groups;
     for m in groups.iter_mut().flat_map(|g| g.files.iter_mut()) {
         if let Some(bytes) = m.path_bytes.take() {
@@ -440,7 +446,7 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
         }
     }
     let min_correlation = r.config.min_pixel_correlation.unwrap_or_else(|| img_fp::defaults().min_pixel_correlation);
-    Ok(Found { groups, analysed: r.files_analysed, min_correlation })
+    Ok(Found { groups, analysed: r.files_analysed, min_correlation, kept: None })
 }
 
 #[cfg(test)]
