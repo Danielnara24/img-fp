@@ -351,6 +351,14 @@ pub struct Member {
     /// `REVIEW`. The same in every group the file is in.
     #[serde(default)]
     pub action: Option<String>,
+    /// The kept file that holds everything this one shows, when the scan
+    /// suggests deleting it.
+    #[serde(default)]
+    pub kept_copy: Option<PathBuf>,
+    /// The window's number for the file, the same in every group it is in;
+    /// given when the results arrive, not read from the report.
+    #[serde(skip)]
+    pub id: u32,
 }
 
 impl Member {

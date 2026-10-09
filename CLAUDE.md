@@ -3823,8 +3823,8 @@ colour `decode::preview`, which only the window calls).
   after the pages are built, and on each secondary window after its child.
 - **The picked card is not the focused card.** `Results::picked` is the
   last card clicked or reached with the keyboard, outlined by a `picked`
-  class; the buttons act on it. Using focus instead broke every button for
-  the mouse, since clicking a button moves focus to the button. (The user's
+  class; the image menu acts on it. Using focus instead broke every button
+  for the mouse, since clicking a button moves focus to the button. (The user's
   stylesheet also left GTK's own focus ring invisible.)
 - **The scan log is not modal**, and there is one of it (`App::show_log`).
   It fills in while a scan runs, so a modal log cost Cancel and the cards
@@ -3861,29 +3861,91 @@ colour `decode::preview`, which only the window calls).
   file manager has shown costs a few KB of PNG a card rather than a full
   decode; the large view always decodes the file. A picture already being
   decoded is not queued again (`Queue::in_flight`).
-- **Arrow keys on the cards are handled by hand** (`Results::move_to`):
-  GtkFlowBox moves its cursor only after a click or Tab has set it, and not
-  after `grab_focus` from code, which is how the page hands it the keyboard.
-- **The groups list is as wide as its longest row and no wider**; only the
-  images grow with the window. It is a horizontal `Box`, not a `Paned`, with
-  `propagate_natural_width` on the list's scroller.
-- **The results toolbar wraps** (a `FlowBox`, `tools`), and the side under it
-  may not shrink below its minimum. As a plain `Box` in a shrinkable pane, a wide font or larger text cut "Show in folder" off at the
-  window's edge: seen with Arch's default font, and with any font at 14 pt.
-  Two settings in it are load-bearing. `halign(Start)`, because a filling
-  flow box hands the spare width to the buttons. And `min_children_per_line(2)`,
-  because with one a non-homogeneous flow box reports its natural width as its
-  widest child's, and GTK 4.14 then allocates a start-packed box exactly that:
-  one button per row, drawn over the cards (the 4.16 source has the same
-  code; 4.22 did not show it). Check any change here on 4.14, which is what
-  Ubuntu 24.04 and Mint 22 ship.
-- **A marked card's label is `mix(@error_color, @theme_fg_color, 0.6)`**, not
-  `@error_color`. Plain error red on its own tint measured 2.1:1 under GTK's
-  dark Adwaita, which is what a GTK 4 app gets in GNOME's dark mode; the mix
-  is 4.9:1 or better across Adwaita light and dark, dark high contrast,
-  Mint-Y, Mint-Y-Dark, Yaru, Yaru-dark, Breeze-Dark and the Mint-L-Dark
-  stylesheet. It darkens on light themes and lightens on dark ones, which no
-  single colour can.
+- **The pictures take the page and the words wait to be asked for**, by the
+  user's choice among four mocked layouts. A group is a mosaic
+  (`gui/mosaic.rs`): every picture at its own shape, in rows sized so the
+  whole group fits the visible height, and only a group whose rows would fall
+  under 150 pixels scrolls, at 200 a row. Never cropped to a uniform tile,
+  because a crop and its original would then look alike. Nothing is written
+  on a picture but state: a `Reference` pill, a yellow corner on a weak match,
+  a red border and a red tick on a marked one (the picture dimmed, not
+  covered, so you still see what you marked). Pointing at an image, or
+  reaching it with the keyboard, puts its details in the bottom bar
+  (`refresh_bar`): name and folder, size against the reference's, overlap and
+  correlation, the file that holds it when the content rule deletes it, and
+  the suggestion. Otherwise the bar says what is marked. The tick circle,
+  shown on hover, marks; a double click or Enter opens the large view.
+- **There is one selected image** (`Results::selected`, outlined), set by a
+  click or by the arrow keys, and everything that acts on "this image" acts on
+  it. The bar shows whichever moved last, the pointer or the selection
+  (`follow_pointer`), so an arrow key shows its image even with the pointer
+  resting on another. Nothing is selected when a group opens; the first
+  arrow selects the first image.
+- **The page's keys are the window's** (capture phase, only while the results
+  page shows). Attached to the page they were never seen while nothing on it
+  had the keyboard, since GTK then hands a key to the window alone. They leave
+  Up, Down, Home, End, Space and Enter to the strip when it has the keyboard,
+  and Space and Enter to a focused button. The strip activates on Enter or a
+  double click only (`activate_on_single_click(false)`): activating takes the
+  keyboard to the images, and on every single click that sent Up and Down to
+  the images instead of the groups.
+- **Measured on IMGS-ALL (703 groups of up to 91), it was laggy, and three
+  things were.** Found with a 10 ms main-loop tick that reports when it runs
+  late, on Xvfb, against a saved report. (1) `gtk::Picture` asks for its
+  texture's size, so every texture arriving re-laid out the whole page, strip
+  of 703 rows included: 40-120 ms stalls many times a second until the last
+  picture came. `still.rs` is a picture whose size never depends on what it
+  shows; a texture only redraws it. (2) A group change built ninety tiles
+  afresh, 80-100 ms. Tiles are now made once and reused (`Results::tiles`,
+  `Mosaic::show` hides the spare ones), tile `i` always being image `i`, so
+  its handlers never change. (3) What was left of a group change, ~45 ms, was
+  `set_tooltip_text`: about a quarter of a millisecond a call. Tooltips and
+  style classes are set only when they change (`set_tooltip`, `set_class`),
+  and the strip's rows have none (their badges say the same). A group change
+  is now ~5 ms.
+- **Marking in bulk is one pass over numbered files** (`State`, `mark_ids`).
+  Mark suggested deletions and Unmark all groups on IMGS-ALL (17,850 files)
+  held the window for 0.9 s each: every file was marked on its own, recounting
+  its group and rewriting its strip row, with paths hashed at every step. Now
+  each file has a number given when the results arrive (`Member::id`), marks,
+  sizes and suggestions are vectors by number with the marked count and bytes
+  kept as they change, and each group's row is redrawn once, only when its
+  count moved (`Row::shown`). Measured, function then frame: 890 ms -> 12 ms
+  (Mark suggested), 860 ms -> 10 ms (Unmark all); what remains is the one
+  repaint every image needs, 50-80 ms on Xvfb with cairo. Two smaller things
+  went with it: the tick's tooltip no longer changes with the mark (90 changes
+  were 20 ms), and a marked picture is dimmed by a veil drawn over it rather
+  than by CSS opacity.
+- **The mosaic is fitted to `page_size`, told after the allocation that
+  changed it** (`idle_add_local_once` on the vertical adjustment's notify):
+  queueing a resize inside the viewport's own allocation is what that avoids.
+  Its tiles are laid out with `PAD` around them, since the picked outline is
+  drawn outside a tile and the viewport clips it otherwise.
+- **Arrow keys move by the layout** (`Mosaic::vertical_neighbour`): left and
+  right through the group's order, up and down to the nearest tile of the row
+  above or below.
+- **Groups are a strip of pictures**, each a plain copy of the group's
+  photograph (`face`: of the size most members share, since copies and edits
+  keep a photograph's size and every canvas it was pasted into has its own;
+  neither inverted nor mirrored; suggested KEEP first), with a count and,
+  once any is marked, a red count of marks. The reference image was used
+  first, and on IMGS-ALL it was as often a small photo on a black canvas; the
+  file most often named as `kept_copy` was tried next and is no better, since
+  a composite holds the photograph whole and is named for it. Its pictures come from
+  a loader of their own with one decoder (`Thumbs::with_workers(1)`), so a
+  group change neither drops them nor waits for them; the rows near the shown
+  group are asked for first. Its scroller has `propagate_natural_width` off
+  and a minimum content width: a picture's natural width is the size it was
+  decoded at, twice what it is shown at, and propagated it doubled the strip.
+- **What applies to one image or one group is a menu**: the ☰ button in the
+  header, and the same `gio::Menu` on a right click, the Menu key or
+  Shift+F10 (*View large*, *Open*, *Show in folder*, *Mark all except this*,
+  *Unmark group*, *Unmark all groups*). Each is also Alt and its letter from
+  anywhere on the page, which the menu shows beside it (`MENU`; the labels
+  test checks them with the page's own letters). The image items are off
+  while no image is selected. This replaced a
+  wrapping row of six buttons above the cards, which had needed two
+  load-bearing `FlowBox` settings on GTK 4.14 to stay out of them.
 - **Mnemonics live in `gui/labels.rs`** and a test checks each set of
   controls visible together for clashes. Add a label there, not inline.
 - **The Trash dialog names the groups in which every image is marked**
@@ -3896,10 +3958,10 @@ colour `decode::preview`, which only the window calls).
   off like the CLI's; the window's scans are recursive, which is why the walk
   skips them by default.
 - **Nothing is pre-marked**, by the user's decision; marks are per *file*,
-  since groups overlap. **The suggestion is offered, not applied**: each card
-  says "suggested: keep", "suggested: delete" or "weak match" (`suggestion`;
-  the user's wording), a REVIEW card is tinted `alpha(@warning_color, 0.16)`
-  under the marked tint, and *Mark suggested deletions* (Alt+D) makes the
+  since groups overlap. **The suggestion is offered, not applied**: the bar
+  says "suggested: keep", "suggested: delete" or "weak match" for the image
+  pointed at (`suggestion`; the user's wording), a REVIEW image has a yellow
+  corner, and *Mark suggested deletions* (Alt+D) makes the
   marks exactly the rule's DELETEs in every group, unmarking everything else,
   hand-made marks included (the user's decision: running a second rule
   replaces the first), and is off while the marks already are that set.
@@ -4254,6 +4316,15 @@ and every HEIC and AVIF record of `derived/Desktop` is byte-identical to the
 README said: it is 2.34, what Rust's std asks for, and `release.yml` now
 fails if that moves. The window still wants GTK 4.10, which no distribution
 with an older glibc ships.
+
+**And it did move, through libm.** `f32::hypot` is glibc's `hypotf`, which
+glibc 2.35 versioned anew, so the suggestion code's two calls made a binary
+built on this machine (or the runner) ask for `hypotf@GLIBC_2.35`, and that
+check refused 0.34.0 and 0.35.0: neither was published, on GitHub or on
+crates.io. `suggest::hypot` takes the squares in f64 instead. Before using a
+float function std hands to libm (`hypot`, `cbrt`, `exp2`, the
+trigonometric ones), run `objdump -T target/plain/release/img-fp | grep -o
+'GLIBC_[0-9.]*' | sort -Vu | tail -1` on a plain build: it must say 2.34.
 
 **DDS is not in the default extensions.** `image` 0.25 has no DDS decoder
 behind its `dds` feature ("The image format `DDS` is not supported"), so every

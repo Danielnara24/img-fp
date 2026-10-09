@@ -5,14 +5,22 @@
 //! it was matched to the file at its head (its reference image); which of them
 //! to keep is left to the person looking.
 //!
-//! **The scan's suggestion is shown and offered, never applied.** Each card
-//! says what img-fp suggests for its file (keep, delete, or "weak match"), and
-//! a weak match is tinted. *Mark suggested deletions* makes the marks
+//! **The pictures take the page, and the words wait to be asked for.** A
+//! group's images fill the space beside the strip of groups, each at its own
+//! shape (`mosaic.rs`), and nothing is written on them but what a person needs
+//! to see at a glance: which one is the reference, which are weak matches, and
+//! which are marked. Pointing at an image, or moving to it with the keyboard,
+//! puts its details in the bar at the bottom of the page, so the picture being
+//! judged is never covered.
+//!
+//! **The scan's suggestion is shown and offered, never applied.** The bar says
+//! what img-fp suggests for the image (keep, delete, or "weak match"), and a
+//! weak match has a yellow corner. *Mark suggested deletions* makes the marks
 //! exactly the files suggested for deletion, in every group, unmarking any
 //! other, by the user's decision; the person still moves them to the Trash
-//! themselves. *Suggestion rule* chooses the rule,
-//! and changes the suggestions at once: the scan's own (`Mode::Content`) came
-//! with the report, and the other two read only the groups.
+//! themselves. *Suggestion rule* chooses the rule, and changes the suggestions
+//! at once: the scan's own (`Mode::Content`) came with the report, and the
+//! other two read only the groups.
 //!
 //! Two things about groups decide how marks work here:
 //!
@@ -24,11 +32,14 @@
 //!   the Trash, what is left of its group is still shown, and says so.
 //!
 //! Keyboard: arrows move between images, Space or Delete marks the one under
-//! the keyboard, Enter opens it large, Ctrl+Page Down / Ctrl+Page Up change
-//! group, and every button has an Alt mnemonic.
+//! the keyboard, Enter opens it large, the Menu key (or Shift+F10, or a right
+//! click) offers the rest, Ctrl+Page Down / Ctrl+Page Up change group, and
+//! every button has an Alt mnemonic.
 
 use crate::labels as l;
+use crate::mosaic::Mosaic;
 use crate::scan::{Found, Group, Member};
+use crate::still::Still;
 use crate::thumbs::{show_on, Latest, Shown, Thumbs};
 use crate::App;
 use img_fp::{Action, SuggestMode};
@@ -39,21 +50,47 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-/// Long side of a card's picture, in pixels.
-const CARD: i32 = 200;
 /// Long side of the large view's picture.
 const LARGE: u32 = 1600;
 /// Cards of the next group decoded ahead, for paging.
 const AHEAD: usize = 16;
+/// A group's picture in the strip.
+const STRIP_W: i32 = 96;
+const STRIP_H: i32 = 72;
+/// Rows of the strip around the shown group whose pictures go first.
+const STRIP_NEAR: usize = 8;
+
+/// Long side a group's pictures are decoded at: a group of a few fills the
+/// page with each, one of dozens shares it out.
+fn card_px(n: usize) -> u32 {
+    match n {
+        0..=4 => 1024,
+        5..=12 => 720,
+        13..=30 => 480,
+        _ => 320,
+    }
+}
 
 const CSS: &str = "
-flowboxchild.card { border-radius: 8px; padding: 6px; }
-flowboxchild.card.picked { outline: 3px solid @theme_selected_bg_color; outline-offset: -3px; }
-flowboxchild.card.review { background-color: alpha(@warning_color, 0.16); }
-flowboxchild.card.marked { background-color: alpha(@error_color, 0.16); }
-flowboxchild.card label.suggest-review { color: mix(@warning_color, @theme_fg_color, 0.5); font-weight: bold; }
-flowboxchild.card.marked checkbutton label { color: mix(@error_color, @theme_fg_color, 0.6); font-weight: bold; }
-flowbox.tools > flowboxchild { padding: 0; }
+overlay.tile { border-radius: 4px; border: 3px solid transparent; background-color: alpha(@theme_fg_color, 0.07); }
+overlay.tile:hover { outline: 2px solid alpha(@theme_selected_bg_color, 0.6); outline-offset: 2px; }
+overlay.tile.picked { outline: 3px solid @theme_selected_bg_color; outline-offset: 2px; }
+overlay.tile.marked { border-color: @error_color; }
+overlay.tile box.veil { background-color: transparent; }
+overlay.tile.marked box.veil { background-color: alpha(@theme_bg_color, 0.6); }
+overlay.tile button.tick { min-width: 22px; min-height: 22px; padding: 0; margin: 0; border-radius: 999px; border: 2px solid white;
+  background: alpha(black, 0.3); color: transparent; box-shadow: 0 1px 3px alpha(black, 0.5); opacity: 0; }
+overlay.tile:hover button.tick, overlay.tile.picked button.tick, overlay.tile.marked button.tick { opacity: 1; }
+overlay.tile.marked button.tick { background: @error_color; border-color: @error_color; color: white; }
+overlay.tile .weak { min-width: 20px; min-height: 20px; background-image: linear-gradient(to bottom left, @warning_color 50%, transparent 50%); }
+overlay.tile label.pill, .strip label.badge { background-color: alpha(black, 0.68); color: white; border-radius: 999px; padding: 0 7px; font-size: smaller; font-weight: bold; }
+.strip label.badge.marked { background-color: @error_color; }
+.strip row { padding: 4px 8px; }
+.strip row still { border-radius: 4px; }
+label.suggest { border-radius: 999px; padding: 1px 9px; font-weight: bold; font-size: smaller; }
+label.suggest.keep { background-color: alpha(@success_color, 0.2); color: mix(@success_color, @theme_fg_color, 0.55); }
+label.suggest.delete { background-color: alpha(@error_color, 0.18); color: mix(@error_color, @theme_fg_color, 0.55); }
+label.suggest.review { background-color: alpha(@warning_color, 0.25); color: mix(@warning_color, @theme_fg_color, 0.5); }
 ";
 
 struct GroupState {
@@ -62,17 +99,27 @@ struct GroupState {
     reference_gone: bool,
 }
 
+/// What the page knows, with every file by its number (`Member::id`) rather
+/// than its path: marking all of IMGS-ALL's suggestions is 17,850 files, and
+/// hashing their paths was most of what that cost once it was one pass.
 #[derive(Default)]
 struct State {
     groups: Vec<GroupState>,
-    marked: HashSet<PathBuf>,
+    /// Each file's path, by number.
+    paths: Vec<PathBuf>,
+    marked: Vec<bool>,
+    /// How many are marked, and their bytes.
+    marked_n: usize,
+    marked_bytes: u64,
     /// For each file, the groups it is in.
-    member_of: HashMap<PathBuf, Vec<usize>>,
-    sizes: HashMap<PathBuf, u64>,
+    member_of: Vec<Vec<usize>>,
+    sizes: Vec<u64>,
+    /// Gone to the Trash.
+    gone: Vec<bool>,
     /// What each rule suggests for each file, in `MODES`' order, worked out
     /// when the results arrive: once a reference image is in the Trash, its
     /// group no longer says what was kept for its files.
-    by_mode: Vec<HashMap<PathBuf, Action>>,
+    by_mode: Vec<Vec<Option<Action>>>,
     /// The rule chosen: an index into `MODES`.
     mode: usize,
     current: usize,
@@ -82,39 +129,112 @@ struct State {
 }
 
 impl State {
-    /// What the chosen rule suggests.
-    fn actions(&self) -> &HashMap<PathBuf, Action> {
-        static NONE: std::sync::OnceLock<HashMap<PathBuf, Action>> = std::sync::OnceLock::new();
-        self.by_mode.get(self.mode).unwrap_or_else(|| NONE.get_or_init(HashMap::new))
+    /// What the chosen rule suggests for file `id`.
+    fn action(&self, id: u32) -> Option<Action> {
+        self.by_mode.get(self.mode).and_then(|m| m.get(id as usize).copied().flatten())
+    }
+
+    fn is_marked(&self, id: u32) -> bool {
+        self.marked.get(id as usize).copied().unwrap_or(false)
+    }
+
+    /// Mark or unmark file `id`; whether that changed anything.
+    fn set_mark(&mut self, id: u32, on: bool) -> bool {
+        let i = id as usize;
+        if self.marked.get(i).copied().unwrap_or(on) == on {
+            return false;
+        }
+        self.marked[i] = on;
+        let b = self.sizes[i];
+        if on {
+            self.marked_n += 1;
+            self.marked_bytes += b;
+        } else {
+            self.marked_n -= 1;
+            self.marked_bytes -= b;
+        }
+        true
+    }
+
+    /// The numbers of the files marked, in order.
+    fn marked_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.marked.iter().enumerate().filter(|(_, m)| **m).map(|(i, _)| i as u32)
     }
 }
 
 struct Card {
     path: PathBuf,
-    child: gtk::FlowBoxChild,
-    check: gtk::CheckButton,
+    id: u32,
+    child: gtk::Overlay,
+}
+
+/// A tile of the mosaic, kept from one group to the next and told which
+/// image it shows: the tile at place `i` is always the `i`th image of the
+/// group, so what it does when clicked never changes.
+#[derive(Clone)]
+struct Tile {
+    child: gtk::Overlay,
+    still: Still,
+    weak: gtk::Box,
+    pill: gtk::Label,
+}
+
+/// A group's row in the strip.
+struct Row {
+    picture: Still,
+    count: gtk::Label,
+    marked: gtk::Label,
+    row: gtk::ListBoxRow,
+    /// The marks its badge shows, so that a row whose count did not change
+    /// is left alone.
+    shown: Cell<Option<usize>>,
+}
+
+/// What the bottom bar says about one image.
+struct Details {
+    name: gtk::Label,
+    dir: gtk::Label,
+    facts: gtk::Label,
+    facts_note: gtk::Label,
+    why: gtk::Label,
+    why_note: gtk::Label,
+    suggestion: gtk::Label,
 }
 
 pub struct Results {
     pub root: gtk::Box,
     app: Rc<App>,
     thumbs: Rc<Thumbs>,
+    /// The strip's pictures, with a decoder of their own, so that changing
+    /// group neither drops them nor waits for them.
+    strip_thumbs: Rc<Thumbs>,
     state: RefCell<State>,
     list: gtk::ListBox,
-    row_labels: RefCell<Vec<gtk::Label>>,
-    flow: gtk::FlowBox,
+    rows: RefCell<Vec<Row>>,
+    mosaic: Mosaic,
     title: gtk::Label,
     note: gtk::Label,
     status: gtk::Label,
+    bar: gtk::Stack,
+    details: Details,
     trash: gtk::Button,
     mark_suggested: gtk::Button,
     group_buttons: Vec<gtk::Widget>,
+    /// The image menu, for the Menu key and a right click.
+    context: gtk::PopoverMenu,
     cards: RefCell<Vec<Card>>,
-    /// The image the buttons act on: the last one clicked or reached with
-    /// the keyboard. Kept apart from focus, which a click on a button takes.
-    picked: Cell<usize>,
-    /// Set while code, not a person, is changing a check box.
-    quiet: Cell<bool>,
+    tiles: RefCell<Vec<Tile>>,
+    /// The selected image, which the menu acts on: the last one clicked or
+    /// reached with the arrow keys. Kept apart from focus, which a click on a
+    /// button takes.
+    selected: Cell<Option<usize>>,
+    /// The image under the pointer.
+    hovered: Cell<Option<usize>>,
+    /// Whether the bar shows the image under the pointer rather than the
+    /// selected one: whichever of the two moved last.
+    follow_pointer: Cell<bool>,
+    /// The menu's actions that need a selected image.
+    image_actions: RefCell<Vec<gio::SimpleAction>>,
     /// Set while files are being moved to the Trash. Marking a card during
     /// that used to turn Trash back on, and a second trash then ran beside
     /// the first; New scan could replace the results the first was about to
@@ -129,81 +249,42 @@ impl Results {
         let css = gtk::CssProvider::new();
         css.load_from_data(CSS);
         // At the user's own priority, added after theirs so it wins: a user
-        // stylesheet that themes every flow box child would otherwise hide
-        // which images are marked.
+        // stylesheet that themes every widget would otherwise hide which
+        // images are marked.
         gtk::style_context_add_provider_for_display(&WidgetExt::display(&app.window), &css, gtk::STYLE_PROVIDER_PRIORITY_USER);
 
-        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Browse).build();
+        // ---- the strip of groups
+        // Activated by Enter or a double click only, since activating a group
+        // takes the keyboard to its images: on a single click, the default,
+        // the strip lost the keyboard to the images on every click, and Up
+        // and Down then moved through the images instead of the groups.
+        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Browse).activate_on_single_click(false).css_classes(["strip"]).build();
         let list_scroll = gtk::ScrolledWindow::builder()
             .child(&list)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            // As wide as the longest row and no wider: the images take the
-            // rest of the window, however wide it gets.
-            .propagate_natural_width(true)
+            // As wide as a row of the strip, and not as wide as its pictures
+            // ask: a picture's natural width is the size it was decoded at.
+            .min_content_width(STRIP_W + 16)
+            .propagate_natural_width(false)
+            .hexpand(false)
             .build();
         let groups_label = gtk::Label::with_mnemonic(l::GROUPS);
         groups_label.set_mnemonic_widget(Some(&list));
         groups_label.set_xalign(0.0);
+        groups_label.set_margin_start(8);
         groups_label.add_css_class("heading");
         let left = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        left.set_margin_start(12);
-        left.set_margin_top(12);
-        left.set_margin_bottom(12);
+        left.set_margin_top(10);
         left.append(&groups_label);
         left.append(&list_scroll);
 
-        let flow = gtk::FlowBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .activate_on_single_click(false)
-            .homogeneous(true)
-            .valign(gtk::Align::Start)
-            .row_spacing(8)
-            .column_spacing(8)
-            .max_children_per_line(12)
-            .min_children_per_line(1)
-            .build();
-        let flow_scroll = gtk::ScrolledWindow::builder().child(&flow).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).hexpand(true).build();
-        let images_label = gtk::Label::with_mnemonic(l::IMAGES);
-        images_label.set_mnemonic_widget(Some(&flow));
-        images_label.add_css_class("heading");
-        let title = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
-        let note = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).visible(false).build();
-        let head = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        head.append(&images_label);
-        head.append(&title);
-
-        let prev = gtk::Button::with_mnemonic(l::PREV_GROUP);
-        prev.set_tooltip_text(Some("Ctrl+Page Up"));
-        let next = gtk::Button::with_mnemonic(l::NEXT_GROUP);
-        next.set_tooltip_text(Some("Ctrl+Page Down"));
-        let mark_others = gtk::Button::with_mnemonic(l::MARK_OTHERS);
-        mark_others.set_tooltip_text(Some("Mark every other image in this group, and keep the outlined one."));
-        let unmark = gtk::Button::with_mnemonic(l::UNMARK_GROUP);
-        let open = gtk::Button::with_mnemonic(l::OPEN);
-        open.set_tooltip_text(Some("Open the outlined image in its usual application."));
-        let folder = gtk::Button::with_mnemonic(l::SHOW_FOLDER);
-        // Wraps rather than setting the page's width. Six buttons in a row are
-        // about 780 pixels in GTK's own font and more in a wider one, which on
-        // a scaled screen is more than the window can have.
-        //
-        // Packed at the start, since a filling flow box shares the spare width
-        // out among the buttons. Two to a line at the least, because with one
-        // a flow box reports its natural width as its widest child's, and GTK
-        // 4.14 gives a box packed at the start exactly that: a column of
-        // buttons running into the images below it.
-        let tools = gtk::FlowBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .halign(gtk::Align::Start)
-            .row_spacing(6)
-            .column_spacing(6)
-            .min_children_per_line(2)
-            .max_children_per_line(6)
-            .css_classes(["tools"])
-            .build();
-        // The rule the suggestions follow, and the button that applies them:
-        // they are about every group, not the one shown, and have a row of
-        // their own under the group's buttons.
+        // ---- the header: which group, and what applies to every group
+        let prev = gtk::Button::from_icon_name("go-previous-symbolic");
+        prev.set_tooltip_text(Some("Previous group (Ctrl+Page Up)"));
+        let next = gtk::Button::from_icon_name("go-next-symbolic");
+        next.set_tooltip_text(Some("Next group (Ctrl+Page Down)"));
+        let title = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["heading"]).build();
         let rule = gtk::DropDown::from_strings(RULES);
         rule.set_tooltip_text(Some(
             "Keep all content: delete only an image that a kept image shows all of, at about the same detail.\n\
@@ -212,37 +293,73 @@ impl Results {
              The last two can suggest deleting an image that shows something the reference image does not, such as a collage or the uncropped photo.",
         ));
         let rule_label = gtk::Label::with_mnemonic(l::SUGGEST_RULE);
+        rule_label.add_css_class("dim-label");
         rule_label.set_mnemonic_widget(Some(&rule));
-        let rule_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        rule_box.append(&rule_label);
-        rule_box.append(&rule);
         let mark_suggested = gtk::Button::with_mnemonic(l::MARK_SUGGESTED);
         mark_suggested.set_tooltip_text(Some(
             "Mark exactly the images the rule suggests deleting, in every group. Every other mark is removed, including ones made by hand.",
         ));
         mark_suggested.set_sensitive(false);
-        rule_box.append(&mark_suggested);
-        for b in [&prev, &next, &mark_others, &unmark, &open, &folder] {
-            // The slot takes no focus of its own: Tab goes from button to
-            // button, as it did in a box.
-            let slot = gtk::FlowBoxChild::builder().child(b).focusable(false).build();
-            tools.append(&slot);
+
+        // What applies to one image or one group: in a menu, so that the
+        // page carries no row of buttons above the pictures.
+        // Each item is also Alt and its letter from anywhere on the page,
+        // which the menu shows beside it.
+        let menu = gio::Menu::new();
+        for part in MENU {
+            let section = gio::Menu::new();
+            for (label, action) in part.iter() {
+                let item = gio::MenuItem::new(Some(label), Some(&format!("results.{action}")));
+                item.set_attribute_value("accel", Some(&format!("<Alt>{}", l::letter(label)).to_variant()));
+                section.append_item(&item);
+            }
+            menu.append_section(None, &section);
         }
+        let more = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("The selected image, and the groups").build();
+
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        head.append(&prev);
+        head.append(&next);
+        head.append(&title);
+        title.set_hexpand(true);
+        title.set_margin_start(4);
+        head.append(&rule_label);
+        head.append(&rule);
+        head.append(&mark_suggested);
+        head.append(&more);
+        let note = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).visible(false).build();
+
+        // ---- the pictures
+        let mosaic = Mosaic::new();
+        let scroll = gtk::ScrolledWindow::builder().child(&mosaic).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).hexpand(true).build();
+        let context = gtk::PopoverMenu::from_model(Some(&menu));
+        context.set_has_arrow(false);
+        context.set_halign(gtk::Align::Start);
+        mosaic.add_popover(&context);
+        // A group is fitted into the height the page shows. Told after the
+        // allocation that changed it, not during it.
+        scroll.vadjustment().connect_page_size_notify({
+            let mosaic = mosaic.downgrade();
+            move |a| {
+                let (mosaic, h) = (mosaic.clone(), a.page_size());
+                glib::idle_add_local_once(move || {
+                    if let Some(m) = mosaic.upgrade() {
+                        m.set_viewport(h);
+                    }
+                });
+            }
+        });
 
         let right = gtk::Box::new(gtk::Orientation::Vertical, 8);
         right.set_margin_end(12);
-        right.set_margin_top(12);
-        right.set_margin_bottom(12);
+        right.set_margin_top(10);
+        right.set_margin_bottom(8);
         right.append(&head);
         right.append(&note);
-        right.append(&tools);
-        right.append(&rule_box);
-        right.append(&flow_scroll);
+        right.append(&scroll);
 
-        // A box, not a pane: the groups keep the width their text needs and
-        // only the images grow with the window. Neither side can be squeezed
-        // below its minimum, so a wide font asks for a wider window instead
-        // of cutting off whatever is at the right edge.
+        // A box, not a pane: the strip keeps its width and only the pictures
+        // grow with the window.
         left.set_hexpand(false);
         right.set_hexpand(true);
         let panes = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).vexpand(true).build();
@@ -250,11 +367,53 @@ impl Results {
         panes.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         panes.append(&right);
 
+        // ---- the bottom bar: the image under the pointer, or the marks
         let status = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
         let hint = gtk::Label::builder()
-            .label("F1 keyboard shortcuts")
+            .label("Point at an image, or use the arrow keys, for its details · F1 keyboard shortcuts")
             .css_classes(["dim-label", "caption"])
             .build();
+        let summary = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        summary.append(&status);
+        summary.append(&hint);
+
+        let column = |a: &gtk::Label, b: &gtk::Label| {
+            let c = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            c.set_valign(gtk::Align::Center);
+            c.append(a);
+            c.append(b);
+            c
+        };
+        let label = |classes: &[&str], ellipsize: gtk::pango::EllipsizeMode| {
+            gtk::Label::builder().xalign(0.0).ellipsize(ellipsize).css_classes(classes.iter().map(|c| c.to_string()).collect::<Vec<_>>()).build()
+        };
+        use gtk::pango::EllipsizeMode as E;
+        let details = Details {
+            name: label(&["heading"], E::Middle),
+            dir: label(&["dim-label", "caption"], E::Start),
+            facts: label(&[], E::End),
+            facts_note: label(&["dim-label", "caption"], E::End),
+            why: label(&[], E::End),
+            why_note: label(&["dim-label", "caption"], E::Middle),
+            suggestion: gtk::Label::builder().css_classes(["suggest"]).valign(gtk::Align::Center).build(),
+        };
+        let first = column(&details.name, &details.dir);
+        first.set_size_request(260, -1);
+        first.set_hexpand(true);
+        let detail = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+        detail.append(&first);
+        detail.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        detail.append(&column(&details.facts, &details.facts_note));
+        detail.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let third = column(&details.why, &details.why_note);
+        third.set_hexpand(true);
+        detail.append(&third);
+        detail.append(&details.suggestion);
+        let bar = gtk::Stack::builder().hexpand(true).build();
+        bar.add_named(&summary, Some("summary"));
+        bar.add_named(&detail, Some("details"));
+        bar.set_visible_child_name("summary");
+
         let log = gtk::Button::with_mnemonic(l::RESULTS_LOG);
         let to_settings = gtk::Button::with_mnemonic(l::TO_SETTINGS);
         let trash = gtk::Button::with_mnemonic(l::TRASH);
@@ -264,37 +423,44 @@ impl Results {
         bottom.set_margin_start(12);
         bottom.set_margin_end(12);
         bottom.set_margin_top(8);
-        bottom.set_margin_bottom(12);
-        bottom.append(&status);
-        bottom.append(&hint);
-        bottom.append(&log);
-        bottom.append(&to_settings);
-        bottom.append(&trash);
+        bottom.set_margin_bottom(10);
+        bottom.set_size_request(-1, 44);
+        bottom.append(&bar);
+        for b in [&log, &to_settings, &trash] {
+            b.set_valign(gtk::Align::Center);
+            bottom.append(b);
+        }
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&panes);
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.append(&bottom);
 
-        let group_buttons: Vec<gtk::Widget> =
-            [&prev, &next, &mark_others, &unmark, &open, &folder].iter().map(|b| b.upcast_ref::<gtk::Widget>().clone()).collect();
+        let group_buttons: Vec<gtk::Widget> = vec![prev.clone().upcast(), next.clone().upcast(), more.clone().upcast()];
         let me = Rc::new(Results {
             root,
             app: app.clone(),
             thumbs: Thumbs::new(),
+            strip_thumbs: Thumbs::with_workers(1),
             state: RefCell::new(State::default()),
             list,
-            row_labels: RefCell::new(Vec::new()),
-            flow,
+            rows: RefCell::new(Vec::new()),
+            mosaic,
             title,
             note,
             status,
+            bar,
+            details,
             trash,
             mark_suggested: mark_suggested.clone(),
             group_buttons,
+            context,
             cards: RefCell::new(Vec::new()),
-            picked: Cell::new(0),
-            quiet: Cell::new(false),
+            tiles: RefCell::new(Vec::new()),
+            selected: Cell::new(None),
+            hovered: Cell::new(None),
+            follow_pointer: Cell::new(false),
+            image_actions: RefCell::new(Vec::new()),
             trashing: Cell::new(false),
             settings_button: to_settings.clone(),
             to_settings: RefCell::new(None),
@@ -311,12 +477,49 @@ impl Results {
         };
         prev.connect_clicked(with(|me| me.step(-1)));
         next.connect_clicked(with(|me| me.step(1)));
-        mark_others.connect_clicked(with(|me| me.mark_all_but_focused()));
-        unmark.connect_clicked(with(|me| me.unmark_group()));
-        open.connect_clicked(with(|me| me.launch(false)));
-        folder.connect_clicked(with(|me| me.launch(true)));
         me.trash.connect_clicked(with(|me| me.confirm_trash()));
         mark_suggested.connect_clicked(with(|me| me.mark_suggested()));
+
+        let actions = gio::SimpleActionGroup::new();
+        let action = |name: &str, f: fn(&Rc<Results>)| {
+            let a = gio::SimpleAction::new(name, None);
+            let weak = Rc::downgrade(&me);
+            a.connect_activate(move |_, _| {
+                if let Some(me) = weak.upgrade() {
+                    f(&me);
+                }
+            });
+            actions.add_action(&a);
+            a
+        };
+        let image_actions = vec![
+            action("enlarge", |me| {
+                if let Some(i) = me.selected.get() {
+                    me.preview(i);
+                }
+            }),
+            action("open", |me| me.launch(false)),
+            action("folder", |me| me.launch(true)),
+            action("mark-others", |me| me.mark_all_but_selected()),
+        ];
+        action("unmark-group", |me| me.unmark_group());
+        action("unmark-all", |me| me.unmark_all());
+        *me.image_actions.borrow_mut() = image_actions;
+        me.root.insert_action_group("results", Some(&actions));
+        me.select(None);
+        // Back to the image the menu was about, so the keyboard carries on
+        // where it was.
+        me.context.connect_closed({
+            let weak = Rc::downgrade(&me);
+            move |_| {
+                if let Some(me) = weak.upgrade()
+                    && let Some(i) = me.selected.get()
+                {
+                    glib::idle_add_local_once(move || me.move_to(i as i64));
+                }
+            }
+        });
+
         rule.connect_selected_notify({
             let weak = Rc::downgrade(&me);
             move |d| {
@@ -342,44 +545,115 @@ impl Results {
                 me.show_group(row.index() as usize);
             }
         });
-        // Enter, and a double click, open an image large.
-        me.flow.connect_child_activated({
+        // Enter on a group takes the keyboard to its images.
+        me.list.connect_row_activated({
             let weak = Rc::downgrade(&me);
-            move |_, child| {
+            move |_, _| {
                 if let Some(me) = weak.upgrade() {
-                    me.preview(child.index() as usize);
+                    me.focus();
                 }
             }
         });
-        // Space and Delete mark the image under the keyboard, taken before the
-        // flow box sees them, since Space would otherwise activate the card.
-        // The arrows are here too: the flow box moves its own cursor only
-        // once a click or a Tab has put it there, and not when the keyboard
-        // was handed to a card from code, which is how this page gives it.
+        // The page's keys are the window's, taken before the widget with the
+        // keyboard sees them: attached to the page, they were never seen at
+        // all while nothing on it had the keyboard, since GTK then hands a key
+        // to the window alone. Only while the page is showing.
+        //
+        // The image keys work from anywhere on the page: the arrows move the
+        // selection by the layout, left and right through the group's order,
+        // up and down to the nearest image of the row above or below. What
+        // they leave alone: Up, Down, Home, End, Space and Enter in the strip,
+        // which change and open groups there, and Space and Enter on a button
+        // or the rule picker, which press it.
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed({
             let weak = Rc::downgrade(&me);
             move |_, key, _, mods| {
                 let Some(me) = weak.upgrade() else { return glib::Propagation::Proceed };
-                if mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+                if !me.showing() || mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
                     return glib::Propagation::Proceed;
                 }
-                let Some(i) = me.focused_card() else { return glib::Propagation::Proceed };
-                match key {
-                    gdk::Key::space | gdk::Key::Delete | gdk::Key::KP_Delete => me.toggle(i),
-                    gdk::Key::Left | gdk::Key::KP_Left => me.move_to(i as i64 - 1),
-                    gdk::Key::Right | gdk::Key::KP_Right => me.move_to(i as i64 + 1),
-                    gdk::Key::Up | gdk::Key::KP_Up => me.move_to(i as i64 - me.columns()),
-                    gdk::Key::Down | gdk::Key::KP_Down => me.move_to(i as i64 + me.columns()),
-                    gdk::Key::Home | gdk::Key::KP_Home => me.move_to(0),
-                    gdk::Key::End | gdk::Key::KP_End => me.move_to(i64::MAX),
+                if me.cards.borrow().is_empty() {
+                    return glib::Propagation::Proceed;
+                }
+                use gdk::Key as K;
+                let focus = gtk::prelude::GtkWindowExt::focus(&me.app.window);
+                let on_tile = focus.as_ref().is_some_and(|f| me.cards.borrow().iter().any(|c| c.child.upcast_ref::<gtk::Widget>() == f));
+                let in_strip = focus.as_ref().is_some_and(|f| f.is_ancestor(&me.list) || f == me.list.upcast_ref::<gtk::Widget>());
+                let theirs = match key {
+                    K::Up | K::KP_Up | K::Down | K::KP_Down | K::Home | K::KP_Home | K::End | K::KP_End => in_strip,
+                    K::space | K::Return | K::KP_Enter | K::ISO_Enter => focus.is_some() && !on_tile,
+                    _ => false,
+                };
+                if theirs {
+                    return glib::Propagation::Proceed;
+                }
+                let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
+                let go = |i: i64| me.move_to(i);
+                match (key, me.selected.get()) {
+                    (K::Left | K::KP_Left, Some(i)) => go(i as i64 - 1),
+                    (K::Right | K::KP_Right, Some(i)) => go(i as i64 + 1),
+                    (K::Up | K::KP_Up, Some(i)) => {
+                        if let Some(j) = me.mosaic.vertical_neighbour(i, false) {
+                            go(j as i64);
+                        }
+                    }
+                    (K::Down | K::KP_Down, Some(i)) => {
+                        if let Some(j) = me.mosaic.vertical_neighbour(i, true) {
+                            go(j as i64);
+                        }
+                    }
+                    // Nothing selected yet: any arrow starts at the first.
+                    (K::Left | K::KP_Left | K::Right | K::KP_Right | K::Up | K::KP_Up | K::Down | K::KP_Down, None) => go(0),
+                    (K::Home | K::KP_Home, _) => go(0),
+                    (K::End | K::KP_End, _) => go(i64::MAX),
+                    (K::space | K::Delete | K::KP_Delete, Some(i)) => me.toggle(i),
+                    (K::Return | K::KP_Enter | K::ISO_Enter, Some(i)) => me.preview(i),
+                    (K::Menu, Some(i)) => me.popup_menu(i, None),
+                    (K::F10, Some(i)) if shift => me.popup_menu(i, None),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
             }
         });
-        me.flow.add_controller(keys);
+        me.app.window.add_controller(keys);
+        // The menu's items are Alt and their letter from anywhere on the
+        // page, as a button's mnemonic would be.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed({
+            let actions = actions.clone();
+            let weak = Rc::downgrade(&me);
+            move |_, key, _, mods| {
+                if !weak.upgrade().is_some_and(|me| me.showing()) {
+                    return glib::Propagation::Proceed;
+                }
+                if !mods.contains(gdk::ModifierType::ALT_MASK) || mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK) {
+                    return glib::Propagation::Proceed;
+                }
+                let Some(c) = key.to_lower().to_unicode() else { return glib::Propagation::Proceed };
+                let Some((_, name)) = MENU.iter().flat_map(|p| p.iter()).find(|(label, _)| l::letter(label) == c) else {
+                    return glib::Propagation::Proceed;
+                };
+                if actions.is_action_enabled(name) {
+                    actions.activate_action(name, None);
+                }
+                glib::Propagation::Stop
+            }
+        });
+        me.app.window.add_controller(keys);
+        // The bar follows the keyboard out of the images as well as in.
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave({
+            let weak = Rc::downgrade(&me);
+            move |_| {
+                if let Some(me) = weak.upgrade() {
+                    me.refresh_bar();
+                }
+            }
+        });
+        me.mosaic.add_controller(focus);
         // Ctrl+Page Down / Up change group from anywhere on the page.
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -387,7 +661,7 @@ impl Results {
             let weak = Rc::downgrade(&me);
             move |_, key, _, mods| {
                 let Some(me) = weak.upgrade() else { return glib::Propagation::Proceed };
-                if !mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                if !me.showing() || !mods.contains(gdk::ModifierType::CONTROL_MASK) {
                     return glib::Propagation::Proceed;
                 }
                 match key {
@@ -398,8 +672,14 @@ impl Results {
                 glib::Propagation::Stop
             }
         });
-        me.root.add_controller(keys);
+        me.app.window.add_controller(keys);
         me
+    }
+
+    /// Whether this page is the one on screen, and so the window's keys are
+    /// its own.
+    fn showing(&self) -> bool {
+        self.app.stack.visible_child_name().as_deref() == Some("results")
     }
 
     pub fn set_to_settings(&self, f: impl Fn() + 'static) {
@@ -418,24 +698,41 @@ impl Results {
             // The rule chosen stays chosen from one scan to the next.
             let mode = s.mode;
             *s = State { problems, analysed, has_results: true, mode, ..State::default() };
+            let mut ids: HashMap<PathBuf, u32> = HashMap::new();
             for g in groups {
-                let Group { files } = g;
-                for f in &files {
-                    if let Some(b) = f.size_bytes {
-                        s.sizes.insert(f.path.clone(), b);
-                    }
+                let Group { mut files } = g;
+                for f in files.iter_mut() {
+                    f.id = *ids.entry(f.path.clone()).or_insert_with(|| {
+                        s.paths.push(f.path.clone());
+                        s.sizes.push(f.size_bytes.unwrap_or(0));
+                        (s.paths.len() - 1) as u32
+                    });
                 }
                 s.groups.push(GroupState { files, reference_gone: false });
             }
-            s.by_mode = MODES.iter().map(|&m| suggestions(&s.groups, m, min_correlation)).collect();
+            let n = s.paths.len();
+            s.marked = vec![false; n];
+            s.gone = vec![false; n];
+            s.by_mode = MODES
+                .iter()
+                .map(|&m| {
+                    let by_path = suggestions(&s.groups, m, min_correlation);
+                    s.paths.iter().map(|p| by_path.get(p).copied()).collect()
+                })
+                .collect();
         }
         self.thumbs.clear_queue();
+        self.strip_thumbs.clear_queue();
         self.rebuild(0);
     }
 
-    /// Keyboard to the page: the images, or the list when there are none.
+    /// Keyboard to the page: the selected image, else the first, or the
+    /// list when there are none.
     pub fn focus(&self) {
-        let first = self.flow.child_at_index(0);
+        let first = {
+            let cards = self.cards.borrow();
+            self.selected.get().and_then(|i| cards.get(i)).or(cards.first()).map(|c| c.child.clone())
+        };
         match first {
             Some(c) => {
                 c.grab_focus();
@@ -446,14 +743,14 @@ impl Results {
         }
     }
 
-    /// The list of groups, from the state, with `select` selected.
+    /// The strip of groups, from the state, with `select` selected.
     fn rebuild(self: &Rc<Self>, select: usize) {
         {
             let mut s = self.state.borrow_mut();
-            let mut member_of: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+            let mut member_of: Vec<Vec<usize>> = vec![Vec::new(); s.paths.len()];
             for (gi, g) in s.groups.iter().enumerate() {
                 for f in &g.files {
-                    member_of.entry(f.path.clone()).or_default().push(gi);
+                    member_of[f.id as usize].push(gi);
                 }
             }
             s.member_of = member_of;
@@ -464,18 +761,30 @@ impl Results {
         while let Some(row) = self.list.row_at_index(0) {
             self.list.remove(&row);
         }
-        let n = self.state.borrow().groups.len();
-        let mut labels = Vec::with_capacity(n);
-        for _ in 0..n {
-            let label = gtk::Label::builder().xalign(0.0).margin_start(8).margin_end(8).margin_top(6).margin_bottom(6).build();
-            self.list.append(&label);
-            labels.push(label);
+        let scale = self.app.window.scale_factor().max(1) as u32;
+        let heads: Vec<(PathBuf, usize)> = {
+            let s = self.state.borrow();
+            s.groups.iter().map(|g| (face(&g.files).map(|f| f.path.clone()).unwrap_or_default(), g.files.len())).collect()
+        };
+        let mut rows = Vec::with_capacity(heads.len());
+        for (head, _) in &heads {
+            let picture = Still::new(STRIP_W, STRIP_H);
+            picture.set_overflow(gtk::Overflow::Hidden);
+            let count = gtk::Label::builder().css_classes(["badge"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(4).margin_bottom(4).build();
+            let marked = gtk::Label::builder().css_classes(["badge", "marked"]).halign(gtk::Align::Start).valign(gtk::Align::End).margin_start(4).margin_bottom(4).visible(false).build();
+            let overlay = gtk::Overlay::builder().child(&picture).build();
+            overlay.add_overlay(&count);
+            overlay.add_overlay(&marked);
+            let row = gtk::ListBoxRow::builder().child(&overlay).build();
+            self.list.append(&row);
+            self.strip_thumbs.request(head, STRIP_W as u32 * 2 * scale, Shown::Still(picture.clone()), false);
+            rows.push(Row { picture, count, marked, row, shown: Cell::new(None) });
         }
-        *self.row_labels.borrow_mut() = labels;
-        for gi in 0..n {
+        *self.rows.borrow_mut() = rows;
+        for gi in 0..heads.len() {
             self.update_row(gi);
         }
-        let empty = n == 0;
+        let empty = heads.is_empty();
         for b in &self.group_buttons {
             b.set_sensitive(!empty);
         }
@@ -493,7 +802,7 @@ impl Results {
             self.update_status();
             return;
         }
-        let i = select.min(n - 1);
+        let i = select.min(heads.len() - 1);
         if let Some(row) = self.list.row_at_index(i as i32) {
             self.list.select_row(Some(&row));
         }
@@ -503,21 +812,40 @@ impl Results {
     fn update_row(&self, gi: usize) {
         let s = self.state.borrow();
         let Some(g) = s.groups.get(gi) else { return };
-        let marked = g.files.iter().filter(|f| s.marked.contains(&f.path)).count();
+        let marked = g.files.iter().filter(|f| s.is_marked(f.id)).count();
+        let rows = self.rows.borrow();
+        let Some(r) = rows.get(gi) else { return };
+        let before = r.shown.replace(Some(marked));
+        if before == Some(marked) {
+            return;
+        }
+        if before.is_none() {
+            r.count.set_text(&g.files.len().to_string());
+        }
+        if marked > 0 {
+            r.marked.set_text(&marked.to_string());
+        }
+        if r.marked.is_visible() != (marked > 0) {
+            r.marked.set_visible(marked > 0);
+        }
         let mut text = format!("Group {} · {} images", gi + 1, g.files.len());
         if marked > 0 {
             text.push_str(&format!(" · {marked} marked"));
         }
-        if let Some(label) = self.row_labels.borrow().get(gi) {
-            label.set_text(&text);
-        }
+        // No tooltip: the badges say the same, and setting seven hundred
+        // tooltips was most of the time the strip took to build.
+        r.row.update_property(&[gtk::accessible::Property::Label(&text)]);
     }
 
     fn clear_cards(&self) {
-        while let Some(c) = self.flow.child_at_index(0) {
-            self.flow.remove(&c);
+        self.select(None);
+        for t in self.tiles.borrow().iter().take(self.cards.borrow().len()) {
+            t.still.set_texture(None);
         }
+        self.mosaic.show(&[]);
         self.cards.borrow_mut().clear();
+        self.hovered.set(None);
+        self.refresh_bar();
     }
 
     fn show_group(self: &Rc<Self>, gi: usize) {
@@ -529,7 +857,6 @@ impl Results {
             s.current = gi;
             (files, gone, s.groups.len(), s.problems)
         };
-        let had_focus = self.flow.focus_child().is_some();
         self.thumbs.clear_queue();
         self.clear_cards();
         self.title.set_text(&format!("Group {} of {} · {} images", gi + 1, n, files.len()));
@@ -544,232 +871,340 @@ impl Results {
         self.note.set_visible(!note.is_empty());
 
         let scale = self.app.window.scale_factor().max(1) as u32;
+        let px = card_px(files.len()) * scale;
         let mut cards = Vec::with_capacity(files.len());
         for (i, m) in files.iter().enumerate() {
-            let card = self.card(i, m);
-            self.thumbs.request(&m.path, CARD as u32 * scale, Shown::Picture(card.2.clone()), false);
-            self.flow.append(&card.0);
-            cards.push(Card { path: m.path.clone(), child: card.0, check: card.1 });
+            let t = self.card(i, m);
+            self.thumbs.request(&m.path, px, Shown::Still(t.still.clone()), false);
+            cards.push(Card { path: m.path.clone(), id: m.id, child: t.child });
         }
         *self.cards.borrow_mut() = cards;
-        self.pick(0);
+        self.mosaic.show(&files.iter().map(|m| (m.width.unwrap_or(0), m.height.unwrap_or(0))).collect::<Vec<_>>());
         // The next group, ahead of being asked for.
-        let ahead: Vec<PathBuf> = {
+        let ahead: (Vec<PathBuf>, usize) = {
             let s = self.state.borrow();
-            s.groups.get(gi + 1).map(|g| g.files.iter().take(AHEAD).map(|f| f.path.clone()).collect()).unwrap_or_default()
+            s.groups.get(gi + 1).map(|g| (g.files.iter().take(AHEAD).map(|f| f.path.clone()).collect(), g.files.len())).unwrap_or_default()
         };
-        for p in ahead {
-            self.thumbs.request(&p, CARD as u32 * scale, Shown::Callback(Box::new(|_| {})), false);
+        for p in ahead.0 {
+            self.thumbs.request(&p, card_px(ahead.1) * scale, Shown::Callback(Box::new(|_| {})), false);
         }
-        if had_focus {
-            self.focus();
+        // The strip's pictures nearest the group shown, first.
+        {
+            let s = self.state.borrow();
+            let rows = self.rows.borrow();
+            for g in gi.saturating_sub(2)..(gi + STRIP_NEAR).min(rows.len()) {
+                if let Some(head) = s.groups.get(g).and_then(|g| face(&g.files)) {
+                    self.strip_thumbs.request(&head.path, STRIP_W as u32 * 2 * scale, Shown::Still(rows[g].picture.clone()), true);
+                }
+            }
         }
+        // A tile left holding the keyboard may now be hidden, or show
+        // another image: the keyboard goes back to the images only when it
+        // was among them and nothing else has taken it (a click on the strip
+        // changes group before the strip takes the keyboard).
+        let focus = gtk::prelude::GtkWindowExt::focus(&self.app.window);
+        if focus.is_some_and(|f| self.tiles.borrow().iter().any(|t| t.child.upcast_ref::<gtk::Widget>() == &f))
+            && let Some(r) = self.list.row_at_index(gi as i32)
+        {
+            r.grab_focus();
+        }
+        self.refresh_bar();
     }
 
-    /// One image of the shown group.
-    fn card(self: &Rc<Self>, i: usize, m: &Member) -> (gtk::FlowBoxChild, gtk::CheckButton, gtk::Picture) {
-        let picture = gtk::Picture::builder()
-            .content_fit(gtk::ContentFit::Contain)
-            .can_shrink(true)
-            .width_request(CARD)
-            .height_request(CARD * 3 / 4)
-            .alternative_text(file_name(&m.path))
-            .build();
-        let name = gtk::Label::builder()
-            .label(file_name(&m.path))
-            .ellipsize(gtk::pango::EllipsizeMode::Middle)
-            .max_width_chars(24)
-            .build();
-        name.add_css_class("heading");
-        let dir = m.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-        let dir = gtk::Label::builder().label(&dir).ellipsize(gtk::pango::EllipsizeMode::Start).max_width_chars(28).css_classes(["dim-label", "caption"]).build();
-        let facts = gtk::Label::builder().label(facts(m)).css_classes(["caption"]).build();
-        // What the match rests on.
-        let why = gtk::Label::builder()
-            .label(evidence(m))
-            .wrap(true)
-            .justify(gtk::Justification::Center)
-            .max_width_chars(28)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        let action = self.state.borrow().actions().get(&m.path).copied();
-        let suggestion = gtk::Label::builder().label(suggestion(action)).css_classes(["caption"]).build();
-        if action == Some(Action::Review) {
-            suggestion.add_css_class("suggest-review");
+    /// Tile `i`, told to show `m`.
+    fn card(self: &Rc<Self>, i: usize, m: &Member) -> Tile {
+        while self.tiles.borrow().len() <= i {
+            let n = self.tiles.borrow().len();
+            let t = self.new_tile(n);
+            self.mosaic.append(&t.child);
+            self.tiles.borrow_mut().push(t);
         }
-        let check = gtk::CheckButton::with_label("Move to Trash");
-        check.set_halign(gtk::Align::Center);
-        check.set_focusable(false);
-        let marked = self.state.borrow().marked.contains(&m.path);
-        check.set_active(marked);
+        let t = self.tiles.borrow()[i].clone();
+        let name = file_name(&m.path);
+        t.still.set_label(&name);
+        if t.still.has_tooltip() {
+            t.still.set_tooltip_text(None);
+        }
+        let (action, marked) = {
+            let s = self.state.borrow();
+            (s.action(m.id), s.is_marked(m.id))
+        };
+        let review = action == Some(Action::Review);
+        if t.weak.is_visible() != review {
+            t.weak.set_visible(review);
+        }
+        set_class(&t.child, "review", review);
+        set_class(&t.child, "marked", marked);
+        set_class(&t.child, "picked", false);
+        let mut pills = Vec::new();
+        if m.is_representative() {
+            pills.push("Reference");
+        }
+        if m.damaged {
+            pills.push("Damaged");
+        }
+        t.pill.set_text(&pills.join(" · "));
+        t.pill.set_visible(!pills.is_empty());
+        t.child.update_property(&[gtk::accessible::Property::Label(&name)]);
+        t
+    }
 
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        body.append(&picture);
-        body.append(&name);
-        body.append(&dir);
-        body.append(&facts);
-        body.append(&why);
-        body.append(&suggestion);
-        body.append(&check);
-        let child = gtk::FlowBoxChild::new();
-        child.set_child(Some(&body));
-        child.add_css_class("card");
-        if action == Some(Action::Review) {
-            child.add_css_class("review");
-        }
-        if marked {
-            child.add_css_class("marked");
-        }
-        child.set_tooltip_text(Some(&m.path.display().to_string()));
-        child.update_property(&[gtk::accessible::Property::Label(&file_name(&m.path))]);
-
-        // Reached by the keyboard, or clicked anywhere on it, including its
-        // check box: either way it is the image the buttons now mean.
+    /// The tile for place `i` of every group, with what it does.
+    fn new_tile(self: &Rc<Self>, i: usize) -> Tile {
+        let still = Still::new(0, 0);
+        let child = gtk::Overlay::builder().child(&still).focusable(true).overflow(gtk::Overflow::Hidden).css_classes(["tile"]).build();
+        let tick = gtk::Button::builder()
+            .icon_name("object-select-symbolic")
+            .css_classes(["tick"])
+            .focusable(false)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_start(6)
+            .margin_top(6)
+            // One wording for both states: a tooltip costs a quarter of a
+            // millisecond to change, and marking a group's worth at once
+            // changed ninety of them.
+            .tooltip_text("Mark or unmark for the Trash (Space)")
+            .build();
+        // A marked picture is dimmed by a veil drawn over it rather than by
+        // its own opacity, which the software renderer pays for by drawing
+        // each picture apart first: some 70 ms of frame for a group of ninety
+        // marked at once.
+        let veil = gtk::Box::builder().css_classes(["veil"]).can_target(false).build();
+        child.add_overlay(&veil);
+        child.add_overlay(&tick);
+        let weak = gtk::Box::builder().css_classes(["weak"]).halign(gtk::Align::End).valign(gtk::Align::Start).tooltip_text("Weak match").visible(false).build();
+        child.add_overlay(&weak);
+        let pill = gtk::Label::builder().css_classes(["pill"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(6).margin_bottom(6).visible(false).build();
+        child.add_overlay(&pill);
+        tick.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(me) = weak.upgrade() {
+                    me.select(Some(i));
+                    me.toggle(i);
+                }
+            }
+        });
+        // Reached by the keyboard, or clicked anywhere on it: either way it
+        // is the image the menu now means, and the bar shows it.
         let focus = gtk::EventControllerFocus::new();
         focus.connect_enter({
             let weak = Rc::downgrade(self);
             move |_| {
                 if let Some(me) = weak.upgrade() {
-                    me.pick(i);
+                    me.select(Some(i));
+                    me.refresh_bar();
                 }
             }
         });
         child.add_controller(focus);
-        let click = gtk::GestureClick::new();
-        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let click = gtk::GestureClick::builder().button(0).propagation_phase(gtk::PropagationPhase::Capture).build();
         click.connect_pressed({
             let weak = Rc::downgrade(self);
-            move |_, _, _, _| {
-                if let Some(me) = weak.upgrade() {
-                    me.pick(i);
+            let child = child.downgrade();
+            move |g, n, x, y| {
+                let (Some(me), Some(child)) = (weak.upgrade(), child.upgrade()) else { return };
+                me.select(Some(i));
+                me.follow_pointer.set(true);
+                child.grab_focus();
+                match g.current_button() {
+                    gdk::BUTTON_SECONDARY => me.popup_menu(i, Some((x, y))),
+                    gdk::BUTTON_PRIMARY if n == 2 => me.preview(i),
+                    _ => {}
                 }
             }
         });
         child.add_controller(click);
-
-        check.connect_toggled({
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_enter({
             let weak = Rc::downgrade(self);
-            move |c| {
-                let Some(me) = weak.upgrade() else { return };
-                if !me.quiet.get() {
-                    me.set_marked(i, c.is_active());
+            move |_, _, _| {
+                if let Some(me) = weak.upgrade() {
+                    me.hovered.set(Some(i));
+                    me.follow_pointer.set(true);
+                    me.refresh_bar();
                 }
             }
         });
-        (child, check, picture)
+        motion.connect_leave({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(me) = weak.upgrade() {
+                    if me.hovered.get() == Some(i) {
+                        me.hovered.set(None);
+                    }
+                    me.refresh_bar();
+                }
+            }
+        });
+        child.add_controller(motion);
+        Tile { child, still, weak, pill }
     }
 
-    /// Make card `i` the one the buttons act on, and show it.
-    fn pick(&self, i: usize) {
+    /// The image menu at card `i`: at `at` in the card, or at its middle.
+    fn popup_menu(&self, i: usize, at: Option<(f64, f64)>) {
+        let Some(child) = self.cards.borrow().get(i).map(|c| c.child.clone()) else { return };
+        self.select(Some(i));
+        let (x, y) = at.unwrap_or((child.width() as f64 / 2.0, child.height() as f64 / 2.0));
+        #[allow(deprecated)]
+        let Some((mx, my)) = child.translate_coordinates(&self.mosaic, x, y) else { return };
+        self.context.set_pointing_to(Some(&gdk::Rectangle::new(mx as i32, my as i32, 1, 1)));
+        self.context.popup();
+    }
+
+    /// Select card `i`, or none: outline it, and let the menu's image items
+    /// act on it.
+    fn select(&self, i: Option<usize>) {
         let cards = self.cards.borrow();
-        if let Some(c) = cards.get(self.picked.get()) {
+        if let Some(c) = self.selected.get().and_then(|j| cards.get(j)) {
             c.child.remove_css_class("picked");
         }
-        if let Some(c) = cards.get(i) {
+        let i = i.filter(|&i| i < cards.len());
+        if let Some(c) = i.and_then(|i| cards.get(i)) {
             c.child.add_css_class("picked");
-            self.picked.set(i);
+        }
+        self.selected.set(i);
+        for a in self.image_actions.borrow().iter() {
+            a.set_enabled(i.is_some());
         }
     }
 
-    fn focused_card(&self) -> Option<usize> {
-        let focus = self.flow.focus_child()?;
-        let child = focus.downcast_ref::<gtk::FlowBoxChild>()?;
-        Some(child.index() as usize)
-    }
-
-    /// Cards on a line of the grid, as laid out now.
-    fn columns(&self) -> i64 {
-        let Some(first) = self.flow.child_at_index(0) else { return 1 };
-        let y = first.allocation().y();
-        let mut n = 1;
-        while let Some(c) = self.flow.child_at_index(n) {
-            if c.allocation().y() != y {
-                break;
-            }
-            n += 1;
-        }
-        n as i64
-    }
-
-    /// The keyboard to card `i`, clamped to the group.
+    /// Select card `i`, clamped to the group, give it the keyboard, and show
+    /// it in the bar even while the pointer rests on another image.
     fn move_to(&self, i: i64) {
         let n = self.cards.borrow().len() as i64;
         if n == 0 {
             return;
         }
-        if let Some(c) = self.flow.child_at_index(i.clamp(0, n - 1) as i32) {
-            c.grab_focus();
+        let i = i.clamp(0, n - 1) as usize;
+        self.select(Some(i));
+        self.follow_pointer.set(false);
+        let c = self.cards.borrow()[i].child.clone();
+        c.grab_focus();
+        self.refresh_bar();
+    }
+
+    /// The bar: the image under the pointer or the selected one, whichever
+    /// moved last, else the marks.
+    fn refresh_bar(&self) {
+        let pointer = if self.follow_pointer.get() { self.hovered.get() } else { None };
+        let shown = if self.trashing.get() { None } else { pointer.or(self.selected.get()) };
+        let member = shown.and_then(|i| {
+            let path = self.cards.borrow().get(i)?.path.clone();
+            let s = self.state.borrow();
+            s.groups.get(s.current)?.files.iter().find(|f| f.path == path).cloned()
+        });
+        let Some(m) = member else {
+            self.bar.set_visible_child_name("summary");
+            return;
+        };
+        let s = self.state.borrow();
+        let d = &self.details;
+        d.name.set_text(&file_name(&m.path));
+        d.dir.set_text(&m.path.parent().map(|p| p.display().to_string()).unwrap_or_default());
+        d.facts.set_text(&facts(&m));
+        let reference = s.groups.get(s.current).and_then(|g| g.files.iter().find(|f| f.is_representative()));
+        let note = match (m.is_representative(), reference.and_then(|r| Some((r.width?, r.height?)))) {
+            (false, Some((w, h))) => format!("the reference is {w} × {h}"),
+            _ => String::new(),
+        };
+        d.facts_note.set_text(&note);
+        d.why.set_text(&evidence(&m));
+        let action = s.action(m.id);
+        let kept = match (action, &m.kept_copy) {
+            (Some(Action::Delete), Some(k)) if s.mode == 0 => format!("Everything in it is also in {}", file_name(k)),
+            _ => String::new(),
+        };
+        d.why_note.set_text(&kept);
+        d.suggestion.set_text(suggestion(action));
+        d.suggestion.set_visible(action.is_some());
+        for c in ["keep", "delete", "review"] {
+            d.suggestion.remove_css_class(c);
         }
+        d.suggestion.add_css_class(match action {
+            Some(Action::Keep) => "keep",
+            Some(Action::Delete) => "delete",
+            _ => "review",
+        });
+        let marked = s.is_marked(m.id);
+        drop(s);
+        if marked {
+            d.suggestion.set_text(&format!("{} · marked", suggestion(action)));
+        }
+        self.bar.set_visible_child_name("details");
     }
 
     fn toggle(self: &Rc<Self>, i: usize) {
-        let Some(path) = self.cards.borrow().get(i).map(|c| c.path.clone()) else { return };
-        let now = !self.state.borrow().marked.contains(&path);
+        let Some(id) = self.cards.borrow().get(i).map(|c| c.id) else { return };
+        let now = !self.state.borrow().is_marked(id);
         self.set_marked(i, now);
     }
 
     /// Mark or unmark card `i`'s file, everywhere it is shown.
     fn set_marked(self: &Rc<Self>, i: usize, on: bool) {
-        let Some(path) = self.cards.borrow().get(i).map(|c| c.path.clone()) else { return };
-        self.mark_path(&path, on);
+        let Some(id) = self.cards.borrow().get(i).map(|c| c.id) else { return };
+        self.mark_ids(&[id], on);
         self.update_status();
+        self.refresh_bar();
     }
 
-    fn mark_path(&self, path: &Path, on: bool) {
-        let groups = {
+    /// Mark or unmark every file of `ids`, then show it: each image shown
+    /// and each group's row once, however many of the files it holds.
+    ///
+    /// One file at a time, every file recounted its group's marks and rewrote
+    /// its row, and every file searched the images shown: Mark suggested
+    /// deletions on IMGS-ALL, 17,850 files, held the window for 0.9 s, and
+    /// Unmark all groups as long.
+    fn mark_ids(&self, ids: &[u32], on: bool) {
+        let groups: HashSet<usize> = {
             let mut s = self.state.borrow_mut();
-            if on {
-                s.marked.insert(path.to_path_buf());
-            } else {
-                s.marked.remove(path);
+            let mut groups = HashSet::new();
+            for &id in ids {
+                if s.set_mark(id, on) {
+                    groups.extend(s.member_of.get(id as usize).into_iter().flatten().copied());
+                }
             }
-            s.member_of.get(path).cloned().unwrap_or_default()
+            groups
         };
-        self.quiet.set(true);
-        for c in self.cards.borrow().iter().filter(|c| c.path == path) {
-            c.check.set_active(on);
-            if on {
-                c.child.add_css_class("marked");
-            } else {
-                c.child.remove_css_class("marked");
+        {
+            let s = self.state.borrow();
+            for c in self.cards.borrow().iter() {
+                let marked = s.is_marked(c.id);
+                set_class(&c.child, "marked", marked);
             }
         }
-        self.quiet.set(false);
         for gi in groups {
             self.update_row(gi);
         }
     }
 
-    fn mark_all_but_focused(self: &Rc<Self>) {
-        let keep = self.picked.get();
-        let paths: Vec<PathBuf> = self.cards.borrow().iter().map(|c| c.path.clone()).collect();
-        for (i, p) in paths.iter().enumerate() {
-            self.mark_path(p, i != keep);
-        }
+    fn mark_all_but_selected(self: &Rc<Self>) {
+        let Some(keep) = self.selected.get() else { return };
+        let ids: Vec<u32> = self.cards.borrow().iter().map(|c| c.id).collect();
+        let others: Vec<u32> = ids.iter().enumerate().filter(|(i, _)| *i != keep).map(|(_, id)| *id).collect();
+        self.mark_ids(&[ids[keep]], false);
+        self.mark_ids(&others, true);
         self.update_status();
         // Back to the image that was kept, so the keyboard carries on there.
         self.move_to(keep as i64);
+        self.refresh_bar();
     }
 
     /// Make the marks the chosen rule's deletions, exactly: every file it
     /// suggests deleting is marked and every other mark goes, whoever made
     /// it, so a second rule replaces the first rather than adding to it.
     fn mark_suggested(self: &Rc<Self>) {
-        let (off, on): (Vec<PathBuf>, Vec<PathBuf>) = {
+        let (off, on): (Vec<u32>, Vec<u32>) = {
             let s = self.state.borrow();
-            let delete = |p: &PathBuf| s.actions().get(p) == Some(&Action::Delete);
-            (
-                s.marked.iter().filter(|p| !delete(p)).cloned().collect(),
-                s.actions().keys().filter(|p| delete(p) && !s.marked.contains(*p)).cloned().collect(),
-            )
+            let delete = |id: u32| s.action(id) == Some(Action::Delete);
+            let all = (0..s.paths.len() as u32).filter(|&id| !s.gone[id as usize]);
+            all.filter(|&id| s.is_marked(id) != delete(id)).partition(|&id| s.is_marked(id))
         };
-        for p in &off {
-            self.mark_path(p, false);
-        }
-        for p in &on {
-            self.mark_path(p, true);
-        }
+        self.mark_ids(&off, false);
+        self.mark_ids(&on, true);
         self.update_status();
+        self.refresh_bar();
     }
 
     /// Suggest by `MODES[mode]` from now on, and show it.
@@ -783,19 +1218,27 @@ impl Results {
             s.current
         };
         if self.state.borrow().groups.get(current).is_some() {
-            let picked = self.picked.get();
+            let selected = self.selected.get();
             self.show_group(current);
-            self.pick(picked);
+            self.select(selected);
+            self.refresh_bar();
         }
         self.update_status();
     }
 
     fn unmark_group(self: &Rc<Self>) {
-        let paths: Vec<PathBuf> = self.cards.borrow().iter().map(|c| c.path.clone()).collect();
-        for p in &paths {
-            self.mark_path(p, false);
-        }
+        let ids: Vec<u32> = self.cards.borrow().iter().map(|c| c.id).collect();
+        self.mark_ids(&ids, false);
         self.update_status();
+        self.refresh_bar();
+    }
+
+    /// Unmark every image, in every group.
+    fn unmark_all(self: &Rc<Self>) {
+        let ids: Vec<u32> = self.state.borrow().marked_ids().collect();
+        self.mark_ids(&ids, false);
+        self.update_status();
+        self.refresh_bar();
     }
 
     fn step(self: &Rc<Self>, by: i32) {
@@ -822,10 +1265,10 @@ impl Results {
             return;
         }
         let s = self.state.borrow();
-        let n = s.marked.len();
-        let bytes: u64 = s.marked.iter().filter_map(|p| s.sizes.get(p)).sum();
+        let (n, bytes) = (s.marked_n, s.marked_bytes);
         let groups = s.groups.len();
-        let suggested = s.actions().values().filter(|a| **a == Action::Delete).count();
+        let live = || (0..s.paths.len() as u32).filter(|&id| !s.gone[id as usize]);
+        let suggested = live().filter(|&id| s.action(id) == Some(Action::Delete)).count();
         let text = if n == 0 && suggested > 0 {
             format!("{groups} group{}. {suggested} suggested for deletion.", if groups == 1 { "" } else { "s" })
         } else if n == 0 {
@@ -835,15 +1278,15 @@ impl Results {
         };
         self.status.set_text(&text);
         self.trash.set_sensitive(n > 0);
+        self.trash.set_label(&if n == 0 { l::TRASH.to_string() } else { l::trash_n(n) });
         // Off only when the marks already are the suggestion.
-        let deletes = s.actions().iter().filter(|(_, a)| **a == Action::Delete);
-        let same = deletes.clone().count() == s.marked.len() && deletes.into_iter().all(|(p, _)| s.marked.contains(p));
+        let same = live().all(|id| s.is_marked(id) == (s.action(id) == Some(Action::Delete)));
         self.mark_suggested.set_sensitive(!same);
     }
 
-    /// Open the picked image, or its folder.
+    /// Open the selected image, or its folder.
     fn launch(self: &Rc<Self>, folder: bool) {
-        let i = self.picked.get();
+        let Some(i) = self.selected.get() else { return };
         let Some(path) = self.cards.borrow().get(i).map(|c| c.path.clone()) else { return };
         let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(&path)));
         let window = self.app.window.clone();
@@ -904,13 +1347,13 @@ impl Results {
                 let path = card.path.clone();
                 let s = me.state.borrow();
                 let member = s.groups.get(s.current).and_then(|g| g.files.iter().find(|f| f.path == path)).cloned();
-                let marked = s.marked.contains(&path);
+                let marked = member.as_ref().is_some_and(|m| s.is_marked(m.id));
                 drop(s);
                 drop(cards);
                 win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at.get() + 1)));
                 let text = match &member {
                     Some(m) => {
-                        let action = me.state.borrow().actions().get(&m.path).copied();
+                        let action = me.state.borrow().action(m.id);
                         format!("{}  ·  {}  ·  {}  ·  {}", path.display(), facts(m), evidence(m), suggestion(action))
                     }
                     None => path.display().to_string(),
@@ -995,9 +1438,7 @@ impl Results {
             let (me, at) = (Rc::downgrade(self), at.clone());
             move |_| {
                 if let Some(me) = me.upgrade() {
-                    if let Some(c) = me.flow.child_at_index(at.get() as i32) {
-                        c.grab_focus();
-                    }
+                    me.move_to(at.get() as i64);
                 }
                 glib::Propagation::Proceed
             }
@@ -1015,16 +1456,16 @@ impl Results {
         }
         let (paths, bytes, whole) = {
             let s = self.state.borrow();
-            let mut paths: Vec<PathBuf> = s.marked.iter().cloned().collect();
+            let mut paths: Vec<PathBuf> = s.marked_ids().map(|id| s.paths[id as usize].clone()).collect();
             paths.sort();
-            let bytes: u64 = paths.iter().filter_map(|p| s.sizes.get(p)).sum();
+            let bytes = s.marked_bytes;
             // The groups, by the number the list shows them under, in which
             // every image is marked.
             let whole: Vec<usize> = s
                 .groups
                 .iter()
                 .enumerate()
-                .filter(|(_, g)| g.files.iter().all(|f| s.marked.contains(&f.path)))
+                .filter(|(_, g)| g.files.iter().all(|f| s.is_marked(f.id)))
                 .map(|(gi, _)| gi + 1)
                 .collect();
             (paths, bytes, whole)
@@ -1070,6 +1511,7 @@ impl Results {
         }
         self.trash.set_sensitive(false);
         self.mark_suggested.set_sensitive(false);
+        self.refresh_bar();
         self.settings_button.set_sensitive(false);
         let n = paths.len();
         let mut gone: HashSet<PathBuf> = HashSet::new();
@@ -1095,11 +1537,12 @@ impl Results {
         }
         let select = {
             let mut s = self.state.borrow_mut();
-            for p in &gone {
-                s.marked.remove(p);
-                s.sizes.remove(p);
+            let ids: Vec<u32> = (0..s.paths.len() as u32).filter(|&id| gone.contains(&s.paths[id as usize])).collect();
+            for id in ids {
+                s.set_mark(id, false);
+                s.gone[id as usize] = true;
                 for m in s.by_mode.iter_mut() {
-                    m.remove(p);
+                    m[id as usize] = None;
                 }
             }
             for g in s.groups.iter_mut() {
@@ -1131,6 +1574,44 @@ impl Results {
             d.show(Some(&self.app.window));
         }
     }
+}
+
+/// A style class on or off, touched only when it changes.
+fn set_class(w: &impl IsA<gtk::Widget>, class: &str, on: bool) {
+    if w.has_css_class(class) == on {
+        return;
+    }
+    if on {
+        w.add_css_class(class);
+    } else {
+        w.remove_css_class(class);
+    }
+}
+
+/// The file that shows what a group is a picture of, for the strip: the
+/// plain photograph rather than a collage, an embed or a page holding it. The
+/// reference image can be any of those, since it is only the file that
+/// matched the most others. What marks the plain one is its size: copies,
+/// re-encodes and edits of a photograph keep its width and height, while
+/// every canvas it was pasted into has a size of its own. So the size most
+/// files share, the larger on a tie, and of the files that size one neither
+/// inverted nor mirrored, the one the scan suggests keeping first.
+fn face(files: &[Member]) -> Option<&Member> {
+    let mut sizes: HashMap<(u32, u32), usize> = HashMap::new();
+    for f in files {
+        if let (Some(w), Some(h)) = (f.width, f.height) {
+            *sizes.entry((w, h)).or_default() += 1;
+        }
+    }
+    let Some((&size, _)) = sizes.iter().max_by_key(|&(&(w, h), &n)| (n, w as u64 * h as u64)) else { return files.first() };
+    let same = || files.iter().filter(move |f| (f.width, f.height) == (Some(size.0), Some(size.1)));
+    // An inverted or mirrored copy is the same size and the wrong picture.
+    let upright = |f: &&Member| f.inverted != Some(true) && f.mirrored != Some(true);
+    same()
+        .filter(upright)
+        .find(|f| f.suggested() == Some(Action::Keep))
+        .or_else(|| same().find(upright))
+        .or_else(|| same().next())
 }
 
 /// Group numbers as a sentence names them: "4", "4 and 9", "4, 9 and 12",
@@ -1193,6 +1674,13 @@ fn evidence(m: &Member) -> String {
     }
     s
 }
+
+/// The menu, in sections: a label and its action. Each label's letter is also
+/// Alt and that letter anywhere on the page.
+const MENU: &[&[(&str, &str)]] = &[
+    &[(l::ENLARGE, "enlarge"), (l::OPEN, "open"), (l::SHOW_FOLDER, "folder")],
+    &[(l::MARK_OTHERS, "mark-others"), (l::UNMARK_GROUP, "unmark-group"), (l::UNMARK_ALL, "unmark-all")],
+];
 
 /// The rules the picker offers, in its order.
 const RULES: &[&str] = &["Keep all content", "By correlation", "Reference images only"];

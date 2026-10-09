@@ -50,7 +50,7 @@ struct Queue {
 
 /// What a picture widget is waiting for.
 pub enum Shown {
-    Picture(gtk::Picture),
+    Still(crate::still::Still),
     /// Called with the texture, or with the error.
     Callback(Box<dyn Fn(Result<gdk::Texture, String>)>),
 }
@@ -65,9 +65,15 @@ pub struct Thumbs {
 
 impl Thumbs {
     pub fn new() -> Rc<Thumbs> {
+        Thumbs::with_workers(2)
+    }
+
+    /// With at most `most` decoders: the group strip's own loader takes one,
+    /// so that its pictures never hold up, or are dropped with, a group's.
+    pub fn with_workers(most: usize) -> Rc<Thumbs> {
         let queue = Arc::new((Mutex::new(Queue { jobs: VecDeque::new(), in_flight: Default::default() }), Condvar::new()));
         let (tx, rx) = async_channel::unbounded::<(Key, Decoded)>();
-        let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 2);
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, most.max(1));
         for _ in 0..workers {
             let (queue, tx) = (queue.clone(), tx.clone());
             std::thread::spawn(move || loop {
@@ -317,7 +323,13 @@ pub fn show_on(p: &gtk::Picture, r: Result<gdk::Texture, String>) {
 
 fn deliver(shown: &Shown, r: Result<gdk::Texture, String>) {
     match shown {
-        Shown::Picture(p) => show_on(p, r),
+        Shown::Still(p) => match r {
+            Ok(t) => p.set_texture(Some(&t)),
+            Err(e) => {
+                p.set_texture(None);
+                p.set_tooltip_text(Some(&format!("Could not show this image: {e}")));
+            }
+        },
         Shown::Callback(f) => f(r),
     }
 }

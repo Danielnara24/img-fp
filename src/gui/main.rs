@@ -22,10 +22,12 @@
 //! focus, and every labelled control has an Alt mnemonic.
 
 mod labels;
+mod mosaic;
 mod results;
 mod scan;
 mod settings;
 mod setup;
+mod still;
 mod thumbs;
 
 use gtk::prelude::*;
@@ -262,9 +264,15 @@ fn show_shortcuts(parent: &gtk::ApplicationWindow) {
             ("Delete", "Remove the selected folder from a list"),
         ]),
         ("Results", &[
-            ("Arrow keys, Home, End", "Move between the images of a group"),
-            ("Space or Delete", "Mark or unmark the image for the Trash"),
-            ("Enter", "Open the image large"),
+            ("Arrow keys, Home, End", "Select an image of the group, from anywhere on the page"),
+            ("Up, Down in the groups", "Change group"),
+            ("Enter in the groups", "Go to the group's images"),
+            ("Space or Delete", "Mark or unmark the selected image for the Trash"),
+            ("Enter, double click", "Open the selected image large"),
+            ("Alt+V, Alt+O, Alt+F", "View it large, open it, show it in its folder"),
+            ("Alt+E", "Mark every other image of the group"),
+            ("Alt+U, Alt+A", "Unmark the group, unmark every group"),
+            ("Menu, Shift+F10, right click", "The same, as a menu"),
             ("Ctrl+Page Down", "Next group"),
             ("Ctrl+Page Up", "Previous group"),
         ]),
@@ -327,8 +335,8 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("img-fp")
-        .default_width(1040)
-        .default_height(760)
+        .default_width(1180)
+        .default_height(820)
         .build();
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::None).build();
     window.set_child(Some(&stack));

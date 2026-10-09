@@ -48,15 +48,20 @@ pub const LOG_CHOOSE: &str = "Bro_wse…";
 
 // The results page.
 pub const GROUPS: &str = "_Groups";
-pub const IMAGES: &str = "_Images";
-pub const NEXT_GROUP: &str = "_Next group";
-pub const PREV_GROUP: &str = "_Previous group";
+// The results page's menu. Its letters are Alt shortcuts on the whole page,
+// so they are checked with the page's own.
+pub const ENLARGE: &str = "_View large";
 pub const MARK_OTHERS: &str = "Mark all _except this";
 pub const UNMARK_GROUP: &str = "_Unmark group";
+pub const UNMARK_ALL: &str = "Unmark _all groups";
 pub const OPEN: &str = "_Open";
 pub const SHOW_FOLDER: &str = "Show in _folder";
 pub const MARK_SUGGESTED: &str = "Mark suggested _deletions";
 pub const TRASH: &str = "Move marked to _Trash…";
+/// The Trash button once something is marked, with TRASH's letter.
+pub fn trash_n(n: usize) -> String {
+    format!("Move {n} to _Trash…")
+}
 pub const TO_SETTINGS: &str = "Scan _settings";
 pub const SUGGEST_RULE: &str = "Suggestion _rule";
 pub const RESULTS_LOG: &str = "Scan _log";
@@ -71,20 +76,24 @@ pub const PREVIEW_CLOSE: &str = "_Close";
 pub const CONFIRM_CANCEL: &str = "_Cancel";
 pub const CONFIRM_TRASH: &str = "_Move to Trash";
 
+/// The letter a label's mnemonic is on, in lower case.
+pub fn letter(label: &str) -> char {
+    label.split_once('_').and_then(|(_, rest)| rest.chars().next()).map_or('\0', |c| c.to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn letter(label: &str) -> char {
-        let parts: Vec<&str> = label.split('_').collect();
-        assert_eq!(parts.len(), 2, "{label:?} should have exactly one mnemonic");
-        parts[1].chars().next().unwrap().to_ascii_lowercase()
+    fn checked(label: &str) -> char {
+        assert_eq!(label.matches('_').count(), 1, "{label:?} should have exactly one mnemonic");
+        letter(label)
     }
 
     fn distinct(scope: &str, labels: &[&str]) {
         let mut seen: Vec<(char, &str)> = Vec::new();
         for l in labels {
-            let c = letter(l);
+            let c = checked(l);
             if let Some((_, other)) = seen.iter().find(|(d, _)| *d == c) {
                 panic!("{scope}: {l:?} and {other:?} both use Alt+{c}");
             }
@@ -109,8 +118,12 @@ mod tests {
         assert_eq!(letter(SCAN), letter(CANCEL));
         distinct(
             "results",
-            &[GROUPS, IMAGES, NEXT_GROUP, PREV_GROUP, MARK_OTHERS, UNMARK_GROUP, OPEN, SHOW_FOLDER, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG],
+            &[
+                GROUPS, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG, ENLARGE, OPEN, SHOW_FOLDER, MARK_OTHERS,
+                UNMARK_GROUP, UNMARK_ALL,
+            ],
         );
+        assert_eq!(letter(TRASH), letter(&trash_n(2)));
         distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE]);
         distinct("confirmation", &[CONFIRM_CANCEL, CONFIRM_TRASH]);
     }

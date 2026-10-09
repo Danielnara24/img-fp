@@ -151,8 +151,11 @@ refused before anything runs.
 
 `img-fp-gui` is a window over the same scan: pick folders and options, watch
 the progress, then go through the groups and choose which images to move to the
-Trash. Each image shows what the scan suggests doing with it, and weak matches
-are tinted. *Suggestion rule* switches between the three rules of `--suggest`
+Trash. Each group fills the window with its images. Point at one, or select
+it with the arrow keys, to see its details and what the scan suggests doing
+with it in the bar below; weak matches have a yellow corner. The menu button,
+or a right click, opens the image or its folder and marks or unmarks a whole
+group, and each of these has an Alt shortcut. *Suggestion rule* switches between the three rules of `--suggest`
 without scanning again. Nothing is marked for you: *Mark suggested deletions*
 marks exactly the images suggested for deletion, replacing any marks already
 made, and you move them to the Trash yourself. *Scan settings* goes back to the folders and options, keeping the

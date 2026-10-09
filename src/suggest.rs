@@ -261,8 +261,8 @@ pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation
                 if *inverted {
                     continue;
                 }
-                let sx = ((m[0].hypot(m[3])) * k).max(1e-6).log2();
-                let sy = ((m[1].hypot(m[4])) * k).max(1e-6).log2();
+                let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
+                let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
                 let mi = invert(m);
                 let a_out = outside(m, pa.work, pb.work);
                 let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
@@ -882,6 +882,16 @@ impl Blurs {
         let sigma = (step as f32 / 4.0).exp2();
         self.0.entry((i, step)).or_insert_with(|| blurred(t, sigma).into()).clone()
     }
+}
+
+/// `a.hypot(b)` without asking libm for it. `f32::hypot` is glibc's
+/// `hypotf`, which glibc 2.35 versioned anew, so a binary built on a newer
+/// system asked for glibc 2.35 and the release check refused it: 0.34.0 and
+/// 0.35.0 were never published. Squared and summed in f64, which holds both
+/// squares exactly, and rounded once: the correctly rounded f32 result.
+fn hypot(a: f32, b: f32) -> f32 {
+    let (a, b) = (a as f64, b as f64);
+    (a * a + b * b).sqrt() as f32
 }
 
 #[cfg(test)]
