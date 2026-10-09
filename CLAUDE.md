@@ -3853,14 +3853,50 @@ colour `decode::preview`, which only the window calls).
   renderer loads Mesa's libLLVM: idle PSS 100 MB against 73 MB.
 - **Thumbnails are decoded again, in colour**, on two threads at most, only
   for the group on screen (a group change drops the queue) plus the next
-  group's first 16; textures are kept to a 96 MB budget (`KEEP_BYTES`), by
-  bytes rather than by count, since one large view outweighs sixty cards.
-  A card is drawn from the desktop's freedesktop thumbnail when one is
-  current (`Thumb::MTime` equal to the file's) and at least the card's size
-  (`thumbs::from_cache`: `large`, then `x-large`, `xx-large`), so a folder a
-  file manager has shown costs a few KB of PNG a card rather than a full
-  decode; the large view always decodes the file. A picture already being
-  decoded is not queued again (`Queue::in_flight`).
+  group's first 16; textures are kept to a 48 MB budget (`KEEP_BYTES`; the
+  strip's loader 16 MB, `STRIP_KEEP`), by bytes rather than by count, since
+  one large view outweighs sixty cards. A card is drawn from the desktop's
+  freedesktop thumbnail when one is current (`Thumb::MTime` equal to the
+  file's) and at least the card's size both ways (`thumbs::from_cache`:
+  `large`, then `x-large`, `xx-large`), so a folder a file manager has shown
+  costs a few KB of PNG a card rather than a full decode; the large view
+  always decodes the file. A picture already being decoded is not queued
+  again (`Queue::in_flight`).
+- **A picture is made at the size it is drawn, in cairo's own format**
+  (`thumbs::Size`, `img_fp::preview_fit`). A tile asks for its own pixel
+  size, filled and cut (`Size::cover`, from `Mosaic::tile_sizes` before the
+  layout and `tiles_resized` after it, which re-asks only a tile whose size
+  changed), a strip row for 96x72; the texture is premultiplied BGRA
+  (`to_bgra_premultiplied`, `B8g8r8a8Premultiplied`), which is
+  `CAIRO_FORMAT_ARGB32`. GTK 4.14's software renderer converts any other
+  format, and scales any texture not the size of its place, on every frame
+  that draws it: RGBA cards decoded at up to twice their size (`card_px`, now
+  only the fallback before the first layout) were ~12 ms a frame while
+  pictures arrived. `GtkWidget::width` is the content box, so the tile's CSS
+  border is measured off `Mosaic::allocated`; reading it off the tile instead
+  asked for every picture twice, 6 pixels apart.
+- **JPEGs are decoded by libjpeg at a half, quarter or eighth scale**
+  (`thumbs::jpeg_scaled`, through the gdk-pixbuf GTK already loads), at the
+  smallest scale that still covers the place either way round, since the
+  EXIF orientation is applied after (`apply_embedded_orientation`). zune-jpeg
+  has no scaled decode. Measured paging IMGS-ALL: 13.5 -> 6.8 ms a JPEG, and
+  161 -> 37 ms for JPEGs over 2 MB. Any failure, or anything not a JPEG, goes
+  to the library's decoder; `a_scaled_jpeg_is_the_picture_shrunk` holds the
+  two to the same size and within 24 levels. A PNG large enough to reduce by
+  an integer factor is read a row at a time into the reduction, and so is a
+  JPEG XL's render (`decode::RowBox`), so neither picture exists whole.
+- **HEIF, AVIF and JPEG XL decode one at a time** (`thumbs::HEAVY`): libaom
+  took 124 MB for one AVIF, `jxl-oxide` 270 MB for one JPEG XL (its own
+  planes, which no row reading avoids), and three decoders meeting three of
+  them made the window's peaks. Found with an `LD_PRELOAD` shim printing a
+  backtrace for every `malloc` over 48 MB, and a global allocator counting
+  each decoder thread's live bytes; a 260 MB "mapping" in `smaps` was many
+  mmapped blocks the kernel had merged into one region.
+- **Two allocator arenas, and the heap trimmed when a decoder goes idle**
+  (`few_arenas` in `main.rs`, `thumbs::release_memory`). glibc keeps what a
+  thread frees in that thread's arena; with an arena each and no trim the page
+  settled at ~335 MB, with both at ~225. A fixed 4 MB mmap threshold took
+  another ~15 MB and cost frame time on Xvfb; not kept.
 - **The pictures take the page and the words wait to be asked for**, by the
   user's choice among four mocked layouts. A group is a mosaic
   (`gui/mosaic.rs`): every picture at its own shape, in rows sized so the
@@ -3903,6 +3939,17 @@ colour `decode::preview`, which only the window calls).
   style classes are set only when they change (`set_tooltip`, `set_class`),
   and the strip's rows have none (their badges say the same). A group change
   is now ~5 ms.
+- **And it was still laggy, and held 400 MB, on IMGS-ALL** (0.37). Measured
+  by paging 60 groups at 4 a second, 10 more slowly, 30 back, scrolling a
+  group of 91 and the strip, and the large view, on Xvfb against the saved
+  scan with the desktop's thumbnails, sampling PSS + swap; a frame-clock
+  probe split each slow frame into layout and paint. Two alternating pairs,
+  before against after: settled **417-448 MB -> 208-226 MB**, peak 734-743
+  -> ~560 MB (the one-at-a-time heavy decodes), main-loop stalls over 30 ms
+  while paging fast 1.3-2.3 s -> 0.27-0.32 s, scrolling the group 1.4 s ->
+  0.07-0.10 s, scrolling the strip 3.8-4.0 s -> 0. The pieces are the four
+  bullets above about pictures and the list-view strip below. The page with
+  no picture decoded holds ~135 MB (an empty window ~88).
 - **Marking in bulk is one pass over numbered files** (`State`, `mark_ids`).
   Mark suggested deletions and Unmark all groups on IMGS-ALL (17,850 files)
   held the window for 0.9 s each: every file was marked on its own, recounting
@@ -3910,7 +3957,7 @@ colour `decode::preview`, which only the window calls).
   each file has a number given when the results arrive (`Member::id`), marks,
   sizes and suggestions are vectors by number with the marked count and bytes
   kept as they change, and each group's row is redrawn once, only when its
-  count moved (`Row::shown`). Measured, function then frame: 890 ms -> 12 ms
+  count moved (`StripRow::shown`). Measured, function then frame: 890 ms -> 12 ms
   (Mark suggested), 860 ms -> 10 ms (Unmark all); what remains is the one
   repaint every image needs, 50-80 ms on Xvfb with cairo. Two smaller things
   went with it: the tick's tooltip no longer changes with the mark (90 changes
@@ -3932,11 +3979,19 @@ colour `decode::preview`, which only the window calls).
   first, and on IMGS-ALL it was as often a small photo on a black canvas; the
   file most often named as `kept_copy` was tried next and is no better, since
   a composite holds the photograph whole and is named for it. Its pictures come from
-  a loader of their own with one decoder (`Thumbs::with_workers(1)`), so a
-  group change neither drops them nor waits for them; the rows near the shown
-  group are asked for first. Its scroller has `propagate_natural_width` off
-  and a minimum content width: a picture's natural width is the size it was
-  decoded at, twice what it is shown at, and propagated it doubled the strip.
+  a loader of their own with one decoder (`Thumbs::with_workers(1, ..)`), so a
+  group change neither drops them nor waits for them. Its scroller has
+  `propagate_natural_width` off and a minimum content width, from when a
+  picture's natural width was the size it was decoded at.
+- **The strip is a `gtk::ListView`** over a `gio::ListStore` of group numbers
+  (`StripRow`, `bind_row`, `unbind_row`), so only the rows a screen shows
+  exist, each asking for its picture when bound and withdrawing the request
+  when unbound (`Thumbs::withdraw`, by the ticket `request` returns). As a
+  `ListBox` of 703 rows it was allocated whole on every step of a scroll, ~11
+  ms of layout a frame and 3.8-4.0 s of main-loop stalls over 120 wheel
+  steps; now none. `rebuild` sets the selection with `quiet` set and shows the
+  group itself; `step` and `rebuild` scroll with the `list.scroll-to-item`
+  action, since `ListView::scroll_to` is GTK 4.12 and the window asks 4.10.
 - **What applies to one image or one group is a menu**: the ☰ button in the
   header, and the same `gio::Menu` on a right click, the Menu key or
   Shift+F10 (*View large*, *Open*, *Show in folder*, *Mark all except this*,
@@ -4002,9 +4057,9 @@ colour `decode::preview`, which only the window calls).
   `results::prepare` numbers the files and works out the three rules' suggestions by
   number rather than by path off the main thread, for a finished scan too
   (it was ~0.2 s frozen in `show`); the gone check is one `stat` a file on
-  every thread; and the strip makes the rows on screen first and the rest
-  in idle chunks (`add_rows`, `strip_generation`), since 703 rows of five
-  widgets were 0.1 s on every rebuild, Trash included. The window is
+  every thread; and the strip makes only the rows on screen (it made 703
+  rows of five widgets, 0.1 s on every rebuild, Trash included, until it was
+  a list view). The window is
   presented at ~0.22 s and the report is ready ~0.08 s later. Files gone
   since (not found, as the Trash counts it) are taken off the page by the
   same `drop_gone` the Trash uses, after the suggestions are worked out with

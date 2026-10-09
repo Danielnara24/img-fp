@@ -18,6 +18,12 @@
 //!   thumbnail is that large.
 //! - **A picture being decoded is not queued again.** Paging away and back
 //!   used to start a second decode of a card whose first was still running.
+//! - **A picture is made at the size it is shown** (`Size`), and handed to
+//!   GTK in the software renderer's own pixel format (premultiplied BGRA).
+//!   A texture is converted to that format on every frame that draws it, and
+//!   scaled on every frame when its size is not the place's: with a group of
+//!   ninety decoded at up to twice their size in RGBA, that was some 12 ms a
+//!   frame while pictures arrived, and four times the memory.
 //!
 //! What is kept is the textures most recently shown, up to a fixed number of
 //! bytes, so paging back is instant. Bytes and not a count: a card's texture
@@ -34,11 +40,32 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Bytes of texture kept once nothing on screen shows them: some six hundred
-/// cards, or a dozen large views, or any mixture.
-const KEEP_BYTES: usize = 96 << 20;
+/// Bytes of texture kept, on screen or not, by the group's loader: two or
+/// three groups of pictures at the size they are shown, or a few large views.
+const KEEP_BYTES: usize = 48 << 20;
 
-type Key = (PathBuf, u32);
+/// The place a picture is made for, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Size {
+    pub w: u32,
+    pub h: u32,
+    /// Fill the place and cut what overhangs, rather than fit inside it.
+    pub cover: bool,
+}
+
+impl Size {
+    /// No larger than `long` either way.
+    pub fn within(long: u32) -> Size {
+        Size { w: long, h: long, cover: false }
+    }
+
+    /// Exactly `w` x `h`, filled.
+    pub fn cover(w: u32, h: u32) -> Size {
+        Size { w: w.max(1), h: h.max(1), cover: true }
+    }
+}
+
+pub type Key = (PathBuf, Size);
 type Decoded = Result<(u32, u32, Vec<u8>), String>;
 
 struct Queue {
@@ -60,22 +87,26 @@ pub struct Thumbs {
     done: RefCell<HashMap<Key, Result<gdk::Texture, String>>>,
     /// What `done` holds, oldest first, for dropping.
     order: RefCell<Budget<Key>>,
-    waiting: RefCell<HashMap<Key, Vec<Shown>>>,
+    /// Each widget waiting, with the ticket its request was given.
+    waiting: RefCell<HashMap<Key, Vec<(u64, Shown)>>>,
+    tickets: std::cell::Cell<u64>,
 }
 
 impl Thumbs {
     pub fn new() -> Rc<Thumbs> {
-        Thumbs::with_workers(2)
+        Thumbs::with_workers(2, KEEP_BYTES)
     }
 
-    /// With at most `most` decoders: the group strip's own loader takes one,
-    /// so that its pictures never hold up, or are dropped with, a group's.
-    pub fn with_workers(most: usize) -> Rc<Thumbs> {
+    /// With at most `most` decoders and `keep` bytes of texture: the group
+    /// strip's own loader takes one, so that its pictures never hold up, or
+    /// are dropped with, a group's.
+    pub fn with_workers(most: usize, keep: usize) -> Rc<Thumbs> {
         let queue = Arc::new((Mutex::new(Queue { jobs: VecDeque::new(), in_flight: Default::default() }), Condvar::new()));
         let (tx, rx) = async_channel::unbounded::<(Key, Decoded)>();
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, most.max(1));
         for _ in 0..workers {
             let (queue, tx) = (queue.clone(), tx.clone());
+            let mut dirty = false;
             std::thread::spawn(move || loop {
                 let key = {
                     let (m, cv) = &*queue;
@@ -85,13 +116,33 @@ impl Thumbs {
                             q.in_flight.insert(k.clone());
                             break k;
                         }
+                        // Nothing left to do: what the decodes freed goes
+                        // back to the system before this waits.
+                        if std::mem::take(&mut dirty) {
+                            drop(q);
+                            release_memory();
+                            q = m.lock().unwrap();
+                            continue;
+                        }
                         q = cv.wait(q).unwrap();
                     }
                 };
+                dirty = true;
+                let Size { w, h, cover } = key.1;
                 let got = match thumbnail_dir().and_then(|dir| from_cache(&dir, &key.0, key.1)) {
                     Some(t) => Ok(t),
-                    None => img_fp::preview(&key.0, key.1).map_err(|e| format!("{e:#}")),
-                };
+                    None => match jpeg_scaled(&key.0, key.1) {
+                        Some(t) => Ok(t),
+                        None => {
+                            let _one = heavy(&key.0).then(|| HEAVY.lock().unwrap_or_else(|e| e.into_inner()));
+                            img_fp::preview_fit(&key.0, w, h, cover).map_err(|e| format!("{e:#}"))
+                        }
+                    },
+                }
+                .map(|(w, h, mut px)| {
+                    to_bgra_premultiplied(&mut px);
+                    (w, h, px)
+                });
                 if tx.send_blocking((key, got)).is_err() {
                     return;
                 }
@@ -100,8 +151,9 @@ impl Thumbs {
         let thumbs = Rc::new(Thumbs {
             queue,
             done: RefCell::new(HashMap::new()),
-            order: RefCell::new(Budget::new(KEEP_BYTES)),
+            order: RefCell::new(Budget::new(keep)),
             waiting: RefCell::new(HashMap::new()),
+            tickets: std::cell::Cell::new(0),
         });
         let weak = Rc::downgrade(&thumbs);
         glib::spawn_future_local(async move {
@@ -120,23 +172,26 @@ impl Thumbs {
         self.waiting.borrow_mut().clear();
     }
 
-    /// Show `path` at `long` pixels in `shown`: now if it is at hand, when it
-    /// has been decoded otherwise. `urgent` puts it at the front of the queue.
-    pub fn request(&self, path: &Path, long: u32, shown: Shown, urgent: bool) {
-        let key = (path.to_path_buf(), long);
+    /// Show `path`, made for `size`, in `shown`: now if it is at hand, when
+    /// it has been decoded otherwise. `urgent` puts it at the front of the
+    /// queue. The ticket withdraws the request (`withdraw`).
+    pub fn request(&self, path: &Path, size: Size, shown: Shown, urgent: bool) -> u64 {
+        let ticket = self.tickets.get() + 1;
+        self.tickets.set(ticket);
+        let key = (path.to_path_buf(), size);
         if let Some(r) = self.done.borrow().get(&key) {
             deliver(&shown, r.clone());
-            return;
+            return ticket;
         }
         let mut waiting = self.waiting.borrow_mut();
         let first = !waiting.contains_key(&key);
-        waiting.entry(key.clone()).or_default().push(shown);
+        waiting.entry(key.clone()).or_default().push((ticket, shown));
         let (m, cv) = &*self.queue;
         let mut q = m.lock().unwrap();
         // Already being decoded: its answer reaches every widget waiting for
         // it, this one included, whenever it comes.
         if q.in_flight.contains(&key) {
-            return;
+            return ticket;
         }
         if first || urgent {
             q.jobs.retain(|k| *k != key);
@@ -146,6 +201,20 @@ impl Thumbs {
                 q.jobs.push_back(key);
             }
             cv.notify_one();
+        }
+        ticket
+    }
+
+    /// Withdraw request `ticket` for `key`: its widget now shows something
+    /// else. Nothing else waiting for that picture, it is not decoded at all
+    /// unless a decoder already has it.
+    pub fn withdraw(&self, key: &Key, ticket: u64) {
+        let mut waiting = self.waiting.borrow_mut();
+        let Some(list) = waiting.get_mut(key) else { return };
+        list.retain(|(t, _)| *t != ticket);
+        if list.is_empty() {
+            waiting.remove(key);
+            self.queue.0.lock().unwrap().jobs.retain(|k| k != key);
         }
     }
 
@@ -159,14 +228,14 @@ impl Thumbs {
         // Here and not on the decoder's thread, so that a request between the
         // decode finishing and its answer arriving waits for this answer.
         self.queue.0.lock().unwrap().in_flight.remove(&key);
-        let r = got.map(|(w, h, rgba)| {
-            let bytes = glib::Bytes::from_owned(rgba);
-            gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &bytes, w as usize * 4).upcast::<gdk::Texture>()
+        let r = got.map(|(w, h, bgra)| {
+            let bytes = glib::Bytes::from_owned(bgra);
+            gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::B8g8r8a8Premultiplied, &bytes, w as usize * 4).upcast::<gdk::Texture>()
         });
-        if let Some(list) = self.waiting.borrow_mut().remove(&key) {
-            for s in &list {
-                deliver(s, r.clone());
-            }
+        // Taken out before delivering, since a delivery may ask for another.
+        let list = self.waiting.borrow_mut().remove(&key);
+        for (_, s) in list.iter().flatten() {
+            deliver(s, r.clone());
         }
         let bytes = r.as_ref().map_or(0, |t| t.width() as usize * t.height() as usize * 4);
         self.done.borrow_mut().insert(key.clone(), r);
@@ -174,6 +243,119 @@ impl Thumbs {
             self.done.borrow_mut().remove(&old);
         }
     }
+}
+
+/// RGBA to what cairo draws without converting: premultiplied, and BGRA in
+/// memory, which is `CAIRO_FORMAT_ARGB32` on a little-endian machine. GTK's
+/// software renderer converts any other format each time it draws one.
+fn to_bgra_premultiplied(px: &mut [u8]) {
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        let (r, b) = (p[0], p[2]);
+        if a == 255 {
+            p[0] = b;
+            p[2] = r;
+        } else {
+            let mul = |c: u8| ((c as u32 * a + 127) / 255) as u8;
+            p[0] = mul(b);
+            p[1] = mul(p[1]);
+            p[2] = mul(r);
+        }
+    }
+}
+
+/// Held while a picture `heavy` says is heavy is decoded, by every loader.
+static HEAVY: Mutex<()> = Mutex::new(());
+
+/// Whether `path` is a HEIF, an AVIF or a JPEG XL, whose decoders hold many
+/// times the picture while they work: libaom took 124 MB for one AVIF of
+/// IMGS-ALL, and three decoders meeting three of them is what the window's
+/// peaks were made of. One of these is decoded at a time.
+fn heavy(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    if f.read_exact(&mut head).is_err() {
+        return false;
+    }
+    &head[4..8] == b"ftyp" || head.starts_with(&[0xFF, 0x0A]) || head.starts_with(b"\0\0\0\x0cJXL ")
+}
+
+/// Hand the heap's free pages back to the system. glibc keeps what a thread
+/// frees in that thread's arena, and a decode frees most of a picture.
+fn release_memory() {
+    #[cfg(target_env = "gnu")]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: takes and releases the allocator's own locks; nothing
+        // else is asked of the caller.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
+/// A JPEG made for `size`, decoded by libjpeg at the smallest of its own
+/// scales (a half, a quarter, an eighth) that still covers the place, through
+/// gdk-pixbuf, which GTK already loads. `None` for anything else, or for any
+/// failure, which the library's own decoder then meets.
+///
+/// The library's JPEG decoder has no scaled decode, so a 35-megapixel
+/// photograph shown in a 250-pixel tile was 105 MB of RGB for a moment, and
+/// most of a second; at an eighth it is a sixty-fourth of both, less the
+/// entropy decoding, which no scale skips.
+fn jpeg_scaled(path: &Path, size: Size) -> Option<(u32, u32, Vec<u8>)> {
+    use gtk::gdk_pixbuf::prelude::*;
+    let bytes = std::fs::read(path).ok()?;
+    if !bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return None;
+    }
+    let loader = gtk::gdk_pixbuf::PixbufLoader::with_type("jpeg").ok()?;
+    loader.connect_size_prepared(move |loader, w, h| {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        // The orientation is not known yet, so enough for the place either
+        // way round.
+        let (w, h) = (w as f64, h as f64);
+        let (pw, ph) = (size.w as f64, size.h as f64);
+        let need = |a: f64, b: f64| if size.cover { (pw / a).max(ph / b) } else { (pw / a).min(ph / b) };
+        let s = need(w, h).max(need(h, w));
+        // libjpeg's own size at each scale, so that gdk-pixbuf has nothing
+        // left to resample.
+        let mut d = 1.0;
+        while d < 8.0 && s * 2.0 * d <= 1.0 {
+            d *= 2.0;
+        }
+        if d > 1.0 {
+            loader.set_size((w / d).ceil() as i32, (h / d).ceil() as i32);
+        }
+    });
+    let wrote = loader.write(&bytes).is_ok();
+    drop(bytes);
+    let closed = loader.close().is_ok();
+    if !(wrote && closed) {
+        return None;
+    }
+    let pixbuf = loader.pixbuf()?;
+    let pixbuf = pixbuf.apply_embedded_orientation().unwrap_or(pixbuf);
+    if pixbuf.bits_per_sample() != 8 {
+        return None;
+    }
+    let (w, h, n, stride) = (pixbuf.width() as usize, pixbuf.height() as usize, pixbuf.n_channels() as usize, pixbuf.rowstride() as usize);
+    let bytes = pixbuf.read_pixel_bytes();
+    let mut packed = Vec::with_capacity(w * h * n);
+    for y in 0..h {
+        packed.extend_from_slice(bytes.get(y * stride..y * stride + w * n)?);
+    }
+    let img = match n {
+        3 => image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(w as u32, h as u32, packed)?),
+        4 => image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w as u32, h as u32, packed)?),
+        _ => return None,
+    };
+    Some(img_fp::fit_preview(img, size.w, size.h, size.cover))
 }
 
 /// The desktop's thumbnail cache: `$XDG_CACHE_HOME/thumbnails`, or
@@ -186,9 +368,9 @@ fn thumbnail_dir() -> Option<PathBuf> {
     Some(base.join("thumbnails"))
 }
 
-/// A picture from the freedesktop thumbnail cache under `dir`, no larger than
-/// `long` on its long side, as RGBA — when there is one that is current and at
-/// least that large.
+/// A picture from the freedesktop thumbnail cache under `dir`, made for
+/// `size`, as RGBA — when there is one that is current and at least that
+/// large.
 ///
 /// The cache is the one the file managers share: a thumbnail is
 /// `<size>/<md5 of the file's URI>.png`, and it is current when its
@@ -196,7 +378,8 @@ fn thumbnail_dir() -> Option<PathBuf> {
 /// the spec's own test. Only the sizes at least as large as what is asked for
 /// are looked in, smallest first, so a card is never drawn from a thumbnail
 /// smaller than itself.
-fn from_cache(dir: &Path, path: &Path, long: u32) -> Option<(u32, u32, Vec<u8>)> {
+fn from_cache(dir: &Path, path: &Path, size: Size) -> Option<(u32, u32, Vec<u8>)> {
+    let long = size.w.max(size.h);
     const SIZES: [(&str, u32); 4] = [("normal", 128), ("large", 256), ("x-large", 512), ("xx-large", 1024)];
     let mtime = std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     // The URI the file manager would have named it by, which is the path it
@@ -211,15 +394,22 @@ fn from_cache(dir: &Path, path: &Path, long: u32) -> Option<(u32, u32, Vec<u8>)>
     for name in names {
         let uri = gtk::gio::File::for_path(&name).uri();
         let md5 = glib::compute_checksum_for_string(glib::ChecksumType::Md5, uri.as_str())?;
-        for (sub, _) in SIZES.iter().filter(|(_, s)| *s >= long) {
+        for &(sub, folder) in SIZES.iter().filter(|(_, s)| *s >= long) {
             let thumb = dir.join(sub).join(format!("{md5}.png"));
-            if !thumb.is_file() || !current(&thumb, uri.as_str(), mtime) {
+            if !thumb.is_file() {
                 continue;
             }
+            let Some((tw, th)) = current(&thumb, uri.as_str(), mtime) else { continue };
             // At least `long` on its long side, or smaller than its folder's
             // size and so the whole picture (a thumbnailer shrinks and never
-            // enlarges): either way what a full decode would have given.
-            if let Ok(t) = img_fp::preview(&thumb, long) {
+            // enlarges): either way what a full decode would have given. To
+            // fill a place it must also be as large as the place both ways,
+            // since a wide picture shrunk to the folder's size is short.
+            let shrunk = tw.max(th) >= folder;
+            if shrunk && size.cover && (tw < size.w || th < size.h) {
+                continue;
+            }
+            if let Ok(t) = img_fp::preview_fit(&thumb, size.w, size.h, size.cover) {
                 return Some(t);
             }
         }
@@ -227,12 +417,12 @@ fn from_cache(dir: &Path, path: &Path, long: u32) -> Option<(u32, u32, Vec<u8>)>
     None
 }
 
-/// Whether a thumbnail PNG says it is of `uri` as it was at `mtime`.
-fn current(thumb: &Path, uri: &str, mtime: u64) -> bool {
-    let Ok(f) = std::fs::File::open(thumb) else { return false };
+/// A thumbnail PNG's size, when it says it is of `uri` as it was at `mtime`.
+fn current(thumb: &Path, uri: &str, mtime: u64) -> Option<(u32, u32)> {
+    let f = std::fs::File::open(thumb).ok()?;
     let mut dec = png::Decoder::new(std::io::BufReader::new(f));
     dec.set_ignore_text_chunk(false);
-    let Ok(reader) = dec.read_info() else { return false };
+    let reader = dec.read_info().ok()?;
     let text = |key: &str| {
         let info = reader.info();
         info.uncompressed_latin1_text
@@ -242,7 +432,8 @@ fn current(thumb: &Path, uri: &str, mtime: u64) -> bool {
             .or_else(|| info.utf8_text.iter().find(|t| t.keyword == key).and_then(|t| t.get_text().ok()))
     };
     let uri_ok = text("Thumb::URI").is_none_or(|u| u == uri);
-    uri_ok && text("Thumb::MTime").and_then(|m| m.trim().parse::<u64>().ok()) == Some(mtime)
+    let fresh = uri_ok && text("Thumb::MTime").and_then(|m| m.trim().parse::<u64>().ok()) == Some(mtime);
+    fresh.then(|| (reader.info().width, reader.info().height))
 }
 
 /// Keys oldest first, each with its size, held to a total.
@@ -386,24 +577,80 @@ mod tests {
         let md5 = glib::compute_checksum_for_string(glib::ChecksumType::Md5, uri.as_str()).unwrap();
 
         // None at all: the picture is decoded.
-        assert!(from_cache(&cache, &pic, 200).is_none());
+        let card = Size::within(200);
+        assert!(from_cache(&cache, &pic, card).is_none());
         // A 128-pixel one is too small for a 200-pixel card.
         thumbnail_png(&cache.join("normal").join(format!("{md5}.png")), 128, 96, &uri, mtime);
-        assert!(from_cache(&cache, &pic, 200).is_none());
+        assert!(from_cache(&cache, &pic, card).is_none());
         // A 256-pixel one is used, shrunk to the card.
         let large = cache.join("large").join(format!("{md5}.png"));
         thumbnail_png(&large, 256, 192, &uri, mtime);
-        let (w, h, rgba) = from_cache(&cache, &pic, 200).expect("a current large thumbnail");
+        let (w, h, rgba) = from_cache(&cache, &pic, card).expect("a current large thumbnail");
         assert_eq!((w, h, rgba.len()), (200, 150, 200 * 150 * 4));
+        // Or filling a place exactly, cut to it: from the large one, since
+        // the 128-pixel one is only 96 high.
+        let (w, h, _) = from_cache(&cache, &pic, Size::cover(120, 120)).expect("a current large thumbnail");
+        assert_eq!((w, h), (120, 120));
+        // And the 128-pixel one does fill a place it covers.
+        std::fs::remove_file(&large).unwrap();
+        let (w, h, _) = from_cache(&cache, &pic, Size::cover(96, 72)).expect("a current normal thumbnail");
+        assert_eq!((w, h), (96, 72));
+        assert!(from_cache(&cache, &pic, Size::cover(120, 120)).is_none());
         // But not one made before the file last changed, nor one of another file.
         thumbnail_png(&large, 256, 192, &uri, mtime - 1);
-        assert!(from_cache(&cache, &pic, 200).is_none());
+        assert!(from_cache(&cache, &pic, card).is_none());
         thumbnail_png(&large, 256, 192, "file:///elsewhere.png", mtime);
-        assert!(from_cache(&cache, &pic, 200).is_none());
+        assert!(from_cache(&cache, &pic, card).is_none());
         // And never for the large view: no thumbnail is that large.
         thumbnail_png(&large, 256, 192, &uri, mtime);
-        assert!(from_cache(&cache, &pic, 1600).is_none());
+        assert!(from_cache(&cache, &pic, Size::within(1600)).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A JPEG with `orientation` in its EXIF, `w` x `h` as stored.
+    fn oriented_jpeg(at: &Path, w: u32, h: u32, orientation: u8) {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, 90]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90).encode_image(&img).unwrap();
+        let mut exif = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0".to_vec();
+        exif.extend([orientation, 0, 0, 0, 0, 0, 0]);
+        let mut out = jpeg[..2].to_vec();
+        out.extend([0xFF, 0xE1]);
+        out.extend(((exif.len() + 2) as u16).to_be_bytes());
+        out.extend(exif);
+        out.extend(&jpeg[2..]);
+        std::fs::write(at, out).unwrap();
+    }
+
+    /// The scaled JPEG decode gives what the library's decoder gives: the
+    /// right way up, at the size asked for, and alike to look at.
+    #[test]
+    fn a_scaled_jpeg_is_the_picture_shrunk() {
+        let dir = std::env::temp_dir().join(format!("img-fp-jpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("turned.jpg");
+        oriented_jpeg(&path, 1600, 800, 6);
+        for size in [Size::within(100), Size::cover(60, 90), Size::cover(400, 300)] {
+            let (w, h, px) = jpeg_scaled(&path, size).expect("a JPEG decodes through gdk-pixbuf");
+            let (lw, lh, lpx) = img_fp::preview_fit(&path, size.w, size.h, size.cover).unwrap();
+            assert_eq!((w, h), (lw, lh), "{size:?}");
+            let worst = px.iter().zip(&lpx).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
+            assert!(worst <= 24, "{size:?}: the two decodes differ by {worst}");
+        }
+        // Turned a quarter: stored wide, shown tall.
+        assert_eq!(jpeg_scaled(&path, Size::within(100)).map(|t| (t.0, t.1)), Some((50, 100)));
+        // Anything that is not a JPEG is left to the library.
+        std::fs::write(&path, b"not a picture").unwrap();
+        assert!(jpeg_scaled(&path, Size::within(100)).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Premultiplied and swapped, and an opaque pixel only swapped.
+    #[test]
+    fn rgba_becomes_premultiplied_bgra() {
+        let mut px = [10, 20, 30, 255, 200, 100, 50, 128, 255, 255, 255, 0];
+        to_bgra_premultiplied(&mut px);
+        assert_eq!(px, [30, 20, 10, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
     }
 
     /// Only the latest request's answer is shown, whatever order the answers

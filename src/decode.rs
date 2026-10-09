@@ -2248,8 +2248,35 @@ pub fn colour_of(path: &Path) -> Option<f32> {
 /// the whole decoded picture for a moment — a window decoding two of these at
 /// a time does not need the scan's budget.
 pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
+    // The whole picture shrunk, as it always was: a scan reads this
+    // (`colour_of`), so it does not take `preview_fit`'s reductions.
+    let img = preview_image(path, None)?;
+    let long = long.max(1);
+    let img = if img.width().max(img.height()) > long { img.thumbnail(long, long) } else { img };
+    let rgba = img.into_rgba8();
+    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+/// A preview made for a place `w` x `h` pixels: shrunk to fit inside it, or
+/// with `cover`, shrunk until it fills it and then cut to it, the middle
+/// kept. Never enlarged, so a picture smaller than the place comes back at
+/// its own size (and, with `cover`, cut only where it overhangs). RGBA.
+///
+/// A window draws a picture fastest at exactly the size it is shown, and a
+/// texture twice that size costs four times its memory; this is that size.
+/// A PNG large enough to be reduced by an integer factor first is read a row
+/// at a time into the reduction, so a 44-megapixel one never exists whole.
+pub fn preview_fit(path: &Path, w: u32, h: u32, cover: bool) -> Result<(u32, u32, Vec<u8>)> {
+    let (w, h) = (w.max(1), h.max(1));
+    let img = preview_image(path, Some((w, h, cover)))?;
+    Ok(fit_preview(img, w, h, cover))
+}
+
+/// The picture at `path`, the right way up: whole, or, made for `place`, as
+/// reduced while it is read as the place allows.
+fn preview_image(path: &Path, place: Option<(u32, u32, bool)>) -> Result<DynamicImage> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let img = match sniff(&bytes) {
+    Ok(match sniff(&bytes) {
         Kind::Image(ImageFormat::Ico) => match preview_image_crate(&bytes, ImageFormat::Ico) {
             Ok(img) => img,
             Err(e) => match ico_png(&bytes) {
@@ -2257,19 +2284,136 @@ pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
                 None => return Err(e),
             },
         },
+        Kind::Image(ImageFormat::Png) => match place.and_then(|(w, h, cover)| preview_png_rows(&bytes, w, h, cover)) {
+            Some(img) => img,
+            None => preview_image_crate(&bytes, ImageFormat::Png)?,
+        },
         Kind::Image(fmt) => preview_image_crate(&bytes, fmt)?,
-        Kind::Jxl => preview_jxl(&bytes)?,
+        Kind::Jxl => preview_jxl(&bytes, place)?,
         Kind::Heif => preview_heif(&bytes)?,
         Kind::Unknown => match unmarked_format(&bytes, path) {
             Some(fmt) => preview_image_crate(&bytes, fmt)?,
             None => bail!(NOT_AN_IMAGE),
         },
-    };
-    drop(bytes);
-    let long = long.max(1);
-    let img = if img.width().max(img.height()) > long { img.thumbnail(long, long) } else { img };
+    })
+}
+
+/// A decoded picture made for a place `w` x `h` pixels, as `preview_fit`
+/// makes one: RGBA.
+pub fn fit_preview(img: DynamicImage, w: u32, h: u32, cover: bool) -> (u32, u32, Vec<u8>) {
+    let (w, h) = (w.max(1), h.max(1));
+    let (iw, ih) = (img.width(), img.height());
+    let (sw, sh) = preview_size(iw, ih, w, h, cover);
+    let img = if (sw, sh) != (iw, ih) { img.thumbnail_exact(sw, sh) } else { img };
+    let (cw, ch) = if cover { (sw.min(w), sh.min(h)) } else { (sw, sh) };
+    let img = if (cw, ch) != (sw, sh) { img.crop_imm((sw - cw) / 2, (sh - ch) / 2, cw, ch) } else { img };
     let rgba = img.into_rgba8();
-    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
+    (rgba.width(), rgba.height(), rgba.into_raw())
+}
+
+/// The size a `iw` x `ih` picture is shrunk to for a `w` x `h` place: to fit
+/// inside it, or with `cover` to fill it; never larger than it is.
+fn preview_size(iw: u32, ih: u32, w: u32, h: u32, cover: bool) -> (u32, u32) {
+    let (sx, sy) = (w as f64 / iw.max(1) as f64, h as f64 / ih.max(1) as f64);
+    let s = if cover { sx.max(sy) } else { sx.min(sy) }.min(1.0);
+    let at = |n: u32| ((n as f64 * s).round() as u32).clamp(1, n.max(1));
+    (at(iw), at(ih))
+}
+
+/// A PNG reduced by the largest whole factor that keeps it at least the size
+/// `preview_size` asks for, read a row at a time; `None` for anything the
+/// general path should read instead — interlaced, animated, oriented by an
+/// eXIf chunk, palette-indexed after expansion, too small to reduce, or any
+/// error, which the general path then reports in its own words.
+fn preview_png_rows(bytes: &[u8], w: u32, h: u32, cover: bool) -> Option<DynamicImage> {
+    let mut dec = png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: max_alloc() as usize });
+    dec.set_ignore_text_chunk(false);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info().ok()?;
+    let info = reader.info();
+    if info.interlaced || info.animation_control.is_some() || info.exif_metadata.is_some() {
+        return None;
+    }
+    let (iw, ih) = (info.width, info.height);
+    let (sw, sh) = preview_size(iw, ih, w, h, cover);
+    let k = (iw / sw).min(ih / sh);
+    if k < 2 {
+        return None;
+    }
+    let (color, depth) = reader.output_color_type();
+    if depth != png::BitDepth::Eight {
+        return None;
+    }
+    let ch = match color {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Indexed => return None,
+    };
+    let mut boxes = RowBox::new(iw as usize, ih as usize, ch, k as usize);
+    for _ in 0..boxes.rows_wanted() {
+        let row = reader.next_row().ok()??;
+        if row.data().len() != iw as usize * ch {
+            return None;
+        }
+        boxes.push(row.data());
+    }
+    boxes.finish()
+}
+
+/// Rows of `ch` 8-bit channels, `w` pixels wide, averaged over `k` x `k`
+/// boxes as they arrive; a remainder at the right or bottom edge that makes
+/// no whole box is dropped. Only the boxes' row of sums is held, never the
+/// picture.
+struct RowBox {
+    k: usize,
+    ch: usize,
+    h: usize,
+    acc: Vec<u32>,
+    out: Vec<u8>,
+    seen: usize,
+}
+
+impl RowBox {
+    fn new(w: usize, h: usize, ch: usize, k: usize) -> RowBox {
+        let k = k.max(1);
+        let (ow, oh) = (w / k, h / k);
+        RowBox { k, ch, h: oh, acc: vec![0; ow * ch], out: Vec::with_capacity(ow * oh * ch), seen: 0 }
+    }
+
+    /// The rows that make whole boxes; the rest need not be read.
+    fn rows_wanted(&self) -> usize {
+        self.h * self.k
+    }
+
+    fn push(&mut self, row: &[u8]) {
+        let (k, ch) = (self.k, self.ch);
+        for (a, px) in self.acc.chunks_exact_mut(ch).zip(row.chunks_exact(k * ch)) {
+            for p in px.chunks_exact(ch) {
+                for (s, &v) in a.iter_mut().zip(p) {
+                    *s += v as u32;
+                }
+            }
+        }
+        self.seen += 1;
+        if self.seen.is_multiple_of(k) {
+            let area = (k * k) as u32;
+            self.out.extend(self.acc.iter().map(|&s| ((s + area / 2) / area) as u8));
+            self.acc.fill(0);
+        }
+    }
+
+    fn finish(self) -> Option<DynamicImage> {
+        let ow = (self.acc.len() / self.ch) as u32;
+        let oh = self.h as u32;
+        Some(match self.ch {
+            1 => DynamicImage::ImageLuma8(image::GrayImage::from_raw(ow, oh, self.out)?),
+            2 => DynamicImage::ImageLumaA8(image::GrayAlphaImage::from_raw(ow, oh, self.out)?),
+            3 => DynamicImage::ImageRgb8(image::RgbImage::from_raw(ow, oh, self.out)?),
+            _ => DynamicImage::ImageRgba8(image::RgbaImage::from_raw(ow, oh, self.out)?),
+        })
+    }
 }
 
 fn preview_image_crate(bytes: &[u8], fmt: ImageFormat) -> Result<DynamicImage> {
@@ -2282,7 +2426,10 @@ fn preview_image_crate(bytes: &[u8], fmt: ImageFormat) -> Result<DynamicImage> {
     Ok(img)
 }
 
-fn preview_jxl(bytes: &[u8]) -> Result<DynamicImage> {
+/// A JPEG XL, its rendered rows reduced as they are read for `place`
+/// (`RowBox`), so that only the decoder's own planes are ever whole; without
+/// a place, every row as it is.
+fn preview_jxl(bytes: &[u8], place: Option<(u32, u32, bool)>) -> Result<DynamicImage> {
     // Its own pool and the same limit, for the reasons `jxl_image` gives.
     let image = jxl_image(bytes, max_alloc())?;
     let render = image.render_frame(0).map_err(|e| anyhow::anyhow!("jxl render: {e}"))?;
@@ -2290,10 +2437,15 @@ fn preview_jxl(bytes: &[u8]) -> Result<DynamicImage> {
     let (w, h, ch) = (stream.width() as usize, stream.height() as usize, stream.channels() as usize);
     let grey = image.image_header().metadata.grayscale();
     let color = if grey { 1 } else { 3 };
-    let mut rgba = vec![255u8; w * h * 4];
+    let k = place.map_or(1, |(pw, ph, cover)| {
+        let (sw, sh) = preview_size(w as u32, h as u32, pw, ph, cover);
+        ((w as u32 / sw).min(h as u32 / sh)).max(1) as usize
+    });
+    let mut boxes = RowBox::new(w, h, 4, k);
     let mut rowf = vec![0f32; w * ch];
+    let mut row = vec![255u8; w * 4];
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    for row in rgba.chunks_exact_mut(w * 4) {
+    for _ in 0..boxes.rows_wanted() {
         let got = stream.write_to_buffer(&mut rowf);
         rowf[got..].fill(0.0);
         for (px, out) in rowf.chunks_exact(ch).zip(row.chunks_exact_mut(4)) {
@@ -2308,9 +2460,9 @@ fn preview_jxl(bytes: &[u8]) -> Result<DynamicImage> {
                 out[3] = byte(px[color]);
             }
         }
+        boxes.push(&row);
     }
-    let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba).context("jxl: frame size")?;
-    Ok(DynamicImage::ImageRgba8(buf))
+    boxes.finish().context("jxl: frame size")
 }
 
 fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
@@ -2334,6 +2486,34 @@ fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview is the size its place asks for, and a PNG read a row at a
+    /// time into the reduction looks as the whole picture shrunk does.
+    #[test]
+    fn a_preview_fits_its_place() {
+        let dir = std::env::temp_dir().join(format!("img-fp-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gradient.png");
+        let img = image::RgbImage::from_fn(600, 400, |x, y| image::Rgb([(x * 255 / 599) as u8, (y * 255 / 399) as u8, ((x + y) % 256) as u8]));
+        img.save(&path).unwrap();
+        // Shrunk to fit: by the rows, against the general path's shrinking.
+        let (w, h, rows) = preview_fit(&path, 100, 100, false).unwrap();
+        assert_eq!((w, h), (100, 67));
+        assert!(preview_png_rows(&std::fs::read(&path).unwrap(), 100, 100, false).is_some(), "large enough to read by rows");
+        let whole = fit_preview(DynamicImage::ImageRgb8(img), 100, 100, false);
+        assert_eq!((whole.0, whole.1), (100, 67));
+        let worst = rows.iter().zip(&whole.2).enumerate().filter(|(i, _)| i % 4 != 2).map(|(_, (a, b))| (*a as i32 - *b as i32).abs()).max().unwrap();
+        assert!(worst <= 8, "rows and the whole picture differ by {worst}");
+        // Filling a place: shrunk until it covers it, then cut to it.
+        let (w, h, _) = preview_fit(&path, 50, 50, true).unwrap();
+        assert_eq!((w, h), (50, 50));
+        // Never enlarged.
+        let (w, h, _) = preview_fit(&path, 1000, 1000, false).unwrap();
+        assert_eq!((w, h), (600, 400));
+        let (w, h, _) = preview_fit(&path, 1000, 200, true).unwrap();
+        assert_eq!((w, h), (600, 200));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn streamed_fit_is_fit_to() {

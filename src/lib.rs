@@ -942,8 +942,9 @@ pub fn defaults() -> Defaults {
     }
 }
 
-/// A preview of an image for a window: RGBA, long side at most `long`.
-pub use decode::preview;
+/// A preview of an image for a window: RGBA, long side at most `long`, or
+/// made for a place of a given size.
+pub use decode::{fit_preview, preview, preview_fit};
 
 /// The only exit path.
 ///

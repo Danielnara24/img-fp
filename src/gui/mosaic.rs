@@ -142,6 +142,29 @@ fn flow(a: &[f32], w: f32) -> (Vec<Rect>, f32) {
     (out, (y - GAP).max(0.0))
 }
 
+/// The tiles of pictures of aspect `a` in a mosaic `width` wide that shows
+/// `h` of its height, `PAD` included.
+fn placed(a: &[f32], width: i32, h: f32) -> Vec<Rect> {
+    let (mut rects, _) = layout(a, width as f32 - 2.0 * PAD, (h - 2.0 * PAD).max(1.0));
+    for r in rects.iter_mut() {
+        r.x += PAD;
+        r.y += PAD;
+    }
+    rects
+}
+
+/// A tile's place in whole pixels: edges rounded, not sizes, so that the
+/// gaps stay even.
+fn pixels(r: &Rect) -> (i32, i32, i32, i32) {
+    let (x0, y0) = (r.x.round() as i32, r.y.round() as i32);
+    let (x1, y1) = ((r.x + r.w).round() as i32, (r.y + r.h).round() as i32);
+    (x0, y0, (x1 - x0).max(1), (y1 - y0).max(1))
+}
+
+fn aspects(sizes: &[(u32, u32)]) -> Vec<f32> {
+    sizes.iter().map(|&(w, h)| if w > 0 && h > 0 { (w as f32 / h as f32).clamp(0.1, 10.0) } else { 4.0 / 3.0 }).collect()
+}
+
 /// The tile above or below tile `i`, nearest to it across: `down` says which.
 pub fn neighbour(rects: &[Rect], i: usize, down: bool) -> Option<usize> {
     let me = rects.get(i)?;
@@ -165,6 +188,7 @@ pub fn neighbour(rects: &[Rect], i: usize, down: bool) -> Option<usize> {
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     #[derive(Default)]
     pub struct Mosaic {
@@ -181,6 +205,11 @@ mod imp {
         pub viewport: Cell<f32>,
         /// Popovers parented here, which a parent must present itself.
         pub popovers: RefCell<Vec<gtk::Popover>>,
+        /// Told when the tiles shown have been given new sizes, after the
+        /// allocation that gave them.
+        pub on_resized: RefCell<Option<Rc<dyn Fn()>>>,
+        /// The tile sizes last told of.
+        pub told: RefCell<Vec<(i32, i32)>>,
     }
 
     #[glib::object_subclass]
@@ -220,22 +249,26 @@ mod imp {
         fn size_allocate(&self, width: i32, height: i32, _baseline: i32) {
             let tiles = self.tiles.borrow();
             let a = self.aspects.borrow();
-            let h = self.viewport.get().min(height as f32) - 2.0 * PAD;
-            let (mut rects, _) = layout(&a, width as f32 - 2.0 * PAD, h.max(1.0));
-            for r in rects.iter_mut() {
-                r.x += PAD;
-                r.y += PAD;
-            }
+            let rects = placed(&a, width, self.viewport.get().min(height as f32));
+            let mut sizes = Vec::with_capacity(rects.len());
             for (t, r) in tiles.iter().zip(&rects) {
-                // Edges rounded, not sizes, so that the gaps stay even.
-                let (x0, y0) = (r.x.round() as i32, r.y.round() as i32);
-                let (x1, y1) = ((r.x + r.w).round() as i32, (r.y + r.h).round() as i32);
+                let (x0, y0, w, h) = pixels(r);
                 t.measure(gtk::Orientation::Horizontal, -1);
-                t.size_allocate(&gtk::Allocation::new(x0, y0, (x1 - x0).max(1), (y1 - y0).max(1)), -1);
+                t.size_allocate(&gtk::Allocation::new(x0, y0, w, h), -1);
+                sizes.push((w, h));
             }
             *self.rects.borrow_mut() = rects;
             for p in self.popovers.borrow().iter() {
                 p.present();
+            }
+            // Pictures are made at the size their tile is drawn, so a tile
+            // given another size wants another picture: said once the
+            // allocation is over, never during it.
+            if *self.told.borrow() != sizes {
+                *self.told.borrow_mut() = sizes;
+                if let Some(f) = self.on_resized.borrow().clone() {
+                    glib::idle_add_local_once(move || f());
+                }
             }
         }
     }
@@ -264,16 +297,33 @@ impl Mosaic {
     /// Show the first tiles, one for each `(width, height)`, and hide the
     /// rest.
     pub fn show(&self, sizes: &[(u32, u32)]) {
-        let aspects: Vec<f32> = sizes
-            .iter()
-            .map(|&(w, h)| if w > 0 && h > 0 { (w as f32 / h as f32).clamp(0.1, 10.0) } else { 4.0 / 3.0 })
-            .collect();
+        let aspects = aspects(sizes);
         for (i, t) in self.imp().tiles.borrow().iter().enumerate() {
             t.set_child_visible(i < aspects.len());
         }
         *self.imp().aspects.borrow_mut() = aspects;
         self.imp().rects.borrow_mut().clear();
         self.queue_resize();
+    }
+
+    /// The size each tile would have for pictures of `sizes`, laid out in the
+    /// space the mosaic has now; `None` before it has any.
+    pub fn tile_sizes(&self, sizes: &[(u32, u32)]) -> Option<Vec<(i32, i32)>> {
+        let (width, h) = (self.width(), self.imp().viewport.get());
+        if width <= 0 || h <= 0.0 {
+            return None;
+        }
+        Some(placed(&aspects(sizes), width, h).iter().map(|r| (pixels(r).2, pixels(r).3)).collect())
+    }
+
+    /// The size tile `i` was last allocated, its style's border included.
+    pub fn allocated(&self, i: usize) -> Option<(i32, i32)> {
+        self.imp().told.borrow().get(i).copied()
+    }
+
+    /// Call `f` when the tiles shown have new sizes.
+    pub fn connect_resized(&self, f: impl Fn() + 'static) {
+        *self.imp().on_resized.borrow_mut() = Some(std::rc::Rc::new(f));
     }
 
     /// The height the page shows, which is what a group is fitted into.

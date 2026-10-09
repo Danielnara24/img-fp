@@ -88,6 +88,7 @@ fn main() -> glib::ExitCode {
         // process does and no thread has been started.
         unsafe { std::env::set_var("GSK_RENDERER", "cairo") };
     }
+    few_arenas();
     quiet_theme_errors();
     // The folders on the command line are the ones to start with, which is
     // what a file manager's "Open With" hands over.
@@ -100,6 +101,24 @@ fn main() -> glib::ExitCode {
     app.set_accels_for_action("window.close", &["<Control>q", "<Control>w"]);
     // GTK is not handed the arguments: they are folders, not GTK options.
     app.run_with_args(&[args[0].to_string_lossy().into_owned()])
+}
+
+/// Two allocator arenas rather than eight a core. glibc keeps what a thread
+/// frees in that thread's own arena, and the window's decoders each free most
+/// of a picture per picture: with an arena each, measured on IMGS-ALL, the
+/// page settled some 100 MB higher (and see `thumbs::release_memory`).
+fn few_arenas() {
+    #[cfg(target_env = "gnu")]
+    {
+        const M_ARENA_MAX: i32 = -8;
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        // SAFETY: called first thing, before any thread is started.
+        unsafe {
+            mallopt(M_ARENA_MAX, 2);
+        }
+    }
 }
 
 /// The scan, in the child. `rest` is the report path and then an img-fp

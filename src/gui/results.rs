@@ -41,7 +41,7 @@ use crate::last;
 use crate::mosaic::Mosaic;
 use crate::scan::{Found, Group, Member};
 use crate::still::Still;
-use crate::thumbs::{show_on, Latest, Shown, Thumbs};
+use crate::thumbs::{show_on, Key, Latest, Shown, Size, Thumbs};
 use crate::App;
 use img_fp::{Action, SuggestMode};
 use gtk::prelude::*;
@@ -59,16 +59,12 @@ const AHEAD: usize = 16;
 /// A group's picture in the strip.
 const STRIP_W: i32 = 96;
 const STRIP_H: i32 = 72;
-/// Rows of the strip around the shown group whose pictures go first.
-const STRIP_NEAR: usize = 8;
-/// Strip rows made before the page is drawn, past the group to select: more
-/// than a screen holds.
-const STRIP_FIRST: usize = 24;
-/// And how many are made at a time after it.
-const STRIP_CHUNK: usize = 64;
+/// Bytes of the strip's pictures kept: at 96 x 72, some six hundred groups.
+const STRIP_KEEP: usize = 16 << 20;
 
-/// Long side a group's pictures are decoded at: a group of a few fills the
-/// page with each, one of dozens shares it out.
+/// Long side a group's pictures are decoded at before the page has been laid
+/// out, which is the only time their tiles' sizes are not known: a group of a
+/// few fills the page with each, one of dozens shares it out.
 fn card_px(n: usize) -> u32 {
     match n {
         0..=4 => 1024,
@@ -176,6 +172,8 @@ struct Card {
     path: PathBuf,
     id: u32,
     child: gtk::Overlay,
+    /// The picture asked for, and the ticket that withdraws it.
+    request: Option<(Key, u64)>,
 }
 
 /// A tile of the mosaic, kept from one group to the next and told which
@@ -189,15 +187,21 @@ struct Tile {
     pill: gtk::Label,
 }
 
-/// A group's row in the strip.
-struct Row {
+/// A row of the strip. The strip is a list view, so there are only as many
+/// of these as a screen shows and each is told in turn which group it is:
+/// as a list box of seven hundred rows it was laid out whole on every step of
+/// a scroll, some 11 ms a frame on IMGS-ALL, and held every row's picture.
+struct StripRow {
     picture: Still,
     count: gtk::Label,
     marked: gtk::Label,
-    row: gtk::ListBoxRow,
+    overlay: gtk::Overlay,
+    /// The group it shows, while it is bound to one.
+    group: Cell<Option<usize>>,
     /// The marks its badge shows, so that a row whose count did not change
     /// is left alone.
     shown: Cell<Option<usize>>,
+    request: RefCell<Option<(Key, u64)>>,
 }
 
 /// What the bottom bar says about one image.
@@ -219,8 +223,16 @@ pub struct Results {
     /// group neither drops them nor waits for them.
     strip_thumbs: Rc<Thumbs>,
     state: RefCell<State>,
-    list: gtk::ListBox,
-    rows: RefCell<Vec<Row>>,
+    list: gtk::ListView,
+    selection: gtk::SingleSelection,
+    store: gio::ListStore,
+    /// The strip's rows that exist, by the list item each belongs to.
+    strip: RefCell<HashMap<gtk::ListItem, StripRow>>,
+    /// Each group's picture in the strip (`face`).
+    faces: RefCell<Vec<PathBuf>>,
+    /// Set while the strip's groups are being replaced, so that the
+    /// selection moving on the way does not show each group it passes.
+    quiet: Cell<bool>,
     mosaic: Mosaic,
     title: gtk::Label,
     note: gtk::Label,
@@ -252,9 +264,6 @@ pub struct Results {
     trashing: Cell<bool>,
     /// A save of the marks is waiting to be written.
     marks_pending: Cell<bool>,
-    /// Which rebuild the strip's rows are being made for; a later one stops
-    /// an earlier one's.
-    strip_generation: Cell<u64>,
     settings_button: gtk::Button,
     to_settings: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -273,7 +282,10 @@ impl Results {
         // takes the keyboard to its images: on a single click, the default,
         // the strip lost the keyboard to the images on every click, and Up
         // and Down then moved through the images instead of the groups.
-        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Browse).activate_on_single_click(false).css_classes(["strip"]).build();
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let selection = gtk::SingleSelection::builder().model(&store).autoselect(true).can_unselect(false).build();
+        let factory = gtk::SignalListItemFactory::new();
+        let list = gtk::ListView::builder().model(&selection).factory(&factory).single_click_activate(false).css_classes(["strip"]).build();
         let list_scroll = gtk::ScrolledWindow::builder()
             .child(&list)
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -460,10 +472,14 @@ impl Results {
             root,
             app: app.clone(),
             thumbs: Thumbs::new(),
-            strip_thumbs: Thumbs::with_workers(1),
+            strip_thumbs: Thumbs::with_workers(1, STRIP_KEEP),
             state: RefCell::new(State::default()),
             list,
-            rows: RefCell::new(Vec::new()),
+            selection,
+            store,
+            strip: RefCell::new(HashMap::new()),
+            faces: RefCell::new(Vec::new()),
+            quiet: Cell::new(false),
             mosaic,
             title,
             note,
@@ -482,7 +498,6 @@ impl Results {
             image_actions: RefCell::new(Vec::new()),
             trashing: Cell::new(false),
             marks_pending: Cell::new(false),
-            strip_generation: Cell::new(0),
             settings_button: to_settings.clone(),
             to_settings: RefCell::new(None),
         });
@@ -559,19 +574,68 @@ impl Results {
             move |_| app.show_log()
         });
 
-        me.list.connect_row_selected({
+        factory.connect_setup({
             let weak = Rc::downgrade(&me);
-            move |_, row| {
-                let (Some(me), Some(row)) = (weak.upgrade(), row) else { return };
-                me.show_group(row.index() as usize);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                let picture = Still::new(STRIP_W, STRIP_H);
+                picture.set_overflow(gtk::Overflow::Hidden);
+                let count = gtk::Label::builder().css_classes(["badge"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(4).margin_bottom(4).build();
+                let marked = gtk::Label::builder().css_classes(["badge", "marked"]).halign(gtk::Align::Start).valign(gtk::Align::End).margin_start(4).margin_bottom(4).visible(false).build();
+                let overlay = gtk::Overlay::builder().child(&picture).build();
+                overlay.add_overlay(&count);
+                overlay.add_overlay(&marked);
+                item.set_child(Some(&overlay));
+                let row = StripRow { picture, count, marked, overlay, group: Cell::new(None), shown: Cell::new(None), request: RefCell::new(None) };
+                me.strip.borrow_mut().insert(item.clone(), row);
+            }
+        });
+        factory.connect_bind({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                me.bind_row(item);
+            }
+        });
+        factory.connect_unbind({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                me.unbind_row(item);
+            }
+        });
+        factory.connect_teardown({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                me.strip.borrow_mut().remove(item);
+            }
+        });
+        me.selection.connect_selected_notify({
+            let weak = Rc::downgrade(&me);
+            move |sel| {
+                let Some(me) = weak.upgrade() else { return };
+                if me.quiet.get() || sel.selected() == gtk::INVALID_LIST_POSITION {
+                    return;
+                }
+                me.show_group(sel.selected() as usize);
             }
         });
         // Enter on a group takes the keyboard to its images.
-        me.list.connect_row_activated({
+        me.list.connect_activate({
             let weak = Rc::downgrade(&me);
             move |_, _| {
                 if let Some(me) = weak.upgrade() {
                     me.focus();
+                }
+            }
+        });
+        // A tile given another size is given a picture of that size.
+        me.mosaic.connect_resized({
+            let weak = Rc::downgrade(&me);
+            move || {
+                if let Some(me) = weak.upgrade() {
+                    me.tiles_resized();
                 }
             }
         });
@@ -822,43 +886,18 @@ impl Results {
             }
             s.member_of = member_of;
         }
-        // Rows are replaced while the list is unselected, so that each one
-        // added does not show its group.
-        self.list.unselect_all();
-        while let Some(row) = self.list.row_at_index(0) {
-            self.list.remove(&row);
-        }
-        let scale = self.app.window.scale_factor().max(1) as u32;
-        let heads: Vec<(PathBuf, usize)> = {
+        let faces: Vec<PathBuf> = {
             let s = self.state.borrow();
-            s.groups.iter().map(|g| (face(&g.files).map(|f| f.path.clone()).unwrap_or_default(), g.files.len())).collect()
+            s.groups.iter().map(|g| face(&g.files).map(|f| f.path.clone()).unwrap_or_default()).collect()
         };
-        self.rows.borrow_mut().clear();
-        // The rows on screen, and the one to select, now; the rest a chunk
-        // at a time once the page is drawn. Each row is five widgets, and
-        // IMGS-ALL's 703 groups took a tenth of a second to make, on every
-        // scan, restore and trip to the Trash.
-        let generation = self.strip_generation.get() + 1;
-        self.strip_generation.set(generation);
-        let heads: Rc<Vec<PathBuf>> = Rc::new(heads.into_iter().map(|(h, _)| h).collect());
-        let first = (select + STRIP_FIRST).min(heads.len());
-        self.add_rows(&heads, 0..first, scale);
-        if first < heads.len() {
-            let me = Rc::downgrade(self);
-            let heads = heads.clone();
-            let mut next = first;
-            glib::idle_add_local(move || {
-                let Some(me) = me.upgrade() else { return glib::ControlFlow::Break };
-                if me.strip_generation.get() != generation {
-                    return glib::ControlFlow::Break;
-                }
-                let end = (next + STRIP_CHUNK).min(heads.len());
-                me.add_rows(&heads, next..end, scale);
-                next = end;
-                if next < heads.len() { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
-            });
-        }
-        let empty = heads.is_empty();
+        let n = faces.len();
+        *self.faces.borrow_mut() = faces;
+        // Every row is told its group again, since the groups are new.
+        self.quiet.set(true);
+        let items: Vec<glib::BoxedAnyObject> = (0..n).map(glib::BoxedAnyObject::new).collect();
+        self.store.splice(0, self.store.n_items(), &items);
+        self.quiet.set(false);
+        let empty = n == 0;
         for b in &self.group_buttons {
             b.set_sensitive(!empty);
         }
@@ -876,39 +915,59 @@ impl Results {
             self.update_status();
             return;
         }
-        let i = select.min(heads.len() - 1);
-        if let Some(row) = self.list.row_at_index(i as i32) {
-            self.list.select_row(Some(&row));
-        }
+        let i = select.min(n - 1);
+        self.quiet.set(true);
+        self.selection.set_selected(i as u32);
+        self.quiet.set(false);
+        self.show_group(i);
+        self.scroll_strip_to(i);
         self.update_status();
     }
 
-    /// The strip's rows for groups `range`, whose pictures are `heads`.
-    fn add_rows(&self, heads: &[PathBuf], range: std::ops::Range<usize>, scale: u32) {
-        for gi in range.clone() {
-            let picture = Still::new(STRIP_W, STRIP_H);
-            picture.set_overflow(gtk::Overflow::Hidden);
-            let count = gtk::Label::builder().css_classes(["badge"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(4).margin_bottom(4).build();
-            let marked = gtk::Label::builder().css_classes(["badge", "marked"]).halign(gtk::Align::Start).valign(gtk::Align::End).margin_start(4).margin_bottom(4).visible(false).build();
-            let overlay = gtk::Overlay::builder().child(&picture).build();
-            overlay.add_overlay(&count);
-            overlay.add_overlay(&marked);
-            let row = gtk::ListBoxRow::builder().child(&overlay).build();
-            self.list.append(&row);
-            self.strip_thumbs.request(&heads[gi], STRIP_W as u32 * 2 * scale, Shown::Still(picture.clone()), false);
-            self.rows.borrow_mut().push(Row { picture, count, marked, row, shown: Cell::new(None) });
+    fn scroll_strip_to(&self, i: usize) {
+        let _ = self.list.activate_action("list.scroll-to-item", Some(&(i as u32).to_variant()));
+    }
+
+    /// Row `item` of the strip now shows the group its item names.
+    fn bind_row(&self, item: &gtk::ListItem) {
+        let Some(gi) = item.item().and_downcast::<glib::BoxedAnyObject>().map(|o| *o.borrow::<usize>()) else { return };
+        let strip = self.strip.borrow();
+        let Some(row) = strip.get(item) else { return };
+        row.group.set(Some(gi));
+        row.shown.set(None);
+        self.show_row(row, gi);
+        row.picture.set_texture(None);
+        let Some(face) = self.faces.borrow().get(gi).cloned() else { return };
+        let scale = self.app.window.scale_factor().max(1) as u32;
+        let size = Size::cover(STRIP_W as u32 * scale, STRIP_H as u32 * scale);
+        let ticket = self.strip_thumbs.request(&face, size, Shown::Still(row.picture.clone()), false);
+        *row.request.borrow_mut() = Some(((face, size), ticket));
+    }
+
+    /// Row `item` of the strip no longer shows a group: its picture is not
+    /// wanted, and not held.
+    fn unbind_row(&self, item: &gtk::ListItem) {
+        let strip = self.strip.borrow();
+        let Some(row) = strip.get(item) else { return };
+        row.group.set(None);
+        if let Some((key, ticket)) = row.request.borrow_mut().take() {
+            self.strip_thumbs.withdraw(&key, ticket);
         }
-        for gi in range {
-            self.update_row(gi);
+        row.picture.set_texture(None);
+    }
+
+    /// Group `gi`'s row of the strip, if one shows it, says what it holds.
+    fn update_row(&self, gi: usize) {
+        let strip = self.strip.borrow();
+        if let Some(row) = strip.values().find(|r| r.group.get() == Some(gi)) {
+            self.show_row(row, gi);
         }
     }
 
-    fn update_row(&self, gi: usize) {
+    fn show_row(&self, r: &StripRow, gi: usize) {
         let s = self.state.borrow();
         let Some(g) = s.groups.get(gi) else { return };
         let marked = g.files.iter().filter(|f| s.is_marked(f.id)).count();
-        let rows = self.rows.borrow();
-        let Some(r) = rows.get(gi) else { return };
         let before = r.shown.replace(Some(marked));
         if before == Some(marked) {
             return;
@@ -928,7 +987,7 @@ impl Results {
         }
         // No tooltip: the badges say the same, and setting seven hundred
         // tooltips was most of the time the strip took to build.
-        r.row.update_property(&[gtk::accessible::Property::Label(&text)]);
+        r.overlay.update_property(&[gtk::accessible::Property::Label(&text)]);
     }
 
     fn clear_cards(&self) {
@@ -964,32 +1023,25 @@ impl Results {
         self.note.set_text(note.trim());
         self.note.set_visible(!note.is_empty());
 
-        let scale = self.app.window.scale_factor().max(1) as u32;
-        let px = card_px(files.len()) * scale;
+        let dims = |files: &[Member]| files.iter().map(|m| (m.width.unwrap_or(0), m.height.unwrap_or(0))).collect::<Vec<_>>();
+        let sizes = self.picture_sizes(&dims(&files));
         let mut cards = Vec::with_capacity(files.len());
         for (i, m) in files.iter().enumerate() {
             let t = self.card(i, m);
-            self.thumbs.request(&m.path, px, Shown::Still(t.still.clone()), false);
-            cards.push(Card { path: m.path.clone(), id: m.id, child: t.child });
+            let size = sizes.as_ref().map_or(Size::within(card_px(files.len()) * self.scale()), |s| s[i]);
+            let ticket = self.thumbs.request(&m.path, size, Shown::Still(t.still.clone()), false);
+            cards.push(Card { path: m.path.clone(), id: m.id, child: t.child, request: Some(((m.path.clone(), size), ticket)) });
         }
         *self.cards.borrow_mut() = cards;
-        self.mosaic.show(&files.iter().map(|m| (m.width.unwrap_or(0), m.height.unwrap_or(0))).collect::<Vec<_>>());
-        // The next group, ahead of being asked for.
-        let ahead: (Vec<PathBuf>, usize) = {
-            let s = self.state.borrow();
-            s.groups.get(gi + 1).map(|g| (g.files.iter().take(AHEAD).map(|f| f.path.clone()).collect(), g.files.len())).unwrap_or_default()
-        };
-        for p in ahead.0 {
-            self.thumbs.request(&p, card_px(ahead.1) * scale, Shown::Callback(Box::new(|_| {})), false);
-        }
-        // The strip's pictures nearest the group shown, first.
-        {
-            let s = self.state.borrow();
-            let rows = self.rows.borrow();
-            for g in gi.saturating_sub(2)..(gi + STRIP_NEAR).min(rows.len()) {
-                if let Some(head) = s.groups.get(g).and_then(|g| face(&g.files)) {
-                    self.strip_thumbs.request(&head.path, STRIP_W as u32 * 2 * scale, Shown::Still(rows[g].picture.clone()), true);
-                }
+        self.mosaic.show(&dims(&files));
+        // The next group, ahead of being asked for, at the sizes it will be
+        // shown at.
+        let ahead: Vec<Member> = self.state.borrow().groups.get(gi + 1).map(|g| g.files.clone()).unwrap_or_default();
+        if !ahead.is_empty() {
+            let sizes = self.picture_sizes(&dims(&ahead));
+            for (i, m) in ahead.iter().enumerate().take(AHEAD) {
+                let size = sizes.as_ref().map_or(Size::within(card_px(ahead.len()) * self.scale()), |s| s[i]);
+                self.thumbs.request(&m.path, size, Shown::Callback(Box::new(|_| {})), false);
             }
         }
         // A tile left holding the keyboard may now be hidden, or show
@@ -997,12 +1049,51 @@ impl Results {
         // was among them and nothing else has taken it (a click on the strip
         // changes group before the strip takes the keyboard).
         let focus = gtk::prelude::GtkWindowExt::focus(&self.app.window);
-        if focus.is_some_and(|f| self.tiles.borrow().iter().any(|t| t.child.upcast_ref::<gtk::Widget>() == &f))
-            && let Some(r) = self.list.row_at_index(gi as i32)
-        {
-            r.grab_focus();
+        if focus.is_some_and(|f| self.tiles.borrow().iter().any(|t| t.child.upcast_ref::<gtk::Widget>() == &f)) {
+            self.list.grab_focus();
         }
         self.refresh_bar();
+    }
+
+    fn scale(&self) -> u32 {
+        self.app.window.scale_factor().max(1) as u32
+    }
+
+    /// The size each picture of a group of `dims` is drawn at, in device
+    /// pixels: its tile's, less the tile's border. `None` before the page
+    /// has been laid out.
+    fn picture_sizes(&self, dims: &[(u32, u32)]) -> Option<Vec<Size>> {
+        let tiles = self.mosaic.tile_sizes(dims)?;
+        // The border is the tiles' style's: measured off a tile laid out,
+        // whose width is its content's.
+        let border = match (self.mosaic.allocated(0), self.tiles.borrow().first()) {
+            (Some((w, h)), Some(t)) if t.still.width() > 0 => (w - t.still.width(), h - t.still.height()),
+            _ => (6, 6),
+        };
+        let scale = self.scale();
+        Some(tiles.iter().map(|&(w, h)| Size::cover((w - border.0).max(1) as u32 * scale, (h - border.1).max(1) as u32 * scale)).collect())
+    }
+
+    /// The tiles have been laid out again: each picture made for another size
+    /// is asked for at its tile's. The picture shown stays until it comes.
+    fn tiles_resized(&self) {
+        let scale = self.scale();
+        let tiles = self.tiles.borrow();
+        for (c, t) in self.cards.borrow_mut().iter_mut().zip(tiles.iter()) {
+            let (w, h) = (t.still.width(), t.still.height());
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            let size = Size::cover(w as u32 * scale, h as u32 * scale);
+            if c.request.as_ref().is_some_and(|(k, _)| k.1 == size) {
+                continue;
+            }
+            if let Some((key, ticket)) = c.request.take() {
+                self.thumbs.withdraw(&key, ticket);
+            }
+            let ticket = self.thumbs.request(&c.path, size, Shown::Still(t.still.clone()), false);
+            c.request = Some(((c.path.clone(), size), ticket));
+        }
     }
 
     /// Tile `i`, told to show `m`.
@@ -1346,13 +1437,11 @@ impl Results {
         if n == 0 {
             return;
         }
-        let next = (cur + by).clamp(0, n - 1);
-        if let Some(row) = self.list.row_at_index(next) {
-            self.list.select_row(Some(&row));
-            // The list scrolls to it; the keyboard goes to the images.
-            row.grab_focus();
-            self.focus();
-        }
+        let next = (cur + by).clamp(0, n - 1) as usize;
+        self.selection.set_selected(next as u32);
+        // The strip shows it; the keyboard goes to the images.
+        self.scroll_strip_to(next);
+        self.focus();
     }
 
     fn update_status(&self) {
@@ -1472,7 +1561,7 @@ impl Results {
                         show_on(&p, r);
                     }
                 }));
-                me.thumbs.request(&path, LARGE * scale, shown, true);
+                me.thumbs.request(&path, Size::within(LARGE * scale), shown, true);
             })
         };
         let go = {
@@ -1653,6 +1742,7 @@ impl Results {
     fn drop_gone(self: &Rc<Self>, gone: &HashSet<PathBuf>) {
         for p in gone {
             self.thumbs.forget(p);
+            self.strip_thumbs.forget(p);
         }
         let mut unmarked = false;
         let select = {
