@@ -3909,7 +3909,10 @@ colour `decode::preview`, which only the window calls).
   reaching it with the keyboard, puts its details in the bottom bar
   (`refresh_bar`): name and folder, size against the reference's, overlap and
   correlation, the file that holds it when the content rule deletes it, and
-  the suggestion. Otherwise the bar says what is marked. The tick circle,
+  the suggestion. Otherwise the bar says what is marked. Its columns are
+  fixed shares (a homogeneous `gtk::Grid`, spans 3, 2 and 3) and the pill's
+  place is held by an invisible copy of its longest wording, so nothing
+  moves from image to image; a column sized by its text jittered. The tick circle,
   shown on hover, marks; a double click or Enter opens the large view.
 - **There is one selected image** (`Results::selected`, outlined), set by a
   click or by the arrow keys, and everything that acts on "this image" acts on

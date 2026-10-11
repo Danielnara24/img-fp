@@ -515,20 +515,36 @@ impl Results {
             facts_note: label(&["dim-label", "caption"], E::End),
             why: label(&[], E::End),
             why_note: label(&["dim-label", "caption"], E::Middle),
-            suggestion: gtk::Label::builder().css_classes(["suggest"]).valign(gtk::Align::Center).build(),
+            suggestion: gtk::Label::builder().css_classes(["suggest"]).halign(gtk::Align::Start).valign(gtk::Align::Center).build(),
         };
-        let first = column(&details.name, &details.dir);
-        first.set_size_request(260, -1);
-        first.set_hexpand(true);
+        // The columns are fixed shares of the bar, whatever they say, so
+        // that pointing from image to image never moves the text: a grid of
+        // equal columns ignores what its labels would like, and each column
+        // spans a set number of them (name 3, size 2, evidence 3).
+        let detail_grid = gtk::Grid::builder().column_homogeneous(true).column_spacing(14).hexpand(true).build();
+        let cell = |content: &gtk::Box, separated: bool| {
+            let c = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+            if separated {
+                c.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+            }
+            content.set_hexpand(true);
+            c.append(content);
+            c
+        };
+        detail_grid.attach(&cell(&column(&details.name, &details.dir), false), 0, 0, 3, 1);
+        detail_grid.attach(&cell(&column(&details.facts, &details.facts_note), true), 3, 0, 2, 1);
+        detail_grid.attach(&cell(&column(&details.why, &details.why_note), true), 5, 0, 3, 1);
+        // The pill's place is as wide as its longest wording, held by an
+        // invisible copy of it, so that "keep" and "delete · marked" start
+        // in the same place and its absence leaves the place empty.
+        let sizer = gtk::Label::builder().label("suggested: delete · marked").css_classes(["suggest"]).opacity(0.0).build();
+        let pill = gtk::Stack::builder().hhomogeneous(true).valign(gtk::Align::Center).build();
+        pill.add_child(&sizer);
+        pill.add_child(&details.suggestion);
+        pill.set_visible_child(&details.suggestion);
         let detail = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-        detail.append(&first);
-        detail.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        detail.append(&column(&details.facts, &details.facts_note));
-        detail.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        let third = column(&details.why, &details.why_note);
-        third.set_hexpand(true);
-        detail.append(&third);
-        detail.append(&details.suggestion);
+        detail.append(&detail_grid);
+        detail.append(&pill);
         let bar = gtk::Stack::builder().hexpand(true).build();
         bar.add_named(&summary, Some("summary"));
         bar.add_named(&detail, Some("details"));
@@ -1798,7 +1814,8 @@ impl Results {
         };
         d.why_note.set_text(&kept);
         d.suggestion.set_text(suggestion(action));
-        d.suggestion.set_visible(action.is_some());
+        // Hidden by opacity, not visibility, so that the stack keeps showing it.
+        d.suggestion.set_opacity(if action.is_some() { 1.0 } else { 0.0 });
         for c in ["keep", "delete", "review"] {
             d.suggestion.remove_css_class(c);
         }
