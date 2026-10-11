@@ -69,6 +69,9 @@ pub struct Settings {
     pub min_frame_overlap: f32,
     #[serde(skip)]
     pub min_pixel_correlation: f32,
+    /// The second look; off is `--skip-mirrored`.
+    #[serde(skip)]
+    pub mirrored: bool,
 
     #[serde(skip)]
     pub report: bool,
@@ -113,6 +116,7 @@ impl Default for Settings {
             min_aligned_points: d.min_aligned_points,
             min_frame_overlap: d.min_frame_overlap,
             min_pixel_correlation: d.min_pixel_correlation,
+            mirrored: !d.skip_mirrored,
             report: false,
             report_path: String::new(),
             report_format: ReportFormat::FromName,
@@ -278,6 +282,9 @@ impl Settings {
         if self.hidden {
             a.push("--hidden".into());
         }
+        if !self.mirrored {
+            a.push("--skip-mirrored".into());
+        }
         if self.clear_cache {
             a.push("--clear-cache".into());
         }
@@ -374,6 +381,7 @@ mod tests {
         s.exclude = vec!["/tmp/a".into()];
         s.follow_symlinks = true;
         s.hidden = true;
+        s.mirrored = false;
         s.recursive = false;
         s.extensions = "*".into();
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
@@ -404,5 +412,6 @@ mod tests {
         let d = img_fp::defaults();
         let s = Settings::default();
         assert_eq!((s.work_size, s.candidates, s.min_aligned_points), (d.work_size, d.candidates, d.min_aligned_points));
+        assert_eq!(s.mirrored, !d.skip_mirrored);
     }
 }

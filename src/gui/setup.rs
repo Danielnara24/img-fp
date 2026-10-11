@@ -226,6 +226,7 @@ pub struct Setup {
     min_points: gtk::SpinButton,
     min_overlap: gtk::SpinButton,
     min_correlation: gtk::SpinButton,
+    mirrored: gtk::CheckButton,
     report: gtk::CheckButton,
     report_path: gtk::Entry,
     report_format: gtk::DropDown,
@@ -272,6 +273,12 @@ impl Setup {
         let min_points = spin(0.0, 200.0, 1.0, 0);
         let min_overlap = spin(0.0, 1.0, 0.05, 2);
         let min_correlation = spin(0.0, 1.0, 0.05, 2);
+        let mirrored = gtk::CheckButton::with_mnemonic(l::MIRRORED);
+        mirrored.set_tooltip_text(Some(
+            "Images that found fewer than two matches are searched again, mirrored and inverted. In a library with few \
+             duplicates that is most images and most of a rescan's time. Turned off, scans there are much faster, \
+             most mirrored and inverted copies are missed, and a group they linked together can split in two.",
+        ));
         let report = gtk::CheckButton::with_mnemonic(l::REPORT);
         let report_path = entry();
         report_path.set_placeholder_text(Some("results.txt, results.csv or results.json"));
@@ -302,15 +309,17 @@ impl Setup {
             g.attach(w, 1, r, 1, 1);
             g.attach(&hint(tip), 2, r, 1, 1);
         }
-        g.attach(&section("Report"), 0, 8, 3, 1);
-        g.attach(&report, 0, 9, 1, 1);
+        g.attach(&mirrored, 1, 8, 2, 1);
+        g.attach(&hint("Off is much faster on a library with few duplicates, and misses most mirrored and inverted copies."), 1, 9, 2, 1);
+        g.attach(&section("Report"), 0, 10, 3, 1);
+        g.attach(&report, 0, 11, 1, 1);
         let report_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         report_box.append(&report_path);
         report_box.append(&report_choose);
-        g.attach(&report_box, 1, 9, 2, 1);
-        g.attach(&label_for(l::REPORT_FORMAT, &report_format), 0, 10, 1, 1);
+        g.attach(&report_box, 1, 11, 2, 1);
+        g.attach(&label_for(l::REPORT_FORMAT, &report_format), 0, 12, 1, 1);
         report_format.set_halign(gtk::Align::Start);
-        g.attach(&report_format, 1, 10, 2, 1);
+        g.attach(&report_format, 1, 12, 2, 1);
         let general = gtk::ScrolledWindow::builder().child(&g).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
 
         // ---- Advanced
@@ -440,6 +449,7 @@ impl Setup {
             min_points,
             min_overlap,
             min_correlation,
+            mirrored,
             report,
             report_path,
             report_format,
@@ -607,6 +617,7 @@ impl Setup {
         self.min_points.set_value(s.min_aligned_points as f64);
         self.min_overlap.set_value(s.min_frame_overlap as f64);
         self.min_correlation.set_value(s.min_pixel_correlation as f64);
+        self.mirrored.set_active(s.mirrored);
         self.report.set_active(s.report);
         self.report_path.set_text(&s.report_path);
         self.report_format.set_selected(ReportFormat::ALL.iter().position(|f| *f == s.report_format).unwrap_or(0) as u32);
@@ -637,6 +648,7 @@ impl Setup {
             min_aligned_points: self.min_points.value() as u32,
             min_frame_overlap: self.min_overlap.value() as f32,
             min_pixel_correlation: self.min_correlation.value() as f32,
+            mirrored: self.mirrored.is_active(),
             report: self.report.is_active(),
             report_path: self.report_path.text().to_string(),
             report_format: ReportFormat::ALL[(self.report_format.selected() as usize).min(ReportFormat::ALL.len() - 1)],

@@ -26,6 +26,7 @@ pub const MIN_POINTS: &str = "Min aligned _points";
 pub const MIN_OVERLAP: &str = "Min frame _overlap";
 pub const MIN_CORRELATION: &str = "Min pi_xel correlation";
 pub const CANDIDATES: &str = "Ca_ndidates per image";
+pub const MIRRORED: &str = "Loo_k for mirrored and inverted copies";
 pub const REPORT: &str = "Save a report _to";
 pub const REPORT_CHOOSE: &str = "C_hoose…";
 pub const REPORT_FORMAT: &str = "For_mat";
@@ -116,7 +117,7 @@ mod tests {
         let page = [SCAN, TAB_GENERAL, TAB_ADVANCED, SCAN_LOG, BACK_TO_RESULTS, DEFAULTS];
         let general = [
             FOLDERS, ADD_FOLDER, REMOVE_FOLDER, RECURSIVE, WORK_SIZE, MIN_POINTS, MIN_OVERLAP,
-            MIN_CORRELATION, CANDIDATES, REPORT, REPORT_CHOOSE, REPORT_FORMAT,
+            MIN_CORRELATION, CANDIDATES, MIRRORED, REPORT, REPORT_CHOOSE, REPORT_FORMAT,
         ];
         let advanced = [
             THREADS, EXTENSIONS, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE, SYMLINKS, HIDDEN, USE_CACHE,

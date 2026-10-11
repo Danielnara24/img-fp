@@ -174,6 +174,20 @@ struct Args {
     #[arg(long, value_name = "F", default_value_t = 0.6, value_parser = parse_fraction)]
     min_pixel_correlation: f32,
 
+    /// Don't search again for mirrored or inverted (negative) copies.
+    ///
+    /// Images that found fewer than two matches are normally searched for a
+    /// second time, mirrored and inverted. In a library with few duplicates
+    /// that is most images and most of a rescan's time. Skipping it is much
+    /// faster there. It misses most mirrored and inverted copies, and where
+    /// such a copy was what linked the rest of a group, the group splits.
+    // Not a dominated trade, unlike the propagation switch that was removed:
+    // a cached rescan of the found corpus goes 40 s -> 15 s for 16% of its
+    // pairs, and the benchmark corpora lose 7-10 points of recall for 5-9%.
+    // See CLAUDE.md, *What a cached run still has to do*.
+    #[arg(long)]
+    skip_mirrored: bool,
+
     /// How each file's KEEP, DELETE or REVIEW is decided.
     #[arg(long, value_enum, value_name = "RULE", default_value = "content")]
     suggest: suggest::Mode,
@@ -927,6 +941,7 @@ pub struct Defaults {
     pub min_aligned_points: u32,
     pub min_frame_overlap: f32,
     pub min_pixel_correlation: f32,
+    pub skip_mirrored: bool,
     pub extensions: Vec<String>,
 }
 
@@ -938,6 +953,7 @@ pub fn defaults() -> Defaults {
         min_aligned_points: a.min_aligned_points,
         min_frame_overlap: a.min_frame_overlap,
         min_pixel_correlation: a.min_pixel_correlation,
+        skip_mirrored: a.skip_mirrored,
         extensions: a.extensions,
     }
 }
@@ -1220,12 +1236,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // it does any of it, so a run's log says which settings produced it.
     say!(
         "Settings -> Work size: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
-         Min pixel correlation: {}, Threads: {}, Recursive: {}, Follow symlinks: {}, Hidden folders: {}",
+         Min pixel correlation: {}, Mirrored and inverted: {}, Threads: {}, Recursive: {}, Follow symlinks: {}, \
+         Hidden folders: {}",
         args.work_size,
         args.candidates,
         args.min_aligned_points,
         args.min_frame_overlap,
         args.min_pixel_correlation,
+        if args.skip_mirrored { "skipped" } else { "searched" },
         rayon::current_num_threads(),
         args.recursive,
         args.follow_symlinks,
@@ -1311,6 +1329,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         f.cache_bytes = cache_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
         f.cache_write = cache_path.is_some();
         f.candidates_per_query = args.candidates;
+        if args.skip_mirrored {
+            f.variants = Some(0);
+        }
     });
 
     // Byte-identical copies, before anything is decoded.
@@ -1915,7 +1936,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // place a count appears in either rule. Trying the tighter reading, "no
     // matches at all", costs a seed apiece on three of the held-out mirror
     // transforms.
-    let lonely: Vec<usize> = (0..n).filter(|&i| matched[i] && degree[i] < 2).collect();
+    //
+    // `--skip-mirrored` asks it of nobody, and everything below then does
+    // nothing: no word lists made, no postings rebuilt, no verdicts.
+    let lonely: Vec<usize> =
+        if args.skip_mirrored { Vec::new() } else { (0..n).filter(|&i| matched[i] && degree[i] < 2).collect() };
     let variants = [
         Variant { mirror: true, invert: false },
         Variant { mirror: false, invert: true },
@@ -2047,7 +2072,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .collect();
     let variant_edges: Vec<Edge> = variant_all.iter().filter(|e| e.1).map(|e| e.0.clone()).collect();
     let variant_all: Vec<Edge> = if dumping { variant_all.into_iter().map(|e| e.0).collect() } else { Vec::new() };
-    stage!(t_start, "variants: {} more pairs from {} unmatched images", variant_edges.len(), lonely.len());
+    if args.skip_mirrored {
+        stage!(t_start, "variants: skipped");
+    } else {
+        stage!(t_start, "variants: {} more pairs from {} unmatched images", variant_edges.len(), lonely.len());
+    }
 
     // Nothing after this point matches a descriptor against another. What is
     // left — propagation, corroboration, assembly — works from thumbnails,
@@ -2512,6 +2541,7 @@ fn run_config(args: &Args) -> serde_json::Value {
         "min_frame_overlap": as_typed(args.min_frame_overlap),
         "min_pixel_correlation": as_typed(args.min_pixel_correlation),
         "stages": "anchor, propagate, corroborate",
+        "mirrored_inverted": !args.skip_mirrored,
         "suggest": format!("{:?}", args.suggest).to_lowercase(),
     })
 }

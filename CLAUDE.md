@@ -4533,10 +4533,46 @@ is why the same cache makes the *benchmark* corpus about five times faster
 (57 s cold to ~12 s) where it makes this one twice: there, extraction is 80%
 of a cold run and the second look is 14 thread-seconds.
 
-The lever nobody has pulled is a flag to skip the second look. It would be
-worth ~40 s of this run for **459 of its 4,578 pairs**, which is a real trade
-rather than a dominated one — unlike `--no-propagate`, which is why that flag
-is gone. It has not been built because nothing has asked for it.
+**`--skip-mirrored` skips the second look** (the window's *Look for mirrored
+and inverted copies*, on by default). It is worth ~40 s of this run for
+**459 of its 4,578 pairs**, which is a real trade rather than a dominated one —
+unlike `--no-propagate`, which is why that flag is gone and this one exists.
+It empties the list of files re-asked, so nothing of the pass runs: no word
+lists, no postings rebuilt. The report's `config` records it as
+`mirrored_inverted`.
+
+**Measured** (`out/v27-skip-mirrored`, plain build, 2026-10-11): each corpus
+cold under `bench.py`'s protocol and then cached from its own cache file, both
+cooled, in the order full skip skip full; every pair of runs of one setting
+gave the same pairs. Cost is the change in the mean, skip against full:
+
+| corpus | F1 full -> skip | recall | perfect | cross-family | groups | cold CPU / wall | cached CPU / wall |
+|---|---|---|---|---|---|---|---|
+| IMGS | 0.9687 -> 0.9152 | 94.31 -> 84.68% | 52 -> 7 | 0 -> 0 | 137 -> 179 | +1.0% / +1.1% | -6.7% / -6.3% |
+| IMGS2 | 0.9811 -> 0.9459 | 96.70 -> 90.12% | 70 -> 67 | 0 -> 18 | 155 -> 201 | -4.0% / -4.7% | -5.9% / -6.9% |
+| IMGS3 | 0.9843 -> 0.9456 | 97.34 -> 90.21% | 76 -> 63 | 87 -> **759** | 237 -> 302 | 0.0% / -0.4% | -6.0% / -7.2% |
+| IMGS4 | 0.9827 -> 0.9474 | 97.00 -> 90.37% | 76 -> 72 | 0 -> 0 | 162 -> 202 | -1.0% / -1.6% | -5.2% / -5.0% |
+| IMGS-ALL | 0.9781 -> 0.9326 | 96.11 -> 87.76% | 45 -> 9 | 3 -> 689 | 694 -> 946 | +2.7% / +2.0% | -8.2% / -9.4% |
+| found | 2,472 -> 2,066 pairs | | | | 771 -> 724 | **-28.1% / -27.9%** | **-65.3% / -61.5%** |
+
+The found corpus is the case it is for: a cached rescan **40.0 s -> 15.4 s**
+(278 -> 96.5 CPU-s), cold 109 -> 78 s, for 16% of the pairs (448 out, 42 in).
+On the benchmark corpora it saves 5-9% cached and nothing cold (the IMGS-ALL
+cold runs drifted 1,981-2,336 MHz, larger than the effect), and costs **6.6-9.6
+points of recall** — about four times the second look's own pairs, because
+mirrored and inverted anchors are what hold families together for
+propagation: groups rise by a quarter to a third, and on IMGS every one of 76
+transformation rows loses seeds (`invert` 62 -> 0, `flip_h` 61 -> 28, the rest
+three to seven each). Precision moves only through those fragments: a family
+broken small enough joins its near-miss sibling under the clean-anchor rule's
+fragment allowance, so IMGS3's cross-family pairs go 87 -> 759 (`Segovia`
+83 -> **324**, over the merge line; `game` 1 -> 258; `algiu` 0 -> 153) and
+IMGS-ALL's 3 -> 689 (`game` 255, `boat_photo` 227, `algiu` 156). Both seed
+halves fall with the whole on every corpus. The output is not a subset of
+the default's (1,612 pairs on IMGS-ALL appear only with the flag): changed
+clusters propagate differently. The suggestion stays safe: IMGS-ALL deletes
+17,567 against 17,877, losing content in the same three composites, and 266
+of 304 families keep their original either way.
 
 ### How big the cache is, and why it is not smaller
 

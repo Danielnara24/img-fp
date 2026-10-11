@@ -296,6 +296,7 @@ to stderr.
 | `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3 | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
+| `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |
 | `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
