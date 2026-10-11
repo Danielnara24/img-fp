@@ -279,7 +279,7 @@ fn show_shortcuts(parent: &gtk::ApplicationWindow) {
             ("Alt + underlined letter", "Use that button or field"),
             ("Tab, Shift+Tab", "Move between controls"),
             ("F1", "This list"),
-            ("Ctrl+Q", "Quit"),
+            ("Ctrl+Q, Ctrl+W", "Quit"),
         ]),
         ("Scan", &[
             ("Ctrl+Enter", "Start the scan"),
