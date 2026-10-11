@@ -45,6 +45,9 @@ pub struct Notes {
     #[serde(default)]
     pub id: u64,
     pub log: String,
+    /// The folders the scan was given, which the tree view starts from.
+    #[serde(default, with = "crate::settings::paths")]
+    pub roots: Vec<PathBuf>,
 }
 
 pub struct Last {
@@ -145,7 +148,8 @@ fn load_in(dir: &Path) -> Option<Last> {
         let _ = std::fs::remove_dir_all(dir);
         return None;
     };
-    let prepared = results::prepare(found);
+    let mut prepared = results::prepare(found);
+    prepared.set_roots(notes.roots.clone());
     // Gone as the Trash counts it: not found. A file that cannot be looked at
     // for another reason is still shown, as the scan left it. Once a file,
     // not once a group it is in, and on every thread: a `stat` each.
@@ -188,7 +192,7 @@ mod tests {
             p
         };
         let dir = root.join("cache").join("img-fp").join("last-scan");
-        let notes = |id: u64, log: &str| Notes { problems: true, took: "1:02".into(), finished: 5, id, log: log.into() };
+        let notes = |id: u64, log: &str| Notes { problems: true, took: "1:02".into(), finished: 5, id, log: log.into(), roots: vec![root.clone()] };
 
         save_in(&dir, &report("one.json", &[&a, &b]), &notes(5, "first")).unwrap();
         let last = load_in(&dir).unwrap();
@@ -196,6 +200,7 @@ mod tests {
         assert_eq!(last.prepared.paths().len(), 2);
         assert!(last.notes.problems);
         assert_eq!(last.notes.log, "first");
+        assert_eq!(last.notes.roots, [root.clone()]);
         // `b.png` was never there: the page is told it is gone.
         assert_eq!(last.gone, HashSet::from([b.clone()]));
         assert!(last.marks.is_empty());

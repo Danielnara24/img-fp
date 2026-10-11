@@ -752,6 +752,9 @@ impl Setup {
             }
         });
 
+        // The folders scanned, as the report spells its paths: the tree view
+        // starts from them.
+        let roots = settings.folders.clone();
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let mut stderr: Vec<String> = Vec::new();
@@ -794,12 +797,14 @@ impl Setup {
                                     finished: now.as_secs(),
                                     id: now.as_nanos() as u64,
                                     log: me.app.log.text(&me.app.log.start_iter(), &me.app.log.end_iter(), false).to_string(),
+                                    roots: roots.clone(),
                                 };
                                 // Made ready for the page here too, off the
                                 // main thread (`results::prepare`).
                                 let read = gio::spawn_blocking(move || {
                                     let mut prepared = scan::read_report(&path).map(results::prepare);
                                     if let Ok(p) = prepared.as_mut() {
+                                        p.set_roots(notes.roots.clone());
                                         if path.exists() && last::save(&path, &notes) {
                                             p.set_kept(notes.id);
                                         }

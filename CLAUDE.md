@@ -3992,6 +3992,27 @@ colour `decode::preview`, which only the window calls).
   steps; now none. `rebuild` sets the selection with `quiet` set and shows the
   group itself; `step` and `rebuild` scroll with the `list.scroll-to-item`
   action, since `ListView::scroll_to` is GTK 4.12 and the window asks 4.10.
+- **The tree view** (`gui/folders.rs`, *Switch to tree view*, Alt+W) puts
+  the folders in the strip's place: the folders the scan was given
+  (`last::Notes::roots`; a scan kept by an older window falls back to the
+  deepest folder its files share) and every folder below holding a grouped
+  file, each with its count. A folder shows every image under it in path
+  order, each file once, with what its first group says of it (the bar names
+  that group). *Mark current folder*, *Unmark folder* and *Mark all except
+  this* act on the whole folder. Left and Right close and open folders.
+- **The mosaic is virtual** (`Mosaic::rebind`, `Results::bind_tile`): every
+  picture is laid out, but only those within a viewport of the part shown
+  are on a tile, and the tiles are a pool told in turn which image they
+  show, as the strip's rows are. A tree view's top folder is every grouped
+  file, 27,064 on IMGS-ALL, and a tile and a decode each was not an option.
+  Measured on IMGS-ALL's saved scan, Xvfb, desktop thumbnails, two runs each
+  way round: showing the 27,064 is 21 ms (one 89 ms stall, tree included);
+  300 fast wheel steps through it, 21 CPU-s, peak PSS+swap 526-565 MB,
+  stalls 30-45 ms; paging 60 groups, 30-31 CPU-s, peak 502-516 MB, stalls the
+  same; settled ~190-225 MB either view. Marking all 27,064 is 0.1 CPU-s.
+  It exposed a bug in `mosaic::fit` that no group reaches: past ~195
+  pictures the gaps of one row outrun the page, the row height goes
+  negative, and two negatives made a scale that passed.
 - **What applies to one image or one group is a menu**: the ☰ button in the
   header, and the same `gio::Menu` on a right click, the Menu key or
   Shift+F10 (*View large*, *Open*, *Show in folder*, *Mark all except this*,

@@ -48,12 +48,21 @@ pub const LOG_CHOOSE: &str = "Bro_wse…";
 
 // The results page.
 pub const GROUPS: &str = "_Groups";
+/// The tree view's heading, in GROUPS' place.
+pub const FOLDERS_TREE: &str = "_Browse folders";
 // The results page's menu. Its letters are Alt shortcuts on the whole page,
 // so they are checked with the page's own.
 pub const ENLARGE: &str = "_View large";
 pub const MARK_OTHERS: &str = "Mark all _except this";
 pub const UNMARK_GROUP: &str = "_Unmark group";
 pub const UNMARK_ALL: &str = "Unmark _all groups";
+// In the tree view, in place of the two above, with their letters.
+pub const UNMARK_FOLDER: &str = "_Unmark folder";
+pub const UNMARK_ALL_FOLDERS: &str = "Unmark _all";
+pub const MARK_FOLDER: &str = "_Mark current folder";
+// One or the other, with one letter.
+pub const TO_TREE: &str = "S_witch to tree view";
+pub const TO_GROUPS: &str = "S_witch to group view";
 pub const OPEN: &str = "_Open";
 pub const SHOW_FOLDER: &str = "Show in _folder";
 pub const MARK_SUGGESTED: &str = "Mark suggested _deletions";
@@ -120,9 +129,19 @@ mod tests {
             "results",
             &[
                 GROUPS, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG, ENLARGE, OPEN, SHOW_FOLDER, MARK_OTHERS,
-                UNMARK_GROUP, UNMARK_ALL,
+                UNMARK_GROUP, UNMARK_ALL, TO_TREE,
             ],
         );
+        distinct(
+            "results, tree view",
+            &[
+                FOLDERS_TREE, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG, ENLARGE, OPEN, SHOW_FOLDER,
+                MARK_OTHERS, MARK_FOLDER, UNMARK_FOLDER, UNMARK_ALL_FOLDERS, TO_GROUPS,
+            ],
+        );
+        assert_eq!(letter(UNMARK_GROUP), letter(UNMARK_FOLDER));
+        assert_eq!(letter(UNMARK_ALL), letter(UNMARK_ALL_FOLDERS));
+        assert_eq!(letter(TO_TREE), letter(TO_GROUPS));
         assert_eq!(letter(TRASH), letter(&trash_n(2)));
         distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE]);
         distinct("confirmation", &[CONFIRM_CANCEL, CONFIRM_TRASH]);

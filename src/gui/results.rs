@@ -31,11 +31,21 @@
 //!   image, not necessarily each other. So when the reference image goes to
 //!   the Trash, what is left of its group is still shown, and says so.
 //!
+//! **The tree view shows the same files by where they are**
+//! (`folders.rs`): in place of the strip, the folders the scan was given and
+//! every folder below them that holds a grouped image, and the page shows
+//! every image under the folder selected, its subfolders' included, in path
+//! order. A file is shown once there however many groups it is in, with what
+//! its first group says of it. *Mark current folder* marks every image under
+//! it. The top folder holds every grouped file, 27,000 on IMGS-ALL, which the
+//! mosaic can show because only the images near the screen are on a tile.
+//!
 //! Keyboard: arrows move between images, Space or Delete marks the one under
 //! the keyboard, Enter opens it large, the Menu key (or Shift+F10, or a right
 //! click) offers the rest, Ctrl+Page Down / Ctrl+Page Up change group, and
 //! every button has an Alt mnemonic.
 
+use crate::folders::{self, Tree};
 use crate::labels as l;
 use crate::last;
 use crate::mosaic::Mosaic;
@@ -61,6 +71,8 @@ const STRIP_W: i32 = 96;
 const STRIP_H: i32 = 72;
 /// Bytes of the strip's pictures kept: at 96 x 72, some six hundred groups.
 const STRIP_KEEP: usize = 16 << 20;
+/// The tree's width.
+const TREE_W: i32 = 280;
 
 /// Long side a group's pictures are decoded at before the page has been laid
 /// out, which is the only time their tiles' sizes are not known: a group of a
@@ -87,7 +99,9 @@ overlay.tile:hover button.tick, overlay.tile.picked button.tick, overlay.tile.ma
 overlay.tile.marked button.tick { background: @error_color; border-color: @error_color; color: white; }
 overlay.tile .weak { min-width: 20px; min-height: 20px; background-image: linear-gradient(to bottom left, @warning_color 50%, transparent 50%); }
 overlay.tile label.pill, .strip label.badge { background-color: alpha(black, 0.68); color: white; border-radius: 999px; padding: 0 7px; font-size: smaller; font-weight: bold; }
-.strip label.badge.marked { background-color: @error_color; }
+.strip label.badge.marked, .tree label.badge.marked { background-color: @error_color; }
+.tree label.badge { border-radius: 999px; padding: 0 7px; font-size: smaller; font-weight: bold; color: white; }
+.tree row { padding: 2px 4px; }
 .strip row { padding: 4px 8px; }
 .strip row still { border-radius: 4px; }
 label.suggest { border-radius: 999px; padding: 1px 9px; font-weight: bold; font-size: smaller; }
@@ -132,6 +146,8 @@ struct State {
     /// The scan kept on disk for the next window, whose marks are kept with
     /// it (`last.rs`); `None` when this one could not be kept.
     kept: Option<u64>,
+    /// The folders the scan was given, which the tree view starts from.
+    roots: Vec<PathBuf>,
 }
 
 impl State {
@@ -166,25 +182,35 @@ impl State {
     fn marked_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.marked.iter().enumerate().filter(|(_, m)| **m).map(|(i, _)| i as u32)
     }
+
+    /// File `id` as its first group has it, and that group.
+    fn member(&self, id: u32) -> Option<(Member, usize)> {
+        let gi = *self.member_of.get(id as usize)?.first()?;
+        let m = self.groups.get(gi)?.files.iter().find(|f| f.id == id)?;
+        Some((m.clone(), gi))
+    }
 }
 
+/// An image of the group or folder shown, whether or not it is on a tile.
 struct Card {
     path: PathBuf,
     id: u32,
-    child: gtk::Overlay,
-    /// The picture asked for, and the ticket that withdraws it.
+    /// The picture asked for while it is on a tile, and the ticket that
+    /// withdraws it.
     request: Option<(Key, u64)>,
 }
 
-/// A tile of the mosaic, kept from one group to the next and told which
-/// image it shows: the tile at place `i` is always the `i`th image of the
-/// group, so what it does when clicked never changes.
+/// A tile of the mosaic, kept from one group to the next and told in turn
+/// which image it shows (`bind_tile`): only the images on or near the screen
+/// are on one, so a folder of 27,000 has the tiles a screenful needs.
 #[derive(Clone)]
 struct Tile {
     child: gtk::Overlay,
     still: Still,
     weak: gtk::Box,
     pill: gtk::Label,
+    /// The image it shows, by its place in the group or folder.
+    item: Rc<Cell<Option<usize>>>,
 }
 
 /// A row of the strip. The strip is a list view, so there are only as many
@@ -202,6 +228,18 @@ struct StripRow {
     /// is left alone.
     shown: Cell<Option<usize>>,
     request: RefCell<Option<(Key, u64)>>,
+}
+
+/// A row of the folder tree, told in turn which folder it is, as a row of
+/// the strip is told its group.
+struct TreeRow {
+    expander: gtk::TreeExpander,
+    name: gtk::Label,
+    count: gtk::Label,
+    marked: gtk::Label,
+    folder: Cell<Option<usize>>,
+    /// The marks its badge shows.
+    shown: Cell<Option<usize>>,
 }
 
 /// What the bottom bar says about one image.
@@ -233,7 +271,26 @@ pub struct Results {
     /// Set while the strip's groups are being replaced, so that the
     /// selection moving on the way does not show each group it passes.
     quiet: Cell<bool>,
+    /// The folder tree, the strip's alternative (`tree_view`).
+    tree: Rc<RefCell<Tree>>,
+    tree_store: gio::ListStore,
+    tree_model: gtk::TreeListModel,
+    tree_sel: gtk::SingleSelection,
+    tree_list: gtk::ListView,
+    tree_rows: RefCell<HashMap<gtk::ListItem, TreeRow>>,
+    /// The tree is shown in place of the strip.
+    tree_view: Cell<bool>,
+    /// The folder shown, in the tree view.
+    folder: Cell<Option<usize>>,
+    left: gtk::Stack,
+    left_label: gtk::Label,
+    menu: gio::Menu,
+    prev: gtk::Button,
+    next: gtk::Button,
     mosaic: Mosaic,
+    scroll: gtk::ScrolledWindow,
+    /// What each card shows: the file as a group has it, and that group.
+    shown: RefCell<Vec<(Member, usize)>>,
     title: gtk::Label,
     note: gtk::Label,
     status: gtk::Label,
@@ -300,15 +357,50 @@ impl Results {
             .propagate_natural_width(false)
             .hexpand(false)
             .build();
-        let groups_label = gtk::Label::with_mnemonic(l::GROUPS);
-        groups_label.set_mnemonic_widget(Some(&list));
-        groups_label.set_xalign(0.0);
-        groups_label.set_margin_start(8);
-        groups_label.add_css_class("heading");
+        // ---- the folder tree, in the strip's place in the tree view
+        let tree = Rc::new(RefCell::new(Tree { folders: Vec::new(), top: Vec::new() }));
+        let tree_store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let tree_model = gtk::TreeListModel::new(tree_store.clone(), false, false, {
+            let tree = tree.clone();
+            move |o| {
+                let i = *o.downcast_ref::<glib::BoxedAnyObject>()?.borrow::<usize>();
+                let t = tree.borrow();
+                let children = &t.folders.get(i)?.children;
+                if children.is_empty() {
+                    return None;
+                }
+                let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+                let items: Vec<glib::BoxedAnyObject> = children.iter().map(|&c| glib::BoxedAnyObject::new(c)).collect();
+                store.splice(0, 0, &items);
+                Some(store.upcast())
+            }
+        });
+        let tree_sel = gtk::SingleSelection::builder().model(&tree_model).autoselect(false).can_unselect(false).build();
+        let tree_factory = gtk::SignalListItemFactory::new();
+        let tree_list = gtk::ListView::builder().model(&tree_sel).factory(&tree_factory).single_click_activate(false).css_classes(["tree"]).build();
+        let tree_scroll = gtk::ScrolledWindow::builder()
+            .child(&tree_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .min_content_width(TREE_W)
+            .width_request(TREE_W)
+            .propagate_natural_width(false)
+            .hexpand(false)
+            .build();
+
+        let left_label = gtk::Label::with_mnemonic(l::GROUPS);
+        left_label.set_mnemonic_widget(Some(&list));
+        left_label.set_xalign(0.0);
+        left_label.set_margin_start(8);
+        left_label.add_css_class("heading");
+        let left_stack = gtk::Stack::builder().hhomogeneous(false).vexpand(true).build();
+        left_stack.add_named(&list_scroll, Some("groups"));
+        left_stack.add_named(&tree_scroll, Some("tree"));
+        left_stack.set_visible_child_name("groups");
         let left = gtk::Box::new(gtk::Orientation::Vertical, 6);
         left.set_margin_top(10);
-        left.append(&groups_label);
-        left.append(&list_scroll);
+        left.append(&left_label);
+        left.append(&left_stack);
 
         // ---- the header: which group, and what applies to every group
         let prev = gtk::Button::from_icon_name("go-previous-symbolic");
@@ -337,16 +429,8 @@ impl Results {
         // Each item is also Alt and its letter from anywhere on the page,
         // which the menu shows beside it.
         let menu = gio::Menu::new();
-        for part in MENU {
-            let section = gio::Menu::new();
-            for (label, action) in part.iter() {
-                let item = gio::MenuItem::new(Some(label), Some(&format!("results.{action}")));
-                item.set_attribute_value("accel", Some(&format!("<Alt>{}", l::letter(label)).to_variant()));
-                section.append_item(&item);
-            }
-            menu.append_section(None, &section);
-        }
-        let more = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("The selected image, and the groups").build();
+        fill_menu(&menu, false);
+        let more = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("The selected image, the group or folder, and the view").build();
 
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         head.append(&prev);
@@ -480,7 +564,22 @@ impl Results {
             strip: RefCell::new(HashMap::new()),
             faces: RefCell::new(Vec::new()),
             quiet: Cell::new(false),
+            tree,
+            tree_store,
+            tree_model,
+            tree_sel,
+            tree_list,
+            tree_rows: RefCell::new(HashMap::new()),
+            tree_view: Cell::new(false),
+            folder: Cell::new(None),
+            left: left_stack,
+            left_label,
+            menu,
+            prev: prev.clone(),
+            next: next.clone(),
             mosaic,
+            scroll: scroll.clone(),
+            shown: RefCell::new(Vec::new()),
             title,
             note,
             status,
@@ -540,6 +639,8 @@ impl Results {
         ];
         action("unmark-group", |me| me.unmark_group());
         action("unmark-all", |me| me.unmark_all());
+        action("mark-folder", |me| me.mark_folder());
+        action("toggle-view", |me| me.toggle_view());
         *me.image_actions.borrow_mut() = image_actions;
         me.root.insert_action_group("results", Some(&actions));
         me.select(None);
@@ -621,12 +722,103 @@ impl Results {
                 me.show_group(sel.selected() as usize);
             }
         });
+        tree_factory.connect_setup({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                let name = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
+                let marked = gtk::Label::builder().css_classes(["badge", "marked"]).valign(gtk::Align::Center).visible(false).build();
+                let count = gtk::Label::builder().css_classes(["dim-label", "caption"]).valign(gtk::Align::Center).build();
+                let b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                b.append(&name);
+                b.append(&marked);
+                b.append(&count);
+                let expander = gtk::TreeExpander::builder().child(&b).build();
+                item.set_child(Some(&expander));
+                let row = TreeRow { expander, name, count, marked, folder: Cell::new(None), shown: Cell::new(None) };
+                me.tree_rows.borrow_mut().insert(item.clone(), row);
+            }
+        });
+        tree_factory.connect_bind({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                me.bind_tree_row(item);
+            }
+        });
+        tree_factory.connect_unbind({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                if let Some(r) = me.tree_rows.borrow().get(item) {
+                    r.folder.set(None);
+                    r.expander.set_list_row(None);
+                }
+            }
+        });
+        tree_factory.connect_teardown({
+            let weak = Rc::downgrade(&me);
+            move |_, item| {
+                let (Some(me), Some(item)) = (weak.upgrade(), item.downcast_ref::<gtk::ListItem>()) else { return };
+                me.tree_rows.borrow_mut().remove(item);
+            }
+        });
+        me.tree_sel.connect_selected_notify({
+            let weak = Rc::downgrade(&me);
+            move |sel| {
+                let Some(me) = weak.upgrade() else { return };
+                if me.quiet.get() || !me.tree_view.get() {
+                    return;
+                }
+                if let Some(f) = me.folder_at(sel.selected()) {
+                    me.show_folder(f);
+                }
+            }
+        });
+        // Enter on a folder takes the keyboard to its images.
+        me.tree_list.connect_activate({
+            let weak = Rc::downgrade(&me);
+            move |_, _| {
+                if let Some(me) = weak.upgrade() {
+                    me.focus();
+                }
+            }
+        });
         // Enter on a group takes the keyboard to its images.
         me.list.connect_activate({
             let weak = Rc::downgrade(&me);
             move |_, _| {
                 if let Some(me) = weak.upgrade() {
                     me.focus();
+                }
+            }
+        });
+        // The tiles are a pool: each is told which image it now shows.
+        me.mosaic.connect_bind(
+            {
+                let weak = Rc::downgrade(&me);
+                move |slot, item| {
+                    if let Some(me) = weak.upgrade() {
+                        me.bind_tile(slot, item);
+                    }
+                }
+            },
+            {
+                let weak = Rc::downgrade(&me);
+                move || {
+                    if let Some(me) = weak.upgrade() {
+                        let t = me.new_tile();
+                        me.mosaic.append(&t.child);
+                        me.tiles.borrow_mut().push(t);
+                    }
+                }
+            },
+        );
+        me.scroll.vadjustment().connect_value_changed({
+            let mosaic = me.mosaic.downgrade();
+            move |a| {
+                if let Some(m) = mosaic.upgrade() {
+                    m.set_offset(a.value());
                 }
             }
         });
@@ -659,13 +851,19 @@ impl Results {
                 if !me.showing() || mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
                     return glib::Propagation::Proceed;
                 }
-                if me.cards.borrow().is_empty() {
+                use gdk::Key as K;
+                if me.cards.borrow().is_empty() && !(me.tree_view.get() && matches!(key, K::Left | K::KP_Left | K::Right | K::KP_Right)) {
                     return glib::Propagation::Proceed;
                 }
-                use gdk::Key as K;
                 let focus = gtk::prelude::GtkWindowExt::focus(&me.app.window);
-                let on_tile = focus.as_ref().is_some_and(|f| me.cards.borrow().iter().any(|c| c.child.upcast_ref::<gtk::Widget>() == f));
-                let in_strip = focus.as_ref().is_some_and(|f| f.is_ancestor(&me.list) || f == me.list.upcast_ref::<gtk::Widget>());
+                let on_tile = focus.as_ref().is_some_and(|f| me.tiles.borrow().iter().any(|t| t.child.upcast_ref::<gtk::Widget>() == f));
+                let side = me.side_list();
+                let in_strip = focus.as_ref().is_some_and(|f| f.is_ancestor(&side) || f == side.upcast_ref::<gtk::Widget>());
+                // Left and Right in the tree close and open its folders.
+                if in_strip && me.tree_view.get() && matches!(key, K::Left | K::KP_Left | K::Right | K::KP_Right) {
+                    me.expand_selected(matches!(key, K::Right | K::KP_Right));
+                    return glib::Propagation::Stop;
+                }
                 let theirs = match key {
                     K::Up | K::KP_Up | K::Down | K::KP_Down | K::Home | K::KP_Home | K::End | K::KP_End => in_strip,
                     K::space | K::Return | K::KP_Enter | K::ISO_Enter => focus.is_some() && !on_tile,
@@ -711,14 +909,14 @@ impl Results {
             let actions = actions.clone();
             let weak = Rc::downgrade(&me);
             move |_, key, _, mods| {
-                if !weak.upgrade().is_some_and(|me| me.showing()) {
+                let Some(me) = weak.upgrade().filter(|me| me.showing()) else {
                     return glib::Propagation::Proceed;
-                }
+                };
                 if !mods.contains(gdk::ModifierType::ALT_MASK) || mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK) {
                     return glib::Propagation::Proceed;
                 }
                 let Some(c) = key.to_lower().to_unicode() else { return glib::Propagation::Proceed };
-                let Some((_, name)) = MENU.iter().flat_map(|p| p.iter()).find(|(label, _)| l::letter(label) == c) else {
+                let Some((_, name)) = menu_of(me.tree_view.get()).iter().flat_map(|p| p.iter()).find(|(label, _)| l::letter(label) == c) else {
                     return glib::Propagation::Proceed;
                 };
                 if actions.is_action_enabled(name) {
@@ -777,7 +975,7 @@ impl Results {
 
     /// A finished scan's groups, replacing whatever was shown.
     pub fn show(self: &Rc<Self>, prepared: Prepared, problems: bool) {
-        let Prepared { groups, paths, sizes, by_mode, analysed, kept } = prepared;
+        let Prepared { groups, paths, sizes, by_mode, analysed, kept, roots } = prepared;
         {
             let mut s = self.state.borrow_mut();
             // The rule chosen stays chosen from one scan to the next.
@@ -795,12 +993,15 @@ impl Results {
                 has_results: true,
                 mode,
                 kept,
+                roots,
                 ..State::default()
             };
         }
         self.marks_pending.set(false);
         self.thumbs.clear_queue();
         self.strip_thumbs.clear_queue();
+        // Another scan's folders: the tree starts again from the top.
+        self.folder.set(None);
         self.rebuild(0);
     }
 
@@ -860,18 +1061,22 @@ impl Results {
     /// Keyboard to the page: the selected image, else the first, or the
     /// list when there are none.
     pub fn focus(&self) {
-        let first = {
-            let cards = self.cards.borrow();
-            self.selected.get().and_then(|i| cards.get(i)).or(cards.first()).map(|c| c.child.clone())
-        };
-        match first {
-            Some(c) => {
-                c.grab_focus();
-            }
-            None => {
-                self.list.grab_focus();
-            }
+        if self.cards.borrow().is_empty() {
+            self.side_list().grab_focus();
+            return;
         }
+        let i = self.selected.get().unwrap_or(0);
+        match self.tile_of(i) {
+            Some(t) => {
+                t.child.grab_focus();
+            }
+            None => self.move_to(i as i64),
+        }
+    }
+
+    /// The list on the left: the strip of groups, or the folder tree.
+    fn side_list(&self) -> gtk::ListView {
+        if self.tree_view.get() { self.tree_list.clone() } else { self.list.clone() }
     }
 
     /// The strip of groups, from the state, with `select` selected.
@@ -886,6 +1091,7 @@ impl Results {
             }
             s.member_of = member_of;
         }
+        self.rebuild_tree();
         let faces: Vec<PathBuf> = {
             let s = self.state.borrow();
             s.groups.iter().map(|g| face(&g.files).map(|f| f.path.clone()).unwrap_or_default()).collect()
@@ -903,6 +1109,7 @@ impl Results {
         }
         if empty {
             self.clear_cards();
+            self.shown.borrow_mut().clear();
             let s = self.state.borrow();
             self.title.set_text("");
             let mut text = format!("No duplicates found among {} image{}.", s.analysed, if s.analysed == 1 { "" } else { "s" });
@@ -919,9 +1126,213 @@ impl Results {
         self.quiet.set(true);
         self.selection.set_selected(i as u32);
         self.quiet.set(false);
-        self.show_group(i);
-        self.scroll_strip_to(i);
+        if self.tree_view.get() {
+            self.state.borrow_mut().current = i;
+            let top = self.tree.borrow().top.first().copied();
+            if let Some(f) = self.folder.get().or(top) {
+                self.select_folder(f);
+            }
+        } else {
+            self.show_group(i);
+            self.scroll_strip_to(i);
+        }
         self.update_status();
+    }
+
+    /// The folder tree, from the groups as they are now, its top folders
+    /// open. The folder shown stays shown if it still holds an image.
+    fn rebuild_tree(&self) {
+        let before = self.folder.get().and_then(|f| self.tree.borrow().folders.get(f).map(|f| f.path.clone()));
+        let tree = {
+            let s = self.state.borrow();
+            let files: Vec<(u32, &Path)> =
+                (0..s.paths.len()).filter(|&i| !s.member_of[i].is_empty()).map(|i| (i as u32, s.paths[i].as_path())).collect();
+            folders::build(&s.roots, &files)
+        };
+        let after = before.and_then(|p| tree.find(&p));
+        let top: Vec<glib::BoxedAnyObject> = tree.top.iter().map(|&t| glib::BoxedAnyObject::new(t)).collect();
+        *self.tree.borrow_mut() = tree;
+        self.folder.set(after);
+        self.quiet.set(true);
+        self.tree_store.splice(0, self.tree_store.n_items(), &top);
+        for i in (0..top.len()).rev() {
+            if let Some(r) = self.tree_model.child_row(i as u32) {
+                r.set_expanded(true);
+            }
+        }
+        self.quiet.set(false);
+    }
+
+    /// The folder at row `pos` of the tree.
+    fn folder_at(&self, pos: u32) -> Option<usize> {
+        let row = self.tree_model.row(pos)?;
+        let o = row.item().and_downcast::<glib::BoxedAnyObject>()?;
+        Some(*o.borrow::<usize>())
+    }
+
+    /// The row of the tree that shows folder `f`, if it is open to it.
+    fn row_of(&self, f: usize) -> Option<u32> {
+        (0..self.tree_model.n_items()).find(|&p| self.folder_at(p) == Some(f))
+    }
+
+    /// Open the tree to folder `f`, select it and show it.
+    fn select_folder(self: &Rc<Self>, f: usize) {
+        let chain = self.tree.borrow().ancestors(f);
+        self.quiet.set(true);
+        for a in chain {
+            if let Some(r) = self.row_of(a).and_then(|p| self.tree_model.row(p)) {
+                r.set_expanded(true);
+            }
+        }
+        let pos = self.row_of(f);
+        if let Some(p) = pos {
+            self.tree_sel.set_selected(p);
+        }
+        self.quiet.set(false);
+        self.show_folder(f);
+        if let Some(p) = pos {
+            let _ = self.tree_list.activate_action("list.scroll-to-item", Some(&p.to_variant()));
+        }
+    }
+
+    /// Open the selected folder, or close it; closing a closed one goes to
+    /// the folder above.
+    fn expand_selected(self: &Rc<Self>, open: bool) {
+        let Some(row) = self.tree_model.row(self.tree_sel.selected()) else { return };
+        if open {
+            row.set_expanded(true);
+        } else if row.is_expanded() {
+            row.set_expanded(false);
+        } else if let Some(parent) = row.parent() {
+            let p = (0..self.tree_model.n_items()).find(|&p| self.tree_model.row(p).as_ref() == Some(&parent));
+            if let Some(p) = p {
+                self.tree_sel.set_selected(p);
+                let _ = self.tree_list.activate_action("list.scroll-to-item", Some(&p.to_variant()));
+            }
+        }
+    }
+
+    /// Row `item` of the tree now shows the folder its item names.
+    fn bind_tree_row(&self, item: &gtk::ListItem) {
+        let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else { return };
+        let Some(f) = row.item().and_downcast::<glib::BoxedAnyObject>().map(|o| *o.borrow::<usize>()) else { return };
+        let rows = self.tree_rows.borrow();
+        let Some(r) = rows.get(item) else { return };
+        r.expander.set_list_row(Some(&row));
+        r.folder.set(Some(f));
+        r.shown.set(None);
+        let t = self.tree.borrow();
+        let Some(folder) = t.folders.get(f) else { return };
+        let label = folder.label();
+        r.name.set_text(&label);
+        r.count.set_text(&folder.all.len().to_string());
+        drop(t);
+        self.show_tree_row(r);
+        r.expander.update_property(&[gtk::accessible::Property::Label(&label)]);
+    }
+
+    /// A row of the tree says how many images under its folder are marked.
+    fn show_tree_row(&self, r: &TreeRow) {
+        let Some(f) = r.folder.get() else { return };
+        let marked = {
+            let (s, t) = (self.state.borrow(), self.tree.borrow());
+            t.folders.get(f).map_or(0, |f| f.all.iter().filter(|&&id| s.is_marked(id)).count())
+        };
+        if r.shown.replace(Some(marked)) == Some(marked) {
+            return;
+        }
+        if marked > 0 {
+            r.marked.set_text(&marked.to_string());
+        }
+        if r.marked.is_visible() != (marked > 0) {
+            r.marked.set_visible(marked > 0);
+        }
+    }
+
+    /// The images of folder `f`, its subfolders' included, on the page.
+    fn show_folder(self: &Rc<Self>, f: usize) {
+        let (path, own, all) = {
+            let t = self.tree.borrow();
+            let Some(folder) = t.folders.get(f) else { return };
+            (folder.path.clone(), folder.own, folder.all.clone())
+        };
+        self.folder.set(Some(f));
+        let (files, problems) = {
+            let s = self.state.borrow();
+            let files: Vec<(Member, usize)> = all.iter().filter_map(|&id| s.member(id)).collect();
+            (files, s.problems)
+        };
+        let n = all.len();
+        let mut title = format!("{} · {n} image{}", path.display(), if n == 1 { "" } else { "s" });
+        if own != n {
+            title.push_str(&format!(" ({own} in this folder)"));
+        }
+        let mut note = String::new();
+        if problems {
+            note.push_str("The scan had problems with some files; see the scan log.");
+        }
+        self.show_files(files, &title, &note, Vec::new());
+    }
+
+    /// Show the tree in place of the strip, or the strip again.
+    fn toggle_view(self: &Rc<Self>) {
+        let tree = !self.tree_view.get();
+        self.tree_view.set(tree);
+        fill_menu(&self.menu, tree);
+        self.left.set_visible_child_name(if tree { "tree" } else { "groups" });
+        self.left_label.set_text_with_mnemonic(if tree { l::FOLDERS_TREE } else { l::GROUPS });
+        self.left_label.set_mnemonic_widget(Some(&self.side_list()));
+        let what = if tree { "folder" } else { "group" };
+        self.prev.set_tooltip_text(Some(&format!("Previous {what} (Ctrl+Page Up)")));
+        self.next.set_tooltip_text(Some(&format!("Next {what} (Ctrl+Page Down)")));
+        if !self.state.borrow().groups.is_empty() {
+            if tree {
+                let top = self.tree.borrow().top.first().copied();
+                if let Some(f) = self.folder.get().or(top) {
+                    self.select_folder(f);
+                }
+            } else {
+                let current = self.state.borrow().current;
+                self.show_group(current);
+                self.scroll_strip_to(current);
+            }
+        }
+        self.side_list().grab_focus();
+    }
+
+    /// Show what is shown again, as the rule now suggests it.
+    fn reshow(self: &Rc<Self>) {
+        match (self.tree_view.get(), self.folder.get()) {
+            (true, Some(f)) => self.show_folder(f),
+            (true, None) => {}
+            (false, _) => {
+                let current = self.state.borrow().current;
+                if self.state.borrow().groups.get(current).is_some() {
+                    self.show_group(current);
+                }
+            }
+        }
+    }
+
+    /// The files the group or folder on screen holds: in the tree view, every
+    /// image under the folder.
+    fn view_ids(&self) -> Vec<u32> {
+        match (self.tree_view.get(), self.folder.get()) {
+            (true, Some(f)) => {
+                let s = self.state.borrow();
+                self.tree.borrow().folders.get(f).map_or_else(Vec::new, |f| f.all.iter().copied().filter(|&id| !s.gone[id as usize]).collect())
+            }
+            (true, None) => Vec::new(),
+            (false, _) => self.cards.borrow().iter().map(|c| c.id).collect(),
+        }
+    }
+
+    /// Mark every image under the folder shown.
+    fn mark_folder(self: &Rc<Self>) {
+        let ids = self.view_ids();
+        self.mark_ids(&ids, true);
+        self.update_status();
+        self.refresh_bar();
     }
 
     fn scroll_strip_to(&self, i: usize) {
@@ -992,9 +1403,8 @@ impl Results {
 
     fn clear_cards(&self) {
         self.select(None);
-        for t in self.tiles.borrow().iter().take(self.cards.borrow().len()) {
-            t.still.set_texture(None);
-        }
+        // Every tile is told it shows nothing while the cards it showed are
+        // still there to withdraw their pictures.
         self.mosaic.show(&[]);
         self.cards.borrow_mut().clear();
         self.hovered.set(None);
@@ -1010,9 +1420,7 @@ impl Results {
             s.current = gi;
             (files, gone, s.groups.len(), s.problems)
         };
-        self.thumbs.clear_queue();
-        self.clear_cards();
-        self.title.set_text(&format!("Group {} of {} · {} images", gi + 1, n, files.len()));
+        let title = format!("Group {} of {} · {} images", gi + 1, n, files.len());
         let mut note = String::new();
         if reference_gone {
             note.push_str("The image the others in this group were matched against has been moved to the Trash. The images left were not compared with each other. ");
@@ -1020,23 +1428,29 @@ impl Results {
         if problems {
             note.push_str("The scan had problems with some files; see the scan log.");
         }
+        // The next group, ahead of being asked for.
+        let ahead: Vec<Member> = self.state.borrow().groups.get(gi + 1).map(|g| g.files.clone()).unwrap_or_default();
+        self.show_files(files.into_iter().map(|m| (m, gi)).collect(), &title, &note, ahead);
+    }
+
+    /// `files`, each with the group it is taken from, on the page; `ahead`
+    /// is decoded ahead of being asked for.
+    fn show_files(self: &Rc<Self>, shown: Vec<(Member, usize)>, title: &str, note: &str, ahead: Vec<Member>) {
+        self.thumbs.clear_queue();
+        self.clear_cards();
+        self.title.set_text(title);
         self.note.set_text(note.trim());
-        self.note.set_visible(!note.is_empty());
+        self.note.set_visible(!note.trim().is_empty());
+        let files: Vec<Member> = shown.iter().map(|(m, _)| m.clone()).collect();
+        *self.shown.borrow_mut() = shown;
 
         let dims = |files: &[Member]| files.iter().map(|m| (m.width.unwrap_or(0), m.height.unwrap_or(0))).collect::<Vec<_>>();
-        let sizes = self.picture_sizes(&dims(&files));
-        let mut cards = Vec::with_capacity(files.len());
-        for (i, m) in files.iter().enumerate() {
-            let t = self.card(i, m);
-            let size = sizes.as_ref().map_or(Size::within(card_px(files.len()) * self.scale()), |s| s[i]);
-            let ticket = self.thumbs.request(&m.path, size, Shown::Still(t.still.clone()), false);
-            cards.push(Card { path: m.path.clone(), id: m.id, child: t.child, request: Some(((m.path.clone(), size), ticket)) });
-        }
-        *self.cards.borrow_mut() = cards;
+        *self.cards.borrow_mut() = files.iter().map(|m| Card { path: m.path.clone(), id: m.id, request: None }).collect();
+        // From the top, and the images there on tiles: the rest are given
+        // theirs as the page is scrolled to them.
+        self.scroll.vadjustment().set_value(0.0);
         self.mosaic.show(&dims(&files));
-        // The next group, ahead of being asked for, at the sizes it will be
-        // shown at.
-        let ahead: Vec<Member> = self.state.borrow().groups.get(gi + 1).map(|g| g.files.clone()).unwrap_or_default();
+        // At the sizes it will be shown at.
         if !ahead.is_empty() {
             let sizes = self.picture_sizes(&dims(&ahead));
             for (i, m) in ahead.iter().enumerate().take(AHEAD) {
@@ -1050,7 +1464,7 @@ impl Results {
         // changes group before the strip takes the keyboard).
         let focus = gtk::prelude::GtkWindowExt::focus(&self.app.window);
         if focus.is_some_and(|f| self.tiles.borrow().iter().any(|t| t.child.upcast_ref::<gtk::Widget>() == &f)) {
-            self.list.grab_focus();
+            self.side_list().grab_focus();
         }
         self.refresh_bar();
     }
@@ -1066,12 +1480,69 @@ impl Results {
         let tiles = self.mosaic.tile_sizes(dims)?;
         // The border is the tiles' style's: measured off a tile laid out,
         // whose width is its content's.
-        let border = match (self.mosaic.allocated(0), self.tiles.borrow().first()) {
-            (Some((w, h)), Some(t)) if t.still.width() > 0 => (w - t.still.width(), h - t.still.height()),
-            _ => (6, 6),
-        };
+        let border = self.border();
         let scale = self.scale();
         Some(tiles.iter().map(|&(w, h)| Size::cover((w - border.0).max(1) as u32 * scale, (h - border.1).max(1) as u32 * scale)).collect())
+    }
+
+    /// A tile's style's border, both ways: measured off a tile laid out,
+    /// whose width is its content's.
+    fn border(&self) -> (i32, i32) {
+        for (slot, t) in self.tiles.borrow().iter().enumerate() {
+            if let Some((w, h)) = self.mosaic.allocated(slot)
+                && t.still.width() > 0
+            {
+                return (w - t.still.width(), h - t.still.height());
+            }
+        }
+        (6, 6)
+    }
+
+    /// The tile image `i` is on, if it is on one.
+    fn tile_of(&self, i: usize) -> Option<Tile> {
+        self.mosaic.slot_of(i).and_then(|s| self.tiles.borrow().get(s).cloned())
+    }
+
+    /// Tile `slot` now shows image `item`, or nothing: the picture it was
+    /// asked for is withdrawn, and the new one asked for at the tile's size.
+    fn bind_tile(&self, slot: usize, item: Option<usize>) {
+        let Some(t) = self.tiles.borrow().get(slot).cloned() else { return };
+        if let Some(old) = t.item.replace(item) {
+            if let Some((key, ticket)) = self.cards.borrow_mut().get_mut(old).and_then(|c| c.request.take()) {
+                self.thumbs.withdraw(&key, ticket);
+            }
+            if self.hovered.get() == Some(old) {
+                self.hovered.set(None);
+            }
+            t.still.set_texture(None);
+        }
+        let Some(i) = item else { return };
+        let Some((m, _)) = self.shown.borrow().get(i).cloned() else { return };
+        self.dress(&t, &m, self.selected.get() == Some(i));
+        let n = self.cards.borrow().len();
+        let size = match self.mosaic.rect(i) {
+            Some((_, _, w, h)) => {
+                let b = self.border();
+                Size::cover((w - b.0).max(1) as u32 * self.scale(), (h - b.1).max(1) as u32 * self.scale())
+            }
+            None => Size::within(card_px(n) * self.scale()),
+        };
+        let ticket = self.thumbs.request(&m.path, size, Shown::Still(t.still.clone()), false);
+        if let Some(c) = self.cards.borrow_mut().get_mut(i) {
+            c.request = Some(((m.path.clone(), size), ticket));
+        }
+    }
+
+    /// Bring image `i` onto the part of the page shown.
+    fn scroll_into_view(&self, i: usize) {
+        let Some((_, y, _, h)) = self.mosaic.rect(i) else { return };
+        let a = self.scroll.vadjustment();
+        let (y, h, top, page) = (y as f64, h as f64, a.value(), a.page_size());
+        if y < top {
+            a.set_value((y - 6.0).max(0.0));
+        } else if y + h > top + page {
+            a.set_value(y + h - page + 6.0);
+        }
     }
 
     /// The tiles have been laid out again: each picture made for another size
@@ -1079,7 +1550,9 @@ impl Results {
     fn tiles_resized(&self) {
         let scale = self.scale();
         let tiles = self.tiles.borrow();
-        for (c, t) in self.cards.borrow_mut().iter_mut().zip(tiles.iter()) {
+        let mut cards = self.cards.borrow_mut();
+        for (slot, item) in self.mosaic.bound() {
+            let (Some(t), Some(c)) = (tiles.get(slot), cards.get_mut(item)) else { continue };
             let (w, h) = (t.still.width(), t.still.height());
             if w <= 0 || h <= 0 {
                 continue;
@@ -1096,15 +1569,8 @@ impl Results {
         }
     }
 
-    /// Tile `i`, told to show `m`.
-    fn card(self: &Rc<Self>, i: usize, m: &Member) -> Tile {
-        while self.tiles.borrow().len() <= i {
-            let n = self.tiles.borrow().len();
-            let t = self.new_tile(n);
-            self.mosaic.append(&t.child);
-            self.tiles.borrow_mut().push(t);
-        }
-        let t = self.tiles.borrow()[i].clone();
+    /// Tile `t`, dressed for `m`.
+    fn dress(&self, t: &Tile, m: &Member, picked: bool) {
         let name = file_name(&m.path);
         t.still.set_label(&name);
         if t.still.has_tooltip() {
@@ -1120,7 +1586,7 @@ impl Results {
         }
         set_class(&t.child, "review", review);
         set_class(&t.child, "marked", marked);
-        set_class(&t.child, "picked", false);
+        set_class(&t.child, "picked", picked);
         let mut pills = Vec::new();
         if m.is_representative() {
             pills.push("Reference");
@@ -1131,11 +1597,12 @@ impl Results {
         t.pill.set_text(&pills.join(" · "));
         t.pill.set_visible(!pills.is_empty());
         t.child.update_property(&[gtk::accessible::Property::Label(&name)]);
-        t
     }
 
-    /// The tile for place `i` of every group, with what it does.
-    fn new_tile(self: &Rc<Self>, i: usize) -> Tile {
+    /// One more tile for the pool, with what it does to whichever image it
+    /// shows.
+    fn new_tile(self: &Rc<Self>) -> Tile {
+        let item: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
         let still = Still::new(0, 0);
         let child = gtk::Overlay::builder().child(&still).focusable(true).overflow(gtk::Overflow::Hidden).css_classes(["tile"]).build();
         let tick = gtk::Button::builder()
@@ -1163,9 +1630,9 @@ impl Results {
         let pill = gtk::Label::builder().css_classes(["pill"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(6).margin_bottom(6).visible(false).build();
         child.add_overlay(&pill);
         tick.connect_clicked({
-            let weak = Rc::downgrade(self);
+            let (weak, item) = (Rc::downgrade(self), item.clone());
             move |_| {
-                if let Some(me) = weak.upgrade() {
+                if let (Some(me), Some(i)) = (weak.upgrade(), item.get()) {
                     me.select(Some(i));
                     me.toggle(i);
                 }
@@ -1175,9 +1642,9 @@ impl Results {
         // is the image the menu now means, and the bar shows it.
         let focus = gtk::EventControllerFocus::new();
         focus.connect_enter({
-            let weak = Rc::downgrade(self);
+            let (weak, item) = (Rc::downgrade(self), item.clone());
             move |_| {
-                if let Some(me) = weak.upgrade() {
+                if let (Some(me), Some(i)) = (weak.upgrade(), item.get()) {
                     me.select(Some(i));
                     me.refresh_bar();
                 }
@@ -1186,10 +1653,10 @@ impl Results {
         child.add_controller(focus);
         let click = gtk::GestureClick::builder().button(0).propagation_phase(gtk::PropagationPhase::Capture).build();
         click.connect_pressed({
-            let weak = Rc::downgrade(self);
+            let (weak, item) = (Rc::downgrade(self), item.clone());
             let child = child.downgrade();
             move |g, n, x, y| {
-                let (Some(me), Some(child)) = (weak.upgrade(), child.upgrade()) else { return };
+                let (Some(me), Some(child), Some(i)) = (weak.upgrade(), child.upgrade(), item.get()) else { return };
                 me.select(Some(i));
                 me.follow_pointer.set(true);
                 child.grab_focus();
@@ -1203,9 +1670,9 @@ impl Results {
         child.add_controller(click);
         let motion = gtk::EventControllerMotion::new();
         motion.connect_enter({
-            let weak = Rc::downgrade(self);
+            let (weak, item) = (Rc::downgrade(self), item.clone());
             move |_, _, _| {
-                if let Some(me) = weak.upgrade() {
+                if let (Some(me), Some(i)) = (weak.upgrade(), item.get()) {
                     me.hovered.set(Some(i));
                     me.follow_pointer.set(true);
                     me.refresh_bar();
@@ -1213,10 +1680,10 @@ impl Results {
             }
         });
         motion.connect_leave({
-            let weak = Rc::downgrade(self);
+            let (weak, item) = (Rc::downgrade(self), item.clone());
             move |_| {
                 if let Some(me) = weak.upgrade() {
-                    if me.hovered.get() == Some(i) {
+                    if item.get().is_some() && me.hovered.get() == item.get() {
                         me.hovered.set(None);
                     }
                     me.refresh_bar();
@@ -1224,12 +1691,12 @@ impl Results {
             }
         });
         child.add_controller(motion);
-        Tile { child, still, weak, pill }
+        Tile { child, still, weak, pill, item }
     }
 
     /// The image menu at card `i`: at `at` in the card, or at its middle.
     fn popup_menu(&self, i: usize, at: Option<(f64, f64)>) {
-        let Some(child) = self.cards.borrow().get(i).map(|c| c.child.clone()) else { return };
+        let Some(child) = self.tile_of(i).map(|t| t.child) else { return };
         self.select(Some(i));
         let (x, y) = at.unwrap_or((child.width() as f64 / 2.0, child.height() as f64 / 2.0));
         #[allow(deprecated)]
@@ -1241,13 +1708,12 @@ impl Results {
     /// Select card `i`, or none: outline it, and let the menu's image items
     /// act on it.
     fn select(&self, i: Option<usize>) {
-        let cards = self.cards.borrow();
-        if let Some(c) = self.selected.get().and_then(|j| cards.get(j)) {
-            c.child.remove_css_class("picked");
+        if let Some(t) = self.selected.get().and_then(|j| self.tile_of(j)) {
+            t.child.remove_css_class("picked");
         }
-        let i = i.filter(|&i| i < cards.len());
-        if let Some(c) = i.and_then(|i| cards.get(i)) {
-            c.child.add_css_class("picked");
+        let i = i.filter(|&i| i < self.cards.borrow().len());
+        if let Some(t) = i.and_then(|i| self.tile_of(i)) {
+            t.child.add_css_class("picked");
         }
         self.selected.set(i);
         for a in self.image_actions.borrow().iter() {
@@ -1265,8 +1731,12 @@ impl Results {
         let i = i.clamp(0, n - 1) as usize;
         self.select(Some(i));
         self.follow_pointer.set(false);
-        let c = self.cards.borrow()[i].child.clone();
-        c.grab_focus();
+        // On a tile now, if it was scrolled away from.
+        self.scroll_into_view(i);
+        self.mosaic.rebind_now();
+        if let Some(t) = self.tile_of(i) {
+            t.child.grab_focus();
+        }
         self.refresh_bar();
     }
 
@@ -1275,12 +1745,8 @@ impl Results {
     fn refresh_bar(&self) {
         let pointer = if self.follow_pointer.get() { self.hovered.get() } else { None };
         let shown = if self.trashing.get() { None } else { pointer.or(self.selected.get()) };
-        let member = shown.and_then(|i| {
-            let path = self.cards.borrow().get(i)?.path.clone();
-            let s = self.state.borrow();
-            s.groups.get(s.current)?.files.iter().find(|f| f.path == path).cloned()
-        });
-        let Some(m) = member else {
+        let member = shown.and_then(|i| self.shown.borrow().get(i).cloned());
+        let Some((m, gi)) = member else {
             self.bar.set_visible_child_name("summary");
             return;
         };
@@ -1289,11 +1755,17 @@ impl Results {
         d.name.set_text(&file_name(&m.path));
         d.dir.set_text(&m.path.parent().map(|p| p.display().to_string()).unwrap_or_default());
         d.facts.set_text(&facts(&m));
-        let reference = s.groups.get(s.current).and_then(|g| g.files.iter().find(|f| f.is_representative()));
-        let note = match (m.is_representative(), reference.and_then(|r| Some((r.width?, r.height?)))) {
+        let reference = s.groups.get(gi).and_then(|g| g.files.iter().find(|f| f.is_representative()));
+        let mut note = match (m.is_representative(), reference.and_then(|r| Some((r.width?, r.height?)))) {
             (false, Some((w, h))) => format!("the reference is {w} × {h}"),
             _ => String::new(),
         };
+        // In the tree view, which group the match is in.
+        if self.tree_view.get() {
+            let groups = s.member_of.get(m.id as usize).map_or(0, Vec::len);
+            let more = if groups > 1 { format!(" (and {} more)", groups - 1) } else { String::new() };
+            note = [format!("group {}{more}", gi + 1), note].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ");
+        }
         d.facts_note.set_text(&note);
         d.why.set_text(&evidence(&m));
         let action = s.action(m.id);
@@ -1354,13 +1826,18 @@ impl Results {
         };
         {
             let s = self.state.borrow();
-            for c in self.cards.borrow().iter() {
-                let marked = s.is_marked(c.id);
-                set_class(&c.child, "marked", marked);
+            let (cards, tiles) = (self.cards.borrow(), self.tiles.borrow());
+            for (slot, item) in self.mosaic.bound() {
+                if let (Some(c), Some(t)) = (cards.get(item), tiles.get(slot)) {
+                    set_class(&t.child, "marked", s.is_marked(c.id));
+                }
             }
         }
         if !groups.is_empty() {
             self.marks_changed();
+            for r in self.tree_rows.borrow().values() {
+                self.show_tree_row(r);
+            }
         }
         for gi in groups {
             self.update_row(gi);
@@ -1369,9 +1846,9 @@ impl Results {
 
     fn mark_all_but_selected(self: &Rc<Self>) {
         let Some(keep) = self.selected.get() else { return };
-        let ids: Vec<u32> = self.cards.borrow().iter().map(|c| c.id).collect();
-        let others: Vec<u32> = ids.iter().enumerate().filter(|(i, _)| *i != keep).map(|(_, id)| *id).collect();
-        self.mark_ids(&[ids[keep]], false);
+        let Some(this) = self.cards.borrow().get(keep).map(|c| c.id) else { return };
+        let others: Vec<u32> = self.view_ids().into_iter().filter(|&id| id != this).collect();
+        self.mark_ids(&[this], false);
         self.mark_ids(&others, true);
         self.update_status();
         // Back to the image that was kept, so the keyboard carries on there.
@@ -1397,25 +1874,23 @@ impl Results {
 
     /// Suggest by `MODES[mode]` from now on, and show it.
     fn set_mode(self: &Rc<Self>, mode: usize) {
-        let current = {
+        {
             let mut s = self.state.borrow_mut();
             if s.mode == mode {
                 return;
             }
             s.mode = mode;
-            s.current
-        };
-        if self.state.borrow().groups.get(current).is_some() {
-            let selected = self.selected.get();
-            self.show_group(current);
-            self.select(selected);
-            self.refresh_bar();
         }
+        let selected = self.selected.get();
+        self.reshow();
+        self.select(selected);
+        self.refresh_bar();
         self.update_status();
     }
 
+    /// Unmark the group shown, or every image under the folder shown.
     fn unmark_group(self: &Rc<Self>) {
-        let ids: Vec<u32> = self.cards.borrow().iter().map(|c| c.id).collect();
+        let ids = self.view_ids();
         self.mark_ids(&ids, false);
         self.update_status();
         self.refresh_bar();
@@ -1430,6 +1905,18 @@ impl Results {
     }
 
     fn step(self: &Rc<Self>, by: i32) {
+        if self.tree_view.get() {
+            let n = self.tree_model.n_items() as i64;
+            let cur = self.tree_sel.selected();
+            if n == 0 || cur == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            let next = (cur as i64 + by as i64).clamp(0, n - 1) as u32;
+            self.tree_sel.set_selected(next);
+            let _ = self.tree_list.activate_action("list.scroll-to-item", Some(&next.to_variant()));
+            self.focus();
+            return;
+        }
         let (cur, n) = {
             let s = self.state.borrow();
             (s.current as i32, s.groups.len() as i32)
@@ -1532,7 +2019,7 @@ impl Results {
                 let Some(card) = cards.get(at.get()) else { return };
                 let path = card.path.clone();
                 let s = me.state.borrow();
-                let member = s.groups.get(s.current).and_then(|g| g.files.iter().find(|f| f.path == path)).cloned();
+                let member = me.shown.borrow().get(at.get()).map(|(m, _)| m.clone());
                 let marked = member.as_ref().is_some_and(|m| s.is_marked(m.id));
                 drop(s);
                 drop(cards);
@@ -1882,7 +2369,33 @@ fn evidence(m: &Member) -> String {
 const MENU: &[&[(&str, &str)]] = &[
     &[(l::ENLARGE, "enlarge"), (l::OPEN, "open"), (l::SHOW_FOLDER, "folder")],
     &[(l::MARK_OTHERS, "mark-others"), (l::UNMARK_GROUP, "unmark-group"), (l::UNMARK_ALL, "unmark-all")],
+    &[(l::TO_TREE, "toggle-view")],
 ];
+/// The menu in the tree view, where the group's items are the folder's.
+const MENU_TREE: &[&[(&str, &str)]] = &[
+    &[(l::ENLARGE, "enlarge"), (l::OPEN, "open"), (l::SHOW_FOLDER, "folder")],
+    &[(l::MARK_OTHERS, "mark-others"), (l::MARK_FOLDER, "mark-folder"), (l::UNMARK_FOLDER, "unmark-group"), (l::UNMARK_ALL_FOLDERS, "unmark-all")],
+    &[(l::TO_GROUPS, "toggle-view")],
+];
+
+fn menu_of(tree: bool) -> &'static [&'static [(&'static str, &'static str)]] {
+    if tree { MENU_TREE } else { MENU }
+}
+
+/// `menu`, as the view has it: the header's button and the right click share
+/// it, so both change with it.
+fn fill_menu(menu: &gio::Menu, tree: bool) {
+    menu.remove_all();
+    for part in menu_of(tree) {
+        let section = gio::Menu::new();
+        for (label, action) in part.iter() {
+            let item = gio::MenuItem::new(Some(label), Some(&format!("results.{action}")));
+            item.set_attribute_value("accel", Some(&format!("<Alt>{}", l::letter(label)).to_variant()));
+            section.append_item(&item);
+        }
+        menu.append_section(None, &section);
+    }
+}
 
 /// The rules the picker offers, in its order.
 const RULES: &[&str] = &["Keep all content", "By correlation", "Reference images only"];
@@ -1917,9 +2430,15 @@ pub struct Prepared {
     by_mode: Vec<Vec<Option<Action>>>,
     analysed: usize,
     kept: Option<u64>,
+    roots: Vec<PathBuf>,
 }
 
 impl Prepared {
+    /// The folders the scan was given.
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>) {
+        self.roots = roots;
+    }
+
     /// Each file's path, by number.
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
@@ -1957,7 +2476,7 @@ pub fn prepare(found: Found) -> Prepared {
     }
     let n = paths.len();
     let by_mode = MODES.iter().map(|&m| suggestions(&groups, n, m, min_correlation)).collect();
-    Prepared { groups, paths, sizes, by_mode, analysed, kept }
+    Prepared { groups, paths, sizes, by_mode, analysed, kept, roots: Vec::new() }
 }
 
 /// What is suggested for a file, in a few words.

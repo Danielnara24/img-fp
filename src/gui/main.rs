@@ -23,6 +23,7 @@
 //! Every control can be reached from the keyboard: Tab and the arrow keys move
 //! focus, and every labelled control has an Alt mnemonic.
 
+mod folders;
 mod labels;
 mod last;
 mod mosaic;
@@ -286,17 +287,20 @@ fn show_shortcuts(parent: &gtk::ApplicationWindow) {
             ("Delete", "Remove the selected folder from a list"),
         ]),
         ("Results", &[
-            ("Arrow keys, Home, End", "Select an image of the group, from anywhere on the page"),
+            ("Arrow keys, Home, End", "Select an image of the group or folder, from anywhere on the page"),
             ("Up, Down in the groups", "Change group"),
             ("Enter in the groups", "Go to the group's images"),
+            ("Left, Right in the folders", "Close or open a folder"),
             ("Space or Delete", "Mark or unmark the selected image for the Trash"),
             ("Enter, double click", "Open the selected image large"),
             ("Alt+V, Alt+O, Alt+F", "View it large, open it, show it in its folder"),
             ("Alt+E", "Mark every other image of the group"),
-            ("Alt+U, Alt+A", "Unmark the group, unmark every group"),
+            ("Alt+U, Alt+A", "Unmark the group or folder, unmark everything"),
+            ("Alt+M", "In the tree view, mark every image in the folder"),
+            ("Alt+W", "Switch between the groups and the folder tree"),
             ("Menu, Shift+F10, right click", "The same, as a menu"),
-            ("Ctrl+Page Down", "Next group"),
-            ("Ctrl+Page Up", "Previous group"),
+            ("Ctrl+Page Down", "Next group or folder"),
+            ("Ctrl+Page Up", "Previous group or folder"),
         ]),
         ("Large view", &[
             ("Left, Right", "Previous or next image"),
@@ -357,8 +361,8 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("img-fp")
-        .default_width(1180)
-        .default_height(820)
+        .default_width(1500)
+        .default_height(860)
         .build();
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::None).build();
     window.set_child(Some(&stack));

@@ -165,6 +165,10 @@ Trash.
 - The menu button at the top right, or a right click on an image, opens the
   image or its folder, marks every other image in the group, or unmarks the
   group or every group.
+- *Switch to tree view*, in the same menu, lists the scanned folders down the
+  left instead of the groups. Selecting a folder shows every grouped image in
+  it and in its subfolders, and *Mark current folder* marks all of them.
+  *Switch to group view* goes back.
 - *Suggestion rule* switches between the three rules of `--suggest` without
   scanning again. Nothing is marked for you: *Mark suggested deletions* marks
   exactly the images suggested for deletion, replacing any marks already made.
