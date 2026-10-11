@@ -41,7 +41,8 @@
 //! mosaic can show because only the images near the screen are on a tile.
 //!
 //! Keyboard: arrows move between images, Space or Delete marks the one under
-//! the keyboard, Enter opens it large, the Menu key (or Shift+F10, or a right
+//! the keyboard, Shift and an arrow marks the images it passes as the last
+//! one marked by hand was (Shift and a click, the range from it), Enter opens it large, the Menu key (or Shift+F10, or a right
 //! click) offers the rest, Ctrl+Page Down / Ctrl+Page Up change group, and
 //! every button has an Alt mnemonic.
 
@@ -307,6 +308,10 @@ pub struct Results {
     /// reached with the arrow keys. Kept apart from focus, which a click on a
     /// button takes.
     selected: Cell<Option<usize>>,
+    /// The image last marked or unmarked by hand, and which of the two:
+    /// where a Shift+click's range starts, and what Shift and an arrow give
+    /// the images they pass. Forgotten when the images shown change.
+    anchor: Cell<Option<(usize, bool)>>,
     /// The image under the pointer.
     hovered: Cell<Option<usize>>,
     /// Whether the bar shows the image under the pointer rather than the
@@ -592,6 +597,7 @@ impl Results {
             cards: RefCell::new(Vec::new()),
             tiles: RefCell::new(Vec::new()),
             selected: Cell::new(None),
+            anchor: Cell::new(None),
             hovered: Cell::new(None),
             follow_pointer: Cell::new(false),
             image_actions: RefCell::new(Vec::new()),
@@ -873,7 +879,12 @@ impl Results {
                     return glib::Propagation::Proceed;
                 }
                 let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
-                let go = |i: i64| me.move_to(i);
+                // With Shift, every image passed on the way takes the mark
+                // the anchor was given (`mark_along`).
+                let go = |i: i64| match (shift, me.selected.get()) {
+                    (true, Some(from)) => me.mark_along(from, i),
+                    _ => me.move_to(i),
+                };
                 match (key, me.selected.get()) {
                     (K::Left | K::KP_Left, Some(i)) => go(i as i64 - 1),
                     (K::Right | K::KP_Right, Some(i)) => go(i as i64 + 1),
@@ -1403,6 +1414,7 @@ impl Results {
 
     fn clear_cards(&self) {
         self.select(None);
+        self.anchor.set(None);
         // Every tile is told it shows nothing while the cards it showed are
         // still there to withdraw their pictures.
         self.mosaic.show(&[]);
@@ -1657,6 +1669,17 @@ impl Results {
             let child = child.downgrade();
             move |g, n, x, y| {
                 let (Some(me), Some(child), Some(i)) = (weak.upgrade(), child.upgrade(), item.get()) else { return };
+                // Shift and a click, on the picture or its tick, marks the
+                // range from the anchor. Claimed here, so the tick under the
+                // pointer does not toggle the image a second time.
+                let shift = g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
+                if shift && n == 1 && g.current_button() == gdk::BUTTON_PRIMARY {
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    me.mark_range(i);
+                    me.follow_pointer.set(true);
+                    child.grab_focus();
+                    return;
+                }
                 me.select(Some(i));
                 me.follow_pointer.set(true);
                 child.grab_focus();
@@ -1798,12 +1821,61 @@ impl Results {
         self.set_marked(i, now);
     }
 
-    /// Mark or unmark card `i`'s file, everywhere it is shown.
+    /// Mark or unmark card `i`'s file, everywhere it is shown, and make it
+    /// the anchor.
     fn set_marked(self: &Rc<Self>, i: usize, on: bool) {
         let Some(id) = self.cards.borrow().get(i).map(|c| c.id) else { return };
+        self.anchor.set(Some((i, on)));
         self.mark_ids(&[id], on);
         self.update_status();
         self.refresh_bar();
+    }
+
+    /// Shift and a click on card `i`: it is marked or unmarked as a click on
+    /// its tick would, and every image from the anchor to it, in the order
+    /// the arrows follow, is given the same. With no anchor, from the
+    /// selected image; with neither, `i` alone. `i` is the anchor after.
+    fn mark_range(self: &Rc<Self>, i: usize) {
+        let Some(id) = self.cards.borrow().get(i).map(|c| c.id) else { return };
+        let on = !self.state.borrow().is_marked(id);
+        let from = self.anchor.get().map(|(a, _)| a).or(self.selected.get()).unwrap_or(i);
+        self.mark_span(from, i, on);
+        self.select(Some(i));
+        self.refresh_bar();
+    }
+
+    /// Shift and an arrow from card `from` to `to`: move there, and give
+    /// every image from `from` to it the anchor's mark. With no anchor,
+    /// `from` is toggled first and becomes it, so the first Shift and arrow
+    /// starts a run the way Space would.
+    fn mark_along(self: &Rc<Self>, from: usize, to: i64) {
+        let n = self.cards.borrow().len() as i64;
+        if n == 0 {
+            return;
+        }
+        let to = to.clamp(0, n - 1) as usize;
+        let on = match self.anchor.get() {
+            Some((_, on)) => on,
+            None => {
+                let Some(id) = self.cards.borrow().get(from).map(|c| c.id) else { return };
+                !self.state.borrow().is_marked(id)
+            }
+        };
+        self.mark_span(from, to, on);
+        self.move_to(to as i64);
+    }
+
+    /// Cards `a` to `b`, either way round and both included, marked or
+    /// unmarked, with `b` the anchor.
+    fn mark_span(self: &Rc<Self>, a: usize, b: usize, on: bool) {
+        let ids: Vec<u32> = {
+            let cards = self.cards.borrow();
+            let (lo, hi) = (a.min(b), a.max(b).min(cards.len().saturating_sub(1)));
+            cards.get(lo..=hi).map_or_else(Vec::new, |c| c.iter().map(|c| c.id).collect())
+        };
+        self.anchor.set(Some((b, on)));
+        self.mark_ids(&ids, on);
+        self.update_status();
     }
 
     /// Mark or unmark every file of `ids`, then show it: each image shown

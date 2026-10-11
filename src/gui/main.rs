@@ -292,6 +292,8 @@ fn show_shortcuts(parent: &gtk::ApplicationWindow) {
             ("Enter in the groups", "Go to the group's images"),
             ("Left, Right in the folders", "Close or open a folder"),
             ("Space or Delete", "Mark or unmark the selected image for the Trash"),
+            ("Shift+arrow key", "Move, giving each image passed the mark last given by hand"),
+            ("Shift+click", "Mark or unmark every image from the one last marked or unmarked to this one"),
             ("Enter, double click", "Open the selected image large"),
             ("Alt+V, Alt+O, Alt+F", "View it large, open it, show it in its folder"),
             ("Alt+E", "Mark every other image of the group"),

@@ -3968,6 +3968,14 @@ colour `decode::preview`, which only the window calls).
   queueing a resize inside the viewport's own allocation is what that avoids.
   Its tiles are laid out with `PAD` around them, since the picked outline is
   drawn outside a tile and the viewport clips it otherwise.
+- **Shift marks a range** (`mark_range`, `mark_along`, by the user's
+  choice over holding Space or Delete). The anchor is the image last marked
+  or unmarked by hand, with the state it was given, forgotten when the
+  images shown change. Shift+click gives every image from the anchor to the
+  clicked one, in the arrows' left-right order, what the clicked one gets;
+  it is claimed in the tile's capture phase so the tick under it does not
+  toggle again. Shift+arrow gives each image passed the anchor's state (with
+  none, the start image's toggle). Marks, not a second selection.
 - **Arrow keys move by the layout** (`Mosaic::vertical_neighbour`): left and
   right through the group's order, up and down to the nearest tile of the row
   above or below.

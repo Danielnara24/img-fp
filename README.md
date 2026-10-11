@@ -162,6 +162,9 @@ Trash.
   a yellow corner.
 - Click the circle on an image, or press Space, to mark it for the Trash.
   Double click or Enter opens it large.
+  Shift and a click marks or unmarks every image from the last one you
+  marked or unmarked to the one clicked; Shift and an arrow key marks or
+  unmarks each image it moves over the same way.
 - The menu button at the top right, or a right click on an image, opens the
   image or its folder, marks every other image in the group, or unmarks the
   group or every group.
