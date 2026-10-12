@@ -367,6 +367,12 @@ pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged:
     FileFacts(facts(out, files, dims, damaged, sizes))
 }
 
+/// Facts already stated, by file: a kept report's own rows, which say each
+/// file's size and length as the scan found them (`last::rewrite`).
+pub(crate) fn stated_facts(known: impl IntoIterator<Item = (usize, Option<(u32, u32)>, Option<u64>, bool)>) -> FileFacts {
+    FileFacts(known.into_iter().map(|(i, dims, bytes, damaged)| (i, Facts { dims, bytes, damaged })).collect())
+}
+
 fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool], sizes: &[u64]) -> HashMap<usize, Facts> {
     let mut wanted: Vec<usize> = out.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
     wanted.sort_unstable();

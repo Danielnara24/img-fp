@@ -135,47 +135,10 @@ impl Default for Settings {
     }
 }
 
-/// A list of folders as the settings file keeps it: each one as text, or as
-/// its bytes when its name is not UTF-8.
-///
-/// serde writes a `PathBuf` as a string and refuses one that is not UTF-8,
-/// and one such folder in the list made the whole save fail — silently, since
-/// a save that fails says nothing — so nothing at all was remembered.
-pub(crate) mod paths {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::ffi::OsString;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::path::PathBuf;
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(untagged)]
-    enum Stored {
-        Text(String),
-        Bytes(Vec<u8>),
-    }
-
-    pub fn serialize<S: Serializer>(v: &[PathBuf], s: S) -> Result<S::Ok, S::Error> {
-        let stored: Vec<Stored> = v
-            .iter()
-            .map(|p| match p.to_str() {
-                Some(t) => Stored::Text(t.to_string()),
-                None => Stored::Bytes(p.as_os_str().as_bytes().to_vec()),
-            })
-            .collect();
-        stored.serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<PathBuf>, D::Error> {
-        let stored: Vec<Stored> = Vec::deserialize(d)?;
-        Ok(stored
-            .into_iter()
-            .map(|x| match x {
-                Stored::Text(t) => PathBuf::from(t),
-                Stored::Bytes(b) => PathBuf::from(OsString::from_vec(b)),
-            })
-            .collect())
-    }
-}
+// A list of folders as the settings file keeps it: each one as text, or as
+// its bytes when its name is not UTF-8 (one such folder made the whole save
+// fail, silently). Shared with the kept scan's notes.
+pub(crate) use img_fp::last::paths;
 
 /// `$XDG_CONFIG_HOME/img-fp/gui.json`, or `~/.config/img-fp/gui.json`.
 fn file() -> Option<PathBuf> {

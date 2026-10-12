@@ -337,36 +337,45 @@ impl<'a> Problems<'a> {
     /// Silent when there is nothing to say: a clean run says so by printing
     /// nothing here and exiting 0.
     pub fn print_summary(&self) {
+        for line in self.summary() {
+            self.say(&line);
+        }
+    }
+
+    /// The lines `print_summary` prints, which a kept scan also keeps as its
+    /// log (`last::Notes::log`).
+    pub fn summary(&self) -> Vec<String> {
+        let mut lines = Vec::new();
         let skips: Vec<_> = self.skips().into_iter().filter(|(t, _)| t.count > 0).collect();
         if !skips.is_empty() {
-            self.say("\nSkipped:");
+            lines.push("\nSkipped:".to_string());
             for (tally, label) in skips {
-                self.render(tally, label);
+                self.render(tally, label, &mut lines);
             }
         }
         let problems: Vec<_> = self.problems().into_iter().filter(|(t, _)| t.count > 0).collect();
         if !problems.is_empty() {
-            self.say(&format!("\nProblems ({} total):", self.count()));
+            lines.push(format!("\nProblems ({} total):", self.count()));
             for (tally, label) in problems {
-                self.render(tally, label);
+                self.render(tally, label, &mut lines);
             }
         }
+        lines
     }
 
-    fn render(&self, tally: &Tally, label: &str) {
-        self.say(&format!("  {:>5}  {}", tally.count, label));
+    fn render(&self, tally: &Tally, label: &str, lines: &mut Vec<String>) {
+        lines.push(format!("  {:>5}  {}", tally.count, label));
         for s in tally.samples.iter() {
-            self.say(&format!("         - {s}"));
+            lines.push(format!("         - {s}"));
         }
         // Only ever elided because the console has a budget; the log file
         // holds every one of them, which is what the line points at.
         let hidden = tally.count - tally.samples.len();
         if hidden > 0 {
-            let more = match self.log.active() {
+            lines.push(match self.log.active() {
                 true => format!("         - ... and {hidden} more (all of them are in the log file)"),
                 false => format!("         - ... and {hidden} more (--log-file lists them all)"),
-            };
-            self.say(&more);
+            });
         }
     }
 

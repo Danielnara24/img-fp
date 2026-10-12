@@ -191,6 +191,8 @@ src/
   against.rs          `--against`: repeat / better / review / new for every
                       scanned file, its report and `--list`; see *Against a
                       library*
+  last.rs             the last scan, kept beside the cache for `--last` and
+                      the window, and `--last` itself; see *The last scan*
   problems.rs         what was skipped, what could not be done, the exit code
                       that says so, and --log-file
   progress.rs         one progress bar for the whole run: each stage owns a
@@ -1199,6 +1201,31 @@ files.
 would keep the original: the library is what is kept, and the question is
 whether it already shows the picture, not whether the scan has a better file
 of it.
+
+### The last scan
+
+**Every finished scan is kept, and `--last` writes its report again without
+scanning** (`last.rs`), in another format or with another `--suggest` rule.
+One slot, shared with the window by the user's choice: `last-scan/` beside
+the cache file the run used, so a CLI scan with the default cache is what the
+window opens on next, and a sweep with its own `--cache` keeps its scans out
+of it. The window always reads and writes the default folder. Not kept under
+`--no-cache`, `--no-last`, `--against` (another report shape) or a walk that
+found no files (a mistyped folder would replace a scan worth keeping).
+
+What is kept is the window's copy, the JSON without `pairs`, plus `Notes`
+(the log is the results line and the problem summary). That is enough to
+write the text and the CSV again **byte for byte** (checked on
+`derived/Desktop`, and by `a_kept_scan_writes_the_reports_the_scan_wrote`):
+each row carries its pair with its representative, which is all either reads.
+A JSON from `--last` has no `pairs` and says so on stderr. The suggestions
+kept are always the content rule's, so a scan under another `--suggest` now
+works the content rule out as well (about 3.5 s on IMGS-ALL); the other two
+rules are `by_group` over the kept rows. Files gone since are left out as
+the window leaves them, after the rule is applied, and a group whose
+representative is gone goes too, since its rows claim nothing about each
+other (the window keeps such a group with `reference_gone`). It is kept
+before `-o` is written, so an `-o` that failed can be recovered with it.
 
 ### What still misses
 

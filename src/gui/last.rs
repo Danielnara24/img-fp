@@ -1,17 +1,14 @@
 //! The last finished scan, kept on disk so that closing the window does not
-//! cost it.
+//! cost it: `img_fp::last` keeps it, here it is read back for the page.
 //!
-//! One scan only, the one the results page shows: a scan that finishes with
-//! results replaces it, and one that is cancelled or fails leaves it alone,
-//! as it leaves the page alone. What is kept is the worker's own report (the
-//! groups, without `pairs`) and what the page says beside it: whether the
-//! scan had problems, how long it took, when it finished, and its log. And
-//! the images marked for the Trash, written as they change (`save_marks`).
+//! One scan only, the one the results page shows, and the command line's
+//! last scan as well: a scan that finishes with results replaces it, from
+//! here or from a terminal, and one that is cancelled or fails leaves it
+//! alone, as it leaves the page alone. Beside it, the images marked for the
+//! Trash, written as they change (`save_marks`).
 //!
-//! `$XDG_CACHE_HOME/img-fp/last-scan/`, or `~/.cache/img-fp/last-scan/`, in a
-//! folder only this user can open, since it lists their files. Written as a
-//! folder of its own beside it and renamed into place, so a scan read back is
-//! never one scan's report with another's notes.
+//! `$XDG_CACHE_HOME/img-fp/last-scan/`, or `~/.cache/img-fp/last-scan/`: the
+//! default cache's folder, whatever cache a scan from the window used.
 
 use crate::results::{self, Prepared};
 use crate::scan;
@@ -19,9 +16,8 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const REPORT: &str = "result.json";
-const NOTES: &str = "scan.json";
-const MARKS: &str = "marks.json";
+use img_fp::last::{MARKS, NOTES, REPORT};
+pub use img_fp::last::Notes;
 
 /// The images marked, and the scan they were marked in (`Notes::id`): marks are read back only beside that scan. A new scan's folder
 /// replaces the old one, but a mark saved in between, or a scan whose own
@@ -29,25 +25,8 @@ const MARKS: &str = "marks.json";
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Marks {
     scan: u64,
-    #[serde(with = "crate::settings::paths")]
+    #[serde(with = "img_fp::last::paths")]
     paths: Vec<PathBuf>,
-}
-
-/// What the page says about a scan besides its groups.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Notes {
-    pub problems: bool,
-    pub took: String,
-    /// Seconds since 1970 when it finished.
-    pub finished: u64,
-    /// Which scan this is, for its marks: nanoseconds since 1970 when it
-    /// finished, which two scans do not share.
-    #[serde(default)]
-    pub id: u64,
-    pub log: String,
-    /// The folders the scan was given, which the tree view starts from.
-    #[serde(default, with = "crate::settings::paths")]
-    pub roots: Vec<PathBuf>,
 }
 
 pub struct Last {
@@ -63,11 +42,7 @@ pub struct Last {
 }
 
 fn dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("img-fp").join("last-scan"))
+    Some(img_fp::last::dir(None))
 }
 
 /// Keep `report`, a finished scan's report, with `notes`, in place of the
@@ -99,26 +74,7 @@ fn save_marks_in(dir: &Path, scan: u64, paths: Vec<PathBuf>) -> std::io::Result<
 }
 
 fn save_in(dir: &Path, report: &Path, notes: &Notes) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    let parent = dir.parent().ok_or_else(|| std::io::Error::other("no parent"))?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
-    let new = parent.join(format!("last-scan.{}.new", std::process::id()));
-    let _ = std::fs::remove_dir_all(&new);
-    std::fs::DirBuilder::new().mode(0o700).create(&new)?;
-    let written = (|| {
-        std::fs::copy(report, new.join(REPORT))?;
-        std::fs::write(new.join(NOTES), serde_json::to_vec(notes).map_err(std::io::Error::other)?)
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_dir_all(&new);
-        return Err(e);
-    }
-    // A folder cannot be renamed over one that holds anything, so the old one
-    // goes first; between the two there is no scan kept, never a mixed one.
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::rename(&new, dir).inspect_err(|_| {
-        let _ = std::fs::remove_dir_all(&new);
-    })
+    img_fp::last::save_with(dir, |to| std::fs::copy(report, to).map(|_| ()), notes)
 }
 
 /// Whether a scan is kept, without reading it: whether to open the window on

@@ -147,6 +147,20 @@ scanned.
 `-o`, `--dump` and `--log-file` never write over an image: naming one is
 refused before anything runs.
 
+The last scan is kept, so its report can be written again without scanning,
+in another format or with another `--suggest` rule:
+
+```bash
+img-fp --last -o dupes.csv
+img-fp --last --suggest representative
+```
+
+The last scan is the last one to finish, from the command line or the
+desktop app, which opens on it. It is kept in `last-scan/` beside the cache,
+and files deleted since are left out. A JSON report written this way has the
+groups but no list of pairs. Scans run with `--no-cache` or `--no-last` are
+not kept, and neither are scans `--against` a library.
+
 ## Comparing with a library
 
 To find out which images in a folder you already have, such as a new camera
@@ -234,7 +248,8 @@ Trash.
 - The results of the last scan are kept in `~/.cache/img-fp/last-scan/` and
   shown again the next time the window opens, with the images you marked still
   marked and without the images already moved to the Trash. The next scan to
-  finish replaces them.
+  finish replaces them, including one run from the command line with the
+  default cache, so a scan run in a terminal can be gone through here.
 
 Every control can be reached from the keyboard. Underlined letters are Alt
 shortcuts, the menu shows its own, and F1 lists every key.
@@ -334,7 +349,7 @@ to stderr.
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `<PATH>...` | Folders and/or image files to scan (required). `-` reads a list of paths from stdin | |
+| `<PATH>...` | Folders and/or image files to scan (required unless `--last`). `-` reads a list of paths from stdin | |
 | `--from-file <FILE>` | Read the paths to scan from a file, one per line (`-` = stdin) | |
 | `-0`, `--null` | Paths in the list are NUL-separated, for `find -print0` / `fd -0`, and so are the paths `--list` prints | off |
 | `-r`, `--recursive` | Include subfolders | off |
@@ -353,6 +368,8 @@ to stderr.
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
 | `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |
 | `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
+| `--last` | Write the last scan's report again without scanning, in another format with `-o` or `--format`, or with another `--suggest` rule (see Usage) | |
+| `--no-last` | Don't keep this scan for `--last` and the desktop app | off |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |

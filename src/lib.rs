@@ -38,6 +38,7 @@ mod extensions;
 mod group;
 mod heif;
 mod index;
+pub mod last;
 mod problems;
 mod prof;
 mod progress;
@@ -74,7 +75,7 @@ struct Args {
     /// Folders or image files to scan. `-` reads a list of paths from stdin.
     ///
     /// A file named `-` is `./-`.
-    #[arg(required_unless_present_any = ["completions", "man", "from_file"], value_name = "PATH")]
+    #[arg(required_unless_present_any = ["completions", "man", "from_file", "last"], value_name = "PATH")]
     roots: Vec<PathBuf>,
 
     /// Read the paths to scan from a file, one per line (`-` = stdin).
@@ -248,6 +249,26 @@ struct Args {
     /// Skipped when the scan could not read everything it was given.
     #[arg(long)]
     prune_cache: bool,
+
+    /// Write the last scan's report again, without scanning: in another
+    /// format with `--output` or `--format`, or with another `--suggest` rule.
+    ///
+    /// The last scan is the last one run from the command line or the window,
+    /// kept beside the cache. Files deleted since are left out. A JSON report
+    /// has the groups but no list of pairs.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "roots", "from_file", "null", "against", "list", "recursive", "exclude", "follow_symlinks",
+            "hidden", "extensions", "work_size", "candidates", "min_aligned_points", "min_frame_overlap",
+            "min_pixel_correlation", "skip_mirrored", "dump", "no_cache", "clear_cache", "prune_cache", "no_last",
+        ]
+    )]
+    last: bool,
+
+    /// Don't keep this scan for `--last` and the window.
+    #[arg(long)]
+    no_last: bool,
 
     /// Print timings for each stage.
     #[arg(short, long)]
@@ -1043,6 +1064,14 @@ fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
     for path in [&args.output, &args.dump].into_iter().flatten().filter(|p| *p != stdout) {
         report::check_writable(path)?;
     }
+    if args.last {
+        let asked = last::Rewrite { cache: args.cache.as_deref(), output: args.output.as_deref(), format: args.format, suggest: args.suggest };
+        for line in last::rewrite(&asked)? {
+            progress::to_stderr(&line);
+            log.line(&line);
+        }
+        return Ok(());
+    }
     interrupt()?;
     let mut problems = Problems::new(&log);
     let outcome = run(args, &log, &mut problems, gui);
@@ -1063,6 +1092,9 @@ fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
 fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
     if gui.is_some() && !args.against.is_empty() {
         anyhow::bail!("--against cannot be used in the window");
+    }
+    if gui.is_some() && args.last {
+        anyhow::bail!("--last cannot be used in the window");
     }
     let dash = |p: &Option<PathBuf>| p.as_deref() == Some(stdout_path());
     let mut on_stdout: Vec<&str> = Vec::new();
@@ -1400,7 +1432,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             let facts = against::Facts { dims: &[], sizes: &[], damaged: &[] };
             write_against(args, &header, &[], &[], &[], &[], &files, &facts)?
         } else {
-            write_reports(args, gui, &out, &files, &[], &[], &[])?
+            // Not kept for `--last`: a scan of nothing, a mistyped folder
+            // say, would replace one worth writing out again.
+            write_reports(args, gui, &out, &files, &report::read_facts(&out, &files, &[], &[], &[]))?
         };
         match went {
             Some(path) => say!("No images found. -> {}", path.display()),
@@ -2619,7 +2653,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // its files are kept whatever the rest say, and each deletion names the
     // file it rests on.
     let pinned: &[bool] = if against { &library } else { &[] };
-    let (actions, keeper) = if args.suggest != suggest::Mode::Content { (Vec::new(), Vec::new()) } else { timed!(44, {
+    // The kept scan's suggestions are the content rule's whatever this run
+    // shows (`last`), so a scan kept is a scan that works them out.
+    let keep_last = gui.is_none() && !against && !args.no_cache && !args.no_last;
+    let (actions, keeper) = if args.suggest != suggest::Mode::Content && !keep_last { (Vec::new(), Vec::new()) } else { timed!(44, {
         let pics: Vec<suggest::Picture> = items
             .iter()
             .zip(&stats)
@@ -2767,8 +2804,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // Cleared before anything is written to stdout, which shares the terminal.
     progress.finish();
     let runtime = t_start.elapsed().as_secs_f64();
-    let actions = if args.suggest == suggest::Mode::Content {
-        actions
+    let (actions, content) = if args.suggest == suggest::Mode::Content {
+        (actions, None)
     } else {
         let corr: HashMap<(usize, usize), f32> = out_pairs
             .iter()
@@ -2782,7 +2819,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 correlation: corr.get(&(i.min(g.rep), i.max(g.rep))).copied().unwrap_or(0.0),
             })
         });
-        suggest::by_group(args.suggest, files.len(), seats, args.min_pixel_correlation)
+        (suggest::by_group(args.suggest, files.len(), seats, args.min_pixel_correlation), Some(actions))
     };
     stage!(
         t_start,
@@ -2791,7 +2828,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         actions.iter().filter(|a| **a == Some(suggest::Action::Delete)).count(),
         actions.iter().filter(|a| **a == Some(suggest::Action::Review)).count()
     );
-    let out = Output {
+    let mut out = Output {
         tool: "img-fp",
         config: run_config(args),
         // A file a wildcard walk reached and that turned out not to be a
@@ -2816,12 +2853,58 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let dims: Vec<(u32, u32)> = items.iter().map(|it| it.dims).collect();
     let damaged: Vec<bool> = items.iter().map(|it| it.damaged.is_some()).collect();
     let sizes: Vec<u64> = stats.iter().map(|s| s.len).collect();
-    match timed!(36, write_reports(args, gui, &out, &files, &dims, &damaged, &sizes))? {
+    let facts = report::read_facts(&out, &files, &dims, &damaged, &sizes);
+    // Kept before `-o` is written: a report that could not be written is
+    // one case `--last` is for.
+    if keep_last {
+        let roots = if args.from_file.is_some() || args.roots.iter().any(|r| r == stdout_path()) {
+            // Read from a list, they are files rather than the folders the
+            // window's tree starts from, and it finds those itself.
+            Vec::new()
+        } else {
+            args.roots.iter().map(|r| std::path::absolute(r).unwrap_or_else(|_| r.clone())).collect()
+        };
+        let mut lines = vec![summary.clone()];
+        lines.extend(problems.summary());
+        let notes = last::Notes::now(problems.any(), runtime as u64, lines.join("\n"), roots);
+        if let Err(e) = timed!(36, keep_scan(args, &mut out, content, &files, &facts, &notes)) {
+            say!("This scan could not be kept for --last: {e}");
+        }
+    }
+    match timed!(36, write_reports(args, gui, &out, &files, &facts))? {
         Some(path) => say!("{summary} -> {}", path.display()),
         None => say!("{summary}"),
     }
     prof::report();
     Ok(())
+}
+
+/// Keep the scan for `--last` and the window (`last`): the report without
+/// its pairs, with the content rule's suggestions whichever the run shows.
+/// `content` is those suggestions when `out` holds another rule's.
+fn keep_scan(
+    args: &Args,
+    out: &mut Output,
+    content: Option<Vec<Option<suggest::Action>>>,
+    files: &[PathBuf],
+    facts: &report::FileFacts,
+    notes: &last::Notes,
+) -> std::io::Result<()> {
+    let mut held = None;
+    if let Some(content) = content {
+        held = Some((std::mem::replace(&mut out.actions, content), out.config["suggest"].take()));
+        out.config["suggest"] = "content".into();
+    }
+    let write = |path: &Path| {
+        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
+        report::write_with(&target, out, files, facts).map_err(std::io::Error::other)
+    };
+    let kept = last::save_with(&last::dir(args.cache.as_deref()), write, notes);
+    if let Some((actions, rule)) = held {
+        out.actions = actions;
+        out.config["suggest"] = rule;
+    }
+    kept
 }
 
 /// The settings a report records, which are the ones that decide its pairs.
@@ -2861,29 +2944,18 @@ fn as_typed(v: f32) -> f64 {
 /// The window's copy is written first. It is what the window reads to show
 /// the scan at all, and a `-o` that failed — a disk full, a folder removed
 /// mid-scan — used to end the run before it, so a finished scan showed as a
-/// failed one with nothing to look at. The files' facts are read once for
-/// both.
-/// `dims` is each file's size as the analysis found it, and `sizes` its
-/// length as the walk found it, indexed like `files`; see `report::read_facts`.
-fn write_reports(
-    args: &Args,
-    gui: Option<&Path>,
-    out: &Output,
-    files: &[PathBuf],
-    dims: &[(u32, u32)],
-    damaged: &[bool],
-    sizes: &[u64],
-) -> Result<Option<PathBuf>> {
+/// failed one with nothing to look at. The files' facts are read once, by
+/// the caller, for both and for the scan kept for `--last`.
+fn write_reports(args: &Args, gui: Option<&Path>, out: &Output, files: &[PathBuf], facts: &report::FileFacts) -> Result<Option<PathBuf>> {
     let target = report::Target::of(args.output.as_deref(), args.format);
     let asked = gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path());
-    let facts = report::read_facts(out, files, dims, damaged, sizes);
     if let Some(path) = gui {
         let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
-        report::write_with(&target, out, files, &facts)?;
+        report::write_with(&target, out, files, facts)?;
     }
     let mut went = None;
     if asked {
-        report::write_with(&target, out, files, &facts)?;
+        report::write_with(&target, out, files, facts)?;
         if let report::Sink::File(path) = &target.sink {
             went = Some(path.clone());
         }
