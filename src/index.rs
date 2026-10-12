@@ -1598,6 +1598,23 @@ impl InvertedFile {
         }
     }
 
+    /// The idf mass of a word list: what `query` divides a query by, summed
+    /// as it sums it. Held against an image's own list, it is what that image
+    /// would be divided by as a query, which is how a query is read the other
+    /// way round: the intersection `query` accumulates is the same from either
+    /// side, so `score * mass(query) / mass(other)` is how much of `other` the
+    /// query holds. See `lib::both_ways`.
+    pub fn mass(&self, wl: &WordList) -> f32 {
+        let mut m = 0f32;
+        for (w, c) in wl.runs() {
+            let w = w as usize;
+            if self.off[w] != self.off[w + 1] {
+                m += c as f32 * self.idf[w] * self.idf[w];
+            }
+        }
+        m
+    }
+
     /// The real count of the posting at `at`, whose packed count saturated.
     #[cold]
     fn wide_count(&self, at: usize) -> u32 {

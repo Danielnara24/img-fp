@@ -299,7 +299,7 @@ fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMa
 }
 
 /// One key of the document and its list, a record a line.
-fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
+pub(crate) fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
     write!(w, "  \"{key}\": [")?;
     for (i, x) in xs.iter().enumerate() {
         write!(w, "{}\n    ", if i == 0 { "" } else { "," })?;
@@ -314,7 +314,7 @@ fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std
 /// 27,000 pictures are a million records and a quarter of a gigabyte, and
 /// they were the last thing a run did on one thread. A batch of pieces at a
 /// time, so that the report is never held whole.
-fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
+pub(crate) fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
     const PIECE: usize = 4096;
     const BATCH: usize = 64 * PIECE;
     write!(w, "  \"{key}\": [")?;
@@ -410,7 +410,7 @@ fn relation(p: &OutPair) -> &'static str {
     }
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1_073_741_824.0 {
         format!("{:.1}GB", b / 1_073_741_824.0)

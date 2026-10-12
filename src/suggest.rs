@@ -157,7 +157,7 @@ pub enum Link<'a> {
 }
 
 /// The clean-anchor bar a strong pair's worst block must clear.
-const CLEAN: f32 = 0.85;
+pub(crate) const CLEAN: f32 = 0.85;
 /// How far outside the other frame a corner may land, as a fraction of it,
 /// plus `TOL_PX` of the file's own pixels: the transform is fitted, and a
 /// thumbnail of a hundred pixels is a few pixels off at four times its size.
@@ -185,7 +185,7 @@ const CROPS: f32 = 0.10;
 /// but a KEEP: under it, the found corpus's REVIEWs were mostly two
 /// specimens of one species, and over it mostly one photograph tinted or
 /// watermarked.
-const REVIEW: f32 = 0.9;
+pub(crate) const REVIEW: f32 = 0.9;
 /// The correlation at which a pair that is not clean — one block of it
 /// disagrees — may still delete. Re-encodes carrying a watermark, or a
 /// background recoloured, fail the clean bar and agree at 0.96 overall; two
@@ -232,8 +232,29 @@ struct Side {
 }
 
 /// The action for every file in a pair, by index; `None` for the rest.
+#[cfg(test)]
 pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation: f32, colour: impl Fn(usize) -> f32 + Sync) -> Vec<Option<Action>> {
+    suggest_pinned(pics, links, min_correlation, colour, &[]).0
+}
+
+/// `suggest`, with some files kept whatever the rest say, and beside each
+/// DELETE the file it rests on: the one that holds it and stays.
+///
+/// A pinned file is `--against`'s library. It is KEEP, it is never deleted,
+/// and where it holds the same frame as files that are not pinned it is the
+/// one of them kept, so a picture the library has is answered by the
+/// library's copy rather than by a copy among the files being asked about.
+/// Deletion spreads from the pinned files first. `pinned` may be empty, and
+/// then nothing is.
+pub fn suggest_pinned(
+    pics: &[Picture],
+    links: &[(usize, usize, Link)],
+    min_correlation: f32,
+    colour: impl Fn(usize) -> f32 + Sync,
+    pinned: &[bool],
+) -> (Vec<Option<Action>>, Vec<Option<usize>>) {
     let n = pics.len();
+    let mut keeper: Vec<Option<usize>> = vec![None; n];
     let mut action = vec![None; n];
     let mut sides: Vec<Vec<Side>> = vec![Vec::new(); n];
     // Every pair, weak ones too, for what the frames say about which file is
@@ -320,10 +341,17 @@ pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation
         members.sort_unstable();
         components.push(members);
     }
-    let ctx = Ctx { pics, links, sides: &sides, all_sides: &all_sides };
-    let settled: Vec<Vec<(usize, Action)>> = components.par_iter().map(|m| ctx.settle(m, &colour)).collect();
-    for (i, a) in settled.into_iter().flatten() {
+    let ctx = Ctx { pics, links, sides: &sides, all_sides: &all_sides, pinned };
+    let settled: Vec<Vec<(usize, Action, Option<usize>)>> = components.par_iter().map(|m| ctx.settle(m, &colour)).collect();
+    for (i, a, k) in settled.into_iter().flatten() {
         action[i] = Some(a);
+        keeper[i] = k;
+    }
+    // Pinned and reached only by pairs too weak to settle anything: kept.
+    for (i, a) in action.iter_mut().enumerate() {
+        if a.is_some() && ctx.is_pinned(i) {
+            *a = Some(Action::Keep);
+        }
     }
     // A file nothing could delete whose best match agrees less than
     // `REVIEW` is another photograph of something like it, not a copy:
@@ -340,7 +368,7 @@ pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation
             action[i] = Some(Action::Keep);
         }
     }
-    action
+    (action, keeper)
 }
 
 struct Ctx<'a> {
@@ -348,9 +376,15 @@ struct Ctx<'a> {
     links: &'a [(usize, usize, Link<'a>)],
     sides: &'a [Vec<Side>],
     all_sides: &'a [Vec<Side>],
+    /// See `suggest_pinned`.
+    pinned: &'a [bool],
 }
 
 impl Ctx<'_> {
+    fn is_pinned(&self, f: usize) -> bool {
+        self.pinned.get(f).copied().unwrap_or(false)
+    }
+
     fn side(&self, f: usize, g: usize) -> Option<&Side> {
         let s = &self.sides[f];
         s.binary_search_by_key(&(g as u32), |e| e.to).ok().map(|k| &s[k])
@@ -408,8 +442,9 @@ impl Ctx<'_> {
         }
     }
 
-    fn settle(&self, members: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> Vec<(usize, Action)> {
+    fn settle(&self, members: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> Vec<(usize, Action, Option<usize>)> {
         let mut action: HashMap<usize, Action> = HashMap::new();
+        let mut keeper: HashMap<usize, usize> = HashMap::new();
         let frame_any = |f: usize, g: usize| -> bool {
             let s = &self.all_sides[f];
             s.binary_search_by_key(&(g as u32), |e| e.to).ok().is_some_and(|k| s[k].exact || s[k].f_in)
@@ -486,9 +521,20 @@ impl Ctx<'_> {
             classes.push(list);
         }
         let mut deleters: std::collections::HashSet<usize> = Default::default();
-        let mut keeps = Vec::new();
+        // The pinned files are kept before anything is chosen, and deletion
+        // spreads from them first: a file both a pinned file and another
+        // could delete is the pinned one's.
+        let mut keeps: Vec<usize> = members.iter().copied().filter(|&f| self.is_pinned(f)).collect();
+        for &k in &keeps {
+            action.insert(k, Action::Keep);
+        }
         let mut chosen = Vec::with_capacity(classes.len());
         for (ci, c) in classes.iter().enumerate() {
+            let pinned: Vec<usize> = c.iter().copied().filter(|&f| self.is_pinned(f)).collect();
+            if !pinned.is_empty() {
+                chosen.push(self.choose(&pinned, colour));
+                continue;
+            }
             let k = self.choose(c, colour);
             chosen.push(k);
             let beaten = self.sides[k].iter().any(|e| {
@@ -507,6 +553,7 @@ impl Ctx<'_> {
                     let y = e.to as usize;
                     if !action.contains_key(&y) && can_delete(x, y) {
                         action.insert(y, Action::Delete);
+                        keeper.insert(y, x);
                         deleters.insert(x);
                         q.push_back(y);
                     }
@@ -523,6 +570,30 @@ impl Ctx<'_> {
                 action.insert(k, Action::Keep);
             }
         }
+        // Which pinned file a deletion is said to rest on. Deletion spreads
+        // from whichever settled file reaches a file first, and against a
+        // library that was as often a greyscale or sharpened copy as the
+        // library's plain one: true, and the wrong file to show someone as
+        // the copy they already have. So a deleted file that pinned files can
+        // delete names the one `choose` would keep of them — colour over grey,
+        // not softer than the rest — tried in that order until one passes.
+        // The actions are already settled; only the name changes.
+        if members.iter().any(|&f| self.is_pinned(f)) {
+            for &y in members {
+                if action.get(&y) != Some(&Action::Delete) {
+                    continue;
+                }
+                let mut cands: Vec<usize> = self.sides[y].iter().map(|e| e.to as usize).filter(|&x| self.is_pinned(x)).collect();
+                while !cands.is_empty() {
+                    let k = self.choose(&cands, colour);
+                    if can_delete(k, y) {
+                        keeper.insert(y, k);
+                        break;
+                    }
+                    cands.retain(|&c| c != k);
+                }
+            }
+        }
         // A file that stays and was only ever matched weakly is for a person
         // to look at, whatever it was chosen as — unless a deletion rests on
         // it, which makes it the copy to keep.
@@ -530,8 +601,8 @@ impl Ctx<'_> {
             .iter()
             .map(|&i| {
                 let a = action.get(&i).copied().unwrap_or(Action::Review);
-                let weak_only = !deleters.contains(&i) && !self.sides[i].iter().any(|e| e.clean);
-                (i, if a == Action::Keep && weak_only { Action::Review } else { a })
+                let weak_only = !deleters.contains(&i) && !self.sides[i].iter().any(|e| e.clean) && !self.is_pinned(i);
+                (i, if a == Action::Keep && weak_only { Action::Review } else { a }, keeper.get(&i).copied())
             })
             .collect()
     }
@@ -920,6 +991,20 @@ mod tests {
         let got = suggest(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
         // The same pixels: the smaller file is kept.
         assert_eq!(got, [Some(Action::Delete), Some(Action::Keep)]);
+    }
+
+    #[test]
+    fn a_pinned_file_is_kept_and_named_by_what_it_deletes() {
+        let (t, tr) = (thumb(), colourful());
+        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes };
+        // Unpinned, the smaller file 1 would be kept; pinned, the larger is.
+        let pics = [pic(2_000), pic(1_000)];
+        let (got, keeper) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, false]);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Delete)]);
+        assert_eq!(keeper, [None, Some(0)]);
+        // Two pinned files are both kept, whatever they hold of each other.
+        let (got, _) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, true]);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Keep)]);
     }
 
     #[test]

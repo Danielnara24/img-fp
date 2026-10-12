@@ -31,6 +31,7 @@
 #[cfg(not(unix))]
 compile_error!("img-fp builds for Unix-like systems only (Linux, the BSDs, macOS)");
 
+mod against;
 mod cache;
 mod decode;
 mod extensions;
@@ -83,9 +84,31 @@ struct Args {
     #[arg(long = "from-file", value_name = "FILE")]
     from_file: Option<PathBuf>,
 
-    /// Paths in the list are NUL-separated, for `find -print0` or `fd -0`.
+    /// Paths in the list are NUL-separated, for `find -print0` or `fd -0`,
+    /// and so are the paths `--list` prints.
     #[arg(short = '0', long = "null")]
     null: bool,
+
+    /// Compare the images scanned with a library of images already kept: a
+    /// folder, or an image file. Repeat for several.
+    ///
+    /// Instead of groups, the report then gives each image scanned a verdict:
+    /// `repeat` (the library, or another image scanned, already shows all of
+    /// it), `better` (the library has it, but this one shows more of it),
+    /// `review` (a weak match to the library, close enough to be an edited
+    /// copy) or `new`. The library's own duplicates are not looked for. It is
+    /// walked with the same options as the paths to scan, so a library of
+    /// subfolders needs `--recursive`. An image both reach counts as scanned.
+    #[arg(long, value_name = "PATH")]
+    against: Vec<PathBuf>,
+
+    /// With `--against`, print only the paths of the images with this
+    /// verdict, one a line, instead of the report: repeat, better, review or
+    /// new. Repeat the option, or separate verdicts with commas, for several.
+    ///
+    /// The report is still written to `--output`, if that names a file.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "VERDICT", requires = "against")]
+    list: Vec<against::Verdict>,
 
     /// Include subfolders.
     #[arg(short, long)]
@@ -674,6 +697,27 @@ impl Planes {
     }
 }
 
+/// A query's scores read both ways round: for each candidate, the larger of
+/// how much of the query it holds and how much of it the query holds.
+///
+/// `query` scores containment of the query, which finds a crop's original
+/// and not an original's crop. A scan of one folder asks both questions by
+/// querying from both files, but against a library only the scanned files
+/// ask — querying from every library file was the cost the mode exists to
+/// avoid — so a photograph whose library copy is a crop would rank that crop
+/// by how little of the photograph it holds. The intersection `query`
+/// accumulates is the same from either side, so the other reading is the
+/// score scaled by the two lists' idf masses (`InvertedFile::mass`), and
+/// costs one multiply a candidate.
+fn both_ways(scored: &mut [(u32, f32)], query_mass: f32, mass: &[f32]) {
+    for (j, s) in scored.iter_mut() {
+        let m = mass[*j as usize];
+        if m > 0.0 {
+            *s = s.max(*s * query_mass / m);
+        }
+    }
+}
+
 /// The `k` best-scoring candidates a query returned, best first, ties to the
 /// lowest index.
 ///
@@ -930,6 +974,11 @@ fn validate(args: &Args) -> std::result::Result<(), String> {
     if args.cache.is_some() && args.no_cache && !args.clear_cache {
         return Err("--cache cannot be used with --no-cache, except with --clear-cache to delete that file".into());
     }
+    // The verdicts are the content rule's, with the library kept; the other
+    // two rules read groups, which a run against a library does not make.
+    if !args.against.is_empty() && args.suggest != suggest::Mode::Content {
+        return Err("--against decides with the content rule, and cannot be used with --suggest".into());
+    }
     Ok(())
 }
 
@@ -1012,10 +1061,22 @@ fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
 /// interleaved CSV, log lines and report that nothing can read back. Under the
 /// window stdout is the progress channel, so neither may use it at all.
 fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
+    if gui.is_some() && !args.against.is_empty() {
+        anyhow::bail!("--against cannot be used in the window");
+    }
     let dash = |p: &Option<PathBuf>| p.as_deref() == Some(stdout_path());
     let mut on_stdout: Vec<&str> = Vec::new();
-    if gui.is_none() && args.output.as_deref().is_none_or(|p| p == stdout_path()) {
+    // `--list` takes stdout's place for the report, which then goes only to
+    // a file `-o` names.
+    let report_there = match args.output.as_deref() {
+        None => args.list.is_empty(),
+        Some(p) => p == stdout_path(),
+    };
+    if gui.is_none() && report_there {
         on_stdout.push("the report");
+    }
+    if !args.list.is_empty() {
+        on_stdout.push("--list");
     }
     if dash(&args.dump) {
         on_stdout.push("--dump -");
@@ -1283,13 +1344,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     for (from, n) in &lists {
         say!("Scanning: {n} path(s) read from {from}");
     }
+    if !args.against.is_empty() {
+        say!("Against: {:?}", args.against);
+    }
     if !args.exclude.is_empty() {
         say!("Excluding: {:?}", args.exclude);
     }
     say!("{}", wanted.describe());
-    let walk::Listing { files, canonical, stats } = walk::walk(
+    let walk::Listing { files, canonical, stats, library } = walk::walk(
         &walk::Request {
             roots: &roots,
+            library: &args.against,
             exclude: &args.exclude,
             wanted: &wanted,
             recursive: args.recursive,
@@ -1299,6 +1364,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         problems,
     );
     stage!(t_start, "{} files", files.len());
+    // `--against`: which of these files a library already has. The scanned
+    // files ask, then the library files they reach, and the library a scan
+    // never touches asks nothing (see the candidates below and `against.rs`).
+    let against = !args.against.is_empty();
+    if against {
+        let lib = library.iter().filter(|&&l| l).count();
+        stage!(t_start, "against: {} scanned, {lib} in the library", files.len() - lib);
+    }
     if files.is_empty() {
         // Still a finished run, and its report says so. Returning without one
         // left whatever the last run wrote to `-o` in place, and a script
@@ -1315,7 +1388,21 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             pairs: Vec::new(),
             actions: Vec::new(),
         };
-        match write_reports(args, gui, &out, &files, &[], &[], &[])? {
+        let went = if against {
+            let header = against::Header {
+                config: run_config(args),
+                files_enumerated: 0,
+                files_analysed: 0,
+                library_files: 0,
+                failures: &[],
+                runtime_seconds: 0.0,
+            };
+            let facts = against::Facts { dims: &[], sizes: &[], damaged: &[] };
+            write_against(args, &header, &[], &[], &[], &[], &files, &facts)?
+        } else {
+            write_reports(args, gui, &out, &files, &[], &[], &[])?
+        };
+        match went {
             Some(path) => say!("No images found. -> {}", path.display()),
             None => say!("No images found."),
         }
@@ -1405,7 +1492,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // run did not walk, which is what `carry_over` wants; the two counts taken
     // here are what tells the save below whether it has anything to write.
     let (mut in_cache, mut same_key) = (0usize, 0usize);
-    let mine: Vec<Option<(cache::Record, cache::Span)>> = files
+    let mut mine: Vec<Option<(cache::Record, cache::Span)>> = files
         .iter()
         .enumerate()
         .map(|(i, _)| {
@@ -1427,26 +1514,40 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
     // second copy of a file is not a cheaper way to reach the same answer, it
-    // is the same work done twice: each group elects one member — one the
-    // cache already knows, if any does, and otherwise its first — and the rest
-    // are copied from it. Those groups are already claimed as duplicates in
-    // the output, so sharing one analysis between them asserts nothing the
+    // is the same work done twice: each group elects its first member and the
+    // rest are copied from it. Those groups are already claimed as duplicates
+    // in the output, so sharing one analysis between them asserts nothing the
     // run does not assert anyway.
+    //
+    // The first, whatever the cache holds. Electing the member the cache
+    // knew made the original depend on the order of whichever scan wrote the
+    // record, and the original decides what the vocabulary samples: a cached
+    // run over IMGS-AGAINST, from records IMGS-ALL's scan had written, moved
+    // 184 verdicts against the same run cold. The bytes are the same, so the
+    // analysis is: a copy's record serves its original, and stays under the
+    // copy's name in the file, where the next run finds it again.
     //
     // The same goes for everything after the analysis; see `with_copies`.
     let mut twin_of: Vec<usize> = (0..n).collect();
+    let mut holds_record = vec![false; n];
     for g in exact.iter() {
-        let original = g.iter().copied().find(|&i| mine[i].is_some()).unwrap_or(g[0]);
+        let original = g[0];
         for &i in g.iter() {
             twin_of[i] = original;
         }
+        if mine[original].is_some() {
+            holds_record[original] = true;
+        } else if let Some(&k) = g.iter().find(|&&i| mine[i].is_some()) {
+            mine[original] = mine[k].take();
+            holds_record[k] = true;
+        }
     }
-    // A copy keeps no record of its own: it is answered by its original on
-    // every run, cached or not, so a record under its name is the same
-    // analysis stored twice and never read. One written by an earlier build
-    // is left out of the file at the next compaction.
+    // Any other copy keeps no record of its own: it is answered by its
+    // original on every run, cached or not, so a record under its name is the
+    // same analysis stored twice and never read. One written by an earlier
+    // build is left out of the file at the next compaction.
     for i in 0..n {
-        if twin_of[i] != i {
+        if twin_of[i] != i && !holds_record[i] {
             span_of[i] = None;
         }
     }
@@ -1791,6 +1892,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     stage!(t_start, "inverted file");
 
     let policy = verify::Policy::new(aligned_points(args), args.min_frame_overlap, args.min_pixel_correlation);
+    // Against a library, not every file asks, so each list's idf mass is kept
+    // for reading its answers both ways round; see `both_ways`.
+    let mass: Vec<f32> = if against { (0..n).map(|i| inv.mass(&lists[i])).collect() } else { Vec::new() };
 
 
     // ---- candidates, then verification
@@ -1801,14 +1905,44 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // both directions genuinely have to be asked.
     type Edge = (usize, usize, Affine, bool, Verdict);
     let bar = progress.begin_counted(Stage::Candidates, n_desc_match as u64, n_match, "images");
-    let mut cand_pairs: Vec<(u32, u32)> = (0..n)
-        .into_par_iter()
-        .filter(|&i| matched[i])
+    // Against a library, the scanned files ask first, and then every library
+    // file a file that has asked anchored asks in turn, round after round
+    // until none is new: the library's own pairs are what a chain from a
+    // scanned file runs through (`propagate`), and they are wanted only where
+    // the library touches the scan. A library of unique photographs is
+    // nearly all unreached and asks nothing, where the union of both sides
+    // had every file of it ask and be re-asked mirrored.
+    let mut asked = vec![false; n];
+    let mut ask: Vec<usize> = (0..n).filter(|&i| matched[i] && !(against && library[i])).collect();
+    let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
+    let mut all_direct: Vec<Direct> = Vec::new();
+    let mut verified = 0usize;
+    let mut round = 0usize;
+    let dumping = args.dump.is_some();
+    // What a verdict must already have before its pixels are worth reading:
+    // the weakest bar any tier applies, or everything a dump would record.
+    //
+    // A dump widens the gate and never narrows it: the bars the run's own
+    // tiers use still decide, so a run with `--dump` finds the pairs the same
+    // run without it finds. (It used to *set* the gate to (3, 0.2), which is
+    // tighter than a `--min-frame-overlap` below 0.2 and so lost pairs.)
+    let tier_gate = (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap);
+    let gate = if dumping { (tier_gate.0.min(3), tier_gate.1.min(0.2)) } else { tier_gate };
+    loop {
+    for &i in ask.iter() {
+        asked[i] = true;
+    }
+    let first = round == 0;
+    let mut cand_pairs: Vec<(u32, u32)> = ask
+        .par_iter()
+        .copied()
         .map_init(
             || (vec![0f32; n], Vec::new()),
             |(acc, scored), i| {
                 timed!(14, inv.query(&lists[i], i as u32, acc, scored));
-                bar.add(items[i].feats.len() as u64);
+                if first {
+                    bar.add(items[i].feats.len() as u64);
+                }
                 timed!(41, {
                     // Every image the query touched, including one that scores
                     // nothing: that happens only when all it shares are words
@@ -1817,6 +1951,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                     // folder of two it is every word a duplicate shares. Dropping it
                     // there found no pair at all; the second look never did.
                     scored.retain(|&(j, _)| matched[j as usize]);
+                    if against {
+                        both_ways(scored, mass[i], &mass);
+                    }
                     rank_best(scored, args.candidates);
                     scored
                         .iter()
@@ -1831,28 +1968,19 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         cand_pairs.par_sort_unstable();
         cand_pairs.dedup();
     });
-    stage!(t_start, "candidates: {} pairs", cand_pairs.len());
-    // Verification reads the word lists and never the postings, and the
-    // second look, which does, is asked of a few per cent of the files after
-    // verification is done. So the postings are let go here and built again
-    // from the same lists if the second look has anything to ask: on a corpus
-    // of 27,000 pictures that is 94 MB off the run's peak, which is the end of
-    // verification, for a rebuild of under two seconds on one thread. The
-    // build is deterministic, so the second index is the first.
-    drop(inv);
+    if against {
+        cand_pairs.retain(|p| seen.insert(*p));
+    }
+    if first {
+        stage!(t_start, "candidates: {} pairs", cand_pairs.len());
+    } else {
+        stage!(t_start, "  library round {round}: {} library files asked, {} more candidates", ask.len(), cand_pairs.len());
+    }
 
-    let dumping = args.dump.is_some();
-    // What a verdict must already have before its pixels are worth reading:
-    // the weakest bar any tier applies, or everything a dump would record.
-    //
-    // A dump widens the gate and never narrows it: the bars the run's own
-    // tiers use still decide, so a run with `--dump` finds the pairs the same
-    // run without it finds. (It used to *set* the gate to (3, 0.2), which is
-    // tighter than a `--min-frame-overlap` below 0.2 and so lost pairs.)
-    let tier_gate = (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap);
-    let gate = if dumping { (tier_gate.0.min(3), tier_gate.1.min(0.2)) } else { tier_gate };
-    progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
-    let bar = progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs");
+    if first {
+        progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
+    }
+    let vbar = first.then(|| progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs"));
     // Verified a slice of the candidates at a time, each slice's verdicts
     // appended to the one list as it finishes. A parallel `collect` of a
     // filtered stream gathers every worker's results into vectors of their
@@ -1868,14 +1996,16 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // the verdict's own variant, and two `usize`s for indices that fit a
     // `u32`. That is 112 bytes against 76, for the one list of edges held
     // through the peak — 923,601 of them on a corpus of 27,000 pictures.
-    let mut all_direct: Vec<Direct> = Vec::new();
+    let from = all_direct.len();
     for slice in cand_pairs.chunks(VERIFY_SLICE) {
         let part: Vec<Direct> = slice
             .par_iter()
             .map_init(
                 || (Vec::new(), Vec::new(), verify::Scratch::default()),
                 |(cands, matches, scratch), &(i, j)| timed!(42, {
-                    bar.tick();
+                    if let Some(b) = &vbar {
+                        b.tick();
+                    }
                     let (i, j) = (i as usize, j as usize);
                     timed!(15, index::shared(&lists[i], &lists[j], cands, 60_000));
                     if cands.len() < 3 {
@@ -1895,12 +2025,40 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             .collect();
         all_direct.extend(part);
     }
+    verified += cand_pairs.len();
+    drop(cand_pairs);
+    if !against {
+        break;
+    }
+    // The library files this round's anchors reached that have not asked.
+    let mut next = vec![false; n];
+    for &(i, j, ref v) in &all_direct[from..] {
+        let (i, j) = (i as usize, j as usize);
+        if v.accepted(&policy.anchor) {
+            for (x, y) in [(i, j), (j, i)] {
+                if asked[x] && library[y] && !asked[y] {
+                    next[y] = true;
+                }
+            }
+        }
+    }
+    ask = (0..n).filter(|&i| next[i]).collect();
+    if ask.is_empty() {
+        break;
+    }
+    round += 1;
+    }
+    // Verification reads the word lists and never the postings, and the
+    // second look, which does, is asked of a few per cent of the files after
+    // verification is done. So the postings are let go here and built again
+    // from the same lists if the second look has anything to ask: on a corpus
+    // of 27,000 pictures that is 94 MB off the run's peak, which is the end of
+    // verification, for a rebuild of under two seconds on one thread. The
+    // build is deterministic, so the second index is the first.
+    drop(inv);
     // What a round of propagation may spend: one composed hypothesis for each
     // candidate the direct pass verified. See `propagate`.
-    let prop_budget = cand_pairs.len();
-    // Every candidate has its verdict now, and the second look below is where
-    // a found corpus's run peaks: a million pairs held through it for nothing.
-    drop(cand_pairs);
+    let prop_budget = verified;
     // Anchors only: a pair believed on its own evidence. These are what decide
     // which files end up in one cluster. They are read out of `all_direct`
     // where they lie rather than copied: they are nearly all of it, and a copy
@@ -1937,10 +2095,57 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // matches at all", costs a seed apiece on three of the held-out mirror
     // transforms.
     //
+    // Against a library, a library file is asked as any file is once the scan
+    // has reached it: one with no match at all is no part of an answer, and
+    // asking each of those is what made matching both sides as one four times
+    // the cost against a library of unique photographs. That leaves the case
+    // those files covered: a mirror of a scanned picture that nothing else in
+    // the library matches, which matched as one scan is re-asked itself, for
+    // having no match, and here is found from the scan's side or not at all.
+    // Counting a scanned file's matches cannot tell when to look — on
+    // IMGS-AGAINST the files it caught had six — and re-asking every scanned
+    // file found them at a third more CPU. A mirror of one file of a picture's
+    // family is a mirror of the family, so each clean-anchor component that
+    // holds a scanned file is re-asked once, through its best-connected
+    // member, and propagation carries what that finds to the rest: 2,635
+    // files re-asked there against 11,024, the same finds. Clean anchors,
+    // because weak ones join families into a few large components, and one
+    // member of each found ten fewer.
+    //
     // `--skip-mirrored` asks it of nobody, and everything below then does
     // nothing: no word lists made, no postings rebuilt, no verdicts.
-    let lonely: Vec<usize> =
-        if args.skip_mirrored { Vec::new() } else { (0..n).filter(|&i| matched[i] && degree[i] < 2).collect() };
+    let lonely: Vec<usize> = if args.skip_mirrored {
+        Vec::new()
+    } else {
+        // Against a library, each clean-anchor component that holds a scanned
+        // file is re-asked through its best-connected member, whatever its
+        // matches; see above.
+        let mut rep = vec![false; n];
+        if against {
+            let mut d = Dsu::new(n);
+            for (a, b, _, _, v) in edges() {
+                if v.accepted(&policy.clean) {
+                    d.union(a, b);
+                }
+            }
+            // Per component: whether a scanned file is in it, and its best-
+            // connected member, ties to the lowest index.
+            let mut best: HashMap<usize, (bool, usize)> = HashMap::new();
+            for i in (0..n).filter(|&i| degree[i] > 0) {
+                let e = best.entry(d.find(i)).or_insert((false, i));
+                e.0 |= !library[i];
+                if degree[i] > degree[e.1] {
+                    e.1 = i;
+                }
+            }
+            for (scanned, i) in best.into_values() {
+                rep[i] |= scanned;
+            }
+        }
+        (0..n)
+            .filter(|&i| matched[i] && (rep[i] || (degree[i] < 2 && !(against && library[i] && degree[i] == 0))))
+            .collect()
+    };
     let variants = [
         Variant { mirror: true, invert: false },
         Variant { mirror: false, invert: true },
@@ -2026,7 +2231,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 };
                 merged.clear();
                 for v in 0..3 {
-                    timed!(14, inv.as_ref().unwrap().query(&wl[v], i as u32, acc, scored));
+                    let inv = inv.as_ref().unwrap();
+                    timed!(14, inv.query(&wl[v], i as u32, acc, scored));
+                    if against {
+                        both_ways(scored, inv.mass(&wl[v]), &mass);
+                    }
                     timed!(41, rank_best(scored, args.candidates));
                     merged.extend(scored.iter().map(|&(j, s)| (j, s, v as u8)));
                 }
@@ -2109,6 +2318,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // merged two whole families into 3,002 false pairs.
     progress.forecast(|f| f.edges = Some(all.len()));
     progress.begin(Stage::Propagate);
+    let (all, propagated, corroborated, all_propagated): (Vec<Edge>, Vec<Edge>, Vec<Edge>, Vec<Edge>) = {
     // Clusters are made from clean anchors, and an anchor that is only an
     // anchor may add a file to one but never join two; see `admit_anchors`.
     let (clean, weak): (Vec<Edge>, Vec<Edge>) = all.into_iter().partition(|e| e.4.accepted(&policy.clean));
@@ -2242,6 +2452,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             .collect()
     };
     stage!(t_start, "corroborated: {} more pairs inside existing clusters", corroborated.len());
+    (all, propagated, corroborated, all_propagated)
+    };
 
     if let Some(path) = &args.dump {
         // `-` is stdout, which `stdout_has_one_reader` has kept for it alone.
@@ -2361,9 +2573,53 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         stated.push(Stated::Edge(e, corroborated));
     }
     drop(seen);
+    // Against a library, nothing is said about two of its files: the run
+    // was not asked, and in the default mode did not look.
+    if against {
+        let keep: Vec<bool> = graph.iter().map(|&(a, b)| !(library[a] && library[b])).collect();
+        let (mut k1, mut k2) = (keep.iter(), keep.iter());
+        graph.retain(|_| *k1.next().unwrap());
+        stated.retain(|_| *k2.next().unwrap());
+    }
+    // The same pairs as the verdicts read them; see `against.rs`.
+    let against_pairs: Vec<against::Pair> = if !against {
+        Vec::new()
+    } else {
+        graph
+            .iter()
+            .zip(&stated)
+            .map(|(&(a, b), s)| match *s {
+                Stated::Identical | Stated::SamePixels => against::Pair {
+                    a,
+                    b,
+                    relation: if matches!(s, Stated::Identical) { "identical" } else { "same_pixels" },
+                    aligned_points: None,
+                    frame_overlap: 1.0,
+                    pixel_correlation: 1.0,
+                    mirrored: false,
+                    inverted: false,
+                    clean: true,
+                },
+                Stated::Edge((_, _, m, inv, v), corroborated) => against::Pair {
+                    a,
+                    b,
+                    relation: if v.n_match == 0 { "propagated" } else if corroborated { "corroborated" } else { "direct" },
+                    aligned_points: (v.n_match > 0).then_some(v.n_in),
+                    frame_overlap: round3(v.ov_a.max(v.ov_b)),
+                    pixel_correlation: round3(v.blk),
+                    mirrored: m[0] * m[4] - m[1] * m[3] < 0.0,
+                    inverted: *inv,
+                    clean: v.blk_min >= suggest::CLEAN,
+                },
+            })
+            .collect()
+    };
     // What to do with each file, read off the same pairs. The other rules
-    // read the groups, and are applied once those exist.
-    let actions = if args.suggest != suggest::Mode::Content { Vec::new() } else { timed!(44, {
+    // read the groups, and are applied once those exist. Against a library,
+    // its files are kept whatever the rest say, and each deletion names the
+    // file it rests on.
+    let pinned: &[bool] = if against { &library } else { &[] };
+    let (actions, keeper) = if args.suggest != suggest::Mode::Content { (Vec::new(), Vec::new()) } else { timed!(44, {
         let pics: Vec<suggest::Picture> = items
             .iter()
             .zip(&stats)
@@ -2383,7 +2639,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 Stated::Edge((_, _, m, inv, v), _) => (a, b, suggest::Link::Edge(v, *m, *inv)),
             })
             .collect();
-        suggest::suggest(&pics, &links, args.min_pixel_correlation, |i| decode::colour_of(&files[i]).unwrap_or(0.0))
+        suggest::suggest_pinned(&pics, &links, args.min_pixel_correlation, |i| decode::colour_of(&files[i]).unwrap_or(0.0), pinned)
     })};
     let names: Vec<String> = files.par_iter().map(|f| f.display().to_string()).collect();
     let mut out_pairs: Vec<OutPair> = graph
@@ -2432,6 +2688,56 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // Stable, as `sort_by` is, so equal names keep the order they were met in.
     out_pairs.par_sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
 
+    let failures: Vec<serde_json::Value> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let e = it.err.as_ref().filter(|_| !not_asked[i])?;
+            let mut f = serde_json::json!({"path": files[i].display().to_string(), "error": e});
+            if let Some(b) = report::raw_bytes(&files[i]) {
+                f["path_bytes"] = b.into();
+            }
+            Some(f)
+        })
+        .collect();
+
+    if against {
+        let asked: Vec<usize> = (0..n).filter(|&i| !library[i] && !not_asked[i]).collect();
+        let answers = against::answer(&asked, &library, &against_pairs, &actions, &keeper);
+        progress.finish();
+        let runtime = t_start.elapsed().as_secs_f64();
+        let n_library = (0..n).filter(|&i| library[i] && !not_asked[i]).count();
+        let header = against::Header {
+            config: run_config(args),
+            files_enumerated: asked.len(),
+            files_analysed: asked.iter().filter(|&&i| items[i].ok).count(),
+            library_files: n_library,
+            failures: &failures,
+            runtime_seconds: (runtime * 1000.0).round() / 1000.0,
+        };
+        let dims: Vec<(u32, u32)> = items.iter().map(|it| it.dims).collect();
+        let damaged: Vec<bool> = items.iter().map(|it| it.damaged.is_some()).collect();
+        let sizes: Vec<u64> = stats.iter().map(|s| s.len).collect();
+        let facts = against::Facts { dims: &dims, sizes: &sizes, damaged: &damaged };
+        let tally = |v: against::Verdict| answers.iter().filter(|a| a.verdict == v).count();
+        let summary = format!(
+            "{} repeat, {} better, {} to review, {} new, of {} scanned against {} in {:.1}s",
+            tally(against::Verdict::Repeat),
+            tally(against::Verdict::Better),
+            tally(against::Verdict::Review),
+            tally(against::Verdict::New),
+            count(asked.len(), "image", "images"),
+            count(n_library, "library image", "library images"),
+            runtime
+        );
+        match timed!(36, write_against(args, &header, &answers, &against_pairs, &out_pairs, &library, &files, &facts))? {
+            Some(path) => say!("{summary} -> {}", path.display()),
+            None => say!("{summary}"),
+        }
+        prof::report();
+        return Ok(());
+    }
+
     let grouping = timed!(28, group::find(n, &graph));
     let membership = group::membership(&grouping);
     stage!(
@@ -2457,19 +2763,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     groups.sort_by(|a, b| {
         b.files.len().cmp(&a.files.len()).then_with(|| a.files.cmp(&b.files))
     });
-
-    let failures: Vec<serde_json::Value> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, it)| {
-            let e = it.err.as_ref().filter(|_| !not_asked[i])?;
-            let mut f = serde_json::json!({"path": files[i].display().to_string(), "error": e});
-            if let Some(b) = report::raw_bytes(&files[i]) {
-                f["path_bytes"] = b.into();
-            }
-            Some(f)
-        })
-        .collect();
 
     // Cleared before anything is written to stdout, which shares the terminal.
     progress.finish();
@@ -2533,7 +2826,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
 
 /// The settings a report records, which are the ones that decide its pairs.
 fn run_config(args: &Args) -> serde_json::Value {
-    serde_json::json!({
+    let mut c = serde_json::json!({
         "work_size": args.work_size,
         "features": FEATURES,
         "candidates": args.candidates,
@@ -2543,7 +2836,12 @@ fn run_config(args: &Args) -> serde_json::Value {
         "stages": "anchor, propagate, corroborate",
         "mirrored_inverted": !args.skip_mirrored,
         "suggest": format!("{:?}", args.suggest).to_lowercase(),
-    })
+    });
+    // Only when asked for, so that a scan's report is what it always was.
+    if !args.against.is_empty() {
+        c["against"] = args.against.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().into();
+    }
+    c
 }
 
 /// A threshold as it was typed. The flags are `f32`, and JSON numbers are
@@ -2589,6 +2887,34 @@ fn write_reports(
         if let report::Sink::File(path) = &target.sink {
             went = Some(path.clone());
         }
+    }
+    Ok(went)
+}
+
+/// The report of a run against a library, where `-o` says, and `--list`'s
+/// paths on stdout. With `--list`, the report goes only to a file `-o` names.
+#[allow(clippy::too_many_arguments)]
+fn write_against(
+    args: &Args,
+    header: &against::Header,
+    answers: &[against::Answer],
+    pairs: &[against::Pair],
+    out_pairs: &[report::OutPair],
+    library: &[bool],
+    files: &[PathBuf],
+    facts: &against::Facts,
+) -> Result<Option<PathBuf>> {
+    let target = report::Target::of(args.output.as_deref(), args.format);
+    let mut went = None;
+    let wanted = args.list.is_empty() || args.output.as_deref().is_some_and(|p| p != stdout_path());
+    if wanted {
+        against::write(&target, header, answers, pairs, out_pairs, library, files, facts)?;
+        if let report::Sink::File(path) = &target.sink {
+            went = Some(path.clone());
+        }
+    }
+    if !args.list.is_empty() {
+        against::list(answers, files, &args.list, args.null)?;
     }
     Ok(went)
 }

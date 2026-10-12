@@ -48,6 +48,9 @@ use walkdir::WalkDir;
 /// Everything about the request that decides which files are analysed.
 pub struct Request<'a> {
     pub roots: &'a [PathBuf],
+    /// `--against`: the library the roots are compared with. Walked by the
+    /// same rules, and each file it lists is marked as the library's.
+    pub library: &'a [PathBuf],
     pub exclude: &'a [PathBuf],
     pub wanted: &'a Wanted,
     pub recursive: bool,
@@ -75,6 +78,8 @@ struct Found {
     /// The entry itself is a symlink — not merely reached through a linked
     /// folder, which names the file just as well. See [`settle`].
     link: bool,
+    /// Reached from a `--against` root rather than from a root to scan.
+    library: bool,
     stat: Stat,
 }
 
@@ -106,6 +111,9 @@ pub struct Listing {
     /// Each file's canonical path when the walk knows it; see [`walk`].
     pub canonical: Vec<Option<PathBuf>>,
     pub stats: Vec<Stat>,
+    /// Whether each file is the library's (`Request::library`). A file both
+    /// sides reach is the scan's: see [`settle`].
+    pub library: Vec<bool>,
 }
 
 /// Every file the request reaches, one path per set of bytes, sorted — and
@@ -133,7 +141,8 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
     let set_aside = SetAside::here();
     let depth = if req.recursive { usize::MAX } else { 1 };
     let mut found = Vec::new();
-    for root in req.roots {
+    let sides = req.roots.iter().map(|r| (r, false)).chain(req.library.iter().map(|r| (r, true)));
+    for (root, library) in sides {
         let shown = root.display().to_string();
         // A root that is not there, or a link to nothing, is loud: a mistyped
         // path must not be a run that quietly scans one directory of the two
@@ -157,9 +166,10 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
                 path: root.clone(),
                 canon: Some(canon),
                 link,
+                library,
             });
         } else if meta.is_dir() {
-            walk_dir(root, &canon, depth, req, &excludes, &set_aside, &mut found, problems);
+            walk_dir(root, &canon, depth, library, req, &excludes, &set_aside, &mut found, problems);
         } else {
             // A socket, a fifo, a device node: naming one is a mistake worth
             // hearing about rather than a file worth trying to decode.
@@ -173,6 +183,7 @@ fn walk_dir(
     root: &Path,
     canon: &Path,
     depth: usize,
+    library: bool,
     req: &Request,
     excludes: &[PathBuf],
     set_aside: &SetAside,
@@ -258,6 +269,7 @@ fn walk_dir(
             stat: Stat::of(&meta),
             link: entry.path_is_symlink(),
             canon: (!follow).then(|| beneath(entry.path())),
+            library,
             path: entry.into_path(),
         });
     }
@@ -354,6 +366,11 @@ impl SetAside {
 /// file and the same file through a linked folder) the smaller path wins,
 /// which makes the list, and so the run, independent of directory order.
 ///
+/// **A file the scan reaches is the scan's**, whatever the library also
+/// reaches: an import folder inside the library is the obvious way, and each
+/// of its files would otherwise be a library file and in the library already.
+/// That comes before the preference for a real name.
+///
 /// Exactly one name is counted per collision either way.
 fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
     found.sort_by(|a, b| a.path.cmp(&b.path));
@@ -368,16 +385,23 @@ fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
             kept.push(f);
             continue;
         };
-        let dropped = if kept[at].link && !f.link { std::mem::replace(&mut kept[at], f).path } else { f.path };
+        let rank = |f: &Found| (f.library, f.link);
+        let dropped = if rank(&f) < rank(&kept[at]) { std::mem::replace(&mut kept[at], f).path } else { f.path };
         problems.listed_twice(&dropped.display().to_string());
     }
     // A later real name may have displaced an earlier link.
     kept.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut out = Listing { files: Vec::with_capacity(kept.len()), canonical: Vec::with_capacity(kept.len()), stats: Vec::with_capacity(kept.len()) };
+    let mut out = Listing {
+        files: Vec::with_capacity(kept.len()),
+        canonical: Vec::with_capacity(kept.len()),
+        stats: Vec::with_capacity(kept.len()),
+        library: Vec::with_capacity(kept.len()),
+    };
     for f in kept {
         out.files.push(f.path);
         out.canonical.push(f.canon);
         out.stats.push(f.stat);
+        out.library.push(f.library);
     }
     out
 }
@@ -569,9 +593,10 @@ mod tests {
         let (wanted, _) = crate::extensions::normalize(&["jpg".to_string()]).unwrap();
         let log = Log::default();
         let mut problems = Problems::new(&log);
-        let Listing { files, canonical: canon, stats } = walk(
+        let Listing { files, canonical: canon, stats, .. } = walk(
             &Request {
                 roots,
+                library: &[],
                 exclude,
                 wanted: &wanted,
                 recursive,
@@ -706,6 +731,27 @@ mod tests {
         fs::hard_link(&a, s.0.join("scan/b.jpg")).unwrap();
         let r = run(&[s.0.join("scan"), s.0.join("scan/sub"), a.clone()], &[], true, false);
         assert_eq!(r.files, vec![s.0.join("scan/b.jpg")], "the smaller of two equally real names");
+    }
+
+    #[test]
+    fn a_file_both_sides_reach_is_the_scans() {
+        let s = Scratch::new();
+        let shelf = s.file("lib/old.jpg");
+        let fresh = s.file("lib/import/new.jpg");
+        // A hard link under the library, with a smaller path, still loses to
+        // the scan's name for the same file.
+        fs::hard_link(&fresh, s.0.join("lib/a.jpg")).unwrap();
+        let (wanted, _) = crate::extensions::normalize(&["jpg".to_string()]).unwrap();
+        let log = Log::default();
+        let mut problems = Problems::new(&log);
+        let roots = [s.0.join("lib/import")];
+        let library = [s.0.join("lib")];
+        let l = walk(
+            &Request { roots: &roots, library: &library, exclude: &[], wanted: &wanted, recursive: true, follow_symlinks: false, hidden: false },
+            &mut problems,
+        );
+        let got: Vec<(PathBuf, bool)> = l.files.into_iter().zip(l.library).collect();
+        assert_eq!(got, vec![(fresh, false), (shelf, true)]);
     }
 
     #[test]

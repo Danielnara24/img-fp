@@ -188,6 +188,9 @@ src/
   suggest.rs          KEEP / DELETE / REVIEW for every grouped file: the
                       `action` column of all three reports; see *Keep,
                       delete, review*
+  against.rs          `--against`: repeat / better / review / new for every
+                      scanned file, its report and `--list`; see *Against a
+                      library*
   problems.rs         what was skipped, what could not be done, the exit code
                       that says so, and --log-file
   progress.rs         one progress bar for the whole run: each stage owns a
@@ -211,6 +214,8 @@ benchmark/
   suggest_score.py    scores a report's `action` column against the ground
                       truth: deletions that lose picture content (must be
                       none), and which families still keep their original
+  against_score.py    scores an `--against` report on IMGS-AGAINST: content
+                      lost, false library claims, files found, truth by verdict
   replay.py           replays the anchor tier and drop_weak_bridges off one
                       --dump, to count cross-family anchors *before* the
                       bridge test — the margin an output table cannot show
@@ -220,6 +225,7 @@ benchmark/
     README.md         how the corpus and its ground truth are built
     transforms.py     CATALOGUE: 90 transforms, every amount drawn per seed
     make_variants.py  the generator
+    make_against.py   IMGS-ALL split into a scan and a library, as symlinks
   out/v5/             the competitors' run: eleven tools, one session
   out/v8/             img-fp's published cost row (see BASELINE.md)
   out/v9/             img-fp after the parameter pass
@@ -261,6 +267,10 @@ benchmark/
                       divisor on IMGS, cold (budget.py, budget.jsonl); one
                       binary reading both from the environment (img-fp-exp),
                       the scaffolding since removed from the source
+  out/v28-against/    `--against` on IMGS-AGAINST and on `derived/Desktop`
+                      against the found corpus: the two first modes cached
+                      (asym, union, found-*), and cold/ the cold runs of
+                      them and of the single mode (cold.py, runs.jsonl)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -1039,6 +1049,156 @@ differently on each side: `crop_strip_top` against its original read 16 grey
 levels against the blur's 2.7, and some 230 more crops and rotations were kept);
 skipping the whole-frame check when the pixel check scored all 36 blocks
 (-30% time, and it deleted a `quadrant_rotate` trap the check had caught).
+
+### Against a library
+
+**`img-fp SCAN --against LIBRARY` answers "which of these do I already
+have", one verdict per scanned file** (`against.rs`): `repeat` (a file that
+stays shows all of it), `better` (the library has it, cleanly matched, and
+nothing there holds it), `review` (a weak library match at `suggest::REVIEW`,
+0.9, or more) and `new`. `--list` prints the paths of some verdicts, for
+`xargs`. The library's own duplicates are not reported. The names and the
+flag are the user's choices.
+
+**A verdict is the content rule with the library pinned**
+(`suggest::suggest_pinned`). A pinned file is KEEP and never deleted; a class
+of one frame holding pinned files keeps a pinned one; deletion spreads from
+the pinned files first, and each DELETE records the file it rests on, so a
+repeat promises what DELETE promises. After the spread, a deletion that
+pinned files could make names the one `choose` would keep of them: the BFS
+named whichever library copy reached it first, and that was a greyscale or
+sharpened copy often enough that 1,018 of 7,748 repeats named a file the
+scorer's stricter `holds` rejects; after it, 331, level with the union run's
+327. A repeat whose keeper is itself a repeat names the end of the chain too
+(`kept`). With `pinned` empty, `suggest` is what it was: IMGS's reports are
+byte-identical to HEAD's in all three formats.
+
+**One mode: the scan asks, then the library it reaches.** Both sides are
+walked (`walk::Request::library`; a file both reach is the scan's) into one
+vocabulary and one index. Every scanned file queries; then every library file
+an asking file anchored queries in turn, round after round until none is new
+(three rounds on IMGS-AGAINST: 13,776, 376 and 46 library files). A candidate
+is ranked by the larger of its two containments, `both_ways`: `score *
+mass(query) / mass(candidate)` (`InvertedFile::mass`), since the intersection
+a query accumulates is the same from either side. The mirrored and inverted
+second look re-asks what an ordinary scan would (a file with fewer than two
+anchors), leaving out library files nothing reached, and **the best-connected
+member of every clean-anchor component holding a scanned file**. Then the ordinary clustering runs over what was reached —
+bridge test, clean-anchor rule, propagation, corroboration — and the
+verdicts are read off its pairs, library-to-library pairs left out. A
+library file no scanned file reaches is analysed and indexed and asks
+nothing.
+
+**How it got there: two modes, each finding what the other missed.** The
+first build had a default that queried only from scanned files, re-asked
+those with fewer than two library anchors and clustered nothing, and a hidden
+`--against-union` that ran the ordinary pipeline over both sides. With the
+copy election fixed (below), on IMGS-AGAINST the default found 6 library
+files the union did not and the union 33 the default did not; 2 and 19 held
+files called repeat. Traced:
+
+- **The union's extras were chains.** Propagation's tree path for every
+  union-only repeat (scaffolding since removed): 18 of 36 ran through library
+  files only (S -> L -> L -> keeper: the library's own duplicates as stepping
+  stones), 11 through scanned files only, 2 through both, 5 were direct pairs
+  the default's retrieval never proposed. Several composed pairs the default
+  *had* verified directly and rejected: a composed transform can beat the
+  direct fit.
+- **The default's extras were the cluster rules' price.** All 16 false
+  library claims only the default made were weak `review` pairs (`blk_min`
+  0.15-0.82) that `admit_anchors` refuses between clusters; the 11 only the
+  union made were propagated `column_roll` and `tile_shuffle` traps. Its true
+  extras were one clean bridge `drop_weak_bridges` dropped, one weak anchor
+  refused, and keep-rule choices off a different pair set.
+- **And a mirror in the library.** A scanned file whose exact mirror image
+  is in the library, and matched by nothing else there, was found by the
+  union because the mirror, matching nothing, was itself re-asked. Only the
+  scan's side asks now, so the scanned file must be re-asked whatever its
+  matches: those the union found this way had six. Re-asking only files
+  with fewer than two library anchors found 4,753 and 3,562; re-asking all
+  4,766 and 3,567, for about a third more CPU on a cached IMGS-AGAINST run
+  (854 against 648), all of it the second look: 44 s of wall for 11,024
+  files, where the union's took 5 s for 1,324. Verifying only candidates
+  outside the file's component saved 20 CPU-seconds of that and lost recall:
+  the cost is the mirrored descents and queries, not the verdicts.
+- **So one file per family is re-asked, not every scanned file.** A mirror of
+  one member of a picture's family is a mirror of the family, and
+  propagation carries the pair to the rest. The best-connected member of each
+  component holding a scanned file: over all anchors, weak ones join
+  families into few large components (1,182 files re-asked, 4,756 found,
+  under the union's 4,759); over clean anchors, 1,994 components and 2,635
+  files re-asked, **4,760 found and 3,569 repeats**, the most of any build.
+  Cached and cooled, A B B A, against re-asking every scanned file: 518 /
+  566 CPU-s against 772 / 726, wall 98 / 104 s against 153 / 130.
+
+**Measured** (`out/v28-against`, native build, 2026-10-11) on
+`/home/daniel/Documents/IMGS-AGAINST` (`make_against.py`: a quarter of
+IMGS-ALL's seeds wholly in the scan, the rest split three files in four to
+the library; 11,800 scanned, 15,859 library; symlinks, run with
+`--follow-symlinks -r -x '*'` so the cache is IMGS-ALL's). Truth per scanned
+file: a library file holds it (4,430), has it without holding it (727), or
+neither (6,643). Cold and cached reports are byte-identical for each.
+
+| | found (names a library file that has it, of 5,157) | held files called repeat (of 4,430) | content lost | false library claims |
+|---|---|---|---|---|
+| **`--against`** | **92.30%** | **80.56%** | **1** (`phone_screenshot`) | **83, all traps** |
+| every scanned file re-asked | 92.42% | 80.52% | 1 | 82, all traps |
+| first default (scan asks, nothing clustered) | 91.76% | 79.98% | 1 | 88: 77 traps, 11 cross-family |
+| union of both sides | 92.28% | 80.36% | 1 | 83, all traps |
+
+"Content lost" is `suggest_score.py`'s test: a repeat no survivor (every
+library file, every scanned file not a repeat) holds. Against either old
+mode, per file, it misses 10 found and 3 repeats of the 4,765 and 3,562
+either made, as re-asking every scanned file missed 10 and 4; looked at for
+that build, in all but two the library matches were there (35-71 of them)
+and the keep rule chose another keeper or `better`.
+
+**Cost**, cold (`cold.py`, `cold/runs.jsonl`: `--no-cache`, corpus evicted,
+cooled to idle + 3 C; the old modes A B B A in one session, the new one two
+runs two hours later in the same day, at matched clocks, 1,834-1,878 MHz on
+IMGS-AGAINST):
+
+| | `--against` CPU-s / wall | first default | union of both sides | peak PSS + swap |
+|---|---|---|---|---|
+| `derived/Desktop` (636) against the found corpus (9,285) | 680 / 681, 106 / 106 s | 580 / 663, 89 / 102 s | 905 / 935, 138 / 143 s | ~1.07 GB all |
+| IMGS-AGAINST | 2,627 / 2,566, 463 / 416 s | 2,634 / 2,661, 429 / 422 s | 2,669 / 2,680, 432 / 439 s | ~2.2 GB all |
+
+(Re-asking every scanned file measured 651 / 662 and 2,915 / 2,923 the same
+evening, so the representatives take a tenth off IMGS-AGAINST cold. The
+`--against` runs are a session apart from the other two columns, and their
+IMGS-AGAINST clocks ran 1,920-1,983 MHz against 1,834-1,878, so read that
+row as level with both old modes, not as below them.)
+
+Cached, Desktop against the found corpus is 105-115 CPU-s (union 383-396,
+the first default 100-112), with the union's verdicts to the file (333
+repeat, no library claim); IMGS-AGAINST 518-566 (union 647, in an earlier
+session). So against a library of unique photographs the mode costs the first
+default's price and a third of the union's, and against a library made of
+families, like IMGS-AGAINST, what either old mode cost.
+
+**Cached and cold were not the same run until the copy election was fixed.**
+A group of byte-identical copies elected the member the cache held, else its
+first, and the cache's members had been elected by IMGS-ALL's walk: a cached
+IMGS-AGAINST run moved 184 verdicts and 8,600 rows' evidence against the same
+run cold, though every record was byte-identical (`--dump` on the files
+involved), because a different original changes the vocabulary's sample. Now
+the first member is the original, and a copy's record serves it and stays
+under the copy's name in the file (`holds_record`). Checked: cached equals
+cold on IMGS-AGAINST in both old modes and in the final one, and on
+`derived/Desktop` cached, cached again and `--no-cache` give the same report.
+**It was not an `--against` bug**: on IMGS itself, HEAD's cached run read 135
+groups and 223,710 pairs against its own `--no-cache` run's 137 and 223,557,
+which this build gives both ways, and which is the figure cold runs here have
+always quoted; so a cached run of a corpus whose cache another walk wrote
+was a vocabulary ripple off its cold one. Ordinary scans are otherwise
+unchanged: IMGS under `--no-cache` is identical to HEAD's, groups, pairs and
+files.
+
+**A scanned original whose library copy is a same-frame re-encode is
+`repeat`, by the user's decision**, although the content rule's `choose`
+would keep the original: the library is what is kept, and the question is
+whether it already shows the picture, not whether the scan has a better file
+of it.
 
 ### What still misses
 

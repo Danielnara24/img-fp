@@ -147,6 +147,59 @@ scanned.
 `-o`, `--dump` and `--log-file` never write over an image: naming one is
 refused before anything runs.
 
+## Comparing with a library
+
+To find out which images in a folder you already have, such as a new camera
+import, compare it with your library using `--against`:
+
+```bash
+# Which of these imports do I already have?
+img-fp ~/Downloads/DCIM -r --against ~/Pictures
+
+# Copy only the images the library doesn't have yet
+img-fp ~/Downloads/DCIM -r --against ~/Pictures --list new,better -0 | xargs -0 cp -t ~/Pictures/2026
+```
+
+Instead of groups, each scanned image gets one verdict:
+
+```
+repeat: 2 files
+	REPEAT, 4032x3024, 3.1MB, /DCIM/IMG_0412.jpg
+	        in library: 4032x3024, 2.4MB, 214 points, overlap 1.00, correlation 0.99, /Pictures/2026/beach.jpg
+	REPEAT, 4032x3024, 3.0MB, /DCIM/IMG_0413.jpg
+	        in scan: 4032x3024, 3.1MB, identical, /DCIM/IMG_0412.jpg
+	        which repeats, in library: /Pictures/2026/beach.jpg
+
+better: 1 file
+	BETTER, 4032x3024, 3.3MB, /DCIM/IMG_0420.jpg
+	        in library: 1600x1200, 410.2KB, 96 points, overlap 1.00, correlation 0.98, /Pictures/shared/dog.jpg
+
+new: 1 file
+	NEW,    4032x3024, 2.9MB, /DCIM/IMG_0431.jpg
+```
+
+- `repeat`: you already have it. A file you keep, either in the library or
+  another scanned image, shows all of it at about the same detail or better,
+  the same promise as `DELETE`. When that file is itself a repeat, the last
+  line names the copy at the end of the chain
+- `better`: the library has the picture, but this image shows more of it:
+  it is larger, less cropped, or the original of an edited copy
+- `review`: a weak match to the library, probably an edited copy, such as one
+  tinted or watermarked. Look at it before deciding
+- `new`: the library doesn't have it. An image that could not be read counts
+  as new unless it is byte-identical to a library file
+
+The library's own duplicates are not reported. The library is walked with the
+same options as the scanned folders: add `-r` for one with subfolders. An
+image both reach, such as an import folder inside the library, counts as
+scanned.
+
+`--list` prints just the paths with the verdicts you name, one per line (or
+NUL-separated with `-0`), in place of the report. The report is still written
+to `-o` if you name a file. The CSV report has a `verdict` column and the file
+it rests on in `match` and `match_in`, and the JSON lists every matched pair
+as well.
+
 ## Desktop app
 
 `img-fp-gui` is a window over the same scan. Pick folders and options, start
@@ -283,11 +336,13 @@ to stderr.
 | --- | --- | --- |
 | `<PATH>...` | Folders and/or image files to scan (required). `-` reads a list of paths from stdin | |
 | `--from-file <FILE>` | Read the paths to scan from a file, one per line (`-` = stdin) | |
-| `-0`, `--null` | Paths in the list are NUL-separated, for `find -print0` / `fd -0` | off |
+| `-0`, `--null` | Paths in the list are NUL-separated, for `find -print0` / `fd -0`, and so are the paths `--list` prints | off |
 | `-r`, `--recursive` | Include subfolders | off |
 | `-e`, `--exclude <PATH>` | Leave out a folder or file; repeat for several | |
 | `--follow-symlinks` | Follow symlinks met while walking a folder | off |
 | `--hidden` | Also walk hidden folders, whose names start with a dot | off |
+| `--against <PATH>` | Compare the scanned images with a library of images you already keep, a folder or an image file; repeat for several. Each scanned image gets a verdict instead of a group (see Comparing with a library) | |
+| `--list <VERDICT>` | With `--against`, print only the paths of the images with these verdicts, one per line, instead of the report: `repeat`, `better`, `review` or `new`, comma-separated or repeated | |
 | `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken only by those two forms | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
