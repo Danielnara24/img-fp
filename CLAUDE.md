@@ -155,7 +155,12 @@ bad pair does not. Zero should be read as "none survived", not as a guarantee
 `benchmark/VALIDATION.md` records the held-out experiment that shaped the
 parameter surface. `README.md` is for users only: how to install and run it,
 with no benchmark figures, comparisons or local measurements, and the same
-holds for the `--help` text and man page generated from `Args`.
+holds for the `--help` text and man page generated from `Args`. Four flags
+are for tuning and scripting and are hidden from `--help` and the README's
+table but listed in the man page (`hide = true`, undone in `print_man`, since
+`clap_mangen` drops hidden arguments): `--dump`, `-k`, `--no-last` and
+`--prune-cache`. The window keeps `-k`, the report, `--min-aligned-points` and
+`--min-frame-overlap` on its Advanced tab; the last two stay in `--help`.
 
 What is left is not accuracy-critical: decode is ~35% of the runtime and has no
 downscaled JPEG path (`zune-jpeg` exposes none, and the arithmetic for adding a

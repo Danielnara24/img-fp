@@ -144,7 +144,7 @@ dot) are skipped unless you pass `--hidden`, since in a home folder they hold
 programs' icons and themes rather than photos; a hidden folder named directly is
 scanned.
 
-`-o`, `--dump` and `--log-file` never write over an image: naming one is
+`-o` and `--log-file` never write over an image: naming one is
 refused before anything runs.
 
 The last scan is kept, so its report can be written again without scanning,
@@ -158,8 +158,7 @@ img-fp --last --suggest representative
 The last scan is the last one to finish, from the command line or the
 desktop app, which opens on it. It is kept in `last-scan/` beside the cache,
 and files deleted since are left out. A JSON report written this way has the
-groups but no list of pairs. Scans run with `--no-cache` or `--no-last` are
-not kept, and neither are scans `--against` a library.
+groups but no list of pairs. Scans run with `--no-cache` are not kept, and neither are scans `--against` a library.
 
 ## Comparing with a library
 
@@ -362,24 +361,23 @@ to stderr.
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--work-size <PX>` | Long side, in pixels, the images are analysed at. Larger images are shrunk to it and small ones enlarged up to it. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `512` |
-| `-k`, `--candidates <N>` | Candidate matches checked per image | `150` |
 | `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3 | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
 | `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |
 | `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
 | `--last` | Write the last scan's report again without scanning, in another format with `-o` or `--format`, or with another `--suggest` rule (see Usage) | |
-| `--no-last` | Don't keep this scan for `--last` and the desktop app | off |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--dump <FILE>` | Write every candidate pair considered, accepted or not, to a CSV. `-` writes it to stdout | |
 | `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC11.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
-| `--prune-cache` | Drop cached entries this scan did not use: images it did not find, and analyses made at another `--work-size`. Skipped when the scan was incomplete | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
 | `--man` | Print the man page (roff) and exit | |
+
+The man page (`man img-fp`, or `img-fp --man`) lists a few more options, for
+tuning and scripting.
 
 Loosening the three `--min-*` options finds more but eventually groups
 different photographs together. The defaults are a safe starting point.
@@ -401,9 +399,8 @@ far as it goes, and is marked `DAMAGED` in the report.
 The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC11.bin`
 (or `~/.cache/img-fp/analysis-IMGFPC11.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
-and entries for deleted files are dropped automatically. Use `--prune-cache` to
-keep only the images in the current scan at the current `--work-size`, or
-`--clear-cache` to start over.
+and entries for deleted files are dropped automatically. Use `--clear-cache`
+to start over.
 
 The part of the name after `analysis-` is the cache format, which changes
 between some versions. Each format has its own default file, so two versions

@@ -1,10 +1,11 @@
 //! The first page: what to scan, how, and the scan's progress.
 //!
-//! Two tabs. General holds what most scans change — the folders, the options
-//! that decide what counts as a duplicate, and where a report goes. Advanced
-//! holds the rest of img-fp's command line: threads, which files a walk takes,
-//! the cache, and a log file. The progress bar, the log and Scan/Cancel sit
-//! below both.
+//! Two tabs. General holds what most scans change — the folders to scan and
+//! to leave out, the work size, the pixel correlation and the mirrored look.
+//! Advanced holds the rest of img-fp's command line: threads, candidates per
+//! image, the aligned points and frame overlap, which files a walk takes, a
+//! report file, the cache, and a log file. The progress bar, the log and
+//! Scan/Cancel sit below both.
 
 use crate::labels as l;
 use crate::last;
@@ -264,12 +265,17 @@ impl Setup {
         // ---- General
         let folders = PathList::new(window, l::ADD_FOLDER, l::REMOVE_FOLDER, "No folders yet. Add one, or drop it here.", 130);
         let recursive = gtk::CheckButton::with_mnemonic(l::RECURSIVE);
+        let hidden = gtk::CheckButton::with_mnemonic(l::HIDDEN);
+        hidden.set_tooltip_text(Some(
+            "Also look in folders whose names start with a dot. They hold programs' icons and themes rather than photos, \
+             so they are left out unless one is added as a folder to scan.",
+        ));
+        let exclude = PathList::new(window, l::ADD_EXCLUDE, l::REMOVE_EXCLUDE, "Nothing left out.", 90);
         // Up to JPEG's largest side, 65,535. The command line has no limit,
         // and this one used to be 4,096, which turned away a size the command
         // line takes for nothing; past the largest picture in a folder any
         // size means what 0 (full size) means.
         let work_size = spin(0.0, 65535.0, 32.0, 0);
-        let candidates = spin(1.0, 2000.0, 10.0, 0);
         let min_points = spin(0.0, 200.0, 1.0, 0);
         let min_overlap = spin(0.0, 1.0, 0.05, 2);
         let min_correlation = spin(0.0, 1.0, 0.05, 2);
@@ -279,29 +285,28 @@ impl Setup {
              duplicates that is most images and most of a rescan's time. Turned off, scans there are much faster, \
              most mirrored and inverted copies are missed, and a group they linked together can split in two.",
         ));
-        let report = gtk::CheckButton::with_mnemonic(l::REPORT);
-        let report_path = entry();
-        report_path.set_placeholder_text(Some("results.txt, results.csv or results.json"));
-        let report_choose = gtk::Button::with_mnemonic(l::REPORT_CHOOSE);
-        let report_format = gtk::DropDown::from_strings(&ReportFormat::ALL.map(|f| f.label()));
 
         let g = grid();
         let folders_label = label_for(l::FOLDERS, &folders.list);
         folders_label.set_valign(gtk::Align::Start);
         g.attach(&folders_label, 0, 0, 1, 1);
         g.attach(&folders.root, 1, 0, 2, 1);
-        g.attach(&recursive, 1, 1, 2, 1);
+        let walk_box = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+        walk_box.append(&recursive);
+        walk_box.append(&hidden);
+        g.attach(&walk_box, 1, 1, 2, 1);
+        let exclude_label = label_for(l::EXCLUDE, &exclude.list);
+        exclude_label.set_valign(gtk::Align::Start);
+        g.attach(&exclude_label, 0, 2, 1, 1);
+        g.attach(&exclude.root, 1, 2, 2, 1);
 
-        g.attach(&section("What counts as a duplicate"), 0, 2, 3, 1);
-        let rows: [(&str, &gtk::SpinButton, &str); 5] = [
+        g.attach(&section("What counts as a duplicate"), 0, 3, 3, 1);
+        let rows: [(&str, &gtk::SpinButton, &str); 2] = [
             (l::WORK_SIZE, &work_size, "Pixels on the long side each image is analysed at. Higher finds more, especially small pictures inside larger ones such as slides and collages, but is slower. 640 is a good choice when that matters. 0 does not shrink images at all, which is much slower on large photos."),
-            (l::MIN_POINTS, &min_points, "Matching points two images must share. Higher is stricter."),
-            (l::MIN_OVERLAP, &min_overlap, "How much of one image must lie inside the other, from 0 to 1. Higher is stricter."),
             (l::MIN_CORRELATION, &min_correlation, "How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter."),
-            (l::CANDIDATES, &candidates, "Possible matches checked for each image."),
         ];
         for (i, (text, w, tip)) in rows.into_iter().enumerate() {
-            let r = 3 + i as i32;
+            let r = 4 + i as i32;
             let label = label_for(text, w);
             label.set_tooltip_text(Some(tip));
             w.set_tooltip_text(Some(tip));
@@ -309,29 +314,20 @@ impl Setup {
             g.attach(w, 1, r, 1, 1);
             g.attach(&hint(tip), 2, r, 1, 1);
         }
-        g.attach(&mirrored, 1, 8, 2, 1);
-        g.attach(&hint("Off is much faster on a library with few duplicates, and misses most mirrored and inverted copies."), 1, 9, 2, 1);
-        g.attach(&section("Report"), 0, 10, 3, 1);
-        g.attach(&report, 0, 11, 1, 1);
-        let report_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        report_box.append(&report_path);
-        report_box.append(&report_choose);
-        g.attach(&report_box, 1, 11, 2, 1);
-        g.attach(&label_for(l::REPORT_FORMAT, &report_format), 0, 12, 1, 1);
-        report_format.set_halign(gtk::Align::Start);
-        g.attach(&report_format, 1, 12, 2, 1);
+        g.attach(&mirrored, 1, 6, 2, 1);
+        g.attach(&hint("Off is much faster on a library with few duplicates, and misses most mirrored and inverted copies."), 1, 7, 2, 1);
         let general = gtk::ScrolledWindow::builder().child(&g).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
 
         // ---- Advanced
         let threads = spin(0.0, 1024.0, 1.0, 0);
+        let candidates = spin(1.0, 2000.0, 10.0, 0);
         let extensions = entry();
-        let exclude = PathList::new(window, l::ADD_EXCLUDE, l::REMOVE_EXCLUDE, "Nothing left out.", 90);
         let symlinks = gtk::CheckButton::with_mnemonic(l::SYMLINKS);
-        let hidden = gtk::CheckButton::with_mnemonic(l::HIDDEN);
-        hidden.set_tooltip_text(Some(
-            "Also look in folders whose names start with a dot. They hold programs' icons and themes rather than photos, \
-             so they are left out unless one is added as a folder to scan.",
-        ));
+        let report = gtk::CheckButton::with_mnemonic(l::REPORT);
+        let report_path = entry();
+        report_path.set_placeholder_text(Some("results.txt, results.csv or results.json"));
+        let report_choose = gtk::Button::with_mnemonic(l::REPORT_CHOOSE);
+        let report_format = gtk::DropDown::from_strings(&ReportFormat::ALL.map(|f| f.label()));
         let use_cache = gtk::CheckButton::with_mnemonic(l::USE_CACHE);
         let cache_path = entry();
         cache_path.set_placeholder_text(Some(&format!("the default: ~/.cache/img-fp/{}", img_fp::cache_file_name())));
@@ -346,44 +342,76 @@ impl Setup {
         a.attach(&label_for(l::THREADS, &threads), 0, 0, 1, 1);
         let threads_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         threads_box.append(&threads);
-        threads_box.append(&hint("Worker threads. 0 uses every core."));
+        let threads_hint = hint("Worker threads. 0 uses every core.");
+        threads_hint.set_hexpand(true);
+        threads_box.append(&threads_hint);
         a.attach(&threads_box, 1, 0, 2, 1);
-        a.attach(&section("Which files"), 0, 1, 3, 1);
-        a.attach(&label_for(l::EXTENSIONS, &extensions), 0, 2, 1, 1);
-        a.attach(&extensions, 1, 2, 2, 1);
+        let candidates_tip = "Possible matches checked for each image.";
+        let candidates_label = label_for(l::CANDIDATES, &candidates);
+        candidates_label.set_tooltip_text(Some(candidates_tip));
+        candidates.set_tooltip_text(Some(candidates_tip));
+        a.attach(&candidates_label, 0, 1, 1, 1);
+        let candidates_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        candidates_box.append(&candidates);
+        let candidates_hint = hint(candidates_tip);
+        candidates_hint.set_hexpand(true);
+        candidates_box.append(&candidates_hint);
+        a.attach(&candidates_box, 1, 1, 2, 1);
+        let strict: [(&str, &gtk::SpinButton, &str); 2] = [
+            (l::MIN_POINTS, &min_points, "Matching points two images must share. Higher is stricter."),
+            (l::MIN_OVERLAP, &min_overlap, "How much of one image must lie inside the other, from 0 to 1. Higher is stricter."),
+        ];
+        for (i, (text, w, tip)) in strict.into_iter().enumerate() {
+            let r = 2 + i as i32;
+            let label = label_for(text, w);
+            label.set_tooltip_text(Some(tip));
+            w.set_tooltip_text(Some(tip));
+            a.attach(&label, 0, r, 1, 1);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.append(w);
+            let h = hint(tip);
+            h.set_hexpand(true);
+            row.append(&h);
+            a.attach(&row, 1, r, 2, 1);
+        }
+        a.attach(&section("Which files"), 0, 4, 3, 1);
+        a.attach(&label_for(l::EXTENSIONS, &extensions), 0, 5, 1, 1);
+        a.attach(&extensions, 1, 5, 2, 1);
         a.attach(
             &hint("Extensions a folder is searched for, comma-separated. * takes every file, and !gif leaves GIFs out of everything else."),
-            1, 3, 2, 1,
+            1, 6, 2, 1,
         );
-        let exclude_label = label_for(l::EXCLUDE, &exclude.list);
-        exclude_label.set_valign(gtk::Align::Start);
-        a.attach(&exclude_label, 0, 4, 1, 1);
-        a.attach(&exclude.root, 1, 4, 2, 1);
-        let walk_box = gtk::Box::new(gtk::Orientation::Horizontal, 18);
-        walk_box.append(&symlinks);
-        walk_box.append(&hidden);
-        a.attach(&walk_box, 1, 5, 2, 1);
-        a.attach(&section("Cache"), 0, 6, 3, 1);
-        a.attach(&use_cache, 0, 7, 3, 1);
-        a.attach(&hint("Keeps each image's analysis, so a folder scanned again only analyses what changed."), 0, 8, 3, 1);
-        a.attach(&label_for(l::CACHE_FILE, &cache_path), 0, 9, 1, 1);
+        a.attach(&symlinks, 1, 7, 2, 1);
+        a.attach(&section("Report"), 0, 8, 3, 1);
+        a.attach(&report, 0, 9, 1, 1);
+        let report_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        report_box.append(&report_path);
+        report_box.append(&report_choose);
+        a.attach(&report_box, 1, 9, 2, 1);
+        a.attach(&label_for(l::REPORT_FORMAT, &report_format), 0, 10, 1, 1);
+        report_format.set_halign(gtk::Align::Start);
+        a.attach(&report_format, 1, 10, 2, 1);
+        a.attach(&section("Cache"), 0, 11, 3, 1);
+        a.attach(&use_cache, 0, 12, 3, 1);
+        a.attach(&hint("Keeps each image's analysis, so a folder scanned again only analyses what changed."), 0, 13, 3, 1);
+        a.attach(&label_for(l::CACHE_FILE, &cache_path), 0, 14, 1, 1);
         let cache_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         cache_box.append(&cache_path);
         cache_box.append(&cache_choose);
-        a.attach(&cache_box, 1, 9, 2, 1);
-        a.attach(&clear_cache, 1, 10, 2, 1);
-        a.attach(&prune_cache, 1, 11, 2, 1);
-        a.attach(&hint("Both apply to the next scan only."), 1, 12, 2, 1);
-        a.attach(&section("Log"), 0, 13, 3, 1);
-        a.attach(&log, 0, 14, 1, 1);
+        a.attach(&cache_box, 1, 14, 2, 1);
+        a.attach(&clear_cache, 1, 15, 2, 1);
+        a.attach(&prune_cache, 1, 16, 2, 1);
+        a.attach(&hint("Both apply to the next scan only."), 1, 17, 2, 1);
+        a.attach(&section("Log"), 0, 18, 3, 1);
+        a.attach(&log, 0, 19, 1, 1);
         let log_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         log_box.append(&log_path);
         log_box.append(&log_choose);
-        a.attach(&log_box, 1, 14, 2, 1);
-        a.attach(&hint("Every skipped file, problem and stage timing, in full."), 1, 15, 2, 1);
+        a.attach(&log_box, 1, 19, 2, 1);
+        a.attach(&hint("Every skipped file, problem and stage timing, in full."), 1, 20, 2, 1);
         let version = hint(concat!("img-fp ", env!("CARGO_PKG_VERSION")));
         version.set_margin_top(18);
-        a.attach(&version, 0, 16, 3, 1);
+        a.attach(&version, 0, 21, 3, 1);
         let advanced = gtk::ScrolledWindow::builder().child(&a).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
 
         let notebook = gtk::Notebook::new();

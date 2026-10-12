@@ -67,7 +67,12 @@ use std::time::Instant;
 use verify::{Affine, Thumb, Variant, Verdict};
 
 #[derive(Parser, Debug)]
-#[command(name = "img-fp", about = "Find duplicate and near-duplicate images.", version)]
+#[command(
+    name = "img-fp",
+    about = "Find duplicate and near-duplicate images.",
+    version,
+    after_help = "A few more options, for tuning and scripting, are in the man page (img-fp --man)."
+)]
 // The doc comments below are the `--help` text and the man page, so they say
 // what a flag does and nothing about how its default was chosen. That is in
 // CLAUDE.md, which the binary cannot point to.
@@ -175,7 +180,7 @@ struct Args {
     work_size: usize,
 
     /// Candidate matches checked per image.
-    #[arg(short = 'k', long, value_name = "N", default_value_t = 150, value_parser = parse_candidates)]
+    #[arg(short = 'k', long, value_name = "N", default_value_t = 150, value_parser = parse_candidates, hide = true)]
     candidates: usize,
 
     /// Matching points two images must share before they count as duplicates.
@@ -218,7 +223,7 @@ struct Args {
 
     /// Write every candidate pair considered, accepted or not, to this CSV.
     /// `-` is stdout.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", hide = true)]
     dump: Option<PathBuf>,
 
     /// Use this cache file instead of the default one.
@@ -247,7 +252,7 @@ struct Args {
     /// analyses made at another `--work-size`.
     ///
     /// Skipped when the scan could not read everything it was given.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     prune_cache: bool,
 
     /// Write the last scan's report again, without scanning: in another
@@ -267,7 +272,7 @@ struct Args {
     last: bool,
 
     /// Don't keep this scan for `--last` and the window.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     no_last: bool,
 
     /// Print timings for each stage.
@@ -1180,9 +1185,14 @@ fn outputs_are_distinct(args: &Args) -> Result<()> {
 
 /// `--man`: clap's page, plus the exit codes, which clap knows nothing about
 /// and which are the part of a run a script can test. Same four as `vid-fp`.
+///
+/// The page lists every option, the ones `--help` hides included: those are
+/// for tuning and scripting, kept out of the short list rather than secret,
+/// and `clap_mangen` would leave them out too.
 fn print_man() -> Result<()> {
     let mut buf: Vec<u8> = Vec::new();
-    clap_mangen::Man::new(Args::command()).render(&mut buf)?;
+    let cmd = Args::command().mut_args(|a| a.hide(false)).after_help(None::<&str>);
+    clap_mangen::Man::new(cmd).render(&mut buf)?;
     if !buf.ends_with(b"\n") {
         buf.push(b'\n');
     }

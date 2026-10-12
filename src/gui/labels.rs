@@ -22,23 +22,23 @@ pub const ADD_FOLDER: &str = "_Add folder…";
 pub const REMOVE_FOLDER: &str = "_Remove";
 pub const RECURSIVE: &str = "Look _in subfolders";
 pub const WORK_SIZE: &str = "_Work size";
-pub const MIN_POINTS: &str = "Min aligned _points";
-pub const MIN_OVERLAP: &str = "Min frame _overlap";
 pub const MIN_CORRELATION: &str = "Min pi_xel correlation";
-pub const CANDIDATES: &str = "Ca_ndidates per image";
 pub const MIRRORED: &str = "Loo_k for mirrored and inverted copies";
-pub const REPORT: &str = "Save a report _to";
-pub const REPORT_CHOOSE: &str = "C_hoose…";
-pub const REPORT_FORMAT: &str = "For_mat";
+pub const EXCLUDE: &str = "Folders to _exclude";
+pub const ADD_EXCLUDE: &str = "Add excl_uded folder…";
+pub const REMOVE_EXCLUDE: &str = "Re_move";
+pub const HIDDEN: &str = "Include _hidden folders";
 
 // The Advanced tab.
 pub const THREADS: &str = "_Threads";
+pub const CANDIDATES: &str = "Ca_ndidates per image";
+pub const MIN_POINTS: &str = "Min _aligned points";
+pub const MIN_OVERLAP: &str = "M_in frame overlap";
 pub const EXTENSIONS: &str = "Extensi_ons";
-pub const EXCLUDE: &str = "_Exclude";
-pub const ADD_EXCLUDE: &str = "Add e_xcluded folder…";
-pub const REMOVE_EXCLUDE: &str = "_Remove";
 pub const SYMLINKS: &str = "Follow symlin_ks";
-pub const HIDDEN: &str = "_Include hidden folders";
+pub const REPORT: &str = "Save a _report to";
+pub const REPORT_CHOOSE: &str = "Choos_e…";
+pub const REPORT_FORMAT: &str = "For_mat";
 pub const USE_CACHE: &str = "_Use a cache";
 pub const CACHE_FILE: &str = "_Cache file";
 pub const CACHE_CHOOSE: &str = "C_hoose…";
@@ -116,11 +116,11 @@ mod tests {
         // CANCEL is left out because it replaces SCAN.
         let page = [SCAN, TAB_GENERAL, TAB_ADVANCED, SCAN_LOG, BACK_TO_RESULTS, DEFAULTS];
         let general = [
-            FOLDERS, ADD_FOLDER, REMOVE_FOLDER, RECURSIVE, WORK_SIZE, MIN_POINTS, MIN_OVERLAP,
-            MIN_CORRELATION, CANDIDATES, MIRRORED, REPORT, REPORT_CHOOSE, REPORT_FORMAT,
+            FOLDERS, ADD_FOLDER, REMOVE_FOLDER, RECURSIVE, HIDDEN, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE,
+            WORK_SIZE, MIN_CORRELATION, MIRRORED,
         ];
         let advanced = [
-            THREADS, EXTENSIONS, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE, SYMLINKS, HIDDEN, USE_CACHE,
+            THREADS, CANDIDATES, MIN_POINTS, MIN_OVERLAP, EXTENSIONS, SYMLINKS, REPORT, REPORT_CHOOSE, REPORT_FORMAT, USE_CACHE,
             CACHE_FILE, CACHE_CHOOSE, CLEAR_CACHE, PRUNE_CACHE, LOG_FILE, LOG_CHOOSE,
         ];
         distinct("general tab", &[&page[..], &general[..]].concat());
