@@ -118,7 +118,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 11: a record carries the file's `decode::Traits`, which the keep/delete
 /// suggestion reads: measured while the file is decoded, and not otherwise
 /// to be had from a cached record.
-const MAGIC: &[u8; 8] = b"IMGFPC11";
+/// 12: a picture wider than 4:3 is analysed with a longer long side, and its
+/// thumbnail with one to match (`decode::area_factor`).
+const MAGIC: &[u8; 8] = b"IMGFPC12";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -180,7 +182,7 @@ pub struct Key {
     pub ctime: i64,
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC11.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC12.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -1126,8 +1128,13 @@ fn read_stream<R: Read + Skip>(
                 // produce: its own bytes are damaged, and the records around
                 // it are not. It is counted, so that the run sees the file
                 // holds something to compact away, and not kept.
+                // A thumbnail's side may pass the setting on a picture wider
+                // than 4:3 (`decode::area_factor`), but never its area, nor
+                // `lib::THUMB_MAX_SIDES` times it.
                 let s = head.settings;
-                if head.n > s.features as usize || head.tw > s.thumb || head.th > s.thumb {
+                let (tw, th) = (head.tw as u64, head.th as u64);
+                let (thumb, sides) = (s.thumb as u64, s.thumb as u64 * crate::THUMB_MAX_SIDES as u64);
+                if head.n > s.features as usize || tw * th > thumb * thumb || tw.max(th) > sides {
                     tail.damaged += 1;
                     continue;
                 }
@@ -1583,6 +1590,24 @@ mod tests {
         // However little of the file it is.
         let keep: Vec<(&Path, Span)> = Vec::new();
         assert!(store.worth_compacting(&keep, false));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A wide picture's thumbnail is longer than the setting on one side
+    /// (`decode::area_factor`), and is a record like any other: read back,
+    /// not called damaged.
+    #[test]
+    fn a_wide_thumbnail_is_not_damage() {
+        let dir = scratch("wide");
+        let path = dir.join(file_name());
+        let (_, store, _) = reopen(&path);
+        let (f, _) = analysis(10, 2);
+        let t = Thumb::new(400, 30, 0.125, vec![2; 400 * 30]);
+        store.append("wide.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (3200, 240), &Traits::default(), &f, &t).unwrap();
+        drop(store);
+        let (got, _, bad) = reopen(&path);
+        assert!(!bad, "a wide thumbnail is not damage");
+        assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("wide.jpg")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

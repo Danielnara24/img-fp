@@ -30,7 +30,8 @@ impl Gray {
 }
 
 pub struct Decoded {
-    /// Long side <= the working size passed to `decode`.
+    /// Long side <= the working size passed to `decode`, times
+    /// `area_factor` for a picture wider than 4:3.
     pub work: Gray,
     /// The picture's own width and height, as shown: an EXIF orientation that
     /// turns it on its side is applied, as it is to `work`.
@@ -1367,9 +1368,31 @@ fn dynamic_to_gray(img: &DynamicImage, work: usize) -> Gray {
     }
 }
 
+/// How much further than `--work-size` a picture's long side may go: as far
+/// as gives it the pixels a 4:3 picture of the working size gets,
+/// `sqrt(3/4 * long/short)`, never less than 1. The limit is on the long
+/// side, so without this a full-page screenshot or a panorama is shrunk by
+/// its aspect ratio as well as its size: a 1080x11520 page at 512 is 48x512,
+/// and each photograph in it 48x64. A 4:3 or squarer picture is untouched,
+/// and no picture costs more than a 4:3 one does. The pixel check's
+/// thumbnail is scaled by the same factor (`lib::analyse`).
+pub fn area_factor(w: usize, h: usize) -> f64 {
+    if w == 0 || h == 0 {
+        return 1.0;
+    }
+    let (long, short) = (w.max(h) as f64, w.min(h) as f64);
+    (0.75 * long / short).sqrt().max(1.0)
+}
+
+/// The long-side limit for a `w` by `h` picture at `--work-size work`.
+fn long_limit(w: usize, h: usize, work: usize) -> usize {
+    if work == 0 { 0 } else { (work as f64 * area_factor(w, h)).round() as usize }
+}
+
 /// Integer box factor that keeps the long side at or above 2x the working
 /// size (or 1), so the final area resample still has enough to average.
 fn box_factor(w: usize, h: usize, work: usize) -> usize {
+    let work = long_limit(w, h, work);
     let long = w.max(h);
     if work == 0 {
         return 1;
@@ -1619,6 +1642,7 @@ impl Fit {
     /// The size `fit_to` would resample a `w` by `h` plane to, or `None` when
     /// it would leave it as it is.
     fn size(w: usize, h: usize, work: usize) -> Option<(usize, usize)> {
+        let work = long_limit(w, h, work);
         let long = w.max(h);
         if work == 0 || long <= work {
             return None;
@@ -1901,6 +1925,7 @@ fn reduce_dyn(w: usize, h: usize, data: &[u8], ch: usize, alpha: bool, work: usi
 
 /// Area-resample so the long side is exactly `work` (never upscales).
 pub fn fit_to(g: Gray, work: usize) -> Gray {
+    let work = long_limit(g.w, g.h, work);
     let long = g.w.max(g.h);
     if work == 0 || long <= work {
         return g;

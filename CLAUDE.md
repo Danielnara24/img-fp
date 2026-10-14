@@ -81,9 +81,17 @@ memory*). Every one is under its section below.
 *Keep, delete, review* under *How img-fp works*): on IMGS-ALL no deletion loses
 picture content but three synthetic composites in 17,877, against the
 generated ground truth. It reads two new facts
-per file measured at decode, so the cache format is `IMGFPC11`; the pairs are
+per file measured at decode, so the cache format went to `IMGFPC11`; the pairs were
 unchanged. The window shows it on each card, tints REVIEW, and marks the
 DELETEs on request (*Mark suggested deletions*).
+
+**0.44.0 analyses a picture wider than 4:3 with as many pixels as a 4:3
+one** (*Elongated pictures*), and keeps a bridge the bridge test drops as a
+weak anchor. IMGS-ALL at 512 goes to F1 **0.9805** (99.56% / 96.59%, 46
+perfect) from 0.9781, IMGS-ELONG from 57 to 65 of 68, for about 4.5% more
+CPU on IMGS-ALL and none on the found corpus; the cache went to `IMGFPC12`.
+The default's cliffs are where they were; 640's moved closer. The paragraphs
+below quote earlier builds until a row re-baselines them.
 
 **The shipped `--min-pixel-correlation` is 0.6**, raised from 0.5 in 0.12.0 for
 what a user wants grouped rather than for F1: at 0.5 the tool grouped merely
@@ -278,6 +286,21 @@ benchmark/
                       against the found corpus: the two first modes cached
                       (asym, union, found-*), and cold/ the cold runs of
                       them and of the single mode (cold.py, runs.jsonl)
+  out/v29-area/       the area rule re-measured on 0.43.1: all four corpora,
+                      IMGS-ALL, the found corpus and IMGS-ELONG at 384, 512,
+                      640 and 1024 (run.py, score1.py, probe/cross.py names
+                      the files behind each cross-family seed pair)
+  out/v30-cluster/    the area rule's two halves and the dropped bridge kept
+                      as a weak anchor (`IMGFP_DEMOTE`), one binary reading
+                      both from the environment (img-fp-exp)
+  out/v31-cost-cliff/ 0.44.0's evidence: cold A B B A cost of each change and
+                      of 640 against 512, and every option swept at 512 and
+                      640 on all four corpora and IMGS-ALL for 0.43.1, the
+                      weak-anchor change and the two together (run.py,
+                      results.jsonl, cliffs.txt)
+  out/v32-cut/        a one-file bridge test (`IMGFP_CUT`), swept the same
+                      way from v31's 0.44.0 caches; not kept (run.py,
+                      results.jsonl, summary.txt)
 vendor/               third-party tools and venvs, gitignored
 ```
 
@@ -577,6 +600,18 @@ The parts that are easy to get wrong:
   is more than one file is dropped, full stop. Holding strong bridges to a
   higher bar instead, which is what three fitted constants used to do, is worth
   0.2 points of tuning-corpus recall and nothing at all on the held-out one.
+
+  **Since 0.44.0 a dropped bridge is kept as a weak anchor** rather than thrown
+  away: it joins no two clusters of its own, but it may still add a file to
+  one and it counts in `admit_anchors`' cover test. On its own that is worth
+  +0.0008 of IMGS-ALL F1 at 512 and costs nothing (cold, cooled A B B A: 2,412
+  against 2,429 CPU-seconds on IMGS-ALL, 774-777 against 786-795 on the found
+  corpus, cached 401 against 404; `out/v31-cost-cliff`), and it moves no cliff
+  anywhere in the 0.43.1 grid at 512 or 640. It shipped for the area rule
+  (*Elongated pictures*): with the area rule alone, IMGS-ALL at 512 put a
+  stray `algiu2` fragment into `algiu1`'s family (162 pairs) and at 384 an
+  `Acueducto2` one into `Acueducto1`'s (217); with the dropped bridges kept
+  as weak anchors, neither (`out/v30-cluster`).
 - **A group is a representative and everything that matched it** (`group.rs`),
   not a connected component and not a maximal clique. Matching is not
   transitive and this tool manufactures the counterexamples by design:
@@ -1270,7 +1305,7 @@ present in both files. The corpus calls such pairs DIFFERENT on the scramble
 rule and img-fp is caught by it for a defensible reason. Report trap hits and
 real errors separately, the way `BASELINE.md` does for SSCD.
 
-### Elongated pictures: measured, not shipped
+### Elongated pictures: the area rule, shipped in 0.44.0
 
 **`--work-size` limits the long side, so a picture far from 4:3 is analysed
 at a fraction of the detail.** A full-page screenshot, a long comic or a
@@ -1282,10 +1317,12 @@ overlap 1.0) on 3 aligned points at 512 and 7 at 1024, against a bar of 10 —
 and in a 1:10.7 page at 2048 but not at `0`, where 600 features are spread over
 the whole page. Up to about 1:6.6 the default found it.
 
-**The rule tried** (`AREA=1` in `out/v19-aspect-texture/img-fp-exp`): a
+**The rule** (`decode::area_factor`; first tried as `AREA=1` in
+`out/v19-aspect-texture/img-fp-exp`): a
 picture wider than 4:3 gets the pixels a 4:3 picture of the working size gets
 — the long-side limit times `sqrt(3/4 * long/short)`, never less than 1 — and
-its pixel-check thumbnail the same factor on its 128. A 4:3 or squarer picture
+its pixel-check thumbnail the same factor on its 128 (at most 16 times it,
+`THUMB_MAX_SIDES`, which a thumbnail's `u16` side needs). A 4:3 or squarer picture
 is untouched to the pixel, so the found corpus (224x224) cannot move; a 16:9
 one gets 591 on its long side at 512, a 1:10 one 1,402. Every picture still
 costs at most what a 4:3 one does.
@@ -1326,11 +1363,71 @@ each one stray file joining its sibling's family — `game2`/`game3` (82) at
 384, `docks1`/`docks2` (82) at 640 — the clean-anchor rule's lone-file
 allowance, not merges. Both seed halves were recorded per run (`results.jsonl`).
 
-**Why it is not shipped yet:** it changes every published number, it costs
-3-4% CPU on the benchmark corpora (uncooled figures; the photographs there are
-mostly 4:3, the derived canvases are not), and at 640 it trades five perfect
-rows for nothing. The case for it is the IMGS-ELONG table, which the benchmark
-cannot see, and the default-size gain, which it can.
+**Why it waited, and why it shipped.** In `out/v19` it changed every
+published number, cost 3-4% CPU uncooled, and at 640 traded five perfect rows
+for nothing. Re-measured on 0.43.1 (`out/v29-area`) it also let stray
+fragments into their siblings' families: an `algiu2` fragment into `algiu1`'s
+at 512 (162 pairs) and an `Acueducto2` one at 384 (217). Keeping a bridge the
+bridge test drops as a weak anchor (*Weak bridges are dropped*) removes both,
+and the two changes shipped together as 0.44.0. On 0.44.0 against 0.43.1
+(`out/v31-cost-cliff`, cached runs, every corpus scored on its own):
+
+| `--work-size` 512 | F1 | recall | perfect | cross-family |
+|---|---|---|---|---|
+| IMGS | 0.9687 -> **0.9711** | 94.31% -> 94.77% | 52 -> 53 | 0 -> 1 |
+| IMGS2 | 0.9811 -> 0.9808 | 96.70% -> 96.64% | 70 -> 64 | 0 -> 1 |
+| IMGS3 | 0.9843 -> **0.9861** | 97.34% -> 97.66% | 76 -> 80 | 87 -> 8 |
+| IMGS4 | 0.9827 -> **0.9854** | 97.00% -> 97.54% | 76 -> 78 | 0 -> 1 |
+| **IMGS-ALL** | **0.9781 -> 0.9805** | **96.11% -> 96.59%** | **45 -> 46** | **3 -> 95** |
+| IMGS-ALL at 640 | 0.9819 -> 0.9826 | 96.88% -> 97.00% | 44 -> 47 | 6 -> 8 |
+
+Precision is 99.56% against 99.58% at 512. IMGS-ALL's 95 cross-family pairs
+are no merge: a stray `Segovia` file (84 pairs, the lone-file allowance on
+the other sibling pair, the one IMGS3 alone had on 0.43.1) and single pairs.
+IMGS2 loses six perfect rows by a seed each. On IMGS-ELONG at 512 it finds
+**65 of 68 against 57**, no false pair. The found corpus (224x224) is
+pair-for-pair the same, as it must be.
+
+**Cost**, cold, cooled, evicted, `--no-cache`, A B B A against 0.43.1:
+IMGS-ALL **2,496 against 2,609 CPU-seconds (+4.5%)** in the clock-matched
+pair (2,000 and 1,961 MHz; the other, 2,391 against 2,684 at 2,050 and 1,900
+MHz, is void), wall 358 against 376 s, peak 2,231-2,251 against 2,312-2,329
+MB, the larger thumbnails; the found corpus level, 790 / 788 against 820 /
+789. It is what the rule says it is: more pixels for the pictures wider than
+4:3, which on the benchmark are the derived canvases.
+
+**The cliffs** (every option at 512 and 640 on the four corpora and
+IMGS-ALL, from 0.44.0's caches; the 0.43.1 rows are the same grid):
+
+| option | 512, 0.43.1 | **512, 0.44.0** | 640, 0.43.1 | 640, 0.44.0 |
+|---|---|---|---|---|
+| `--min-aligned-points` 10 | none down to 3 | **none down to 3** | 4 steps (IMGS2 at 6) | 3 steps (IMGS-ALL at 7, `bust`) |
+| `--min-frame-overlap` 0.85 | 0.35 (`docks`) | **0.35** (`docks`; `Henares` too at 0.3) | 0.45 (`docks` at 0.4) | 0.25 (`docks` at 0.6) |
+| `--min-pixel-correlation` 0.6 | none from 0.2 to 0.8 | **none from 0.2 to 0.8** | none | 0.2 below (IMGS3 at 0.4, `game`) |
+| `-k` 150 | none from 10 up | **none from 10 up** | none | none |
+
+So the default's margins are unchanged and 640's moved closer. Traced
+(`out/v31-cost-cliff/cliffs.txt`), only one of the three 640 merges is the
+area rule's own: `bust` at bar 7, where a 1.56:1 `crop_strip_top` of `bust2`
+gets an 8% larger thumbnail, its two anchors into `bust1` turn clean (worst
+block 0.71 and 0.35 -> 0.92 and 0.88), and two edges from one file are no
+bridge. `docks` at 0.6 has the same shape (one `mirror_crop` of `docks1` with
+two clean anchors into `docks2`) on files the rule does not touch: a
+vocabulary ripple. So is `game` at 0.4, where a ripple's second wrong weak
+anchor on an `invert` of `game3` counts as "anchored twice", so the second
+look never re-asks it and its fragment joins `game2`.
+
+**Tried for the shape and not kept: a one-file bridge test**
+(`out/v32-cut`, `IMGFP_CUT`, scaffolding since removed). A file that is the
+only link between two groups of two or more files kept its links into the
+group it had most links to, and the rest became weak anchors. It removed
+`bust` at 640 everywhere down to bar 3 and `docks` at 0.6 (640) and 0.5
+(512), and cost the default: IMGS-ALL at 512 0.9805 -> 0.9789 (recall
+96.59% -> 96.27%), IMGS3 80 -> 68 perfect rows, both halves down — a family's
+original holding two of its own sub-clusters together is the same shape. At
+`-k` 25 and 50 the fragments it made joined sibling families (250-700
+cross-family pairs, `Henares` at 324 at 512). Untried: cutting only when both
+sides close a cycle of clean anchors, as `admit_anchors` asks.
 
 ### Parameters, and the rule about them
 
@@ -3898,6 +3995,15 @@ gives up 2.7 points of IMGS recall and 18% of the found corpus's pairs. Above
 640, IMGS2, IMGS3 and IMGS4 are flat to 0.003 and IMGS gains 0.005 at 768 and
 nothing more by 1280; nothing there is worth asking for.
 
+**Re-measured on 0.43.1, the price is the same** (`out/v31-cost-cliff`, cold,
+cooled, evicted, 512 640 640 512): IMGS-ALL **3,012 against 2,469 CPU-seconds
+(+22%) and 434 against 352 s of wall (+23%)** in the clock-matched pair (1,988
+and 2,002 MHz; the other pair, 2,542 against 2,020 MHz, is void), peak 2,481
+against 2,244 MB; the found corpus level, 776 / 777 against 773 / 783, with
+the same 2,472 pairs. What it bought there was F1 0.9819 against 0.9781. The
+cliffs no longer argue either way (*Parameters*), so the choice is the
+fifth more CPU on photographs.
+
 **The cliff at the top is gone.** On the builds before the clean-anchor rule
 896 merged `beach` with `panoramic3.jpg` (2,207 cross-family pairs) and full
 size made 14 cross-family pairs; now no size merges a family on any corpus
@@ -4505,7 +4611,7 @@ else that shells out to img-fp needs the same treatment, or it will read a
 finished run as a failed one.
 
 **The cache is on by default, and it is one file for the machine.**
-`$XDG_CACHE_HOME/img-fp/analysis-IMGFPC11.bin` (the name carries the format;
+`$XDG_CACHE_HOME/img-fp/analysis-IMGFPC12.bin` (the name carries the format;
 see below), `~/.cache/img-fp/` without
 that variable, `/tmp/img-fp/` without `HOME` — the same lookup `vid-fp` does
 for `fingerprints.redb`, and `--cache PATH` overrides it the same way, naming

@@ -170,7 +170,9 @@ struct Args {
 
     /// Long side, in pixels, the images are analysed at. Larger images are
     /// shrunk to it; small ones are enlarged, up to it, so their details can
-    /// be found.
+    /// be found. A picture much wider or taller than 4:3, such as a panorama
+    /// or a full-page screenshot, gets a longer side, so that it is analysed
+    /// with as many pixels as a 4:3 picture.
     ///
     /// Higher finds more, especially small images inside larger ones such as
     /// slides, screenshots and collages, but is slower and uses more memory.
@@ -581,6 +583,11 @@ struct Item {
 const EXIT_WITH_PROBLEMS: i32 = 2;
 
 const THUMB_LONG: usize = 128;
+/// The pixel check's thumbnail is `THUMB_LONG` times `decode::area_factor`
+/// on its long side, and never more than this many times `THUMB_LONG`: a
+/// strip of a few hundred thousand pixels by one would otherwise ask for a
+/// side past what a thumbnail's `u16` holds.
+pub(crate) const THUMB_MAX_SIDES: usize = 16;
 
 /// Local features described per image.
 ///
@@ -647,7 +654,7 @@ fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::P
             let (feats, thumb) = planes.analysis(&d.work, || {
                 let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
                 let feats = sift::extract(&d.work, &p);
-                let thumb = timed!(4, Thumb::build(&d.work, THUMB_LONG));
+                let thumb = timed!(4, Thumb::build(&d.work, ((THUMB_LONG as f64 * decode::area_factor(d.work.w, d.work.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
                 (feats.into(), thumb.into())
             });
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -2367,7 +2374,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // anchor may add a file to one but never join two; see `admit_anchors`.
     let (clean, weak): (Vec<Edge>, Vec<Edge>) = all.into_iter().partition(|e| e.4.accepted(&policy.clean));
     let n_before = clean.len();
-    let clean = drop_weak_bridges(clean, n);
+    // A clean anchor the bridge test drops is not thrown away but kept as a
+    // weak one: it may still add a file to a cluster and counts in the cover
+    // test, and joins no two clusters of its own.
+    let (clean, dropped) = drop_weak_bridges(clean, n);
+    let mut weak = weak;
+    weak.extend(dropped);
     stage!(t_start, "bridges: dropped {} lone links between clusters", n_before - clean.len());
     let n_weak = weak.len();
     let (all, refused) = admit_anchors(clean, weak, n);
@@ -3352,7 +3364,11 @@ fn admit_anchors(
 /// carrying all of them. A bridge to a single isolated file is left alone:
 /// that is the ordinary case of a file matched exactly once, and it claims
 /// nothing beyond itself.
-fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+#[allow(clippy::type_complexity)]
+fn drop_weak_bridges(
+    edges: Vec<(usize, usize, Affine, bool, Verdict)>,
+    n: usize,
+) -> (Vec<(usize, usize, Affine, bool, Verdict)>, Vec<(usize, usize, Affine, bool, Verdict)>) {
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbour, edge index)
     for (e, (a, b, _, _, _)) in edges.iter().enumerate() {
         adj[*a].push((*b, e));
@@ -3431,7 +3447,9 @@ fn drop_weak_bridges(edges: Vec<(usize, usize, Affine, bool, Verdict)>, n: usize
             drop[e] = true;
         }
     }
-    edges.into_iter().enumerate().filter(|(e, _)| !drop[*e]).map(|(_, x)| x).collect()
+    // What is dropped is handed back: the caller keeps it as a weak anchor.
+    let (kept, dropped): (Vec<_>, Vec<_>) = edges.into_iter().enumerate().partition(|(e, _)| !drop[*e]);
+    (kept.into_iter().map(|(_, x)| x).collect(), dropped.into_iter().map(|(_, x)| x).collect())
 }
 
 /// What a round of propagation proposed, and how.
@@ -4007,7 +4025,7 @@ mod tests {
         let unique = unique_pairs(edges);
         assert_eq!(unique.len(), 7);
         assert_eq!(unique[6].4.n_in, 40, "the first verdict for a pair is the one kept");
-        let kept = drop_weak_bridges(unique, 6);
+        let kept = drop_weak_bridges(unique, 6).0;
         assert!(!kept.iter().any(|e| (e.0, e.1) == (2, 3)), "the lone link is dropped");
         assert_eq!(kept.len(), 6);
     }
