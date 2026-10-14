@@ -2218,7 +2218,8 @@ impl Results {
         }
         let (paths, bytes, whole) = {
             let s = self.state.borrow();
-            let mut paths: Vec<PathBuf> = s.marked_ids().map(|id| s.paths[id as usize].clone()).collect();
+            // With the length the scan found, which the move checks first.
+            let mut paths: Vec<(PathBuf, u64)> = s.marked_ids().map(|id| (s.paths[id as usize].clone(), s.sizes[id as usize])).collect();
             paths.sort();
             let bytes = s.marked_bytes;
             // The groups, by the number the list shows them under, in which
@@ -2267,7 +2268,7 @@ impl Results {
         });
     }
 
-    async fn trash(self: &Rc<Self>, paths: Vec<PathBuf>) {
+    async fn trash(self: &Rc<Self>, paths: Vec<(PathBuf, u64)>) {
         if self.trashing.replace(true) {
             return;
         }
@@ -2278,8 +2279,18 @@ impl Results {
         let n = paths.len();
         let mut gone: HashSet<PathBuf> = HashSet::new();
         let mut failed: Vec<String> = Vec::new();
-        for (i, p) in paths.iter().enumerate() {
+        for (i, (p, scanned)) in paths.iter().enumerate() {
             self.status.set_text(&format!("Moving to the Trash: {} of {n}…", i + 1));
+            // A file at that path that is not the length the scan found is
+            // not the file the scan judged: replaced since, or, for a scan
+            // kept from an earlier session, another file under the same
+            // name. It stays where it is.
+            if let Ok(md) = std::fs::metadata(p) {
+                if *scanned > 0 && md.len() != *scanned {
+                    failed.push(format!("{}: changed since the scan, so it was left where it is", p.display()));
+                    continue;
+                }
+            }
             match gio::File::for_path(p).trash_future(glib::Priority::DEFAULT).await {
                 Ok(()) => {
                     gone.insert(p.clone());

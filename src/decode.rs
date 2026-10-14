@@ -190,7 +190,15 @@ fn abs_diff_sum(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Whether a file's format keeps every pixel it was given.
+///
+/// A picture held as a palette is not, whatever its format: a photograph
+/// saved as a 256-colour PNG is dithered to fit, and counted lossless it tied
+/// with the photograph's own PNG on everything but size, and was kept over
+/// it while the original was suggested for deletion.
 fn lossless_format(kind: Kind, bytes: &[u8]) -> bool {
+    if indexed(kind, bytes) {
+        return false;
+    }
     match kind {
         Kind::Image(ImageFormat::WebP) => bytes.get(12..16) == Some(b"VP8L"),
         Kind::Image(
@@ -206,6 +214,35 @@ fn lossless_format(kind: Kind, bytes: &[u8]) -> bool {
         ) => true,
         _ => false,
     }
+}
+
+/// Whether a file's head says its pixels are indices into a palette: a PNG
+/// of colour type 3, a BMP of eight bits a pixel or fewer, a colour-mapped
+/// TGA. Read from the first 64 bytes (`HEAD`), which hold each of those.
+fn indexed(kind: Kind, b: &[u8]) -> bool {
+    let u16_at = |at: usize| b.get(at..at + 2).map(|v| u16::from_le_bytes([v[0], v[1]]));
+    let u32_at = |at: usize| b.get(at..at + 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+    match kind {
+        Kind::Image(ImageFormat::Png) => b.get(12..16) == Some(b"IHDR") && b.get(25) == Some(&3),
+        // The bit count follows the header's size: at 24 in the old
+        // 12-byte OS/2 header, at 28 in every later one.
+        Kind::Image(ImageFormat::Bmp) => {
+            let at = if u32_at(14) == Some(12) { 24 } else { 28 };
+            u16_at(at).is_some_and(|bits| (1..=8).contains(&bits))
+        }
+        // Image type 1 or 9: colour-mapped, plain or run-length.
+        Kind::Image(ImageFormat::Tga) => matches!(b.get(2), Some(1 | 9)),
+        _ => false,
+    }
+}
+
+/// Whether the file at `path` is stored as a palette (`indexed`). For a
+/// record the cache made before that counted against being lossless; see
+/// `lib::run`. `false` for a file that cannot be read.
+pub fn is_indexed(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(HEAD);
+    std::fs::File::open(path).and_then(|f| f.take(HEAD as u64).read_to_end(&mut head)).is_ok() && indexed(sniff(&head), &head)
 }
 
 /// Whether a file carries an EXIF block where formats put one: within its

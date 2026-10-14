@@ -199,11 +199,15 @@ by frame corners, keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
 pixels hold no detail (`Traits::detail`); a whole-frame blurred check before
 every deletion (`whole_worst`, 12 grey levels, `WHOLE_TRIES`); composites are
 deleted only by their own copies; tie-break by grey closeness, sharpness,
-lossless, EXIF, size, colour (`decode::colour_of`, lazily).
+lossless, EXIF, size, colour (`decode::colour_of`, lazily). A palette
+(indexed PNG, <= 8-bit BMP, colour-mapped TGA) is not lossless
+(`decode::indexed`; cached records re-checked from the header): a
+256-colour copy used to be kept over its PNG original. A DELETE row carries
+`kept_copy` (JSON only), which the window shows.
 
 `--suggest correlation | representative` (`suggest::by_group`): simple
-group-only rules, by user request; `correlation` cut is halfway, 0.8
-(`CUT`), the user's choice. Neither answers to the content requirement.
+group-only rules, by user request; `correlation` deletes at 0.9 at the
+default bar (`CUT` = 0.75 of the way from the bar to 1), the user's choice. Neither answers to the content requirement.
 
 ### `--against LIBRARY` (`against.rs`)
 
@@ -222,7 +226,9 @@ and cold runs agree.
 Every finished scan is kept in `last-scan/` beside the cache file (shared
 with the window); `--last` re-writes text/CSV byte-for-byte, JSON without
 `pairs`. Not kept under `--no-cache`, `--no-last`, `--against`, or an empty
-walk.
+walk. Paths are kept absolute (`keep_scan`): read back from another folder,
+or by the window from `$HOME`, relative ones named other files. The window's
+Trash leaves a file whose length differs from the scan's.
 
 ### `--skip-mirrored`
 
@@ -421,8 +427,13 @@ Do not retry without new evidence:
 - **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC12.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record. Records for
-  paths a run did not walk are carried over while the file exists.
-  Appended as made; compacted only when dead bytes reach a quarter.
+  paths a run did not walk are carried over while the file exists, or
+  while its volume (`/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) is
+  unmounted (`cache::volume_root`). Appended as made; compacted only when
+  dead bytes reach a quarter. Runs sharing the file hold it with `flock`
+  shared; compaction, header writing and torn-tail repair need it alone
+  (`exclusive`, never waited for) and are skipped otherwise: a compaction
+  under another run sent its later appends to an unlinked file.
   Another format version's file is left untouched. Damage costs only the
   damaged record. **Cost measurements must pass `--no-cache`.** Sweeps
   should use their own `--cache`. `--prune-cache` keeps only what the scan

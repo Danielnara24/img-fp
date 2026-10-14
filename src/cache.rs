@@ -549,6 +549,8 @@ fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<F
     };
     let made = (|| -> Result<File> {
         let f = OpenOptions::new().read(true).append(true).create(true).open(&tmp)?;
+        // Held shared before it has the cache's name, as every run holds it.
+        flock(&f, LOCK_SH);
         fill(&f)?;
         let mut partial = lock(&PARTIAL);
         if !unregister(&mut partial) {
@@ -690,60 +692,163 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
         damaged: 0,
         other_version: None,
     };
-    match OpenOptions::new().read(true).append(true).open(path) {
-        Ok(f) => {
-            let tail = match read_file(&f, path, want, walked, &mut out, &mut store.others, problems) {
-                Found::Usable(tail) => Some(tail),
-                Found::OtherVersion(v) => {
-                    store.other_version = Some(v);
-                    return (out, store);
+    // Several runs may hold the file at once — the window's scan and one in
+    // a terminal — and each appends to it as it goes. Appending is safe
+    // together (`O_APPEND`, a record a write); replacing the file or cutting
+    // its end is not, since another run's records then go into a file that
+    // no longer has a name, or are cut in half. So every run holds the file
+    // shared for as long as it has it open, and only a run that can hold it
+    // alone replaces or cuts it; see `exclusive`.
+    for _ in 0..8 {
+        let f = match OpenOptions::new().read(true).append(true).open(path) {
+            Ok(f) => f,
+            // Not being there yet is the first run against this cache, which
+            // is every first run and not a problem. Made here, empty; the
+            // header goes in below, under the lock.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match OpenOptions::new().read(true).append(true).create_new(true).open(path) {
+                    Ok(f) => f,
+                    // Another run made it first.
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => {
+                        problems.cache(format!("could not write {}: {e}", path.display()));
+                        return (out, store);
+                    }
                 }
-                Found::Unusable => None,
-            };
-            if let Some(tail) = tail {
+            }
+            Err(e) => {
+                // A cache that can be read and not written still answers this
+                // run. It just keeps nothing new, and that is worth saying.
+                problems.cache(format!("could not open {} for writing: {e}", path.display()));
+                // What it holds is still counted, although nothing will be
+                // appended: the caller measures how many records a later one
+                // superseded against this, and a count of zero beside a full map
+                // was an underflow.
+                match File::open(path).map(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
+                    Ok(Found::Usable(tail)) => {
+                        store.records = AtomicUsize::new(tail.count);
+                        store.damaged = tail.damaged;
+                    }
+                    Ok(Found::OtherVersion(v)) => store.other_version = Some(v),
+                    _ => {}
+                }
+                return (out, store);
+            }
+        };
+        // Waits only while another run replaces or repairs the file, and then
+        // the name may lead to its replacement: open that one instead.
+        if !flock(&f, LOCK_SH) || !names(&f, path) {
+            continue;
+        }
+        // A file just made, or one a run stopped before its header was in.
+        if f.metadata().is_ok_and(|m| m.len() == 0) {
+            if !exclusive(&f, path) {
+                continue;
+            }
+            match Buf(&f).header() {
+                Ok(()) => {
+                    flock(&f, LOCK_SH);
+                    store.file = Some(f);
+                }
+                Err(e) => problems.cache(format!("could not write {}: {e}", path.display())),
+            }
+            return (out, store);
+        }
+        match read_file(&f, path, want, walked, &mut out, &mut store.others, problems) {
+            Found::Usable(tail) => {
+                store.records = AtomicUsize::new(tail.count);
+                store.damaged = tail.damaged;
                 // A partial record at the end would sit in front of every
                 // record appended after it, and turn a lost record into a
                 // damaged file. So would a record whose framing is damaged,
                 // which ends the part of the file that can be read.
                 if tail.truncated {
-                    if let Err(e) = f.set_len(tail.end) {
+                    if !exclusive(&f, path) {
+                        // Another run has the file, and what reads as torn may
+                        // be its record still being written. This run reads
+                        // what it found and appends nothing behind it.
+                        return (out, store);
+                    }
+                    let cut = f.set_len(tail.end);
+                    flock(&f, LOCK_SH);
+                    if let Err(e) = cut {
                         problems.cache(format!("could not repair {}: {e}", path.display()));
                         return (out, store);
                     }
                 }
                 store.file = Some(f);
-                store.records = AtomicUsize::new(tail.count);
-                store.damaged = tail.damaged;
+                return (out, store);
+            }
+            Found::OtherVersion(v) => {
+                store.other_version = Some(v);
+                return (out, store);
+            }
+            // Replaced by an empty one, unless another run is using it.
+            Found::Unusable => {
+                if exclusive(&f, path) {
+                    match replace_with(path, |f| Buf(f).header()) {
+                        Ok(f) => store.file = Some(f),
+                        Err(e) => problems.cache(format!("could not write {}: {e}", path.display())),
+                    }
+                }
                 return (out, store);
             }
         }
-        // Not being there yet is the first run against this cache, which is
-        // every first run and not a problem.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            // A cache that can be read and not written still answers this
-            // run. It just keeps nothing new, and that is worth saying.
-            problems.cache(format!("could not open {} for writing: {e}", path.display()));
-            // What it holds is still counted, although nothing will be
-            // appended: the caller measures how many records a later one
-            // superseded against this, and a count of zero beside a full map
-            // was an underflow.
-            match File::open(path).map(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
-                Ok(Found::Usable(tail)) => {
-                    store.records = AtomicUsize::new(tail.count);
-                    store.damaged = tail.damaged;
-                }
-                Ok(Found::OtherVersion(v)) => store.other_version = Some(v),
-                _ => {}
-            }
-            return (out, store);
+    }
+    // The name kept leading to a file being replaced: this run keeps nothing.
+    (out, store)
+}
+
+const LOCK_SH: i32 = 1;
+const LOCK_EX: i32 = 2;
+const LOCK_NB: i32 = 4;
+
+/// `flock(2)` on `f`: whether the lock is held. A blocking request is
+/// retried when a signal interrupts it. Only another holder refuses: on a
+/// filesystem that has no such locks the answer is yes, and the file is
+/// used as it was before there were any.
+fn flock(f: &File, op: i32) -> bool {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: i32, op: i32) -> i32;
+    }
+    loop {
+        // SAFETY: `f` is open for the length of the call.
+        if unsafe { flock(f.as_raw_fd(), op) } == 0 {
+            return true;
+        }
+        match std::io::Error::last_os_error().kind() {
+            std::io::ErrorKind::Interrupted if op & LOCK_NB == 0 => {}
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => return false,
+            _ => return true,
         }
     }
-    match replace_with(path, |f| Buf(f).header()) {
-        Ok(f) => store.file = Some(f),
-        Err(e) => problems.cache(format!("could not write {}: {e}", path.display())),
+}
+
+/// Whether `path` still names the file `f` has open.
+fn names(f: &File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (f.metadata(), std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
     }
-    (out, store)
+}
+
+/// Hold `f`, which this run holds shared, alone, if no other run has it open
+/// and `path` still names it: what replacing or cutting it asks. Otherwise
+/// it is held shared again and the answer is no.
+///
+/// Never waited for: two runs waiting to hold one file alone would each wait
+/// for the other to let go. A run that cannot have it leaves it as it is,
+/// which costs at most a compaction put off to the next run.
+fn exclusive(f: &File, path: &Path) -> bool {
+    // A conversion is not atomic: one refused has given up the shared lock
+    // too, so it is taken back.
+    if flock(f, LOCK_EX | LOCK_NB) && names(f, path) {
+        return true;
+    }
+    flock(f, LOCK_SH);
+    false
 }
 
 /// What reading a cache file came to.
@@ -908,8 +1013,15 @@ impl Store {
     /// Every entry is already in the file, so this is a copy: nothing is
     /// unpacked or deflated again, and an interrupt part-way through leaves
     /// the file it was copying from exactly as it was.
-    pub fn compact(&mut self, entries: &mut [(&Path, Span)]) -> Result<()> {
-        let Some(src) = &self.file else { return Ok(()) };
+    ///
+    /// `false` when it was put off: not while another run has the file open,
+    /// since its records would go on into the file this replaces, which by
+    /// then has no name. A run that has the file alone does it.
+    pub fn compact(&mut self, entries: &mut [(&Path, Span)]) -> Result<bool> {
+        let Some(src) = &self.file else { return Ok(false) };
+        if !exclusive(src, &self.path) {
+            return Ok(false);
+        }
         // By the path's bytes, which is the order the text sort gave before
         // paths were kept as bytes.
         entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()));
@@ -927,7 +1039,7 @@ impl Store {
         })?;
         self.file = Some(new);
         self.records = AtomicUsize::new(entries.len());
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1237,19 +1349,66 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
 /// is worth keeping while the file it describes is there to be matched again;
 /// once the file is gone the record can never be used, only carried. It is one
 /// `stat` per record not seen this run, and it is why `--prune-cache` is a
-/// flag rather than the default: an image is a few milliseconds to describe,
-/// where the video fingerprint this idea comes from is minutes, so a record
-/// dropped by mistake — an unmounted drive, say — costs a re-analysis rather
-/// than an afternoon, and that is a cheap enough mistake to make
-/// automatically.
+/// flag rather than the default.
+///
+/// **A file on a drive that is not plugged in is not gone.** Its records
+/// used to count as dead like any other, and once they were a quarter of the
+/// file the next scan of anything else compacted them away: a photo library
+/// on an external disk, scanned and then unplugged, was analysed from scratch
+/// the next time it was plugged in. So a record whose file is missing is kept
+/// when the file lies on a volume that is not mounted (`unmounted`).
 pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
     // On every thread: one `stat` per record of every other folder this cache
     // has seen, which on a network share is a round trip apiece.
-    cached
-        .par_iter()
-        .filter(|(path, _)| path.exists())
-        .map(|(path, e)| (path.as_path(), e.2))
-        .collect()
+    type Kept<'a> = Vec<(&'a Path, Span)>;
+    let (mut kept, missing): (Kept, Kept) = cached.par_iter().map(|(path, e)| (path.as_path(), e.2)).partition(|(path, _)| path.exists());
+    // Each volume asked once, however many of its records are missing.
+    let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
+    for (path, span) in missing {
+        let Some(root) = volume_root(path) else { continue };
+        if *volumes.entry(root).or_insert_with_key(|r| unmounted(r)) {
+            kept.push((path, span));
+        }
+    }
+    kept
+}
+
+/// The folder a removable drive or a network share holding `path` is mounted
+/// at, when `path` lies where systems mount them: `/media/USER/NAME` (udisks
+/// on Debian and Ubuntu), `/run/media/USER/NAME` (udisks elsewhere),
+/// `/mnt/NAME`, `/run/user/UID/gvfs/NAME` (GNOME's network shares) and
+/// `/Volumes/NAME` (macOS).
+fn volume_root(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let parts: Vec<&std::ffi::OsStr> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if !path.is_absolute() {
+        return None;
+    }
+    let take = |n: usize| (parts.len() > n).then(|| Path::new("/").join(parts[..n].iter().collect::<PathBuf>()));
+    match parts.as_slice() {
+        [first, ..] if *first == "media" => take(3),
+        [first, second, ..] if *first == "run" && *second == "media" => take(4),
+        [first, ..] if *first == "mnt" => take(2),
+        [first, second, _, gvfs, ..] if *first == "run" && *second == "user" && *gvfs == "gvfs" => take(5),
+        [first, ..] if *first == "Volumes" => take(2),
+        _ => None,
+    }
+}
+
+/// Whether nothing is mounted at `root`: it is not there (udisks removes the
+/// folder it made), or it is an empty folder (a mount point under `/mnt`
+/// stays behind).
+fn unmounted(root: &Path) -> bool {
+    match std::fs::read_dir(root) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 #[cfg(test)]
@@ -1375,6 +1534,32 @@ mod tests {
         assert_eq!(kept.len(), 1, "only the untouched file that still exists");
         assert_eq!(kept[0].0, here);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A missing file on a drive that is not mounted keeps its record; the
+    /// volume is the folder the drive is mounted at, by where systems mount
+    /// them, and it is unmounted when it is not there or holds nothing.
+    #[test]
+    fn a_record_on_an_unplugged_drive_is_kept() {
+        let root = |p: &str| volume_root(Path::new(p));
+        assert_eq!(root("/media/u/Photos/2019/a.jpg"), Some("/media/u/Photos".into()));
+        assert_eq!(root("/run/media/u/Photos/a.jpg"), Some("/run/media/u/Photos".into()));
+        assert_eq!(root("/mnt/nas/a.jpg"), Some("/mnt/nas".into()));
+        assert_eq!(root("/run/user/1000/gvfs/smb-share:server=x,share=p/a.jpg"), Some("/run/user/1000/gvfs/smb-share:server=x,share=p".into()));
+        assert_eq!(root("/Volumes/Card/DCIM/a.jpg"), Some("/Volumes/Card".into()));
+        assert_eq!(root("/home/u/Pictures/a.jpg"), None, "a home folder is not a drive that comes and goes");
+        assert_eq!(root("/media/u"), None, "nor is the folder drives are mounted in");
+        assert_eq!(root("media/u/Photos/a.jpg"), None);
+
+        let dir = scratch("volumes");
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let full = dir.join("full");
+        std::fs::create_dir_all(full.join("DCIM")).unwrap();
+        assert!(unmounted(&dir.join("not-there")));
+        assert!(unmounted(&empty), "a mount point left behind");
+        assert!(!unmounted(&full), "mounted, and the file is gone from it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1630,6 +1815,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Two runs holding one cache: neither replaces the file while the other
+    /// has it, so what the other appends afterwards is still in it. A
+    /// compaction used to rename a new file over the one the other run was
+    /// appending to, and every record it made from then on was lost.
+    #[test]
+    fn a_cache_another_run_holds_is_not_replaced_under_it() {
+        let dir = scratch("two-runs");
+        let path = dir.join(file_name());
+        let (f, t) = analysis(20, 5);
+        let key = Key { len: 1, mtime: 1, ctime: 1 };
+        let (_, mut a, _) = reopen(&path);
+        let (_, b, _) = reopen(&path);
+        a.append("old.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        // `a` drops `old.jpg` while `b` has the file: it is left as it is.
+        assert!(!a.compact(&mut []).unwrap(), "put off");
+        b.append("b.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        drop((a, b));
+        let (got, mut store, _) = reopen(&path);
+        assert!(got.contains_key(Path::new("b.jpg")), "b's record is in the file the name leads to");
+        assert!(got.contains_key(Path::new("old.jpg")), "and nothing was compacted away under b");
+        // Alone, a run compacts as before.
+        assert!(store.compact(&mut []).unwrap());
+        drop(store);
+        let (got, _, _) = reopen(&path);
+        assert!(got.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The default file is named for the format, so that a format change
     /// starts a new file rather than meeting the old one and caching nothing.
     #[test]
@@ -1654,7 +1867,7 @@ mod tests {
             .collect();
         let mut store = store;
         let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
-        store.compact(&mut keep).unwrap();
+        assert!(store.compact(&mut keep).unwrap());
         drop(store);
         let (got, store, bad) = reopen(&path);
         assert!(!bad);
@@ -1717,7 +1930,7 @@ mod tests {
         let mut keep: Vec<(&Path, Span)> = got.iter().map(|(p, e)| (p.as_path(), e.2)).collect();
         let others = store.other_settings().to_vec();
         keep.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
-        store.compact(&mut keep).unwrap();
+        assert!(store.compact(&mut keep).unwrap());
         drop(store);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);

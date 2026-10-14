@@ -355,6 +355,9 @@ pub struct Member {
     /// suggests deleting it.
     #[serde(default)]
     pub kept_copy: Option<PathBuf>,
+    /// `kept_copy`'s bytes, when its name is not UTF-8, as for `path_bytes`.
+    #[serde(default)]
+    kept_copy_bytes: Option<Vec<u8>>,
     /// The window's number for the file, the same in every group it is in;
     /// given when the results arrive, not read from the report.
     #[serde(skip)]
@@ -440,9 +443,12 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
     let r: Report = serde_json::from_slice(&f).map_err(|e| format!("could not read the scan's results: {e}"))?;
     let mut groups = r.groups;
     for m in groups.iter_mut().flat_map(|g| g.files.iter_mut()) {
+        use std::os::unix::ffi::OsStringExt;
         if let Some(bytes) = m.path_bytes.take() {
-            use std::os::unix::ffi::OsStringExt;
             m.path = PathBuf::from(OsString::from_vec(bytes));
+        }
+        if let Some(bytes) = m.kept_copy_bytes.take() {
+            m.kept_copy = Some(PathBuf::from(OsString::from_vec(bytes)));
         }
     }
     let min_correlation = r.config.min_pixel_correlation.unwrap_or_else(|| img_fp::defaults().min_pixel_correlation);
@@ -479,7 +485,8 @@ mod tests {
         std::fs::write(
             &report,
             r#"{"files_analysed": 2, "groups": [{"files": [
-                {"path": "/p/a.jpg", "role": "representative", "action": "DELETE", "width": 4, "height": 3, "size_bytes": 10},
+                {"path": "/p/a.jpg", "role": "representative", "action": "DELETE", "width": 4, "height": 3, "size_bytes": 10,
+                 "kept_copy": "/p/b\ufffd.jpg", "kept_copy_bytes": [47,112,47,98,255,46,106,112,103]},
                 {"path": "/p/b\ufffd.jpg", "path_bytes": [47,112,47,98,255,46,106,112,103], "role": "match"}]}]}"#,
         )
         .unwrap();
@@ -487,6 +494,7 @@ mod tests {
         let files = &found.groups[0].files;
         assert_eq!(files[0].path, PathBuf::from("/p/a.jpg"));
         assert_eq!(files[1].path.as_os_str().as_bytes(), b"/p/b\xff.jpg");
+        assert_eq!(files[0].kept_copy.as_deref(), Some(files[1].path.as_path()), "and so is the file a deletion rests on");
         assert_eq!(found.analysed, 2);
         assert_eq!(files[0].suggested(), Some(img_fp::Action::Delete));
         assert_eq!(files[1].relation, None, "a field the report leaves out is not needed");

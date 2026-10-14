@@ -74,7 +74,13 @@ fn main() -> glib::ExitCode {
         return worker(args.split_off(2));
     }
     // `--help` and `--version` answer on any CPU; nothing else has run yet.
-    let folders = <GuiArgs as clap::Parser>::parse_from(&args).folders;
+    // Absolute, as every folder the window keeps is: they are remembered for
+    // the next window, which may start anywhere.
+    let folders: Vec<PathBuf> = <GuiArgs as clap::Parser>::parse_from(&args)
+        .folders
+        .into_iter()
+        .map(|f| std::path::absolute(&f).unwrap_or(f))
+        .collect();
     if let Err(e) = img_fp::check_cpu_for_window() {
         eprintln!("Error: {e:#}");
         return glib::ExitCode::FAILURE;

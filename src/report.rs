@@ -215,6 +215,9 @@ pub struct Output {
     /// What to do with each file, by index: see `suggest.rs`. `None` for a
     /// file in no pair, which no group holds.
     pub actions: Vec<Option<Action>>,
+    /// For a file the content rule deletes, the kept file that shows all of
+    /// it, by index (`suggest::suggest_pinned`); empty under another rule.
+    pub kept: Vec<Option<usize>>,
 }
 
 /// Write the report where `target` says, in the layout it says.
@@ -281,7 +284,7 @@ fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMa
             group: group_name(gi),
             representative: &g.representative,
             representative_bytes: raw_bytes(&files[g.rep]),
-            files: rows(g, &out.actions, files, &pairs, facts).collect(),
+            files: rows(g, out, files, &pairs, facts).collect(),
         })
         .collect();
     writeln!(w, "{{")?;
@@ -466,6 +469,12 @@ struct Row<'a> {
     /// The file decoded only in part. Written only when it did.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     damaged: bool,
+    /// For a DELETE, the kept file that shows everything this one does.
+    /// The JSON's alone: the text and the CSV keep their columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kept_copy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kept_copy_bytes: Option<Vec<u8>>,
 }
 
 /// A group's rows, representative first. A file in two groups has a row in
@@ -473,7 +482,7 @@ struct Row<'a> {
 /// group's representative.
 fn rows<'a>(
     g: &'a OutGroup,
-    actions: &'a [Option<Action>],
+    out: &'a Output,
     files: &'a [PathBuf],
     pairs: &'a HashMap<(usize, usize), &'a OutPair>,
     facts: &'a HashMap<usize, Facts>,
@@ -483,12 +492,14 @@ fn rows<'a>(
         let i = g.members[k];
         let f = facts.get(&i).copied().unwrap_or_default();
         let p = if i == g.rep { None } else { pairs.get(&(i.min(g.rep), i.max(g.rep))).copied() };
+        let action = out.actions.get(i).copied().flatten();
+        let kept = out.kept.get(i).copied().flatten().filter(|_| action == Some(Action::Delete));
         Row {
             path: &g.files[k],
             path_bytes: raw_bytes(&files[i]),
             raw: &files[i],
             role: if i == g.rep { "representative" } else { "match" },
-            action: actions.get(i).copied().flatten().map(Action::as_str),
+            action: action.map(Action::as_str),
             width: f.dims.map(|d| d.0),
             height: f.dims.map(|d| d.1),
             size: f.bytes.map(format_size),
@@ -500,6 +511,8 @@ fn rows<'a>(
             mirrored: p.map(|p| p.mirrored),
             inverted: p.map(|p| p.inverted),
             damaged: f.damaged,
+            kept_copy: kept.map(|k| files[k].display().to_string()),
+            kept_copy_bytes: kept.and_then(|k| raw_bytes(&files[k])),
         }
     })
 }
@@ -517,7 +530,7 @@ fn write_txt(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
     let pairs = pair_index(out);
     for (gi, g) in out.groups.iter().enumerate() {
         writeln!(w, "{}: {} files", group_name(gi), g.members.len())?;
-        for r in rows(g, &out.actions, files, &pairs, facts) {
+        for r in rows(g, out, files, &pairs, facts) {
             let role = if r.role == "representative" { "REP," } else { "MATCH," };
             let action = format!("{},", r.action.unwrap_or("-"));
             let dims = match (r.width, r.height) {
@@ -589,7 +602,7 @@ fn write_csv(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap
     csv_row(w, &CSV_HEADER.map(str::as_bytes))?;
     for (gi, g) in out.groups.iter().enumerate() {
         let group = group_name(gi);
-        for r in rows(g, &out.actions, files, &pairs, facts) {
+        for r in rows(g, out, files, &pairs, facts) {
             csv_row(
                 w,
                 &[
@@ -695,6 +708,7 @@ mod tests {
             }],
             pairs: vec![identical, mirrored],
             actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review)],
+            kept: vec![None, Some(0), Some(0)],
         }
     }
 
@@ -763,6 +777,9 @@ mod tests {
         assert_eq!(g["files"][2]["path"], "/2;x.jpg");
         assert_eq!(g["files"][2]["aligned_points"], 42);
         assert_eq!(g["files"][2]["mirrored"], true);
+        // A DELETE names the kept file it rests on; nothing else does.
+        assert_eq!(g["files"][1]["kept_copy"], "/0.jpg");
+        assert!(g["files"][2].get("kept_copy").is_none(), "a REVIEW rests on nothing");
         assert_eq!(v["pairs"][1]["mirrored"], true);
         assert!(v["pairs"][0].get("mirrored").is_none());
         assert!(v["pairs"][0].get("ia").is_none());

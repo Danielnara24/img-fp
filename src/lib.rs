@@ -1436,6 +1436,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             groups: Vec::new(),
             pairs: Vec::new(),
             actions: Vec::new(),
+            kept: Vec::new(),
         };
         let went = if against {
             let header = against::Header {
@@ -1800,8 +1801,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         if !store.worth_compacting(&entries, prune) {
             let dead = store.records().saturating_sub(entries.len());
             stage!(t_start, "cache: {} records, {dead} of them unused, not compacted", store.records());
-        } else if let Err(e) = store.compact(&mut entries) {
-            problems.cache(format!("could not write {}: {e}", p.display()));
+        } else {
+            match store.compact(&mut entries) {
+                Ok(true) => {}
+                Ok(false) => stage!(t_start, "cache: not compacted, another run has it open"),
+                Err(e) => problems.cache(format!("could not write {}: {e}", p.display())),
+            }
         }
     }
     drop(store);
@@ -2679,6 +2684,22 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // shows (`last`), so a scan kept is a scan that works them out.
     let keep_last = gui.is_none() && !against && !args.no_cache && !args.no_last;
     let (actions, keeper) = if args.suggest != suggest::Mode::Content && !keep_last { (Vec::new(), Vec::new()) } else { timed!(44, {
+        // A palette is not lossless (`decode::lossless_format`), and a record
+        // the cache made before that was said still calls a 256-colour PNG
+        // lossless. Asked of the files a choice can turn on: those in a
+        // pair, and stored in a format that counts as lossless.
+        let mut linked = vec![false; n];
+        for &(a, b) in &graph {
+            linked[a] = true;
+            linked[b] = true;
+        }
+        let indexed: Vec<usize> = (0..n)
+            .into_par_iter()
+            .filter(|&i| linked[i] && items[i].traits.lossless && decode::is_indexed(&files[i]))
+            .collect();
+        for i in indexed {
+            items[i].traits.lossless = false;
+        }
         let pics: Vec<suggest::Picture> = items
             .iter()
             .zip(&stats)
@@ -2826,8 +2847,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // Cleared before anything is written to stdout, which shares the terminal.
     progress.finish();
     let runtime = t_start.elapsed().as_secs_f64();
-    let (actions, content) = if args.suggest == suggest::Mode::Content {
-        (actions, None)
+    let (actions, kept, content) = if args.suggest == suggest::Mode::Content {
+        (actions, keeper, None)
     } else {
         let corr: HashMap<(usize, usize), f32> = out_pairs
             .iter()
@@ -2841,7 +2862,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 correlation: corr.get(&(i.min(g.rep), i.max(g.rep))).copied().unwrap_or(0.0),
             })
         });
-        (suggest::by_group(args.suggest, files.len(), seats, args.min_pixel_correlation), Some(actions))
+        (suggest::by_group(args.suggest, files.len(), seats, args.min_pixel_correlation), Vec::new(), Some((actions, keeper)))
     };
     stage!(
         t_start,
@@ -2863,6 +2884,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         groups,
         pairs: out_pairs,
         actions,
+        kept,
     };
 
     let summary = format!(
@@ -2903,27 +2925,48 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
 
 /// Keep the scan for `--last` and the window (`last`): the report without
 /// its pairs, with the content rule's suggestions whichever the run shows.
-/// `content` is those suggestions when `out` holds another rule's.
+/// `content` is those suggestions, and the file each deletion rests on, when
+/// `out` holds another rule's.
 fn keep_scan(
     args: &Args,
     out: &mut Output,
-    content: Option<Vec<Option<suggest::Action>>>,
+    content: Option<(Vec<Option<suggest::Action>>, Vec<Option<usize>>)>,
     files: &[PathBuf],
     facts: &report::FileFacts,
     notes: &last::Notes,
 ) -> std::io::Result<()> {
     let mut held = None;
-    if let Some(content) = content {
-        held = Some((std::mem::replace(&mut out.actions, content), out.config["suggest"].take()));
+    if let Some((content, kept)) = content {
+        held = Some((std::mem::replace(&mut out.actions, content), std::mem::replace(&mut out.kept, kept), out.config["suggest"].take()));
         out.config["suggest"] = "content".into();
     }
+    // Every path absolute. The report names files as the run spelled them,
+    // and a scan of `photos` kept as `photos/a.jpg` was read back against
+    // whatever folder the reader started in: `--last` from another folder,
+    // or the window from the home folder, named the files of another
+    // `photos` — and the window's Trash would have moved them.
+    let files: Vec<PathBuf> = files.iter().map(|f| std::path::absolute(f).unwrap_or_else(|_| f.clone())).collect();
+    let spelled: Vec<(String, Vec<String>)> = out
+        .groups
+        .iter_mut()
+        .map(|g| {
+            let rep = files[g.rep].display().to_string();
+            let members = g.members.iter().map(|&i| files[i].display().to_string()).collect();
+            (std::mem::replace(&mut g.representative, rep), std::mem::replace(&mut g.files, members))
+        })
+        .collect();
     let write = |path: &Path| {
         let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
-        report::write_with(&target, out, files, facts).map_err(std::io::Error::other)
+        report::write_with(&target, out, &files, facts).map_err(std::io::Error::other)
     };
     let kept = last::save_with(&last::dir(args.cache.as_deref()), write, notes);
-    if let Some((actions, rule)) = held {
+    for (g, (rep, members)) in out.groups.iter_mut().zip(spelled) {
+        g.representative = rep;
+        g.files = members;
+    }
+    if let Some((actions, kept, rule)) = held {
         out.actions = actions;
+        out.kept = kept;
         out.config["suggest"] = rule;
     }
     kept

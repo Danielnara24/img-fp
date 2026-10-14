@@ -172,6 +172,8 @@ struct KeptRow {
     inverted: Option<bool>,
     #[serde(default)]
     damaged: bool,
+    kept_copy: Option<String>,
+    kept_copy_bytes: Option<Vec<u8>>,
 }
 
 impl KeptRow {
@@ -180,6 +182,16 @@ impl KeptRow {
         match &self.path_bytes {
             Some(b) => PathBuf::from(std::ffi::OsString::from_vec(b.clone())),
             None => PathBuf::from(&self.path),
+        }
+    }
+
+    /// The kept file a DELETE rests on, if the row names one.
+    fn kept_copy(&self) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+        match (&self.kept_copy_bytes, &self.kept_copy) {
+            (Some(b), _) => Some(PathBuf::from(std::ffi::OsString::from_vec(b.clone()))),
+            (None, Some(p)) => Some(PathBuf::from(p)),
+            (None, None) => None,
         }
     }
 }
@@ -266,6 +278,8 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
     let mut pairs: HashMap<(usize, usize), OutPair> = HashMap::new();
     let mut groups: Vec<OutGroup> = Vec::new();
     let mut seats: Vec<suggest::Seat> = Vec::new();
+    // Each DELETE's kept file, by path: it is numbered once every row is.
+    let mut rests_on: Vec<(usize, PathBuf)> = Vec::new();
     for g in &kept.groups {
         let members: Vec<usize> = g
             .files
@@ -283,6 +297,9 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
         let Some(rk) = g.files.iter().position(|r| r.role == "representative") else { continue };
         let rep = members[rk];
         for (r, &i) in g.files.iter().zip(&members) {
+            if let Some(k) = r.kept_copy() {
+                rests_on.push((i, k));
+            }
             let correlation = match r.relation.as_deref() {
                 Some("identical" | "same_pixels") => 1.0,
                 _ => r.pixel_correlation.unwrap_or(0.0),
@@ -318,9 +335,16 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
             members,
         });
     }
-    let actions = match mode {
-        suggest::Mode::Content => content,
-        _ => suggest::by_group(mode, files.len(), seats, min_correlation),
+    let (actions, kept_by) = match mode {
+        suggest::Mode::Content => {
+            // A kept file is in a group with what it holds, so it has a number.
+            let mut kept_by = vec![None; files.len()];
+            for (i, k) in rests_on {
+                kept_by[i] = index.get(&k).copied();
+            }
+            (content, kept_by)
+        }
+        _ => (suggest::by_group(mode, files.len(), seats, min_correlation), Vec::new()),
     };
     let gone: HashSet<usize> = (0..files.len())
         .filter(|&i| std::fs::symlink_metadata(&files[i]).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))
@@ -344,6 +368,7 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
         groups,
         pairs: pairs.into_values().collect(),
         actions,
+        kept: kept_by,
     };
     (out, files, report::stated_facts(stated), gone.len())
 }
@@ -420,6 +445,7 @@ mod tests {
             groups: vec![group(0, vec![0, 1, 2, 3]), group(4, vec![3, 4, 5])],
             pairs,
             actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review), Some(Action::Delete), Some(Action::Keep), None],
+            kept: vec![None, Some(0), None, Some(4), None, None],
         };
         let dims = [(640, 480), (640, 480), (320, 240), (0, 0), (10, 10), (8, 8)];
         let facts = report::read_facts(&out, &files, &dims, &[false, false, true, false, false, false], &[1, 2, 3, 4, 5, 6]);
