@@ -795,6 +795,11 @@ impl Setup {
         // The folders scanned, as the report spells its paths: the tree view
         // starts from them.
         let roots = settings.folders.clone();
+        // Kept for `--last` and the next window as the command line keeps a
+        // scan: not one run without the cache, and not one that found
+        // nothing (see `img_fp::last`). Kept regardless, a scan of an empty
+        // folder replaced the last one worth having, and its marks with it.
+        let keep = settings.use_cache;
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let mut stderr: Vec<String> = Vec::new();
@@ -842,10 +847,12 @@ impl Setup {
                                 // Made ready for the page here too, off the
                                 // main thread (`results::prepare`).
                                 let read = gio::spawn_blocking(move || {
-                                    let mut prepared = scan::read_report(&path).map(results::prepare);
+                                    let found = scan::read_report(&path);
+                                    let keep = keep && found.as_ref().is_ok_and(|f| f.enumerated > 0);
+                                    let mut prepared = found.map(results::prepare);
                                     if let Ok(p) = prepared.as_mut() {
                                         p.set_roots(notes.roots.clone());
-                                        if path.exists() && last::save(&path, &notes) {
+                                        if keep && path.exists() && last::save(&path, &notes) {
                                             p.set_kept(notes.id);
                                         }
                                     }

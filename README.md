@@ -157,8 +157,11 @@ img-fp --last --suggest representative
 
 The last scan is the last one to finish, from the command line or the
 desktop app, which opens on it. It is kept in `last-scan/` beside the cache,
-and files deleted since are left out. A JSON report written this way has the
-groups but no list of pairs. Scans run with `--no-cache` are not kept, and neither are scans `--against` a library.
+and files deleted since are left out. A file suggested for deletion because
+another file shows all of it becomes REVIEW if that other file has been
+deleted since. A JSON report written this way has the groups but no list of
+pairs. Scans run with `--no-cache` are not kept, and neither are scans
+`--against` a library or scans that found no images.
 
 ## Comparing with a library
 
@@ -370,7 +373,7 @@ to stderr.
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC12.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -396,8 +399,8 @@ far as it goes, and is marked `DAMAGED` in the report.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC12.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC12.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC13.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Use `--clear-cache`
 to start over.

@@ -47,7 +47,7 @@ mod report;
 mod sift;
 mod simd;
 mod suggest;
-pub use suggest::{by_group, Action, Mode as SuggestMode, Seat};
+pub use suggest::{by_group, kept_at_end, Action, Mode as SuggestMode, Seat};
 pub use cache::file_name as cache_file_name;
 mod verify;
 mod walk;
@@ -261,8 +261,9 @@ struct Args {
     /// format with `--output` or `--format`, or with another `--suggest` rule.
     ///
     /// The last scan is the last one run from the command line or the window,
-    /// kept beside the cache. Files deleted since are left out. A JSON report
-    /// has the groups but no list of pairs.
+    /// kept beside the cache. Files deleted since are left out, and a DELETE
+    /// whose kept copy was one of them is REVIEW. A JSON report has the
+    /// groups but no list of pairs.
     #[arg(
         long,
         conflicts_with_all = [
@@ -1782,7 +1783,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         // `--clear-cache`, which takes every record with it, could give the
         // copy back.
         let others: Vec<(PathBuf, cache::Span)> =
-            store.other_settings().par_iter().filter(|(p, _)| !prune && p.exists()).cloned().collect();
+            store.other_settings().par_iter().filter(|(p, _)| !prune && !cache::gone(p)).cloned().collect();
         if !others.is_empty() {
             stage!(t_start, "cache: {} records kept from other working sizes", others.len());
         }
@@ -2684,22 +2685,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // shows (`last`), so a scan kept is a scan that works them out.
     let keep_last = gui.is_none() && !against && !args.no_cache && !args.no_last;
     let (actions, keeper) = if args.suggest != suggest::Mode::Content && !keep_last { (Vec::new(), Vec::new()) } else { timed!(44, {
-        // A palette is not lossless (`decode::lossless_format`), and a record
-        // the cache made before that was said still calls a 256-colour PNG
-        // lossless. Asked of the files a choice can turn on: those in a
-        // pair, and stored in a format that counts as lossless.
-        let mut linked = vec![false; n];
-        for &(a, b) in &graph {
-            linked[a] = true;
-            linked[b] = true;
-        }
-        let indexed: Vec<usize> = (0..n)
-            .into_par_iter()
-            .filter(|&i| linked[i] && items[i].traits.lossless && decode::is_indexed(&files[i]))
-            .collect();
-        for i in indexed {
-            items[i].traits.lossless = false;
-        }
         let pics: Vec<suggest::Picture> = items
             .iter()
             .zip(&stats)
@@ -2818,6 +2803,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         return Ok(());
     }
 
+    // Each deletion names the file that stays and holds it, at the end of
+    // its chain of holders, not the nearest one, which may be deleted too.
+    // (`--against` follows the chain itself, above, and says both.)
+    let keeper = suggest::kept_at_end(&actions, &keeper);
     let grouping = timed!(28, group::find(n, &graph));
     let membership = group::membership(&grouping);
     stage!(
@@ -2899,8 +2888,10 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let sizes: Vec<u64> = stats.iter().map(|s| s.len).collect();
     let facts = report::read_facts(&out, &files, &dims, &damaged, &sizes);
     // Kept before `-o` is written: a report that could not be written is
-    // one case `--last` is for.
-    if keep_last {
+    // one case `--last` is for. Not a walk that found no picture at all,
+    // such as a wildcard walk of a folder of documents, for the reason an
+    // empty walk is not (above); the window keeps by the same rule.
+    if keep_last && out.files_enumerated > 0 {
         let roots = if args.from_file.is_some() || args.roots.iter().any(|r| r == stdout_path()) {
             // Read from a list, they are files rather than the folders the
             // window's tree starts from, and it finds those itself.

@@ -189,21 +189,38 @@ Each was measured; changing one needs a re-measure.
 User requirement: **a deletion never loses picture content.** Keeps may be
 the original, a lossless copy, a re-encode, or a composite holding the whole
 photo. REVIEW is for weak matches close to a copy; nothing acts on it.
-On IMGS-ALL at 512: 17,877 DELETE, 3 lose content (synthetic composites),
-266/304 families keep the original. Scored by `suggest_score.py`.
+On IMGS-ALL at 512: 17,968 DELETE, 1 loses content (a synthetic
+`browser_window` composite), 273/304 families keep the original or a
+lossless copy, 301/304 a faithful full copy. Scored by `suggest_score.py`
+(`benchmark/suggest_score.py REPORT.json`, ~100 s a cached run).
 
 Rules (constants in `suggest.rs` with reasons): clean pair at 0.85; weak pair
 deletes at >= 0.95 (`WEAK_DELETES`), REVIEW at >= 0.9 (`REVIEW`); two crops
 each missing <= 10% count as one frame on deleting pairs (`CROPS`); *holds*
 by frame corners, keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
 pixels hold no detail (`Traits::detail`); a whole-frame blurred check before
-every deletion (`whole_worst`, 12 grey levels, `WHOLE_TRIES`); composites are
-deleted only by their own copies; tie-break by grey closeness, sharpness,
-lossless, EXIF, size, colour (`decode::colour_of`, lazily). A palette
-(indexed PNG, <= 8-bit BMP, colour-mapped TGA) is not lossless
-(`decode::indexed`; cached records re-checked from the header): a
-256-colour copy used to be kept over its PNG original. A DELETE row carries
-`kept_copy` (JSON only), which the window shows.
+every deletion (`whole_worst`, 12 grey levels), every holder asked in turn
+(a cap of three tries, removed: it cost 108 safe deletions and no time);
+composites are deleted only by their own copies; tie-break by grey closeness
+(`TAU` = 3, the p99 grey-grid distance between two files holding the same
+pixels), sharpness (`SOFT_TIE` = 0.05, the p99 softening of a q84-96 JPEG
+re-encode), lossless, EXIF, size, colour (`COLOURFUL` = 1.5, above the 1.31
+the noisiest grey copy reads; `decode::colour_of`, lazily). Each derivation
+and its sweep is on the constant. Colour is the colour of a 4x4 grid's cell
+means (`decode::CellColour`): pixel by pixel, noise on a grey photo read as
+colour and no bar separated it from a faint tint. A palette (indexed PNG,
+<= 8-bit BMP, colour-mapped TGA) is not lossless (`decode::indexed`): a
+256-colour copy used to be kept over its PNG original. Nor is a
+JPEG-compressed TIFF; a WebP is lossless when its picture chunk is `VP8L`
+wherever it lies (EXIF or ICC make the first chunk `VP8X`), a JPEG XL when
+its first frame is Modular without XYB (a recompressed JPEG is VarDCT).
+
+A DELETE row carries `kept_copy` (JSON only), which the window shows: the
+end of its chain of holders (`suggest::kept_at_end`), which stays. Deletion
+spreads one holder at a time, and the nearest holder was itself a DELETE for
+15% of deletions. A deletion whose kept copy is gone (`--last`, or the
+window after the Trash or on restore) becomes REVIEW: carried out, it would
+take the last copy.
 
 `--suggest correlation | representative` (`suggest::by_group`): simple
 group-only rules, by user request; `correlation` deletes at 0.9 at the
@@ -225,8 +242,8 @@ and cold runs agree.
 
 Every finished scan is kept in `last-scan/` beside the cache file (shared
 with the window); `--last` re-writes text/CSV byte-for-byte, JSON without
-`pairs`. Not kept under `--no-cache`, `--no-last`, `--against`, or an empty
-walk. Paths are kept absolute (`keep_scan`): read back from another folder,
+`pairs`. Not kept under `--no-cache`, `--no-last`, `--against`, or a walk
+that found no picture; the window keeps by the same rule. Paths are kept absolute (`keep_scan`): read back from another folder,
 or by the window from `$HOME`, relative ones named other files. The window's
 Trash leaves a file whose length differs from the scan's.
 
@@ -424,7 +441,7 @@ Do not retry without new evidence:
 - `-o`, `--dump`, `--log-file` may not name a picture or each other; at most
   one may be stdout. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC12.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record. Records for
   paths a run did not walk are carried over while the file exists, or
@@ -433,7 +450,11 @@ Do not retry without new evidence:
   dead bytes reach a quarter. Runs sharing the file hold it with `flock`
   shared; compaction, header writing and torn-tail repair need it alone
   (`exclusive`, never waited for) and are skipped otherwise: a compaction
-  under another run sent its later appends to an unlinked file.
+  under another run sent its later appends to an unlinked file. A
+  compaction keeps what another run appended after this one read the file
+  (`Store::foreign`), and counts it live: it used to drop it. A record's
+  file is gone only on "not found" (`cache::gone`): an unreadable folder or
+  a dropped sshfs/NFS mount is not a deletion.
   Another format version's file is left untouched. Damage costs only the
   damaged record. **Cost measurements must pass `--no-cache`.** Sweeps
   should use their own `--cache`. `--prune-cache` keeps only what the scan

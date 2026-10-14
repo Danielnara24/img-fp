@@ -198,17 +198,36 @@ const WEAK_DELETES: f32 = 0.95;
 const EXTRA_PER_OCTAVE: f32 = 0.1;
 const EXTRA_FLOOR: f32 = 0.03;
 /// How close in grey (summed over the 4x4 grid, 0..=255 a cell) a file must
-/// be to the group's middle to be a candidate for keeping.
-const TAU: f32 = 2.0;
-/// How much softer than the candidates' median a candidate may be.
+/// be to the group's middle to be a candidate for keeping: as close as two
+/// files holding the same pixels are. The grid is read from each file's own
+/// decode, and a JPEG's grey is its Y plane where a PNG's is BT.601 from RGB,
+/// so the same pixels differ: over every pair of an original and its exact,
+/// stripped, PNG, TIFF and lossless WebP copies on IMGS-ALL, by 1.07 at p90
+/// and 3.11 at p99. Tone edits sit far out (brightness, gamma, contrast and
+/// grading: at most 1% within 3); those that move colour and not luma,
+/// which the grid cannot see at any bar, up to 7%. Swept on IMGS-ALL, 2 to 3
+/// is a plateau (272-274 families keep their original, 301 a faithful copy)
+/// with a cliff each side: 0.5 drops lossless copies over decode noise (241),
+/// 8 lets edits in to win on size (255), no bar at all 90.
+const TAU: f32 = 3.0;
+/// How much softer than the candidates' median a candidate may be: as much
+/// softer as a JPEG re-encode at quality 84 to 96 is than its original, at
+/// p99 (0.047), so that such a copy ties with it. At 0 a lossless copy drops
+/// out over its decode's own noise (0.015 at most) and only 164 families
+/// keep their original; 0.025 to 0.05 is a plateau, and wider erodes it
+/// slowly (270 with no bar), as blurred copies come in.
 const SOFT_TIE: f32 = 0.05;
 /// The most a block of the whole-frame check may disagree, in grey levels.
 const WHOLE_RESIDUAL: f32 = 12.0;
-/// How many files' whole-frame checks a file may fail before it is no
-/// longer asked: see `settle`.
-const WHOLE_TRIES: u32 = 3;
-/// Below this, `Traits::colour` is a grey picture.
-const COLOURFUL: f32 = 2.0;
+/// Below this, `Traits::colour` is a grey picture: above the most a grey one
+/// reads. Through every codec the benchmark corpus has, a grey seed reads
+/// 0.1 at most, and with the strongest noise its generator adds, 1.31 — that
+/// last through zune-jpeg, whose chroma upsampling rounds up a quarter level
+/// where chroma varies. A faint real tint below it (0.6 to 1.2 in the corpus)
+/// counts as grey, which costs nothing: a grey copy of such a picture loses
+/// next to nothing. Swept on IMGS-ALL, 1.5 to 3 is flat (271-272 families
+/// keep their original, 301-302 a faithful copy), and 1 is below the floor.
+const COLOURFUL: f32 = 1.5;
 
 /// One strong pair, seen from one end `f`.
 #[derive(Clone, Copy)]
@@ -371,6 +390,31 @@ pub fn suggest_pinned(
     (action, keeper)
 }
 
+/// For each DELETE, the file that stays and holds it: the end of its chain
+/// of keepers. Deletion spreads one holder at a time, so the file a deletion
+/// rests on (`suggest_pinned`'s second answer) may be a DELETE itself, and
+/// named as the copy that is kept it was a file suggested for deletion too:
+/// 52 of 337 DELETEs on `derived/Desktop`. `None` where `keeper` has none,
+/// or where the chain does not end on a file that stays.
+pub fn kept_at_end(actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<Option<usize>> {
+    (0..keeper.len())
+        .map(|i| {
+            if actions.get(i).copied().flatten() != Some(Action::Delete) {
+                return None;
+            }
+            let mut end = keeper[i]?;
+            // A chain visits each file at most once; a longer walk is a loop.
+            for _ in 0..keeper.len() {
+                if actions.get(end).copied().flatten() != Some(Action::Delete) {
+                    return Some(end);
+                }
+                end = keeper.get(end).copied().flatten()?;
+            }
+            None
+        })
+        .collect()
+}
+
 struct Ctx<'a> {
     pics: &'a [Picture<'a>],
     links: &'a [(usize, usize, Link<'a>)],
@@ -470,7 +514,12 @@ impl Ctx<'_> {
             let (pd, pk) = (&self.pics[d], &self.pics[k]);
             *whole_memo.entry((k, d)).or_insert_with(|| whole_worst(&mut blurs, (d, pd), (k, pk), &m))
         };
-        let mut refused: HashMap<usize, u32> = HashMap::new();
+        // Every holder a file has is asked in turn until one passes. A file
+        // refused three times was once not asked again, on the guess that it
+        // held a sticker or a vignette its family lacked; on IMGS-ALL that
+        // gave up 108 deletions the fourth holder or a later one passed, none
+        // of them losing anything, for no time measurable on it or on the
+        // found corpus (0.1 s), since `whole` is memoised by pair.
         let mut can_delete = |k: usize, d: usize| -> bool {
             if !self.holds(k, d) {
                 return false;
@@ -483,18 +532,7 @@ impl Ctx<'_> {
             if !shape {
                 return false;
             }
-            // A file the whole-frame check has refused this often holds
-            // something none of its family does — a sticker, a vignette —
-            // and asking the rest of the family again only costs time.
-            let tries = refused.entry(d).or_insert(0);
-            if *tries >= WHOLE_TRIES {
-                return false;
-            }
-            let ok = whole(k, d) <= WHOLE_RESIDUAL;
-            if !ok {
-                *tries += 1;
-            }
-            ok
+            whole(k, d) <= WHOLE_RESIDUAL
         };
         // Classes: files of one frame, each holding the other.
         let mut class: HashMap<usize, usize> = HashMap::new();
@@ -968,6 +1006,16 @@ fn hypot(a: f32, b: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deletion names the file at the end of its chain of holders, which
+    /// stays; a chain that ends on no such file, or loops, names none.
+    #[test]
+    fn a_deletion_names_the_file_that_stays() {
+        use Action::*;
+        let actions = [Some(Keep), Some(Delete), Some(Delete), Some(Delete), Some(Delete), Some(Review)];
+        let keeper = [None, Some(0), Some(1), Some(4), Some(3), None];
+        assert_eq!(kept_at_end(&actions, &keeper), vec![None, Some(0), Some(0), None, None, None]);
+    }
 
     fn thumb() -> Thumb {
         Thumb::new(16, 12, 0.125, (0..16 * 12).map(|i| ((i * 37) % 251) as u8).collect())

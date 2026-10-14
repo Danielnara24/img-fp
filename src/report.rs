@@ -216,7 +216,8 @@ pub struct Output {
     /// file in no pair, which no group holds.
     pub actions: Vec<Option<Action>>,
     /// For a file the content rule deletes, the kept file that shows all of
-    /// it, by index (`suggest::suggest_pinned`); empty under another rule.
+    /// it, by index: the end of its chain of holders (`suggest::kept_at_end`),
+    /// which stays. Empty under another rule.
     pub kept: Vec<Option<usize>>,
 }
 

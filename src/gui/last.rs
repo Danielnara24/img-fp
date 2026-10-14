@@ -4,7 +4,8 @@
 //! One scan only, the one the results page shows, and the command line's
 //! last scan as well: a scan that finishes with results replaces it, from
 //! here or from a terminal, and one that is cancelled or fails leaves it
-//! alone, as it leaves the page alone. Beside it, the images marked for the
+//! alone, as it leaves the page alone. So does one run without the cache or
+//! one that found no pictures, as on the command line (`img_fp::last`). Beside it, the images marked for the
 //! Trash, written as they change (`save_marks`).
 //!
 //! `$XDG_CACHE_HOME/img-fp/last-scan/`, or `~/.cache/img-fp/last-scan/`: the

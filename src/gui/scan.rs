@@ -398,6 +398,8 @@ pub struct Group {
 #[derive(serde::Deserialize)]
 struct Report {
     groups: Vec<Group>,
+    #[serde(default)]
+    files_enumerated: usize,
     files_analysed: usize,
     #[serde(default)]
     config: Config,
@@ -412,6 +414,8 @@ struct Config {
 
 pub struct Found {
     pub groups: Vec<Group>,
+    /// Pictures the scan found, whether or not they opened.
+    pub enumerated: usize,
     pub analysed: usize,
     /// The correlation bar the scan ran at, which the correlation rule cuts
     /// from.
@@ -437,7 +441,7 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
     // the time on a large report.
     let f = match std::fs::read(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), analysed: 0, min_correlation: img_fp::defaults().min_pixel_correlation, kept: None }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), enumerated: 0, analysed: 0, min_correlation: img_fp::defaults().min_pixel_correlation, kept: None }),
         Err(e) => return Err(format!("could not read the scan's results: {e}")),
     };
     let r: Report = serde_json::from_slice(&f).map_err(|e| format!("could not read the scan's results: {e}"))?;
@@ -452,7 +456,7 @@ pub fn read_report(path: &Path) -> Result<Found, String> {
         }
     }
     let min_correlation = r.config.min_pixel_correlation.unwrap_or_else(|| img_fp::defaults().min_pixel_correlation);
-    Ok(Found { groups, analysed: r.files_analysed, min_correlation, kept: None })
+    Ok(Found { groups, enumerated: r.files_enumerated, analysed: r.files_analysed, min_correlation, kept: None })
 }
 
 #[cfg(test)]

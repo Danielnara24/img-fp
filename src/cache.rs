@@ -120,7 +120,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// to be had from a cached record.
 /// 12: a picture wider than 4:3 is analysed with a longer long side, and its
 /// thumbnail with one to match (`decode::area_factor`).
-const MAGIC: &[u8; 8] = b"IMGFPC12";
+/// 13: `Traits::colour` is the colour of a 4x4 grid's cell means, which noise
+/// does not reach (`decode::CellColour`); and `Traits::lossless` is said of a
+/// WebP with metadata, a JPEG-compressed TIFF and a JPEG XL by what their
+/// pictures are (`decode::lossless_format`). A record of 12 says neither.
+const MAGIC: &[u8; 8] = b"IMGFPC13";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -182,7 +186,7 @@ pub struct Key {
     pub ctime: i64,
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC12.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC13.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -509,6 +513,10 @@ static PARTIAL: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static APPENDED: AtomicUsize = AtomicUsize::new(0);
 
 fn lock<T>(m: &'static Mutex<T>) -> MutexGuard<'static, T> {
+    lock_any(m)
+}
+
+fn lock_any<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -648,6 +656,12 @@ pub struct Store {
     /// The file is another format version's, whose magic this is, and is
     /// left as it is; see the note on `MAGIC`.
     other_version: Option<String>,
+    /// Where the part of the file this run has read ends. Anything after it
+    /// was appended since: by this run (`mine`), or by another run sharing
+    /// the file (`foreign`).
+    read_end: u64,
+    /// Where each record this run appended begins.
+    mine: Mutex<std::collections::HashSet<u64>>,
 }
 
 /// Open the cache at `path`, read what is usable out of it, and keep it open
@@ -691,6 +705,8 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
         broken: Default::default(),
         damaged: 0,
         other_version: None,
+        read_end: MAGIC.len() as u64,
+        mine: Default::default(),
     };
     // Several runs may hold the file at once — the window's scan and one in
     // a terminal — and each appends to it as it goes. Appending is safe
@@ -758,6 +774,7 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             Found::Usable(tail) => {
                 store.records = AtomicUsize::new(tail.count);
                 store.damaged = tail.damaged;
+                store.read_end = tail.end;
                 // A partial record at the end would sit in front of every
                 // record appended after it, and turn a lost record into a
                 // damaged file. So would a record whose framing is damaged,
@@ -933,6 +950,7 @@ impl Store {
         });
         match wrote {
             Ok(span) => {
+                lock_any(&self.mine).insert(span.at);
                 self.records.fetch_add(1, Ordering::Relaxed);
                 APPENDED.fetch_add(1, Ordering::Relaxed);
                 Some(span)
@@ -1003,7 +1021,9 @@ impl Store {
         let Ok(size) = f.metadata().map(|m| m.len()) else { return true };
         // The records' bytes, the header aside.
         let held = size.saturating_sub(MAGIC.len() as u64);
-        let live: u64 = entries.iter().map(|e| e.1.len).sum();
+        // Another run's records, appended since this one read the file, are
+        // as live as this run's own: they are its analysis.
+        let live: u64 = entries.iter().map(|e| e.1.len).chain(self.foreign().iter().map(|e| e.1.len)).sum();
         held.saturating_sub(live) * 4 >= held
     }
 
@@ -1017,14 +1037,26 @@ impl Store {
     /// `false` when it was put off: not while another run has the file open,
     /// since its records would go on into the file this replaces, which by
     /// then has no name. A run that has the file alone does it.
-    pub fn compact(&mut self, entries: &mut [(&Path, Span)]) -> Result<bool> {
+    ///
+    /// The records another run appended since this one read the file are
+    /// kept too. That run has finished — nothing else holds the file — and
+    /// what it described is in nothing this run was handed: dropped, a scan
+    /// in the window lost the analysis of a folder a terminal had scanned
+    /// meanwhile, and its bytes, counted as dead, were what made the copy
+    /// look worth making.
+    pub fn compact(&mut self, entries: &[(&Path, Span)]) -> Result<bool> {
         let Some(src) = &self.file else { return Ok(false) };
         if !exclusive(src, &self.path) {
             return Ok(false);
         }
+        let foreign = self.foreign();
+        let mut entries: Vec<(&Path, Span)> = entries.iter().copied().chain(foreign.iter().map(|(p, s)| (p.as_path(), *s))).collect();
         // By the path's bytes, which is the order the text sort gave before
-        // paths were kept as bytes.
-        entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()));
+        // paths were kept as bytes; and two records for one path in the
+        // order they were written, since the later is the one a reader keeps.
+        // Two are possible only when another run described a file this run
+        // also has a record for.
+        entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()).then(a.1.at.cmp(&b.1.at)));
         let new = replace_with(&self.path, |f| {
             let mut b = Buf(std::io::BufWriter::with_capacity(1 << 20, f));
             b.header()?;
@@ -1037,9 +1069,53 @@ impl Store {
             b.0.flush()?;
             Ok(())
         })?;
+        self.read_end = new.metadata().map_or(u64::MAX, |m| m.len());
         self.file = Some(new);
         self.records = AtomicUsize::new(entries.len());
+        lock_any(&self.mine).clear();
         Ok(true)
+    }
+
+    /// The records after `read_end` that this run did not append: another
+    /// run's, made while this one had the file open. Read by `pread`, so the
+    /// descriptor's own offset, which the appends go through, is not moved.
+    /// A record being written as this reads, or cut off, ends the list.
+    fn foreign(&self) -> Vec<(PathBuf, Span)> {
+        let Some(f) = &self.file else { return Vec::new() };
+        let Ok(size) = f.metadata().map(|m| m.len()) else { return Vec::new() };
+        let mine = lock_any(&self.mine);
+        let mut r = Rd { r: At { f, pos: self.read_end }, pos: self.read_end, size, ended: false };
+        let mut out = Vec::new();
+        loop {
+            let at = r.pos;
+            match read_record(&mut r, |_| false) {
+                Ok(Some((head, _))) if !mine.contains(&at) => out.push((head.path, Span { at, len: r.pos - at })),
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        out
+    }
+}
+
+/// A file read from an offset with `pread`; see `Store::foreign`.
+struct At<'a> {
+    f: &'a File,
+    pos: u64,
+}
+
+impl Read for At<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.f.read_at(buf, self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Skip for At<'_> {
+    fn skip(&mut self, n: u64) -> std::io::Result<()> {
+        self.pos += n;
+        Ok(())
     }
 }
 
@@ -1345,7 +1421,7 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
 /// default cache would be worse than none, silently, for anyone who scans two
 /// directories in turn.
 ///
-/// The existence check is what keeps the file from growing forever. A record
+/// The existence check (`gone`) is what keeps the file from growing forever. A record
 /// is worth keeping while the file it describes is there to be matched again;
 /// once the file is gone the record can never be used, only carried. It is one
 /// `stat` per record not seen this run, and it is why `--prune-cache` is a
@@ -1361,7 +1437,7 @@ pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
     // On every thread: one `stat` per record of every other folder this cache
     // has seen, which on a network share is a round trip apiece.
     type Kept<'a> = Vec<(&'a Path, Span)>;
-    let (mut kept, missing): (Kept, Kept) = cached.par_iter().map(|(path, e)| (path.as_path(), e.2)).partition(|(path, _)| path.exists());
+    let (mut kept, missing): (Kept, Kept) = cached.par_iter().map(|(path, e)| (path.as_path(), e.2)).partition(|(path, _)| !gone(path));
     // Each volume asked once, however many of its records are missing.
     let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
     for (path, span) in missing {
@@ -1371,6 +1447,22 @@ pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
         }
     }
     kept
+}
+
+/// Whether the file a record names is no longer there: the filesystem says
+/// so, and not merely that it cannot be asked right now.
+///
+/// `Path::exists` is false on any error, so a file in a folder made
+/// unreadable, on an sshfs mount whose connection dropped ("Transport
+/// endpoint is not connected") or behind a stale NFS handle counted as
+/// deleted, and once such records were a quarter of the file the next scan
+/// of anything else compacted them away. Only "no such file", or a part of
+/// the path that is no longer a folder, says the file has gone.
+pub fn gone(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(_) => false,
+        Err(e) => matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+    }
 }
 
 /// The folder a removable drive or a network share holding `path` is mounted
@@ -1841,6 +1933,66 @@ mod tests {
         let (got, _, _) = reopen(&path);
         assert!(got.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Another run that appended to the cache and finished while this one
+    /// had it open: what it appended is not this run's to keep or drop, and a
+    /// compaction keeps it. It used to copy only what this run knew of, and
+    /// the other run's records, counted as dead, were what set it off.
+    #[test]
+    fn a_compaction_keeps_what_another_run_appended_meanwhile() {
+        let dir = scratch("two-runs-finished");
+        let path = dir.join(file_name());
+        let (f, t) = analysis(20, 5);
+        let (f2, t2) = analysis(20, 6);
+        let key = Key { len: 1, mtime: 1, ctime: 1 };
+        let newer = Key { len: 2, mtime: 2, ctime: 2 };
+        let (_, mut a, _) = reopen(&path);
+        let mine = a.append("mine.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        a.append("dead.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let shared = a.append("shared.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let (_, b, _) = reopen(&path);
+        b.append("other.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        // The other run described a file this one has a record for, after it.
+        b.append("shared.jpg", newer, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        drop(b);
+        let keep = [(Path::new("mine.jpg"), mine), (Path::new("shared.jpg"), shared)];
+        // Only `dead.jpg` is dead: the other run's two records are live.
+        assert!(!a.worth_compacting(&keep, false), "a fifth of the file is dead, not three fifths");
+        assert!(a.compact(&keep).unwrap());
+        drop(a);
+        let (got, store, _) = reopen(&path);
+        assert!(got.contains_key(Path::new("other.jpg")), "the other run's record is kept");
+        assert!(got.contains_key(Path::new("mine.jpg")) && !got.contains_key(Path::new("dead.jpg")));
+        let s = &got[Path::new("shared.jpg")];
+        assert_eq!((s.0.len, &s.1.as_ref().unwrap().feats.desc), (2, &f2.desc), "the later record still wins");
+        assert_eq!(store.records(), 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A record whose file cannot be looked at right now — a folder made
+    /// unreadable here; a dropped sshfs or NFS mount in life — is carried,
+    /// not taken for a file deleted.
+    #[test]
+    fn a_file_that_cannot_be_reached_is_not_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("unreachable");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let f = locked.join("a.jpg");
+        std::fs::write(&f, b"x").unwrap();
+        let mut m: HashMap<PathBuf, Entry> = HashMap::new();
+        m.insert(f.clone(), (Key { len: 1, mtime: 1, ctime: 1 }, None, Span { at: 8, len: 10 }));
+        m.insert(dir.join("deleted.jpg"), (Key { len: 1, mtime: 1, ctime: 1 }, None, Span { at: 18, len: 10 }));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let reachable = std::fs::metadata(&f).is_ok();
+        let kept: Vec<PathBuf> = carry_over(&m).into_iter().map(|(p, _)| p.to_path_buf()).collect();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        // Root reads through any mode, and then the file is simply there.
+        if !reachable {
+            assert_eq!(kept, vec![f]);
+        }
     }
 
     /// The default file is named for the format, so that a format change
