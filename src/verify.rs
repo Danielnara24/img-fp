@@ -243,15 +243,18 @@ impl Policy {
         Policy {
             anchor,
             // An anchor whose every detailed block agrees: no block of the
-            // overlap below 0.85. **This number is fitted**, and it is the one
-            // number the near-miss rule has. Replayed over the anchors of
-            // IMGS, IMGS2 and both, families of photographs of one scene
-            // taken a moment apart merge below 0.8 and none do from 0.8 to
-            // 0.95, while IMGS's reach falls as it rises; 0.85 is the plateau's
-            // lower middle. A count of aligned points was tried beside it and
-            // is worse: a dark or plain picture has few features and good
-            // pixels, and its family fell apart. See CLAUDE.md.
-            clean: Rules { min_worst_block: 0.85, ..anchor },
+            // overlap below 0.9. **This number is fitted**, and it is the one
+            // number the near-miss rule has. It is the plateau's lower middle,
+            // as it was when it was 0.85: swept on IMGS-ALL, two photographs
+            // of one scene in Segovia merge at 0.85 (6,933 false pairs) and no
+            // family merges from 0.875 to 0.95 (F1 0.9823, 0.9821, 0.9816,
+            // 0.9806). It moved up a step when the fit and the pyramid stopped
+            // costing exact copies agreement (`best_transform`, `Pyramid`):
+            // near misses rose by about 0.04 with them, and the bar was 0.04
+            // above the old cliff. A count of aligned points was tried beside
+            // it and is worse: a dark or plain picture has few features and
+            // good pixels, and its family fell apart. See CLAUDE.md.
+            clean: Rules { min_worst_block: 0.9, ..anchor },
             propagated: Rules {
                 min_aligned_points: 0,
                 centred_evidence: false,
@@ -628,11 +631,24 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     let mut held_after = n_in;
     // Refine: least-squares affine on the inliers, recount, repeat while the
     // set does not shrink.
+    //
+    // **The fitted transform is kept even when the recount shrinks**; only
+    // the inlier set and its count stay the hypothesis's. The hypothesis is a
+    // similarity read off one keypoint pair's scale and angle, which a
+    // keypoint knows to a percent or so: on exact copies it was 1-9 working
+    // pixels out at the corners (median 4.9 on a plain half-size copy, 8.7 on
+    // a crop), and the pixel check read that misregistration as disagreement
+    // — 110 of 288 lossless copies fell under the clean bar. The fit through
+    // hundreds of inliers is a few tenths of a pixel out. It was thrown away
+    // whenever it moved one inlier past the tolerance, which at 1.5% of the
+    // diagonal is nearly always: the count is a vote for the hypothesis, not a
+    // measure of the fit.
     for _ in 0..3 {
         let held = sc.mask.iter().filter(|v| **v).count();
         let Some(m2) = fit_affine(a, b, pairs, &sc.mask) else { break };
         let count = count_inliers(&m2, ax, ay, bx, by, tol2, held);
         if count < held {
+            m = m2;
             break;
         }
         mark_inliers(&m2, ax, ay, bx, by, tol2, &mut sc.hit);
@@ -851,9 +867,9 @@ fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
 /// introduced. The pyramid is derived from `px` and is not serialised.
 ///
 /// Nor is it kept. It is built for each comparison that reads it, into
-/// scratch the worker keeps (`Pyramid`), and that costs less than a
-/// microsecond: a level is a 2x2 mean, sixteen outputs to a few vector
-/// instructions. Kept on the thumbnail it was a third again of every
+/// scratch the worker keeps (`Pyramid`), and that costs a few microseconds,
+/// paid once for a run of comparisons on one side: a level is the one below
+/// filtered by [1 3 3 1]/8 each way and halved (`Pyramid`). Kept on the thumbnail it was a third again of every
 /// thumbnail, held from the first comparison to the end of the run — 103 MB
 /// on a corpus of 27,000 pictures, nearly all of whose thumbnails are read
 /// above level zero, and alive at the end of verification, which is where
@@ -866,29 +882,63 @@ pub struct Thumb {
     /// Scale from working-image coordinates to thumbnail coordinates.
     pub scale: f32,
     pub px: Vec<u8>,
+    /// Which thumbnail this is, for a worker's `Pyramid` to know it already
+    /// holds its levels: unique to each `Thumb::new`, and shared only by a
+    /// clone, which holds the same pixels. 0, a default thumbnail's, is none.
+    pub id: u64,
 }
 
 /// The half-resolution levels above a thumbnail's `px`, built into buffers a
 /// worker keeps from one comparison to the next: level i has been halved
 /// i+1 times.
+///
+/// **A level is the one below filtered by [1 3 3 1]/8 each way, then
+/// halved**, not its 2x2 mean. Pixel `j` of a level is centred where the 2x2
+/// block's centre was (`to_level` is unchanged), but a 2x2 mean is a box with
+/// no margin, and what it keeps of detail near its own scale depends on where
+/// its grid falls: two thumbnails of one picture whose grids fall differently
+/// — a crop, which moves the grid by any fraction, or a reflection of a
+/// thumbnail with an odd side, which moves it by half a level pixel — held
+/// different levels, and the pixel check read the difference as disagreement.
+/// Exact lossless copies, compared through the exact transform, fell under
+/// the clean bar in 12 of 288 cases (a 180-degree turn of a 128x75 thumbnail
+/// read 0.75 at its worst block), all of them a reflection or a crop; a
+/// resize, whose grids fall alike, read 0.999. The wider filter suppresses
+/// what the grid's position decides, and the 12 became 2. It is what
+/// `suggest::blurred` found for the same reason, at the cost of a Gaussian.
 #[derive(Default)]
 pub(crate) struct Pyramid {
     buf: Vec<u8>,
     /// Width, height and where in `buf` each level starts.
     levels: Vec<(u16, u16, usize)>,
+    /// The vertical pass of the row being made.
+    rows: Vec<u16>,
+    /// The thumbnail whose levels these are (`Thumb::id`), 0 for none.
+    of: u64,
 }
 
 impl Pyramid {
-    /// The levels of `t`, in place of whatever this held.
+    /// At least the first `want` levels of `t`, or all it has if fewer.
+    ///
+    /// Levels already made for `t` are kept: a worker verifies a file against
+    /// its candidates one after another, so the same thumbnail is the first
+    /// side of a long run of comparisons, and its levels were made again for
+    /// each. And no deeper than asked, since a comparison reads two adjacent
+    /// levels. Neither changes what a level holds, only how often it is made.
     #[cfg_attr(dispatch, inline(always))]
-    fn fill(&mut self, t: &Thumb) {
-        self.buf.clear();
-        self.levels.clear();
-        let (mut cw, mut ch) = (t.w as usize, t.h as usize);
-        // Every level together is under a third of level zero.
-        self.buf.reserve(cw * ch / 2);
-        let mut from: Option<usize> = None;
-        while cw >= 4 && ch >= 4 {
+    fn fill(&mut self, t: &Thumb, want: usize) {
+        if t.id == 0 || t.id != self.of {
+            self.buf.clear();
+            self.levels.clear();
+            self.of = t.id;
+            // Every level together is under a third of level zero.
+            self.buf.reserve(t.w as usize * t.h as usize / 2);
+        }
+        let (mut cw, mut ch, mut from) = match self.levels.last() {
+            Some(&(w, h, at)) => (w as usize, h as usize, Some(at)),
+            None => (t.w as usize, t.h as usize, None),
+        };
+        while self.levels.len() < want && cw >= 4 && ch >= 4 {
             let (nw, nh) = (cw / 2, ch / 2);
             let at = self.buf.len();
             self.buf.resize(at + nw * nh, 0);
@@ -897,8 +947,15 @@ impl Pyramid {
                 None => &t.px,
                 Some(f) => &done[f..f + cw * ch],
             };
+            // Vertical first, at the source's width, then horizontal: the
+            // vertical pass reads whole rows and the horizontal one then runs
+            // over half as many.
+            self.rows.clear();
+            self.rows.resize(cw, 0);
+            let row = |k: usize| &cur[k.min(ch - 1) * cw..(k.min(ch - 1) + 1) * cw];
             for y in 0..nh {
-                halve_row(&cur[2 * y * cw..(2 * y + 1) * cw], &cur[(2 * y + 1) * cw..(2 * y + 2) * cw], &mut next[y * nw..(y + 1) * nw]);
+                filter_column(row((2 * y).saturating_sub(1)), row(2 * y), row(2 * y + 1), row(2 * y + 2), &mut self.rows);
+                filter_row(&self.rows, &mut next[y * nw..(y + 1) * nw]);
             }
             self.levels.push((nw as u16, nh as u16, at));
             from = Some(at);
@@ -920,41 +977,82 @@ impl Pyramid {
     }
 }
 
-/// One output row of a pyramid level: each byte the rounded mean of the 2x2
-/// block below it, `(a + b + c + d + 2) / 4`. An odd last column is dropped,
-/// as the level's width is the floor of half.
+/// The vertical half of a pyramid level: `r0 + 3 r1 + 3 r2 + r3` per
+/// column, at most 8 x 255. Contiguous, and the compiler vectorises it.
 #[cfg_attr(dispatch, inline(always))]
 #[cfg_attr(not(dispatch), inline)]
-fn halve_row(r0: &[u8], r1: &[u8], out: &mut [u8]) {
-    let mut x = 0usize;
-    // Sixteen outputs at a time: `maddubs` against ones sums each horizontal
-    // pair into a sixteen-bit lane, the two rows' sums are added, and the
-    // rounding is the same integer arithmetic as the scalar tail. Every sum is
-    // at most 1,022, so nothing saturates. Only where the CPU has AVX2.
+fn filter_column(r0: &[u8], r1: &[u8], r2: &[u8], r3: &[u8], out: &mut [u16]) {
+    let n = out.len();
+    let (r0, r1, r2, r3) = (&r0[..n], &r1[..n], &r2[..n], &r3[..n]);
+    for x in 0..n {
+        out[x] = r0[x] as u16 + 3 * (r1[x] as u16 + r2[x] as u16) + r3[x] as u16;
+    }
+}
+
+/// The horizontal half: each output `(v[2x-1] + 3v[2x] + 3v[2x+1] + v[2x+2]
+/// + 32) / 64` of the vertical pass `v`, its ends repeated past its edges,
+/// rounded to a byte. Every sum is at most 64 x 255, inside an `i16`.
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
+fn filter_row(v: &[u16], out: &mut [u8]) {
+    // Functions rather than closures, and inlined: a closure here was kept
+    // out of line, and out of the x86-64-v3 copy of the pixel check.
+    #[inline(always)]
+    fn tap(v: &[u16], x: usize) -> u8 {
+        let at = |i: isize| v[i.clamp(0, v.len() as isize - 1) as usize] as u32;
+        let i = 2 * x as isize;
+        (((at(i - 1) + 3 * (at(i) + at(i + 1)) + at(i + 2)) + 32) >> 6) as u8
+    }
+    /// Outputs `x..x + 8`; `v` holds `2x - 1` to `2x + 17`.
     #[cfg(target_arch = "x86_64")]
-    if crate::simd::v3() {
+    #[inline(always)]
+    unsafe fn block(v: &[u16], x: usize, out: &mut [u8]) {
+        use std::arch::x86_64::*;
         unsafe {
-            use std::arch::x86_64::*;
-            let ones = _mm256_set1_epi8(1);
-            let two = _mm256_set1_epi16(2);
-            while x + 16 <= out.len() {
-                let a = _mm256_loadu_si256(r0.as_ptr().add(2 * x) as *const __m256i);
-                let b = _mm256_loadu_si256(r1.as_ptr().add(2 * x) as *const __m256i);
-                let s = _mm256_add_epi16(_mm256_maddubs_epi16(a, ones), _mm256_maddubs_epi16(b, ones));
-                let v = _mm256_srli_epi16(_mm256_add_epi16(s, two), 2);
-                // Packing works per 128-bit half; the two halves' bytes are the
-                // even quadwords afterwards.
-                let packed = _mm256_permute4x64_epi64(_mm256_packus_epi16(v, v), 0b00_00_10_00);
-                _mm_storeu_si128(out.as_mut_ptr().add(x) as *mut __m128i, _mm256_castsi256_si128(packed));
-                x += 16;
+            let w13 = _mm256_set1_epi32(1 | 3 << 16);
+            let w31 = _mm256_set1_epi32(3 | 1 << 16);
+            let l = _mm256_madd_epi16(_mm256_loadu_si256(v.as_ptr().add(2 * x - 1) as *const __m256i), w13);
+            let r = _mm256_madd_epi16(_mm256_loadu_si256(v.as_ptr().add(2 * x + 1) as *const __m256i), w31);
+            let s = _mm256_srli_epi32(_mm256_add_epi32(_mm256_add_epi32(l, r), _mm256_set1_epi32(32)), 6);
+            // Eight 32-bit lanes to eight bytes: pack within each 128-bit
+            // half, then take each half's low four bytes.
+            let w = _mm256_packus_epi32(s, s);
+            let b = _mm256_packus_epi16(w, w);
+            let lo = _mm_cvtsi128_si32(_mm256_castsi256_si128(b)) as u32;
+            let hi = _mm_cvtsi128_si32(_mm256_extracti128_si256(b, 1)) as u32;
+            std::ptr::write_unaligned(out.as_mut_ptr().add(x) as *mut u64, lo as u64 | (hi as u64) << 32);
+        }
+    }
+    let n = out.len();
+    if n == 0 {
+        return;
+    }
+    out[0] = tap(v, 0);
+    // Every tap of these is inside the row.
+    let last = if 2 * n < v.len() { n } else { n - 1 };
+    let mut x = 1usize;
+    // Eight outputs at a time: `madd` takes `v[2x-1] + 3v[2x]` from a load at
+    // `2x - 1` and `3v[2x+1] + v[2x+2]` from one at `2x + 1`, as 32-bit sums,
+    // which are the scalar loop's sums exactly. A load at `2x + 1` reads 16
+    // values, to `2x + 17`. Only where the CPU has AVX2.
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::v3() && last >= 9 && v.len() >= 19 {
+        while x + 8 <= last && 2 * x + 17 <= v.len() {
+            unsafe { block(v, x, out) };
+            x += 8;
+        }
+        // The rest in one block that ends as far right as the row allows,
+        // overlapping outputs already made, which it makes again alike.
+        if x < last {
+            let end = (last - 8).min((v.len() - 17) / 2);
+            if end >= 1 {
+                unsafe { block(v, end, out) };
+                x = x.max(end + 8);
             }
         }
     }
-    while x < out.len() {
-        let i = 2 * x;
-        let s = r0[i] as u32 + r0[i + 1] as u32 + r1[i] as u32 + r1[i + 1] as u32;
-        out[x] = ((s + 2) / 4) as u8;
-        x += 1;
+    for x in x..n {
+        out[x] = tap(v, x);
     }
 }
 
@@ -997,7 +1095,8 @@ impl Thumb {
 
     /// A thumbnail from its level zero, which is all there is of one.
     pub fn new(w: u16, h: u16, scale: f32, px: Vec<u8>) -> Thumb {
-        Thumb { w, h, scale, px }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Thumb { w, h, scale, px, id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
     }
 
 
@@ -1076,12 +1175,13 @@ impl Thumb {
         if !(footprint > 1.0) {
             return whole;
         }
-        pyr.fill(self);
+        let l = footprint.log2();
+        // The levels read are `li - 1` and `li`, so `li + 1` of them.
+        pyr.fill(self, (l as usize).saturating_add(1));
         let mips: &Pyramid = pyr;
         if mips.len() == 0 {
             return whole;
         }
-        let l = footprint.log2();
         let li = (l as usize).min(mips.len());
         let lo: (&[u8], usize, usize, f32) = if li == 0 {
             (&self.px[..], self.w as usize, self.h as usize, 1.0)
@@ -1985,8 +2085,9 @@ mod bench {
 mod tests {
     use super::*;
 
-    /// The pyramid as it was built when it was kept on the thumbnail, one
-    /// output at a time: the reference `Pyramid::fill` is held to.
+    /// The pyramid one output at a time, each pixel the [1 3 3 1]/8 filter
+    /// both ways over the level below: the reference `Pyramid::fill` is held
+    /// to.
     fn pyramid_reference(w: u16, h: u16, px: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
         let mut mips: Vec<(u16, u16, Vec<u8>)> = Vec::new();
         let (mut cw, mut ch) = (w as usize, h as usize);
@@ -1997,11 +2098,17 @@ mod tests {
                 Some((_, _, p)) => p,
             };
             let mut next = Vec::with_capacity(nw * nh);
+            let k = [1u32, 3, 3, 1];
+            let at = |x: isize, y: isize| cur[y.clamp(0, ch as isize - 1) as usize * cw + x.clamp(0, cw as isize - 1) as usize] as u32;
             for y in 0..nh {
                 next.extend((0..nw).map(|x| {
-                    let i = 2 * y * cw + 2 * x;
-                    let s = cur[i] as u32 + cur[i + 1] as u32 + cur[i + cw] as u32 + cur[i + cw + 1] as u32;
-                    ((s + 2) / 4) as u8
+                    let mut s = 0;
+                    for (j, kj) in k.iter().enumerate() {
+                        for (i, ki) in k.iter().enumerate() {
+                            s += kj * ki * at(2 * x as isize - 1 + i as isize, 2 * y as isize - 1 + j as isize);
+                        }
+                    }
+                    ((s + 32) / 64) as u8
                 }));
             }
             mips.push((nw as u16, nh as u16, next));
@@ -2011,12 +2118,12 @@ mod tests {
         mips
     }
 
-    /// Every level, at every shape the vector path and its tail divide
-    /// differently: under sixteen outputs, odd widths and heights, exact
+    /// Every level, at every shape the interior loop and the clamped edges
+    /// divide differently: under sixteen outputs, odd widths and heights, exact
     /// multiples, the 128-pixel side thumbnails really have, and the
     /// extremes of the byte range.
     #[test]
-    fn the_pyramid_is_built_exactly_as_it_was() {
+    fn the_pyramid_is_built_as_its_reference() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut byte = move || {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -2033,7 +2140,7 @@ mod tests {
                     })
                     .collect();
                 let t = Thumb::new(w, h, 1.0, px);
-                pyr.fill(&t);
+                pyr.fill(&t, usize::MAX);
                 let want = pyramid_reference(w, h, &t.px);
                 assert_eq!(pyr.len(), want.len(), "{w}x{h}");
                 for (i, (ww, wh, wp)) in want.iter().enumerate() {

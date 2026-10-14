@@ -271,13 +271,6 @@ fn ago(secs: u64) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// The kept report as the run held it: the files numbered as they first
-/// appear, each group's members with their pair with the representative, the
-/// facts the rows stated, and the actions `mode` gives. The actions are
-/// worked out over every file, and only then are the gone ones left out, so
-/// that what a rule said of the rest is what it said with them (as in the
-/// window) — except a deletion resting on a file that has gone, which no
-/// longer has anything to rest on and is REVIEW.
 /// What `rebuild` left out or changed: files gone since the scan, and the
 /// deletions whose kept copy was among them, which are now REVIEW.
 struct Rebuilt {
@@ -285,6 +278,14 @@ struct Rebuilt {
     unheld: usize,
 }
 
+/// The kept report as the run held it: the files numbered as they first
+/// appear, each group's members with their pair with the representative, the
+/// facts the rows stated, and the actions `mode` gives. The actions are
+/// worked out over every file, and only then are the gone ones left out, so
+/// that what a rule said of the rest is what it said with them (as in the
+/// window) — except a deletion resting on a file that has gone, which no
+/// longer has anything to rest on: the content rule's is REVIEW, and the
+/// group rules judge only by representatives still there.
 fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Vec<PathBuf>, report::FileFacts, Rebuilt) {
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     let mut files: Vec<PathBuf> = Vec::new();
@@ -292,7 +293,8 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
     let mut content: Vec<Option<Action>> = Vec::new();
     let mut pairs: HashMap<(usize, usize), OutPair> = HashMap::new();
     let mut groups: Vec<OutGroup> = Vec::new();
-    let mut seats: Vec<suggest::Seat> = Vec::new();
+    // Each file's place in each group, beside the group's representative.
+    let mut seats: Vec<(usize, suggest::Seat)> = Vec::new();
     // Each DELETE's kept file, by path: it is numbered once every row is.
     let mut rests_on: Vec<(usize, PathBuf)> = Vec::new();
     for g in &kept.groups {
@@ -319,7 +321,7 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
                 Some("identical" | "same_pixels") => 1.0,
                 _ => r.pixel_correlation.unwrap_or(0.0),
             };
-            seats.push(suggest::Seat { file: i, representative: i == rep, correlation });
+            seats.push((rep, suggest::Seat { file: i, representative: i == rep, correlation }));
             if i == rep {
                 continue;
             }
@@ -376,7 +378,15 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
             }
             (content, kept_by)
         }
-        _ => (suggest::by_group(mode, files.len(), seats, min_correlation), Vec::new()),
+        // The other two rules judge a file by the representatives it was
+        // matched to, so a group whose representative has gone says nothing:
+        // its files were never compared with each other, and judged by it, a
+        // group's every remaining file was DELETE, resting on a file no
+        // longer there. A file it alone held has no suggestion.
+        _ => {
+            let seats = seats.into_iter().filter(|(rep, _)| !gone.contains(rep)).map(|(_, s)| s);
+            (suggest::by_group(mode, files.len(), seats, min_correlation), Vec::new())
+        }
     };
     // A group keeps its files that are still there, and is left out once it
     // holds fewer than two, or no longer holds the file every other was
@@ -568,6 +578,57 @@ mod tests {
         assert_eq!(done.unheld, 2);
         for f in &files[1..] {
             assert_eq!(again.actions[at(f)], Some(Action::Review), "{}", f.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The group rules judge a file only by representatives still there: a
+    /// file that agreed closely with one now gone and loosely with another
+    /// is judged by the other, and one only a gone representative held has
+    /// no suggestion.
+    #[test]
+    fn the_group_rules_judge_by_representatives_still_there() {
+        let root = std::env::temp_dir().join(format!("img-fp-groupgone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let files: Vec<PathBuf> = ["gone.jpg", "both.jpg", "only.jpg", "stays.jpg"].iter().map(|n| root.join(n)).collect();
+        for f in &files {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let corr = |ia, ib, c| OutPair { pixel_correlation: c, ..pair(ia, ib, &files) };
+        let group = |rep: usize, members: Vec<usize>| OutGroup {
+            representative: files[rep].display().to_string(),
+            files: members.iter().map(|&i| files[i].display().to_string()).collect(),
+            rep,
+            members,
+        };
+        let out = Output {
+            tool: "img-fp",
+            config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.6}),
+            files_enumerated: 4,
+            files_analysed: 4,
+            failures: vec![],
+            runtime_seconds: 1.0,
+            groups: vec![group(0, vec![0, 1, 2]), group(3, vec![1, 3])],
+            pairs: vec![corr(0, 1, 0.99), corr(0, 2, 0.99), corr(1, 3, 0.7)],
+            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Delete), Some(Action::Keep)],
+            kept: vec![None, Some(0), Some(0), None],
+        };
+        let facts = report::read_facts(&out, &files, &[(8, 8); 4], &[false; 4], &[1; 4]);
+        let p = root.join("kept.json");
+        report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
+        let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
+        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Correlation, 0.6);
+        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
+        assert_eq!(again.actions[at(&files[1])], Some(Action::Delete), "with its representative, by its best agreement");
+
+        std::fs::remove_file(&files[0]).unwrap();
+        for mode in [suggest::Mode::Correlation, suggest::Mode::Representative] {
+            let (again, again_files, _, _) = rebuild(read(), mode, 0.6);
+            let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
+            let want = if mode == suggest::Mode::Correlation { Some(Action::Keep) } else { Some(Action::Delete) };
+            assert_eq!(again.actions[at(&files[1])], want, "{mode:?}: judged by the representative still there");
+            assert_eq!(again.actions[at(&files[2])], None, "{mode:?}: only the gone one held it");
         }
         let _ = std::fs::remove_dir_all(&root);
     }

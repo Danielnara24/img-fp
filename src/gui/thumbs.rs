@@ -381,7 +381,8 @@ fn thumbnail_dir() -> Option<PathBuf> {
 fn from_cache(dir: &Path, path: &Path, size: Size) -> Option<(u32, u32, Vec<u8>)> {
     let long = size.w.max(size.h);
     const SIZES: [(&str, u32); 4] = [("normal", 128), ("large", 256), ("x-large", 512), ("xx-large", 1024)];
-    let mtime = std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     // The URI the file manager would have named it by, which is the path it
     // was opened under: the one the report gives, and failing that the real
     // one, for a report that reached it through a link.
@@ -399,7 +400,7 @@ fn from_cache(dir: &Path, path: &Path, size: Size) -> Option<(u32, u32, Vec<u8>)
             if !thumb.is_file() {
                 continue;
             }
-            let Some((tw, th)) = current(&thumb, uri.as_str(), mtime) else { continue };
+            let Some((tw, th)) = current(&thumb, uri.as_str(), mtime, md.len()) else { continue };
             // At least `long` on its long side, or smaller than its folder's
             // size and so the whole picture (a thumbnailer shrinks and never
             // enlarges): either way what a full decode would have given. To
@@ -417,8 +418,16 @@ fn from_cache(dir: &Path, path: &Path, size: Size) -> Option<(u32, u32, Vec<u8>)
     None
 }
 
-/// A thumbnail PNG's size, when it says it is of `uri` as it was at `mtime`.
-fn current(thumb: &Path, uri: &str, mtime: u64) -> Option<(u32, u32)> {
+/// A thumbnail PNG's size, when it says it is of `uri` as it was at `mtime`,
+/// and, when it says how long the file was (`Thumb::Size`, which the spec
+/// makes optional and GNOME's and KDE's thumbnailers write), `len` bytes.
+///
+/// The modification time is to the second and is the user's to set: `cp -p`,
+/// `rsync -a` and `touch -r` all put it back, so a file replaced by another
+/// picture kept its old thumbnail, and the card a person judges a deletion by
+/// showed the picture that was there before. The length catches nearly all
+/// of those, for the price of a field already read.
+fn current(thumb: &Path, uri: &str, mtime: u64, len: u64) -> Option<(u32, u32)> {
     let f = std::fs::File::open(thumb).ok()?;
     let mut dec = png::Decoder::new(std::io::BufReader::new(f));
     dec.set_ignore_text_chunk(false);
@@ -432,7 +441,8 @@ fn current(thumb: &Path, uri: &str, mtime: u64) -> Option<(u32, u32)> {
             .or_else(|| info.utf8_text.iter().find(|t| t.keyword == key).and_then(|t| t.get_text().ok()))
     };
     let uri_ok = text("Thumb::URI").is_none_or(|u| u == uri);
-    let fresh = uri_ok && text("Thumb::MTime").and_then(|m| m.trim().parse::<u64>().ok()) == Some(mtime);
+    let size_ok = text("Thumb::Size").is_none_or(|s| s.trim().parse::<u64>().ok() == Some(len));
+    let fresh = uri_ok && size_ok && text("Thumb::MTime").and_then(|m| m.trim().parse::<u64>().ok()) == Some(mtime);
     fresh.then(|| (reader.info().width, reader.info().height))
 }
 
@@ -551,12 +561,19 @@ mod tests {
 
     /// A PNG of `w` x `h` with the two texts the thumbnail spec asks for.
     fn thumbnail_png(at: &Path, w: u32, h: u32, uri: &str, mtime: u64) {
+        thumbnail_png_sized(at, w, h, uri, mtime, None);
+    }
+
+    fn thumbnail_png_sized(at: &Path, w: u32, h: u32, uri: &str, mtime: u64, size: Option<u64>) {
         let f = std::fs::File::create(at).unwrap();
         let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
         enc.add_text_chunk("Thumb::URI".into(), uri.into()).unwrap();
         enc.add_text_chunk("Thumb::MTime".into(), mtime.to_string()).unwrap();
+        if let Some(size) = size {
+            enc.add_text_chunk("Thumb::Size".into(), size.to_string()).unwrap();
+        }
         let mut w8 = enc.write_header().unwrap();
         w8.write_image_data(&vec![200u8; (w * h * 4) as usize]).unwrap();
     }
@@ -601,6 +618,13 @@ mod tests {
         assert!(from_cache(&cache, &pic, card).is_none());
         thumbnail_png(&large, 256, 192, "file:///elsewhere.png", mtime);
         assert!(from_cache(&cache, &pic, card).is_none());
+        // Nor one of a file of another length at the same time: another
+        // picture put in its place with its time kept.
+        let len = std::fs::metadata(&pic).unwrap().len();
+        thumbnail_png_sized(&large, 256, 192, &uri, mtime, Some(len + 1));
+        assert!(from_cache(&cache, &pic, card).is_none());
+        thumbnail_png_sized(&large, 256, 192, &uri, mtime, Some(len));
+        assert!(from_cache(&cache, &pic, card).is_some());
         // And never for the large view: no thumbnail is that large.
         thumbnail_png(&large, 256, 192, &uri, mtime);
         assert!(from_cache(&cache, &pic, Size::within(1600)).is_none());

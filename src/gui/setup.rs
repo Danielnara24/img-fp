@@ -852,6 +852,7 @@ impl Setup {
                                     let mut prepared = found.map(results::prepare);
                                     if let Ok(p) = prepared.as_mut() {
                                         p.set_roots(notes.roots.clone());
+                                        p.set_finished(notes.finished);
                                         if keep && path.exists() && last::save(&path, &notes) {
                                             p.set_kept(notes.id);
                                         }
@@ -985,6 +986,7 @@ impl Setup {
         };
         let last::Last { prepared: mut found, notes, gone, marks } = kept;
         found.set_kept(notes.id);
+        found.set_finished(notes.finished);
         self.app.log.set_text(&notes.log);
         let when = glib::DateTime::from_unix_local(notes.finished as i64)
             .and_then(|t| t.format("%e %b %Y, %H:%M"))

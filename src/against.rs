@@ -12,7 +12,8 @@
 //!   it shows all of this file: it is larger, less cropped, or the original
 //!   of an edit the library holds.
 //! - **review**: matched to the library only weakly, but closely enough to be
-//!   a copy (`suggest::REVIEW`): a tint, a watermark, a negative.
+//!   a copy (`suggest::REVIEW`): a tint, a watermark, a negative, a mirror
+//!   image.
 //! - **new**: nothing in the library matches, or nothing closely enough. A
 //!   file that would not decode is new unless its bytes are a library file's:
 //!   the safe answer for "what do I still have to import".
@@ -118,7 +119,9 @@ pub fn answer(asked: &[usize], library: &[bool], pairs: &[Pair], actions: &[Opti
                 }
             }
             // The best library match: a clean one first, then the closest.
-            let clean = |k: usize| pairs[k].clean && !pairs[k].inverted;
+            // A mirror image, like a negative, is not the picture as the
+            // library has it, whatever it shows: at best a copy to look at.
+            let clean = |k: usize| pairs[k].clean && !pairs[k].inverted && !pairs[k].mirrored;
             let best = to_library
                 .iter()
                 .copied()

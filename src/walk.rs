@@ -310,7 +310,11 @@ fn is_hidden(dir: &Path) -> bool {
 ///
 /// By name, the ones a removable drive or a home folder carries: the
 /// freedesktop topdir trashes (`.Trash`, `.Trash-1000`), macOS's `.Trashes`,
-/// Windows's `$RECYCLE.BIN` and `RECYCLER`, and the old `.thumbnails`; and by
+/// Windows's `$RECYCLE.BIN` and `RECYCLER`, the old `.thumbnails`, and the
+/// folders a NAS keeps on each share — Synology's `#recycle`, `@eaDir` (a
+/// thumbnail of every photo beside it) and `#snapshot`, QNAP's `@Recycle`,
+/// `@__thumb` and `@Recently-Snapshot`: a recycle bin's copy became a group's
+/// KEEP and the live file its DELETE, exactly as a Trash's did; and by
 /// place, the home Trash and thumbnail cache under the XDG folders, whose own
 /// names (`Trash`, `thumbnails`) are too ordinary to go by. Only a folder met
 /// during a walk is passed over. Named as a root, it is scanned like any
@@ -343,6 +347,12 @@ impl SetAside {
     fn holds(&self, path: &Path, canonical_guess: &Path, through_links: bool) -> bool {
         let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
         if name == ".trash" || name.starts_with(".trash-") || name == ".trashes" || name == "$recycle.bin" || name == "recycler" || name == ".thumbnails" {
+            return true;
+        }
+        // A NAS's own, on its shares: Synology's recycle bin, thumbnail and
+        // metadata folders and snapshot view, and QNAP's recycle bin,
+        // thumbnails and snapshot view.
+        if matches!(name.as_str(), "#recycle" | "@eadir" | "#snapshot" | "@recycle" | "@__thumb" | "@recently-snapshot") {
             return true;
         }
         if self.places.is_empty() {
@@ -684,6 +694,9 @@ mod tests {
             s.file(&format!("drive/{rel}"));
         }
         // A folder only an ordinary name says nothing about.
+        for rel in ["#recycle/g.jpg", "photos/@eaDir/a.jpg/SYNOPHOTO_THUMB_M.jpg", "#snapshot/h.jpg", "@Recycle/i.jpg", "@__thumb/j.jpg", "@Recently-Snapshot/k.jpg"] {
+            s.file(&format!("drive/{rel}"));
+        }
         let kept = s.file("drive/trash-talk/f.jpg");
         assert_eq!(run(&[s.0.join("drive")], &[], true, false).files, vec![a.clone(), kept.clone()]);
         // Named, it is scanned.

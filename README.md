@@ -139,7 +139,9 @@ A file reached through a symlink, a hard link or two overlapping folders is
 scanned once. Symlinks met inside a folder are skipped unless you pass
 `--follow-symlinks`. Trash folders and thumbnail caches met inside a folder are
 skipped too, since they hold copies of pictures that are elsewhere or were
-deleted; name one directly to scan it. Hidden folders (names starting with a
+deleted; so are a Synology or QNAP NAS's recycle bin, thumbnail and snapshot
+folders (`#recycle`, `@eaDir`, `#snapshot`, `@Recycle`, `@__thumb`,
+`@Recently-Snapshot`). Name one directly to scan it. Hidden folders (names starting with a
 dot) are skipped unless you pass `--hidden`, since in a home folder they hold
 programs' icons and themes rather than photos; a hidden folder named directly is
 scanned.

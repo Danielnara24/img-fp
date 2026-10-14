@@ -7,16 +7,15 @@
 //! say so. Everything the run cannot prove redundant stays: as REVIEW when it
 //! was only ever matched weakly but closely enough to be a copy, as KEEP
 //! otherwise. Measured against the benchmark corpora's generated ground
-//! truth, three of 17,769 deletions lose anything, each a composite on a
-//! synthetic canvas; the measurement and the cases behind each piece are in
-//! CLAUDE.md.
+//! truth, none of 17,293 deletions loses anything; the measurement and the
+//! cases behind each piece are in CLAUDE.md.
 //!
 //! The pieces, in the order they are applied:
 //!
 //! - **A pair is clean** when no block of its overlap disagrees
 //!   (`Policy::clean`'s bar). A pair that is not may still delete when it
 //!   agrees at `WEAK_DELETES` overall; below that it decides nothing, and a
-//!   negative never does. A file left reached only through such pairs is
+//!   negative or a mirror image never does. A file left reached only through such pairs is
 //!   REVIEW when one of them agrees at `REVIEW` — a copy tinted or
 //!   watermarked, which no pair could prove — and KEEP below it, where it is
 //!   another photograph of the same subject.
@@ -156,7 +155,14 @@ pub enum Link<'a> {
     Edge(&'a Verdict, Affine, bool),
 }
 
-/// The clean-anchor bar a strong pair's worst block must clear.
+/// The bar a strong pair's worst block must clear: the clean-anchor bar as
+/// it was (`Policy::clean`), not as it is. When that bar rose to 0.9 this was
+/// swept on IMGS-ALL beside it: at 0.85, 0.9 and 0.95 the same deletions
+/// lose content and the same families keep their original (276) and a
+/// faithful copy (304), and only the count of deletions moves (18,183,
+/// 18,158, 18,158) with the REVIEWs (1,758, 2,181, 3,164), measured with the
+/// whole-frame check at 32 samples a side (`WHOLE_GRID`). A worst block that
+/// clusters nothing new can still say a file is redundant.
 pub(crate) const CLEAN: f32 = 0.85;
 /// How far outside the other frame a corner may land, as a fraction of it,
 /// plus `TOL_PX` of the file's own pixels: the transform is fitted, and a
@@ -219,6 +225,23 @@ const TAU: f32 = 3.0;
 const SOFT_TIE: f32 = 0.05;
 /// The most a block of the whole-frame check may disagree, in grey levels.
 const WHOLE_RESIDUAL: f32 = 12.0;
+/// Samples a side of the whole-frame check (`whole_worst`), which is also
+/// the blur it reads each frame at: a sixty-fourth of the frame.
+///
+/// It was 32, and a thirty-second of the frame blurs thin lines and stripes
+/// into an even haze. That was safe only while the fitted transforms were a
+/// few pixels out: once they fitted (`verify::best_transform`), two
+/// composites of one photograph — a contact sheet whose middle cell is where
+/// an embed has its photograph, an inset on a striped canvas beside a
+/// photograph on a plain one — registered exactly, their canvases' faint
+/// lines read as the other's flat background, and each was deleted for the
+/// other. Swept on IMGS-ALL, deletions losing content at 32, 48, 64 and 96:
+/// 3, 1, 0, 0, for 18,183, 17,759, 17,293 and 16,002 deletions, the same 276
+/// families keeping their original and all 304 a faithful copy. 64 is the
+/// coarsest with no loss, so the one that gives up fewest deletions; it also
+/// ended the one loss there was before (a browser window over a PDF page).
+/// It costs some 0.6 s of a cached run over IMGS.
+const WHOLE_GRID: usize = 64;
 /// Below this, `Traits::colour` is a grey picture: above the most a grey one
 /// reads. Through every codec the benchmark corpus has, a grey seed reads
 /// 0.1 at most, and with the strongest noise its generator adds, 1.31 — that
@@ -312,7 +335,7 @@ pub fn suggest_pinned(
                 // one frame. A composite holds its picture whole, so it is
                 // never this; nor is a pair too weak to delete on, or two
                 // specimens framed alike would make every file "plain".
-                let deletes = v.blk >= min_correlation && (clean || v.blk >= WEAK_DELETES);
+                let deletes = !mirrored(m) && v.blk >= min_correlation && (clean || v.blk >= WEAK_DELETES);
                 let mutual = deletes && !a_in_b && !b_in_a && a_out <= CROPS && b_out <= CROPS;
                 let (a_in_b, b_in_a) = (a_in_b || mutual, b_in_a || mutual);
                 let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, f_in: a_in_b, in_f: b_in_a, sx, sy, f_out: a_out, clean };
@@ -323,8 +346,16 @@ pub fn suggest_pinned(
         all_sides[*b].push(back);
         let usable = match link {
             Link::Exact => true,
-            Link::Edge(v, ..) => {
-                v.blk >= min_correlation && (fwd.clean || v.blk >= WEAK_DELETES)
+            // A mirror image settles nothing either way, as a negative does
+            // not. It shows all of the picture, turned the other way round,
+            // and which of the two is the right way round is not something a
+            // pair can say: the rule chose between them on quality, so a
+            // mirrored re-encode a little better than its original was kept
+            // and the original deleted — 14 of 19 photographs, a flip saved at
+            // quality 95 beside the original at 92. Left to a person, as
+            // REVIEW when it agrees as closely as a copy does.
+            Link::Edge(v, m, _) => {
+                !mirrored(m) && v.blk >= min_correlation && (fwd.clean || v.blk >= WEAK_DELETES)
             }
         };
         if usable {
@@ -388,6 +419,12 @@ pub fn suggest_pinned(
         }
     }
     (action, keeper)
+}
+
+/// Whether a transform turns its picture over: a left-right or top-bottom
+/// flip, alone or with any rotation.
+fn mirrored(m: &Affine) -> bool {
+    m[0] * m[4] - m[1] * m[3] < 0.0
 }
 
 /// For each DELETE, the file that stays and holds it: the end of its chain
@@ -823,10 +860,11 @@ fn extra(f: &Traits, g: &Traits, s: f32) -> f32 {
 /// counts. Both thumbnails are read at the footprint one sample covers in
 /// each, a linear tone map is fitted between them (contrast, brightness and
 /// each thumbnail's own stretch), and the worst 8x8-sample block's mean
-/// residual must stay under `WHOLE_RESIDUAL` grey levels.
+/// residual must stay under `WHOLE_RESIDUAL` grey levels, on a grid of
+/// `WHOLE_GRID` samples a side.
 fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &Picture), m: &Affine) -> f32 {
     let (td, wd, tk, wk) = (pd.thumb, pd.work, pk.thumb, pk.work);
-    const N: usize = 32;
+    const N: usize = WHOLE_GRID;
     const B: usize = 8;
     if wd.0 == 0 || wk.0 == 0 || td.w == 0 || tk.w == 0 {
         return f32::INFINITY;
@@ -1074,6 +1112,23 @@ mod tests {
             assert!(got.contains(&Some(Action::Keep)) && got.contains(&Some(Action::Delete)), "{got:?}");
         }
         assert_eq!(suggest(&pics, &[], 0.6, |_| 30.0), [None, None, None], "a file in no pair has no action");
+    }
+
+    #[test]
+    fn a_mirror_image_settles_nothing_and_is_left_for_a_look() {
+        let (t, tr) = (thumb(), colourful());
+        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000 };
+        // The mirror is the larger file, which would win were it upright.
+        let pics = [pic, Picture { bytes: 2_000, ..pic }];
+        let v = verdict(0.99, 0.98);
+        let flip: Affine = [-1.0, 0.0, 127.0, 0.0, 1.0, 0.0];
+        assert_eq!(suggest(&pics, &[(0, 1, Link::Edge(&v, flip, false))], 0.6, |_| 30.0), [Some(Action::Review); 2]);
+        // Beside an upright copy, the upright pair settles and the mirror waits.
+        let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }];
+        let links = [(0, 1, Link::Edge(&v, IDENTITY, false)), (1, 2, Link::Edge(&v, flip, false)), (0, 2, Link::Edge(&v, flip, false))];
+        let got = suggest(&pics, &links, 0.6, |_| 30.0);
+        assert_eq!(got[2], Some(Action::Review), "{got:?}");
+        assert!(got[..2].contains(&Some(Action::Keep)) && got[..2].contains(&Some(Action::Delete)), "{got:?}");
     }
 
     #[test]

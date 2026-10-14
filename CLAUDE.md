@@ -10,12 +10,14 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.44.0)
+## Status (0.46.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
-  304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9805**,
-  99.56% precision, 96.59% recall, 46 perfect transforms; 95 cross-family
-  pairs, no family merge. At 640: F1 0.9826. SSCD, the best competitor:
+  304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
+  99.57% precision, 96.90% recall, 47 perfect transforms; 7 cross-family
+  pairs, no family merge (`out/v33-fit-pyramid/RESULTS.md`; 0.45.0 was
+  0.9805 / 95 cross-family). 640 and the per-corpus figures below are
+  0.44.0's, not re-measured. At 640: F1 0.9826. SSCD, the best competitor:
   F1 0.748, and every other tool has zero perfect transforms
   (`benchmark/BASELINE.md`, field in `out/v17-all4`).
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
@@ -136,6 +138,17 @@ Each was measured; changing one needs a re-measure.
   thumbnail's own contrast (`Thumb::build` stretches each thumbnail); blocks
   are averaged (|r|), not counted; both sides are read through a mip pyramid
   (`Thumb::lod`) at the right footprint. **Do not reintroduce a plain tap.**
+  A level is the one below filtered [1 3 3 1]/8 each way and halved (0.46),
+  not a 2x2 mean: a box's levels depend on where its grid falls, so a crop or
+  a reflection of an odd-sided thumbnail compared out of phase (exact copies
+  under the clean bar through the *exact* transform: 12/288 -> 2/288).
+  Levels are kept for a run of comparisons on one thumbnail (`Thumb::id`).
+- **The fitted transform is the least-squares fit**, kept even when it moves
+  an inlier out of tolerance (0.46). It used to be dropped then, which was
+  nearly always, leaving the one-keypoint similarity hypothesis: exact copies
+  were 1-9 working px out at the corners and 110/288 fell under the clean bar.
+  Probe: 48 seeds x 6 exact transforms, fitted vs exact transform's
+  `blk_min` (`out/v33-fit-pyramid`).
 - **`encloses_centre`**: an anchor's inliers must bracket the middle of what
   it claims (over the keypoints in the claimed region, either frame).
   Without it: 36 merges.
@@ -152,8 +165,10 @@ Each was measured; changing one needs a re-measure.
   0.44.0 a dropped bridge is kept as a weak anchor (may add one file, counts
   in the cover test). Without the bridge test: 4 merges.
 - **Clean-anchor clusters** (`admit_anchors`): an anchor is clean when no
-  detailed block correlates below 0.85 (`blk_min`, `Policy::clean`, the
-  rule's one fitted number). Weak anchors may join two clusters only when
+  detailed block correlates below 0.9 (`blk_min`, `Policy::clean`, the
+  rule's one fitted number; 0.85 until the fit and pyramid fixes raised near
+  misses ~0.04 and Segovia1/2 merged at 0.85. Swept 0.875-0.95: no merge,
+  F1 0.9823/0.9821/0.9816/0.9806; 0.9 is the plateau's lower middle). Weak anchors may join two clusters only when
   every file of the smaller has a weak anchor into the larger, and **not**
   when both close a cycle of clean anchors unless one file of the larger has
   a weak anchor to every file of the smaller. This is what stops near-miss
@@ -189,17 +204,23 @@ Each was measured; changing one needs a re-measure.
 User requirement: **a deletion never loses picture content.** Keeps may be
 the original, a lossless copy, a re-encode, or a composite holding the whole
 photo. REVIEW is for weak matches close to a copy; nothing acts on it.
-On IMGS-ALL at 512: 17,968 DELETE, 1 loses content (a synthetic
-`browser_window` composite), 273/304 families keep the original or a
-lossless copy, 301/304 a faithful full copy. Scored by `suggest_score.py`
+On IMGS-ALL at 512: 17,293 DELETE, none loses content, 276/304 families
+keep the original or a lossless copy, 304/304 a faithful full copy (0.45.0:
+17,986, 1 lost, 272, 299). Scored by `suggest_score.py`
 (`benchmark/suggest_score.py REPORT.json`, ~100 s a cached run).
 
-Rules (constants in `suggest.rs` with reasons): clean pair at 0.85; weak pair
+Rules (constants in `suggest.rs` with reasons): clean pair at 0.85 (its own
+bar now, not `Policy::clean`'s; 0.85/0.9/0.95 lose the same, delete ~the
+same); a mirrored pair, like a negative, deletes nothing either way (a flip at
+q95 was kept over its q92 original 14/19 times); weak pair
 deletes at >= 0.95 (`WEAK_DELETES`), REVIEW at >= 0.9 (`REVIEW`); two crops
 each missing <= 10% count as one frame on deleting pairs (`CROPS`); *holds*
 by frame corners, keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
 pixels hold no detail (`Traits::detail`); a whole-frame blurred check before
-every deletion (`whole_worst`, 12 grey levels), every holder asked in turn
+every deletion (`whole_worst`, 12 grey levels on a 64-sample grid,
+`WHOLE_GRID`: at 32 thin lines blurred to haze and, once transforms fitted,
+composites of one photograph deleted each other; losses at 32/48/64/96:
+3/1/0/0), every holder asked in turn
 (a cap of three tries, removed: it cost 108 safe deletions and no time);
 composites are deleted only by their own copies; tie-break by grey closeness
 (`TAU` = 3, the p99 grey-grid distance between two files holding the same
@@ -220,7 +241,10 @@ end of its chain of holders (`suggest::kept_at_end`), which stays. Deletion
 spreads one holder at a time, and the nearest holder was itself a DELETE for
 15% of deletions. A deletion whose kept copy is gone (`--last`, or the
 window after the Trash or on restore) becomes REVIEW: carried out, it would
-take the last copy.
+take the last copy. The window labels it "review: its kept copy is gone", not
+a weak match. The two group rules judge only by representatives still there
+(`--last` and the window): a group whose representative has gone suggests
+nothing for its files.
 
 `--suggest correlation | representative` (`suggest::by_group`): simple
 group-only rules, by user request; `correlation` deletes at 0.9 at the
@@ -277,7 +301,8 @@ a parameter is the cheap experiment; run it before adding one.
   worse (coincidence was never the binding constraint).
 
 Cliffs at 0.44.0, distance from shipped to nearest merge
-(`out/v31-cost-cliff/cliffs.txt`):
+(`out/v31-cost-cliff/cliffs.txt`). **Not re-measured since 0.46's fit and
+pyramid changes, which move every pixel figure; only the clean bar was.**
 
 | option | 512 (default) | 640 |
 |---|---|---|
@@ -391,9 +416,14 @@ Do not retry without new evidence:
   breaks after a package upgrade).
 - Report copy for the window has no `pairs`, written to `$XDG_RUNTIME_DIR`,
   parsed off the main thread; read on exit 1 too.
+- The Trash leaves a file whose length differs from the scan's, or whose
+  ctime is after the scan finished (`Notes::finished`): written, replaced,
+  renamed or chmod'ed since.
 - Rendered with cairo; textures premultiplied BGRA at drawn size
   (`thumbs::Size`); JPEG thumbnails via libjpeg scaled decode; freedesktop
-  thumbnail cache used when current; HEIF/AVIF/JXL decode one at a time;
+  thumbnail cache used when current (`Thumb::MTime`, and `Thumb::Size` when
+  written: mtime alone survives `cp -p`/`rsync -a`); HEIF/AVIF/JXL decode one
+  at a time;
   texture budget by bytes (`KEEP_BYTES`, `STRIP_KEEP`).
 - Mosaic (`gui/mosaic.rs`) is virtual and its tiles pooled; strip is a
   `ListView`; `still.rs` keeps texture arrival from relaying out the page;
@@ -433,7 +463,9 @@ Do not retry without new evidence:
 - **Skips vs problems** (vid-fp's summary format). Skips: extension not
   taken by `-x` (extensionless files only under `-x '*'`), non-pictures under
   a wildcard (`decode::plausible` checks short signatures), hidden folders
-  without `--hidden`, Trash/thumbnail folders (`walk::SetAside`), symlinks
+  without `--hidden`, Trash/thumbnail/NAS recycle and snapshot folders
+  (`walk::SetAside`: `#recycle`, `@eaDir`, `#snapshot`, `@Recycle`,
+  `@__thumb`, `@Recently-Snapshot` too), symlinks
   without `--follow-symlinks`, second names for one (device, inode).
   Problems: undecodable, unreadable path, unresolved `--exclude`,
   featureless, cut-off JPEG (`decode::jpeg_cut_off`; analysed, marked

@@ -288,7 +288,7 @@ impl<'a> Problems<'a> {
     fn skips(&self) -> [(&Tally, &'static str); 8] {
         [
             (&self.not_an_image, "file(s) whose extension is not searched, or with none (see -x)"),
-            (&self.set_aside, "Trash or thumbnail folder(s), not gone into (name one to scan it)"),
+            (&self.set_aside, "Trash, thumbnail or snapshot folder(s), not gone into (name one to scan it)"),
             (&self.hidden, "hidden folder(s), not gone into (see --hidden)"),
             (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
             (&self.symlink, "symlink(s), which are not followed (see --follow-symlinks)"),
