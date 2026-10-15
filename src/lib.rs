@@ -1429,13 +1429,35 @@ const EXIT_INTERRUPTED: i32 = 130;
 /// No summary: the run did not finish, and the problems it had found so far
 /// are an account of a run nobody is going to read the results of.
 fn interrupt() -> Result<()> {
-    ctrlc::set_handler(|| {
-        const SIG_DFL: usize = 0;
-        unsafe extern "C" {
-            fn signal(signum: i32, handler: usize) -> usize;
-        }
-        // SIGHUP, SIGINT, SIGTERM.
-        for sig in [1, 2, 15] {
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+        fn sigaction(signum: i32, act: *const u8, old: *mut u8) -> i32;
+    }
+    // SIGHUP, SIGINT, SIGTERM.
+    const SIGNALS: [i32; 3] = [1, 2, 15];
+    // **A signal the run was started ignoring stays ignored.** That is how
+    // `nohup` keeps a run going after its terminal closes (SIGHUP), and how
+    // a shell keeps Ctrl-C from reaching a job a script put in the
+    // background (SIGINT), and installing the handler over it undid both: a
+    // `nohup img-fp` an hour into a library ended with "Interrupted." the
+    // moment its terminal went. Asked with `sigaction`, which changes
+    // nothing: setting a disposition to find out the old one leaves a moment
+    // when the signal is lost.
+    let ignored: Vec<i32> = SIGNALS
+        .into_iter()
+        .filter(|&sig| {
+            // Room for any platform's `struct sigaction`, whose first field
+            // is the handler.
+            let mut old = [0usize; 32];
+            // SAFETY: a null action only reads the disposition into `old`.
+            unsafe { sigaction(sig, std::ptr::null(), old.as_mut_ptr() as *mut u8) == 0 && old[0] == SIG_IGN }
+        })
+        .collect();
+    let leave = ignored.clone();
+    ctrlc::set_handler(move || {
+        for sig in SIGNALS.into_iter().filter(|s| !leave.contains(s)) {
             unsafe {
                 signal(sig, SIG_DFL);
             }
@@ -1458,10 +1480,20 @@ fn interrupt() -> Result<()> {
         }
         unsafe { _exit(EXIT_INTERRUPTED) }
     })
-    .context("could not install the Ctrl-C handler")
+    .context("could not install the Ctrl-C handler")?;
+    for sig in ignored {
+        // SAFETY: setting a disposition the process was started with.
+        unsafe {
+            signal(sig, SIG_IGN);
+        }
+    }
+    Ok(())
 }
 
 fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> Result<()> {
+    // Before anything is read: a file changed since is not one this run can
+    // vouch for (`last::Notes::changed_after`).
+    let started = last::now_secs();
     // Before anything else: a `-x` that can match no file is a mistake to
     // stop on, not a walk to take.
     let (wanted, extensions_note) = extensions::normalize(&args.extensions)?;
@@ -1999,7 +2031,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             }
         }
     }
-    drop(store);
+    // The store stays open until the suggestion, which keeps in it the colour
+    // of each JPEG it has to decode to learn it (`cache::Store::keep_colour`).
+    // Which files hold the record each set of identical bytes is answered by.
+    let mut records_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    if store.is_some() {
+        for i in (0..n).filter(|&i| span_of[i].is_some()) {
+            records_of.entry(twin_of[i]).or_default().push(i);
+        }
+    }
     // Nothing more is analysed or read from the cache. What was written stays
     // readable for as long as it is held.
     spill::end();
@@ -2948,8 +2988,34 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 Stated::Edge((_, _, m, inv, v), _) => (a, b, suggest::Link::Edge(v, *m, *inv)),
             })
             .collect();
-        suggest::suggest_pinned(&pics, &links, args.min_pixel_correlation, |i| decode::colour_of(&files[i]).unwrap_or(0.0), pinned)
+        // A JPEG's colour, which its decode to grey did not measure: kept
+        // from an earlier run, or decoded once for this one and kept for the
+        // next. Asked once a set of identical bytes, however many times the
+        // rule asks.
+        let measured: std::sync::Mutex<HashMap<usize, f32>> = Default::default();
+        let colour = |i: usize| -> f32 {
+            if let Some(c) = items[i].traits.colour_kept {
+                return c;
+            }
+            let o = twin_of[i];
+            if let Some(&c) = measured.lock().unwrap().get(&o) {
+                return c;
+            }
+            let c = decode::colour_of(&files[i]).map(cache::kept_colour);
+            if let (Some(c), Some(store)) = (c, store.as_ref()) {
+                for &k in records_of.get(&o).into_iter().flatten() {
+                    store.keep_colour(span_of[k].expect("a file holding a record has its span"), &names[k], c);
+                }
+            }
+            let c = c.unwrap_or(0.0);
+            measured.lock().unwrap().insert(o, c);
+            c
+        };
+        suggest::suggest_pinned(&pics, &links, args.min_pixel_correlation, colour, pinned)
     })};
+    // Every colour the suggestion measured is in the cache.
+    drop(store);
+    drop(records_of);
     // One name per file, shared by every pair that names it; see `OutPair::a`.
     let names: Vec<std::sync::Arc<str>> = files.par_iter().map(|f| f.display().to_string().into()).collect();
     let mut out_pairs: Vec<OutPair> = graph
@@ -3146,7 +3212,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         };
         let mut lines = vec![summary.clone()];
         lines.extend(problems.summary());
-        let notes = last::Notes::now(problems.any(), runtime as u64, lines.join("\n"), roots);
+        let notes = last::Notes::now(problems.any(), started, runtime as u64, lines.join("\n"), roots);
         if let Err(e) = timed!(36, keep_scan(args, &mut out, content, &files, &facts, &notes)) {
             say!("This scan could not be kept for --last: {e}");
         }

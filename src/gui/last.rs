@@ -149,7 +149,7 @@ mod tests {
             p
         };
         let dir = root.join("cache").join("img-fp").join("last-scan");
-        let notes = |id: u64, log: &str| Notes { problems: true, took: "1:02".into(), finished: 5, id, log: log.into(), roots: vec![root.clone()] };
+        let notes = |id: u64, log: &str| Notes { problems: true, took: "1:02".into(), finished: 5, started: None, id, log: log.into(), roots: vec![root.clone()] };
 
         save_in(&dir, &report("one.json", &[&a, &b]), &notes(5, "first")).unwrap();
         let last = load_in(&dir).unwrap();

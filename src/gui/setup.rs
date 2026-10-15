@@ -800,6 +800,9 @@ impl Setup {
         // nothing (see `img_fp::last`). Kept regardless, a scan of an empty
         // folder replaced the last one worth having, and its marks with it.
         let keep = settings.use_cache;
+        // Before the scan reads anything: a file changed since is not the
+        // file it judged (`last::Notes::changed_after`).
+        let started = img_fp::last::now_secs();
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let mut stderr: Vec<String> = Vec::new();
@@ -840,6 +843,7 @@ impl Setup {
                                     problems: code != Some(0),
                                     took: me.took(),
                                     finished: now.as_secs(),
+                                    started: Some(started),
                                     id: now.as_nanos() as u64,
                                     log: me.app.log.text(&me.app.log.start_iter(), &me.app.log.end_iter(), false).to_string(),
                                     roots: roots.clone(),
@@ -852,7 +856,7 @@ impl Setup {
                                     let mut prepared = found.map(results::prepare);
                                     if let Ok(p) = prepared.as_mut() {
                                         p.set_roots(notes.roots.clone());
-                                        p.set_finished(notes.finished);
+                                        p.set_changed_after(notes.changed_after());
                                         if keep && path.exists() && last::save(&path, &notes) {
                                             p.set_kept(notes.id);
                                         }
@@ -986,7 +990,7 @@ impl Setup {
         };
         let last::Last { prepared: mut found, notes, gone, marks } = kept;
         found.set_kept(notes.id);
-        found.set_finished(notes.finished);
+        found.set_changed_after(notes.changed_after());
         self.app.log.set_text(&notes.log);
         let when = glib::DateTime::from_unix_local(notes.finished as i64)
             .and_then(|t| t.format("%e %b %Y, %H:%M"))

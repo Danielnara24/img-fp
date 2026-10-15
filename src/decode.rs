@@ -67,6 +67,10 @@ pub struct Traits {
     /// The mean grey (0..=255) of each cell of a 4x4 grid over the working
     /// plane, row by row.
     pub grid: [f32; 16],
+    /// A JPEG's `colour` as the suggestion measured it on an earlier run
+    /// (`colour_of`), and kept in its cache record (`cache::Store::keep_colour`);
+    /// `colour` itself stays unmeasured, since the decode did not measure it.
+    pub colour_kept: Option<f32>,
     /// Stored losslessly: PNG, TIFF, lossless WebP and the like.
     pub lossless: bool,
     /// The file carries an EXIF block.

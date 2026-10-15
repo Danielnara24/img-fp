@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.47.0)
+## Status (0.48.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -23,6 +23,13 @@ under *Tried and rejected* below, or before quoting a figure not given here.
 - 0.47.0 (audit fixes, `out/v35-audit`): F1 **0.9823**, recall 96.93%,
   same 7 cross-family pairs and trap FPs, 48 perfect transforms; keep rule
   17,299 DELETE, none loses content, 276 / 304.
+- 0.48.0 (`out/` not written; measured in a session scratch dir): keep rule
+  **297 / 304** originals (was 276) from `EXTRA_PER_OCTAVE` 0.1 -> 0.2,
+  17,300 DELETE, none loses content, 304 / 304 faithful; pairs and groups
+  byte-identical. Also: signals started ignored stay ignored (`nohup`),
+  "changed since the scan" counts from its start, the window demotes
+  suggestions resting on a changed kept copy as `--last` does, and a JPEG's
+  measured colour is kept in its cache record.
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
   (`out/v31-cost-cliff`).
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -48,7 +55,12 @@ under *Tried and rejected* below, or before quoting a figure not given here.
 - Open: no downscaled JPEG decode path (worth ~4%); the second look is
   re-asked only where the first pass anchored <2 times; nothing tested above
   ~30k images; on the found corpus about half of sampled reported pairs are
-  different specimens of one species, leaking through the propagated tier.
+  different specimens of one species, leaking through the propagated tier;
+  `suggest::choose`'s grey middle (`TAU`) and softness median are majority
+  votes, so several same-size soft copies (enlargements of a small copy)
+  outvote the original: it is DELETEd for one of them (synthetic sets: 177
+  of 178 families holding nine such copies, in 0.47.0 and 0.48.0; the
+  corpora have one `upscale` a family).
 
 Docs split: `benchmark/BASELINE.md` (competition), `benchmark/VALIDATION.md`
 (held-out experiment), `README.md` is **users only**: install and usage, no
@@ -227,9 +239,9 @@ Each was measured; changing one needs a re-measure.
 User requirement: **a deletion never loses picture content.** Keeps may be
 the original, a lossless copy, a re-encode, or a composite holding the whole
 photo. REVIEW is for weak matches close to a copy; nothing acts on it.
-On IMGS-ALL at 512: 17,293 DELETE, none loses content, 276/304 families
-keep the original or a lossless copy, 304/304 a faithful full copy (0.45.0:
-17,986, 1 lost, 272, 299). Scored by `suggest_score.py`
+On IMGS-ALL at 512: 17,300 DELETE, none loses content, 297/304 families
+keep the original or a lossless copy, 304/304 a faithful full copy (0.47.0:
+17,299, 0, 276, 304; 0.45.0: 17,986, 1 lost, 272, 299). Scored by `suggest_score.py`
 (`benchmark/suggest_score.py REPORT.json`, ~100 s a cached run).
 
 Rules (constants in `suggest.rs` with reasons): clean pair at 0.85 (its own
@@ -239,7 +251,11 @@ q95 was kept over its q92 original 14/19 times); weak pair
 deletes at >= 0.95 (`WEAK_DELETES`), REVIEW at >= 0.9 (`REVIEW`); two crops
 each missing <= 10% count as one frame on deleting pairs (`CROPS`); *holds*
 by frame corners, keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
-pixels hold no detail (`Traits::detail`); a whole-frame blurred check before
+pixels hold no detail (`Traits::detail`, `extra` above 0.2 an octave + 0.03,
+`EXTRA_PER_OCTAVE`: enlargements read <= 0.3/octave at p99, real originals
+>= 0.44 at p01; at 0.1 a 3x Lanczos upscale beat its original; originals
+kept at 0.1/0.15/0.2/0.25/0.3/0.4: 276/296/297/297/298/298, none lost;
+above 0.25 real originals start to read as enlargements); a whole-frame blurred check before
 every deletion (`whole_worst`, 12 grey levels on a 64-sample grid,
 `WHOLE_GRID`: at 32 thin lines blurred to haze and, once transforms fitted,
 composites of one photograph deleted each other; losses at 32/48/64/96:
@@ -249,7 +265,9 @@ composites are deleted only by their own copies; tie-break by grey closeness
 (`TAU` = 3, the p99 grey-grid distance between two files holding the same
 pixels), sharpness (`SOFT_TIE` = 0.05, the p99 softening of a q84-96 JPEG
 re-encode), lossless, EXIF, size, colour (`COLOURFUL` = 1.5, above the 1.31
-the noisiest grey copy reads; `decode::colour_of`, lazily). Each derivation
+the noisiest grey copy reads; `decode::colour_of`, lazily, and kept in the
+JPEG's cache record, `cache::Store::keep_colour`: it was decoded again on
+every rescan, 4.5x a cached rescan's CPU on grey JPEGs). Each derivation
 and its sweep is on the constant. Colour is the colour of a 4x4 grid's cell
 means (`decode::CellColour`): pixel by pixel, noise on a grey photo read as
 colour and no bar separated it from a faint tint. A palette (indexed PNG,
@@ -293,8 +311,10 @@ with the window); `--last` re-writes text/CSV byte-for-byte, JSON without
 that found no picture; the window keeps by the same rule. Paths are kept absolute (`keep_scan`): read back from another folder,
 or by the window from `$HOME`, relative ones named other files. The window's
 Trash leaves a file whose length differs from the scan's, or whose ctime is
-after the scan finished (`last::changed_since`); `--last` suggests deleting
-no such file and nothing resting on one. The Trash dialog also warns when a
+from the second the scan *started* on (`Notes::changed_after`; it was the
+end, so an edit saved mid-scan passed); `--last` and the window
+(`State::note_changed`, on showing, *Mark suggested deletions* and the
+Trash) suggest deleting no such file and nothing resting on one. The Trash dialog also warns when a
 marked DELETE's kept copy is marked (groups overlap, so "every image of a
 group marked" missed an original + re-encode marked with a crop left).
 
@@ -460,8 +480,9 @@ Do not retry without new evidence:
 - Report copy for the window has no `pairs`, written to `$XDG_RUNTIME_DIR`,
   parsed off the main thread; read on exit 1 too.
 - The Trash leaves a file whose length differs from the scan's, or whose
-  ctime is after the scan finished (`Notes::finished`): written, replaced,
-  renamed or chmod'ed since.
+  ctime is from the scan's start on (`Notes::changed_after`): written,
+  replaced, renamed or chmod'ed since. Suggestions resting on such a file
+  turn REVIEW, as under `--last`.
 - Rendered with cairo; textures premultiplied BGRA at drawn size
   (`thumbs::Size`); JPEG thumbnails via libjpeg scaled decode; freedesktop
   thumbnail cache used when current (`Thumb::MTime`, and `Thumb::Size` when
@@ -500,7 +521,9 @@ Do not retry without new evidence:
 - Reports give one overlap per pair, the larger direction (user's choice);
   `--dump` has both.
 - **Exit codes** (vid-fp's): 0 clean, 1 fatal, 2 finished with problems,
-  130 interrupt (instant; records are appended as made). **Every benchmark
+  130 interrupt (instant; records are appended as made). A signal the run
+  was started ignoring (`nohup`'s SIGHUP, a background job's SIGINT) stays
+  ignored; the window's worker resets all three, since Cancel is SIGINT. **Every benchmark
   run exits 2** (`Foto 38622.png` is truncated); `bench.py`'s `OK_EXIT`
   accepts it.
 - **Skips vs problems** (vid-fp's summary format). Skips: extension not
@@ -533,6 +556,10 @@ Do not retry without new evidence:
   (`Store::foreign`), and counts it live: it used to drop it. A record's
   file is gone only on "not found" (`cache::gone`): an unreadable folder or
   a dropped sshfs/NFS mount is not a deletion.
+  A JPEG's colour, measured later by the suggestion, is written in place into
+  its record's colour field as `-2 - c` (below the decode's -1, so a build
+  of the same format that predates it reads "not measured"); the value used
+  is `cache::kept_colour(c)`, so cold and cached runs decide alike.
   Another format version's file is left untouched. Damage costs only the
   damaged record. **Cost measurements must pass `--no-cache`.** Sweeps
   should use their own `--cache`. `--prune-cache` keeps only what the scan

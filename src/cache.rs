@@ -483,6 +483,21 @@ fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), tr: &Traits, f: &F
     Ok(b.0)
 }
 
+/// `Traits::colour` of a JPEG, which its decode to grey does not measure.
+const UNMEASURED: f32 = -1.0;
+/// A JPEG's colour as the suggestion measured it later is kept in the same
+/// field as `UNKEPT - colour`: below `UNMEASURED`, so that a build of this
+/// format that knows nothing of it reads "not measured", as it always did.
+const UNKEPT: f32 = -2.0;
+
+/// A measured colour as a record keeps it and gives it back. Not quite the
+/// colour, since `UNKEPT - c` rounds; but the same value again through any
+/// number of rounds, so a run deciding by it decides as a later run reading
+/// it from the record will.
+pub fn kept_colour(c: f32) -> f32 {
+    UNKEPT - (UNKEPT - c)
+}
+
 /// Where one record sits in the cache file, from its path's length to the end
 /// of its packed half. What a compaction copies, without unpacking it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -662,6 +677,13 @@ pub struct Store {
     read_end: u64,
     /// Where each record this run appended begins.
     mine: Mutex<std::collections::HashSet<u64>>,
+    /// Where each record a compaction by this run kept moved to, by where it
+    /// was; `None` when there was none. A record left out is in neither.
+    moved: Option<HashMap<u64, u64>>,
+    /// The file again, open for writing in place (`keep_colour`): `pwrite`
+    /// on a descriptor opened to append writes at the end on Linux, whatever
+    /// offset it is given.
+    in_place: std::sync::OnceLock<Option<File>>,
 }
 
 /// Open the cache at `path`, read what is usable out of it, and keep it open
@@ -707,6 +729,8 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
         other_version: None,
         read_end: MAGIC.len() as u64,
         mine: Default::default(),
+        moved: None,
+        in_place: Default::default(),
     };
     // Several runs may hold the file at once — the window's scan and one in
     // a terminal — and each appends to it as it goes. Appending is safe
@@ -1057,23 +1081,89 @@ impl Store {
         // Two are possible only when another run described a file this run
         // also has a record for.
         entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()).then(a.1.at.cmp(&b.1.at)));
+        let mut moved = HashMap::with_capacity(entries.len());
         let new = replace_with(&self.path, |f| {
             let mut b = Buf(std::io::BufWriter::with_capacity(1 << 20, f));
             b.header()?;
             let mut buf = Vec::new();
+            let mut to = MAGIC.len() as u64;
             for &(_, s) in entries.iter() {
                 buf.resize(s.len as usize, 0);
                 src.read_exact_at(&mut buf, s.at)?;
                 b.0.write_all(&buf)?;
+                moved.insert(s.at, to);
+                to += s.len;
             }
             b.0.flush()?;
             Ok(())
         })?;
+        self.moved = Some(moved);
         self.read_end = new.metadata().map_or(u64::MAX, |m| m.len());
         self.file = Some(new);
         self.records = AtomicUsize::new(entries.len());
         lock_any(&self.mine).clear();
         Ok(true)
+    }
+
+    /// Keep `colour`, a JPEG's colour as `decode::colour_of` measured it and
+    /// `kept_colour` gave it back, in the record at `span` for `path`, where
+    /// the next run reads it as `Traits::colour_kept`.
+    ///
+    /// **The suggestion decodes a JPEG whole to learn its colour**, which its
+    /// analysis, decoded to grey, never measured; and nothing kept the answer,
+    /// so every rescan decoded every JPEG the suggestion asked about again: a
+    /// cached rescan of 120 grey JPEGs spent 0.8 s there against 0.1 s for the
+    /// same pictures as PNG, four times the CPU of the rest of the run. The
+    /// answer is a fact about the file's bytes, which the record's key
+    /// vouches for, so it goes into the record: four bytes written in place
+    /// over the decode's "not measured", in the one field that means colour.
+    ///
+    /// Written only over a record that is where it is said to be, for that
+    /// path, still saying "not measured"; anything else is left as it is,
+    /// and costs no more than a decode next time. A record a compaction by
+    /// this run left out is not written at all. Under the append lock, so an
+    /// interrupt finds nothing half written after it.
+    pub fn keep_colour(&self, span: Span, path: &Path, colour: f32) {
+        let Some(src) = &self.file else { return };
+        if self.broken.load(Ordering::Relaxed) {
+            return;
+        }
+        let at = match &self.moved {
+            Some(m) => match m.get(&span.at) {
+                Some(&at) => at,
+                None => return,
+            },
+            None => span.at,
+        };
+        let Some(dst) = self
+            .in_place
+            .get_or_init(|| {
+                use std::os::unix::fs::MetadataExt;
+                let f = OpenOptions::new().write(true).open(&self.path).ok()?;
+                let (a, b) = (f.metadata().ok()?, src.metadata().ok()?);
+                ((a.dev(), a.ino()) == (b.dev(), b.ino())).then_some(f)
+            })
+            .as_ref()
+        else {
+            return;
+        };
+        let name = path.as_os_str().as_bytes();
+        // The path's length and the path, then settings (12), key (24),
+        // size (8) and detail (24), and the colour.
+        let field = at + 8 + name.len() as u64 + 12 + 24 + 8 + 24;
+        if field + 4 > at + span.len {
+            return;
+        }
+        let mut head = vec![0u8; 8 + name.len()];
+        let mut was = [0u8; 4];
+        if src.read_exact_at(&mut head, at).is_err() || src.read_exact_at(&mut was, field).is_err() {
+            return;
+        }
+        if head[..8] != (name.len() as u64).to_le_bytes() || head[8..] != *name || was != UNMEASURED.to_le_bytes() {
+            return;
+        }
+        let _held = lock(&WRITING);
+        let _ = dst.write_all_at(&(UNKEPT - colour).to_le_bytes(), field);
     }
 
     /// The records after `read_end` that this run did not append: another
@@ -1261,6 +1351,12 @@ where
     let mut traits = Traits::default();
     for v in traits.detail.iter_mut().chain([&mut traits.colour]).chain(traits.grid.iter_mut()) {
         *v = r.f32()?;
+    }
+    // A JPEG's colour measured by a later run, kept below the decode's own
+    // "not measured" (`keep_colour`).
+    if traits.colour < UNMEASURED - 0.5 {
+        traits.colour_kept = Some(UNKEPT - traits.colour);
+        traits.colour = UNMEASURED;
     }
     let flags = r.u32()?;
     traits.lossless = flags & 1 != 0;
@@ -1724,6 +1820,48 @@ mod tests {
         let a = &got[Path::new("a.jpg")];
         assert_eq!((a.0.len, a.1.as_ref().unwrap().feats.kps.len()), (3, 5));
         assert_eq!(a.1.as_ref().unwrap().feats.desc, f2.desc);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A JPEG's colour, measured after its record was written, is kept in the
+    /// record and read back as kept, the decode's own "not measured" left as
+    /// it was; through a compaction too; and never over a record that is not
+    /// the one named, nor one that already says a colour.
+    #[test]
+    fn a_colour_measured_later_is_kept_in_the_record() {
+        let dir = scratch("colour");
+        let path = dir.join(file_name());
+        let (_, store, _) = reopen(&path);
+        let (f, t) = analysis(3, 1);
+        let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
+        let png = Traits { colour: 7.5, ..Default::default() };
+        let a = store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &jpeg, &f, &t).unwrap();
+        let b = store.append("b.png", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &png, &f, &t).unwrap();
+        let c = store.append("c.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &jpeg, &f, &t).unwrap();
+        let measured = kept_colour(12.345);
+        assert_eq!(kept_colour(measured), measured, "the same value through any number of rounds");
+        store.keep_colour(a, Path::new("a.jpg"), measured);
+        store.keep_colour(b, Path::new("b.png"), 3.0);
+        store.keep_colour(c, Path::new("not-c.jpg"), 3.0);
+        drop(store);
+        let (got, mut store, bad) = reopen(&path);
+        assert!(!bad);
+        let traits = |got: &HashMap<PathBuf, Entry>, p: &str| got[Path::new(p)].1.as_ref().unwrap().traits;
+        assert_eq!((traits(&got, "a.jpg").colour, traits(&got, "a.jpg").colour_kept), (UNMEASURED, Some(measured)));
+        assert_eq!((traits(&got, "b.png").colour, traits(&got, "b.png").colour_kept), (7.5, None), "a measured colour is not written over");
+        assert_eq!(traits(&got, "c.jpg").colour_kept, None, "nor a record for another path");
+
+        // Compacted to `c.jpg` and `a.jpg` (in path order), `c.jpg` moves to
+        // the front, and is written where it went; `b.png`, left out, is not.
+        let entries: Vec<(&Path, Span)> = ["c.jpg", "a.jpg"].iter().map(|p| (Path::new(*p), got[Path::new(*p)].2)).collect();
+        assert_eq!(store.compact(&entries).unwrap(), true);
+        store.keep_colour(got[Path::new("c.jpg")].2, Path::new("c.jpg"), 2.0);
+        store.keep_colour(got[Path::new("b.png")].2, Path::new("b.png"), 2.0);
+        drop(store);
+        let (again, _, bad) = reopen(&path);
+        assert!(!bad && again.len() == 2);
+        assert_eq!(traits(&again, "c.jpg").colour_kept, Some(2.0));
+        assert_eq!(traits(&again, "a.jpg").colour_kept, Some(measured));
         std::fs::remove_dir_all(&dir).ok();
     }
 

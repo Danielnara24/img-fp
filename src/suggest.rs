@@ -200,8 +200,25 @@ pub(crate) const REVIEW: f32 = 0.9;
 const WEAK_DELETES: f32 = 0.95;
 /// How much more fine detail (log2) a file's extra pixels must hold, per
 /// octave of size and plus a floor, to count as real rather than an
-/// enlargement's.
-const EXTRA_PER_OCTAVE: f32 = 0.1;
+/// enlargement's (`extra`).
+///
+/// Measured on seeds from all four corpora, each an original against its
+/// own downscales (1.5, 2 and 3 times: real detail) and against enlargements
+/// of its third-size copy (bilinear, bicubic and Lanczos at 1.5 to 3 times,
+/// JPEG at q86-97 or PNG, and nearest at 2: none). An enlargement reads up
+/// to 0.3 octave a doubling at p99, Lanczos and JPEG noise most; a real
+/// original 0.44 a doubling at p01 on IMGS3+IMGS4, and on IMGS+IMGS2 the
+/// same except for seeds that are themselves soft, whose half-size round
+/// trip is ~40 dB and whose extra pixels so hold nothing. It was 0.1,
+/// unmeasured, under which 6-9% of the enlargements read as real detail:
+/// a 3x Lanczos upscale was kept as the fuller copy and its original
+/// deleted, and against a library it was `better`. Swept on IMGS-ALL,
+/// families keeping their original at 0.1, 0.15, 0.2, 0.25, 0.3, 0.4:
+/// 276, 296, 297, 297, 298, 298, none losing content. The corpora cannot
+/// see the other side: above 0.25 the originals above start to read as
+/// enlargements. 0.2 is where the plateau starts, with the most margin to
+/// them.
+const EXTRA_PER_OCTAVE: f32 = 0.2;
 const EXTRA_FLOOR: f32 = 0.03;
 /// How close in grey (summed over the 4x4 grid, 0..=255 a cell) a file must
 /// be to the group's middle to be a candidate for keeping: as close as two

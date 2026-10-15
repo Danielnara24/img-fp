@@ -81,6 +81,7 @@ unsafe extern "C" {
     fn __errno_location() -> *mut i32;
     fn _exit(code: i32) -> !;
 }
+const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
 const SIGKILL: i32 = 9;
 const SIGPIPE: i32 = 13;
@@ -130,6 +131,12 @@ fn spawn(program: &Path, argv: &[OsString]) -> std::io::Result<Child> {
         unsafe {
             if dup2(null_fd, 0) >= 0 && dup2(out_fd, 1) >= 0 && dup2(err_fd, 2) >= 0 {
                 signal(SIGPIPE, SIG_DFL);
+                // Cancel is SIGINT, and a window started with it ignored —
+                // from a script, in the background — would hand that on to
+                // the scan, which keeps a signal it was started ignoring.
+                for sig in [SIGHUP, SIGINT, SIGTERM] {
+                    signal(sig, SIG_DFL);
+                }
                 prctl(PR_SET_PDEATHSIG, SIGTERM as u64, 0, 0, 0);
                 // The death signal is for a parent that dies from here on. One
                 // that died between the fork and the line above sends none,

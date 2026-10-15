@@ -117,6 +117,18 @@ struct GroupState {
     reference_gone: bool,
 }
 
+/// Why the content rule no longer deletes a file it deleted: the file that
+/// held it is not there to hold it, as the scan saw it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Unheld {
+    #[default]
+    No,
+    /// It has gone (`Results::drop_gone`).
+    Gone,
+    /// It has changed since the scan (`State::note_changed`).
+    Changed,
+}
+
 /// What the page knows, with every file by its number (`Member::id`) rather
 /// than its path: marking all of IMGS-ALL's suggestions is 17,850 files, and
 /// hashing their paths was most of what that cost once it was one pass.
@@ -142,17 +154,22 @@ struct State {
     /// it, at the end of its chain of holders (`img_fp::kept_at_end`).
     kept_of: Vec<Option<u32>>,
     /// Files the content rule deleted and now leaves for a look because the
-    /// file that held them has gone (`drop_gone`): a REVIEW that is not a
-    /// weak match.
-    unheld: Vec<bool>,
+    /// file that held them has gone (`drop_gone`) or changed since the scan
+    /// (`note_changed`): a REVIEW that is not a weak match.
+    unheld: Vec<Unheld>,
+    /// Files changed since the scan (`last::changed_since`): not the files it
+    /// judged, so no rule suggests deleting them, nor anything resting on
+    /// them, as `--last` does not.
+    changed: Vec<bool>,
     /// The rule chosen: an index into `MODES`.
     mode: usize,
     /// The correlation bar the scan ran at, which the correlation rule cuts
     /// from.
     min_correlation: f32,
-    /// When the scan finished, in seconds since 1970, which the Trash checks
-    /// each file against.
-    finished: Option<u64>,
+    /// The time, in seconds since 1970, a file changed after is not the file
+    /// the scan judged (`last::Notes::changed_after`): what the Trash and the
+    /// suggestions check each file against.
+    changed_after: Option<u64>,
     current: usize,
     problems: bool,
     analysed: usize,
@@ -173,17 +190,99 @@ impl State {
     /// What the chosen rule suggests for file `id`, in a few words.
     fn said(&self, id: u32) -> &'static str {
         match self.action(id) {
-            Some(Action::Review) if MODES[self.mode] == SuggestMode::Content && self.unheld.get(id as usize).copied().unwrap_or(false) => {
-                "review: its kept copy is gone"
-            }
+            Some(Action::Review) if self.changed.get(id as usize).copied().unwrap_or(false) => "review: changed since the scan",
+            Some(Action::Review) if MODES[self.mode] == SuggestMode::Content => match self.unheld_of(id) {
+                Unheld::Gone => "review: its kept copy is gone",
+                Unheld::Changed => "review: its kept copy has changed",
+                Unheld::No => suggestion(Some(Action::Review)),
+            },
             a => suggestion(a),
         }
     }
 
+    fn unheld_of(&self, id: u32) -> Unheld {
+        self.unheld.get(id as usize).copied().unwrap_or_default()
+    }
+
     /// Whether file `id` is a weak match to look at: a REVIEW, except one
-    /// that is only there because its kept copy has gone.
+    /// that is only there because it or its kept copy has gone or changed.
     fn weak(&self, id: u32) -> bool {
-        self.action(id) == Some(Action::Review) && !(MODES[self.mode] == SuggestMode::Content && self.unheld.get(id as usize).copied().unwrap_or(false))
+        self.action(id) == Some(Action::Review)
+            && !self.changed.get(id as usize).copied().unwrap_or(false)
+            && !(MODES[self.mode] == SuggestMode::Content && self.unheld_of(id) != Unheld::No)
+    }
+
+    /// The rules that read the groups, worked out again from the groups
+    /// whose reference image is still there as the scan saw it, and no rule
+    /// deleting a file changed since the scan.
+    ///
+    /// They judge a file by the reference images it was matched to, so a
+    /// group whose reference has gone or changed says nothing: its files were
+    /// never compared with each other, and judged by it every one of them
+    /// stayed DELETE, so *Mark suggested deletions* marked the last copies.
+    /// A file only such a group held has no suggestion. Every other file's is
+    /// what it was.
+    fn regroup(&mut self) {
+        let changed = &self.changed;
+        let reference_changed = |g: &GroupState| g.files.iter().any(|f| f.is_representative() && changed.get(f.id as usize).copied().unwrap_or(false));
+        for (k, &mode) in MODES.iter().enumerate() {
+            if mode != SuggestMode::Content {
+                let again = suggestions(self.groups.iter().filter(|g| !g.reference_gone && !reference_changed(g)), self.paths.len(), mode, self.min_correlation);
+                self.by_mode[k] = again;
+            }
+        }
+        for (id, _) in self.changed.iter().enumerate().filter(|(_, c)| **c) {
+            for m in self.by_mode.iter_mut() {
+                if m[id] == Some(Action::Delete) {
+                    m[id] = Some(Action::Review);
+                }
+            }
+        }
+    }
+
+    /// The files, of those not already known to have, that have changed since
+    /// the scan: another length, or a change time after it started
+    /// (`last::changed_since`). A `stat` each, on every thread.
+    fn changed_now(&self) -> Vec<u32> {
+        use rayon::prelude::*;
+        (0..self.paths.len() as u32)
+            .into_par_iter()
+            .filter(|&id| {
+                let i = id as usize;
+                !self.gone[i]
+                    && !self.changed[i]
+                    && std::fs::metadata(&self.paths[i]).is_ok_and(|md| img_fp::last::changed_since(&md, self.sizes[i], self.changed_after))
+            })
+            .collect()
+    }
+
+    /// Take in that `ids` have changed since the scan, as `--last` does: none
+    /// is suggested for deletion, nor is a file the content rule deleted on
+    /// the strength of one, which it may no longer hold; and the group rules
+    /// do not judge by one. Whether any suggestion moved.
+    fn note_changed(&mut self, ids: &[u32]) -> bool {
+        if ids.is_empty() {
+            return false;
+        }
+        for &id in ids {
+            self.changed[id as usize] = true;
+        }
+        let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
+        for id in 0..self.paths.len() {
+            if self.by_mode[content][id] != Some(Action::Delete) {
+                continue;
+            }
+            if self.changed[id] {
+                self.by_mode[content][id] = Some(Action::Review);
+                self.kept_of[id] = None;
+            } else if self.kept_of[id].is_some_and(|k| self.changed[k as usize]) {
+                self.by_mode[content][id] = Some(Action::Review);
+                self.kept_of[id] = None;
+                self.unheld[id] = Unheld::Changed;
+            }
+        }
+        self.regroup();
+        true
     }
 
     fn is_marked(&self, id: u32) -> bool {
@@ -1045,7 +1144,7 @@ impl Results {
 
     /// A finished scan's groups, replacing whatever was shown.
     pub fn show(self: &Rc<Self>, prepared: Prepared, problems: bool) {
-        let Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots, min_correlation, finished } = prepared;
+        let Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots, min_correlation, changed_after } = prepared;
         {
             let mut s = self.state.borrow_mut();
             // The rule chosen stays chosen from one scan to the next.
@@ -1059,7 +1158,8 @@ impl Results {
                 kept_of,
                 marked: vec![false; n],
                 gone: vec![false; n],
-                unheld: vec![false; n],
+                unheld: vec![Unheld::No; n],
+                changed: vec![false; n],
                 problems,
                 analysed,
                 has_results: true,
@@ -1067,7 +1167,7 @@ impl Results {
                 kept,
                 roots,
                 min_correlation,
-                finished,
+                changed_after,
                 ..State::default()
             };
         }
@@ -1077,6 +1177,26 @@ impl Results {
         // Another scan's folders: the tree starts again from the top.
         self.folder.set(None);
         self.rebuild(0);
+        // A file written while the scan ran, after it was read, is already
+        // not the file it judged.
+        self.check_changed();
+    }
+
+    /// Look again for files changed since the scan, and take in any found
+    /// (`State::note_changed`). Asked when the results are shown, and again
+    /// before anything acts on the suggestions: a file can change while they
+    /// are on screen. Whether any suggestion moved.
+    fn check_changed(self: &Rc<Self>) -> bool {
+        let found = self.state.borrow().changed_now();
+        if !self.state.borrow_mut().note_changed(&found) {
+            return false;
+        }
+        let (current, selected) = (self.state.borrow().current, self.selected.get());
+        self.rebuild(current);
+        self.select(selected);
+        self.update_status();
+        self.refresh_bar();
+        true
     }
 
     /// The scan kept from last time, as it was left: its groups and marks,
@@ -1858,10 +1978,11 @@ impl Results {
             (Some(Action::Delete), Some(k)) if s.mode == 0 => format!("Everything in it is also in {}", file_name(&s.paths[k as usize])),
             _ => String::new(),
         };
-        let kept = if kept.is_empty() && s.mode == 0 && s.unheld.get(m.id as usize).copied().unwrap_or(false) {
-            "The file that held everything in it has gone".to_string()
-        } else {
-            kept
+        let kept = match (kept.is_empty(), s.changed.get(m.id as usize).copied().unwrap_or(false), s.mode == 0, s.unheld_of(m.id)) {
+            (true, true, _, _) => "It has changed since the scan".to_string(),
+            (true, _, true, Unheld::Gone) => "The file that held everything in it has gone".to_string(),
+            (true, _, true, Unheld::Changed) => "The file that held everything in it has changed since the scan".to_string(),
+            _ => kept,
         };
         d.why_note.set_text(&kept);
         let said = s.said(m.id);
@@ -2001,6 +2122,7 @@ impl Results {
     /// suggests deleting is marked and every other mark goes, whoever made
     /// it, so a second rule replaces the first rather than adding to it.
     fn mark_suggested(self: &Rc<Self>) {
+        self.check_changed();
         let (off, on): (Vec<u32>, Vec<u32>) = {
             let s = self.state.borrow();
             let delete = |id: u32| s.action(id) == Some(Action::Delete);
@@ -2268,11 +2390,13 @@ impl Results {
         if self.trashing.get() {
             return;
         }
-        let (paths, bytes, whole, finished, with_copy) = {
+        // What the suggestions rest on, as it is now.
+        self.check_changed();
+        let (paths, bytes, whole, changed_after, with_copy, kept_changed) = {
             let s = self.state.borrow();
             // With the length the scan found, which the move checks first.
             let mut paths: Vec<(PathBuf, u64)> = s.marked_ids().map(|id| (s.paths[id as usize].clone(), s.sizes[id as usize])).collect();
-            let finished = s.finished;
+            let changed_after = s.changed_after;
             paths.sort();
             let bytes = s.marked_bytes;
             // The groups, by the number the list shows them under, in which
@@ -2284,7 +2408,8 @@ impl Results {
                 .filter(|(_, g)| g.files.iter().all(|f| s.is_marked(f.id)))
                 .map(|(gi, _)| gi + 1)
                 .collect();
-            (paths, bytes, whole, finished, s.marked_with_their_copy())
+            let kept_changed = s.marked_ids().filter(|&id| s.unheld_of(id) == Unheld::Changed).count();
+            (paths, bytes, whole, changed_after, s.marked_with_their_copy(), kept_changed)
         };
         if paths.is_empty() {
             return;
@@ -2320,6 +2445,19 @@ impl Results {
                 if one { "it shows" } else { "they show" }
             ));
         }
+        // A kept copy that has changed since the scan may no longer hold what
+        // the deletion rested on: such a file is no longer suggested for
+        // deletion, but a mark made before is the person's own.
+        if kept_changed > 0 {
+            let one = kept_changed == 1;
+            detail.push_str(&format!(
+                "\n\n{kept_changed} of {} {} suggested for deletion because another image showed all of {}, and that image has \
+                 changed since the scan: it may no longer.",
+                if n == 1 { "it" } else { "them" },
+                if one { "was" } else { "were" },
+                if one { "it" } else { "them" },
+            ));
+        }
         let dialog = gtk::AlertDialog::builder()
             .message(format!("Move {n} image{} to the Trash?", if n == 1 { "" } else { "s" }))
             .detail(detail)
@@ -2331,12 +2469,12 @@ impl Results {
         let me = self.clone();
         glib::spawn_future_local(async move {
             if matches!(dialog.choose_future(Some(&me.app.window)).await, Ok(1)) {
-                me.trash(paths, finished).await;
+                me.trash(paths, changed_after).await;
             }
         });
     }
 
-    async fn trash(self: &Rc<Self>, paths: Vec<(PathBuf, u64)>, finished: Option<u64>) {
+    async fn trash(self: &Rc<Self>, paths: Vec<(PathBuf, u64)>, changed_after: Option<u64>) {
         if self.trashing.replace(true) {
             return;
         }
@@ -2352,14 +2490,14 @@ impl Results {
             // A file at that path that is not the length the scan found is
             // not the file the scan judged: replaced since, or, for a scan
             // kept from an earlier session, another file under the same
-            // name. Nor is one changed after the scan finished, whatever its
+            // name. Nor is one changed since the scan started, whatever its
             // length: its change time is the kernel's, which `cp -p` or
             // `rsync -a` cannot put back as they put back a modification
             // time (a rename or a `chmod` since counts too, and leaves the
             // file where it is, which is the side to err on). It stays where
             // it is.
             if let Ok(md) = std::fs::metadata(p) {
-                if img_fp::last::changed_since(&md, *scanned, finished) {
+                if img_fp::last::changed_since(&md, *scanned, changed_after) {
                     failed.push(format!("{}: changed since the scan, so it was left where it is", p.display()));
                     continue;
                 }
@@ -2426,7 +2564,7 @@ impl Results {
                 if s.by_mode[content][id] == Some(Action::Delete) && s.kept_of[id].is_some_and(|k| s.gone[k as usize]) {
                     s.by_mode[content][id] = Some(Action::Review);
                     s.kept_of[id] = None;
-                    s.unheld[id] = true;
+                    s.unheld[id] = Unheld::Gone;
                 }
             }
             for g in s.groups.iter_mut() {
@@ -2435,19 +2573,7 @@ impl Results {
                 }
                 g.files.retain(|f| !gone.contains(&f.path));
             }
-            // The other two rules judge a file by the reference images it was
-            // matched to, so they are worked out again without the groups
-            // whose reference image has gone: its files were never compared
-            // with each other, and judged by it every one of them stayed
-            // DELETE, so *Mark suggested deletions* marked the last copies.
-            // A file only such a group held has no suggestion. Every other
-            // file's is what it was.
-            for (k, &mode) in MODES.iter().enumerate() {
-                if mode != SuggestMode::Content {
-                    let again = suggestions(s.groups.iter().filter(|g| !g.reference_gone), s.paths.len(), mode, s.min_correlation);
-                    s.by_mode[k] = again;
-                }
-            }
+            s.regroup();
             let current = s.current;
             // Where the shown group lands once the emptied ones before it go.
             let before = s.groups[..current.min(s.groups.len())].iter().filter(|g| g.files.len() < 2).count();
@@ -2631,7 +2757,7 @@ pub struct Prepared {
     kept: Option<u64>,
     roots: Vec<PathBuf>,
     min_correlation: f32,
-    finished: Option<u64>,
+    changed_after: Option<u64>,
 }
 
 impl Prepared {
@@ -2653,9 +2779,10 @@ impl Prepared {
         self.analysed
     }
 
-    /// The scan finished at `secs` after 1970 (`last::Notes::finished`).
-    pub fn set_finished(&mut self, secs: u64) {
-        self.finished = Some(secs);
+    /// A file changed after `secs` (since 1970) is not the file the scan
+    /// judged (`last::Notes::changed_after`).
+    pub fn set_changed_after(&mut self, secs: u64) {
+        self.changed_after = Some(secs);
     }
 
     /// It is the scan kept on disk as `id` (`last::Notes::id`).
@@ -2693,7 +2820,7 @@ pub fn prepare(found: Found) -> Prepared {
     }
     let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
     let kept_of = img_fp::kept_at_end(&by_mode[content], &rests_on).into_iter().map(|k| k.map(|k| k as u32)).collect();
-    Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots: Vec::new(), min_correlation, finished: None }
+    Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots: Vec::new(), min_correlation, changed_after: None }
 }
 
 /// What is suggested for a file, in a few words.
@@ -2746,6 +2873,63 @@ mod tests {
         assert_eq!(s.marked_with_their_copy(), 0, "the original stays");
         s.set_mark(0, true);
         assert_eq!(s.marked_with_their_copy(), 1, "the original goes with it; the crop does not hold it");
+    }
+
+    /// A kept copy changed since the scan holds nothing the window can vouch
+    /// for: what the content rule deleted on its strength is left for a look,
+    /// the group rules do not judge by it, and it is not deleted itself.
+    #[test]
+    fn a_kept_copy_changed_since_the_scan_is_not_relied_on() {
+        // 0 the reference and kept original, 1 and 2 copies it holds.
+        let member = |id: u32, role: &str, action: &str, corr: f32| -> Member {
+            let mut m: Member = serde_json::from_value(serde_json::json!({
+                "path": format!("/p/{id}.jpg"), "role": role, "width": 8, "height": 8, "size_bytes": 1,
+                "relation": if role == "match" { Some("direct") } else { None }, "pixel_correlation": corr, "action": action,
+            }))
+            .unwrap();
+            m.id = id;
+            m
+        };
+        let files = vec![member(0, "representative", "KEEP", 1.0), member(1, "match", "DELETE", 0.99), member(2, "match", "DELETE", 0.99)];
+        let d = Some(Action::Delete);
+        let mut s = State {
+            groups: vec![GroupState { files, reference_gone: false }],
+            paths: (0..3).map(|i| PathBuf::from(format!("/p/{i}.jpg"))).collect(),
+            by_mode: vec![vec![Some(Action::Keep), d, d], vec![Some(Action::Keep), d, d], vec![Some(Action::Keep), d, d]],
+            kept_of: vec![None, Some(0), Some(0)],
+            unheld: vec![Unheld::No; 3],
+            changed: vec![false; 3],
+            min_correlation: 0.6,
+            ..Default::default()
+        };
+        assert!(!s.note_changed(&[]), "nothing changed, nothing moves");
+        assert!(s.note_changed(&[0]));
+        assert_eq!(s.by_mode[0], vec![Some(Action::Keep), Some(Action::Review), Some(Action::Review)]);
+        assert_eq!((s.kept_of[1], s.unheld[1]), (None, Unheld::Changed));
+        s.mode = 0;
+        assert_eq!(s.said(1), "review: its kept copy has changed");
+        assert!(!s.weak(1), "not a weak match");
+        for mode in 1..3 {
+            assert_eq!(s.by_mode[mode], vec![None; 3], "{:?}: judged by a reference that changed", MODES[mode]);
+        }
+
+        // A copy itself changed is not deleted by any rule, and says why.
+        let mut t = State {
+            groups: s.groups.drain(..).collect(),
+            paths: s.paths.clone(),
+            by_mode: vec![vec![Some(Action::Keep), d, d]; 3],
+            kept_of: vec![None, Some(0), Some(0)],
+            unheld: vec![Unheld::No; 3],
+            changed: vec![false; 3],
+            min_correlation: 0.6,
+            ..Default::default()
+        };
+        t.note_changed(&[1]);
+        for mode in 0..3 {
+            assert_eq!(t.by_mode[mode][1], Some(Action::Review), "{:?}", MODES[mode]);
+            assert_eq!(t.by_mode[mode][2], d, "{:?}: an unchanged copy is as it was", MODES[mode]);
+        }
+        assert_eq!(t.said(1), "review: changed since the scan");
     }
 
     #[test]

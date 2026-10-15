@@ -39,6 +39,11 @@ pub struct Notes {
     pub took: String,
     /// Seconds since 1970 when it finished.
     pub finished: u64,
+    /// Seconds since 1970 when it started, before anything was read: a file
+    /// changed since then may have changed after the scan read it. `None` in
+    /// a scan kept by an earlier version, which said only when it finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
     /// Which scan this is, for its marks: nanoseconds since 1970 when it
     /// finished, which two scans do not share.
     #[serde(default)]
@@ -51,23 +56,51 @@ pub struct Notes {
 }
 
 impl Notes {
-    /// Notes for a scan finishing now, which took `secs`.
-    pub fn now(problems: bool, secs: u64, log: String, roots: Vec<PathBuf>) -> Notes {
+    /// Notes for a scan finishing now, which started at `started` (seconds
+    /// since 1970) and took `secs`.
+    pub fn now(problems: bool, started: u64, secs: u64, log: String, roots: Vec<PathBuf>) -> Notes {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        Notes { problems, took: format!("{}:{:02}", secs / 60, secs % 60), finished: now.as_secs(), id: now.as_nanos() as u64, log, roots }
+        Notes {
+            problems,
+            took: format!("{}:{:02}", secs / 60, secs % 60),
+            finished: now.as_secs(),
+            started: Some(started),
+            id: now.as_nanos() as u64,
+            log,
+            roots,
+        }
     }
+
+    /// The time a file changed after is not the file this scan judged
+    /// (`changed_since`): the second before the scan started.
+    ///
+    /// **Its start, not its end.** A scan reads each file once, somewhere in
+    /// the middle, and a file written after that — an edit saved during a
+    /// long scan — changed before the scan finished, so measured against the
+    /// end it passed for the file the scan judged, and its length alone could
+    /// tell it apart. The second the scan started counts too, since a change
+    /// time is to the second here: a file changed just before the scan is
+    /// taken for one changed during it, which costs at most a suggestion.
+    pub fn changed_after(&self) -> u64 {
+        self.started.map_or(self.finished, |s| s.saturating_sub(1))
+    }
+}
+
+/// Seconds since 1970, now: what `Notes::started` holds.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// Whether a file is not the file a scan judged: its length is not the one
 /// the scan found (`scanned`, `0` when it did not say), or it changed after
-/// the scan finished (`finished`, seconds since 1970). Its change time is the
+/// `after` (seconds since 1970; `Notes::changed_after`). Its change time is the
 /// kernel's, which `cp -p` and `rsync -a` cannot put back as they put back a
 /// modification time; a rename or a `chmod` since counts too, which is the
 /// side to err on. The window's Trash leaves such a file where it is, and
 /// `--last` suggests deleting neither it nor anything resting on it.
-pub fn changed_since(md: &std::fs::Metadata, scanned: u64, finished: Option<u64>) -> bool {
+pub fn changed_since(md: &std::fs::Metadata, scanned: u64, after: Option<u64>) -> bool {
     use std::os::unix::fs::MetadataExt;
-    (scanned > 0 && md.len() != scanned) || finished.is_some_and(|f| md.ctime() > f as i64)
+    (scanned > 0 && md.len() != scanned) || after.is_some_and(|f| md.ctime() > f as i64)
 }
 
 /// Where the scan is kept for a run whose `--cache` is `cache`: `last-scan/`
@@ -236,7 +269,7 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
         anyhow::bail!("the kept scan's suggestions are the {made_by} rule's; --suggest content needs a new scan");
     }
     let min_correlation = kept.config.get("min_pixel_correlation").and_then(|v| v.as_f64()).map_or(0.6, |v| v as f32);
-    let (mut out, files, facts, Rebuilt { gone, unheld, changed }) = rebuild(kept, asked.suggest, min_correlation, Some(notes.finished));
+    let (mut out, files, facts, Rebuilt { gone, unheld, changed }) = rebuild(kept, asked.suggest, min_correlation, Some(notes.changed_after()));
     out.config["suggest"] = format!("{:?}", asked.suggest).to_lowercase().into();
 
     let mut target = report::Target::of(asked.output, asked.format);
@@ -309,13 +342,14 @@ struct Rebuilt {
 /// longer has anything to rest on: the content rule's is REVIEW, and the
 /// group rules judge only by representatives still there.
 ///
-/// **A file changed since the scan finished (`finished`) is treated as the
-/// window's Trash treats it**: it is not the file the scan judged, so it is
+/// **A file changed since the scan read it (`after`, `Notes::changed_after`)
+/// is treated as the window's Trash treats it**: it is not the file the scan
+/// judged, so it is
 /// not suggested for deletion, nor is a file whose deletion rests on it, and
 /// the group rules do not judge by it. `--last` used to check only whether a
 /// file was still there, and wrote DELETE beside a file since replaced by
 /// another picture, which a script deleting the DELETEs would have deleted.
-fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, finished: Option<u64>) -> (Output, Vec<PathBuf>, report::FileFacts, Rebuilt) {
+fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, after: Option<u64>) -> (Output, Vec<PathBuf>, report::FileFacts, Rebuilt) {
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut stated: Vec<(usize, Option<(u32, u32)>, Option<u64>, bool)> = Vec::new();
@@ -385,7 +419,7 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, finished: Opti
         .filter(|&i| std::fs::symlink_metadata(&files[i]).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))
         .collect();
     let changed: HashSet<usize> = (0..files.len())
-        .filter(|&i| std::fs::metadata(&files[i]).is_ok_and(|md| changed_since(&md, stated[i].2.unwrap_or(0), finished)))
+        .filter(|&i| std::fs::metadata(&files[i]).is_ok_and(|md| changed_since(&md, stated[i].2.unwrap_or(0), after)))
         .collect();
     let mut unheld = 0;
     let (actions, kept_by) = match mode {
@@ -739,6 +773,22 @@ mod tests {
         let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
         assert_eq!(again.actions[at(&files[2])], None, "judged by its representative, which changed");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file changed while the scan ran — after it was read, before the
+    /// scan finished — is changed since the scan, at the length it had.
+    #[test]
+    fn a_file_changed_during_the_scan_is_changed_since_it() {
+        let f = std::env::temp_dir().join(format!("img-fp-during-{}", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        let md = std::fs::metadata(&f).unwrap();
+        let now = now_secs();
+        let notes = |started: Option<u64>| Notes { problems: false, took: "1:00".into(), finished: now + 30, started, id: 1, log: String::new(), roots: vec![] };
+        assert!(changed_since(&md, md.len(), Some(notes(Some(now - 30)).changed_after())), "written during the scan");
+        assert!(!changed_since(&md, md.len(), Some(notes(Some(now + 5)).changed_after())), "written before it");
+        // A scan kept by an earlier version says only when it finished.
+        assert!(!changed_since(&md, md.len(), Some(notes(None).changed_after())));
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
