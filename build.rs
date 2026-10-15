@@ -3,8 +3,8 @@
 //! The kernels are written for x86-64-v3 (AVX2, FMA, BMI2), and a build for a
 //! machine that has them — `target-cpu=native`, or `x86-64-v3` — compiles them
 //! in directly. A build for plain x86-64 is what the release is, and what
-//! `cargo install` makes, since it reads no `.cargo/config.toml` from the package; there
-//! the hot paths are compiled twice and chosen when the run starts; see
+//! `cargo install` and a plain `cargo build` make; there the hot paths are
+//! compiled twice and chosen when the run starts; see
 //! `src/simd.rs`. This names that case once, rather than spelling
 //! `all(target_arch = "x86_64", not(target_feature = "avx2"))` at every place
 //! it decides something.

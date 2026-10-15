@@ -213,6 +213,20 @@ impl State {
         self.marked.iter().enumerate().filter(|(_, m)| **m).map(|(i, _)| i as u32)
     }
 
+    /// The marked files the content rule deletes on the strength of a kept
+    /// copy that is marked too: moved together, nothing the scan found would
+    /// hold what they show. Asked whichever rule is shown, since it is the
+    /// content rule that knows which file holds which.
+    fn marked_with_their_copy(&self) -> usize {
+        let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
+        self.marked_ids()
+            .filter(|&id| {
+                self.by_mode[content].get(id as usize).copied().flatten() == Some(Action::Delete)
+                    && self.kept_of.get(id as usize).copied().flatten().is_some_and(|k| self.is_marked(k))
+            })
+            .count()
+    }
+
     /// File `id` as its first group has it, and that group.
     fn member(&self, id: u32) -> Option<(Member, usize)> {
         let gi = *self.member_of.get(id as usize)?.first()?;
@@ -2254,7 +2268,7 @@ impl Results {
         if self.trashing.get() {
             return;
         }
-        let (paths, bytes, whole, finished) = {
+        let (paths, bytes, whole, finished, with_copy) = {
             let s = self.state.borrow();
             // With the length the scan found, which the move checks first.
             let mut paths: Vec<(PathBuf, u64)> = s.marked_ids().map(|id| (s.paths[id as usize].clone(), s.sizes[id as usize])).collect();
@@ -2270,7 +2284,7 @@ impl Results {
                 .filter(|(_, g)| g.files.iter().all(|f| s.is_marked(f.id)))
                 .map(|(gi, _)| gi + 1)
                 .collect();
-            (paths, bytes, whole, finished)
+            (paths, bytes, whole, finished, s.marked_with_their_copy())
         };
         if paths.is_empty() {
             return;
@@ -2289,6 +2303,21 @@ impl Results {
                 if one { "group" } else { "groups" },
                 numbers(&whole),
                 if one { "that picture" } else { "those pictures" }
+            ));
+        }
+        // Groups are a reference image and its matches, and they overlap, so
+        // a picture can lose its last whole copy with no group all marked: an
+        // original and its re-encode marked, a crop of it left. What the
+        // content rule knows is which file holds which.
+        if with_copy > 0 {
+            let one = with_copy == 1;
+            detail.push_str(&format!(
+                "\n\n{with_copy} of {} {} suggested for deletion because another image shows all of {}, and that image is marked too: \
+                 moved together, nothing the scan found would be left holding what {}.",
+                if n == 1 { "it" } else { "them" },
+                if one { "is" } else { "are" },
+                if one { "it" } else { "them" },
+                if one { "it shows" } else { "they show" }
             ));
         }
         let dialog = gtk::AlertDialog::builder()
@@ -2330,9 +2359,7 @@ impl Results {
             // file where it is, which is the side to err on). It stays where
             // it is.
             if let Ok(md) = std::fs::metadata(p) {
-                use std::os::unix::fs::MetadataExt;
-                let changed = finished.is_some_and(|f| md.ctime() > f as i64);
-                if (*scanned > 0 && md.len() != *scanned) || changed {
+                if img_fp::last::changed_since(&md, *scanned, finished) {
                     failed.push(format!("{}: changed since the scan, so it was left where it is", p.display()));
                     continue;
                 }
@@ -2698,12 +2725,35 @@ fn facts(m: &Member) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The Trash warns of a marked file whose kept copy is marked too,
+    /// whichever rule is shown and whether or not a group is all marked.
+    #[test]
+    fn a_marked_deletion_whose_kept_copy_is_marked_is_counted() {
+        // 0 the original, 1 a re-encode it holds, 2 a crop of it.
+        let d = Some(Action::Delete);
+        let content = vec![Some(Action::Keep), d, Some(Action::Keep)];
+        let mut s = State {
+            by_mode: vec![content, vec![d; 3], vec![d; 3]],
+            kept_of: vec![None, Some(0), None],
+            marked: vec![false; 3],
+            sizes: vec![1; 3],
+            mode: 1,
+            ..Default::default()
+        };
+        s.set_mark(1, true);
+        assert_eq!(s.marked_with_their_copy(), 0, "the original stays");
+        s.set_mark(0, true);
+        assert_eq!(s.marked_with_their_copy(), 1, "the original goes with it; the crop does not hold it");
+    }
+
     #[test]
     fn group_numbers_read_as_a_sentence() {
-        assert_eq!(super::numbers(&[4]), "4");
-        assert_eq!(super::numbers(&[4, 9]), "4 and 9");
-        assert_eq!(super::numbers(&[4, 9, 12]), "4, 9 and 12");
+        assert_eq!(numbers(&[4]), "4");
+        assert_eq!(numbers(&[4, 9]), "4 and 9");
+        assert_eq!(numbers(&[4, 9, 12]), "4, 9 and 12");
         let many: Vec<usize> = (1..=23).collect();
-        assert!(super::numbers(&many).ends_with("19, 20 and 3 more"));
+        assert!(numbers(&many).ends_with("19, 20 and 3 more"));
     }
 }

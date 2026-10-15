@@ -58,6 +58,18 @@ impl Notes {
     }
 }
 
+/// Whether a file is not the file a scan judged: its length is not the one
+/// the scan found (`scanned`, `0` when it did not say), or it changed after
+/// the scan finished (`finished`, seconds since 1970). Its change time is the
+/// kernel's, which `cp -p` and `rsync -a` cannot put back as they put back a
+/// modification time; a rename or a `chmod` since counts too, which is the
+/// side to err on. The window's Trash leaves such a file where it is, and
+/// `--last` suggests deleting neither it nor anything resting on it.
+pub fn changed_since(md: &std::fs::Metadata, scanned: u64, finished: Option<u64>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (scanned > 0 && md.len() != scanned) || finished.is_some_and(|f| md.ctime() > f as i64)
+}
+
 /// Where the scan is kept for a run whose `--cache` is `cache`: `last-scan/`
 /// beside the cache file.
 pub fn dir(cache: Option<&Path>) -> PathBuf {
@@ -224,7 +236,7 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
         anyhow::bail!("the kept scan's suggestions are the {made_by} rule's; --suggest content needs a new scan");
     }
     let min_correlation = kept.config.get("min_pixel_correlation").and_then(|v| v.as_f64()).map_or(0.6, |v| v as f32);
-    let (mut out, files, facts, Rebuilt { gone, unheld }) = rebuild(kept, asked.suggest, min_correlation);
+    let (mut out, files, facts, Rebuilt { gone, unheld, changed }) = rebuild(kept, asked.suggest, min_correlation, Some(notes.finished));
     out.config["suggest"] = format!("{:?}", asked.suggest).to_lowercase().into();
 
     let mut target = report::Target::of(asked.output, asked.format);
@@ -238,6 +250,14 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
     }];
     if gone > 0 {
         lines.push(format!("{gone} {} gone since the scan {} left out", if gone == 1 { "file" } else { "files" }, if gone == 1 { "is" } else { "are" }));
+    }
+    if changed > 0 {
+        lines.push(format!(
+            "{changed} {} changed since the scan: none of {} is suggested for deletion, nor is anything resting on {}",
+            if changed == 1 { "file has" } else { "files have" },
+            if changed == 1 { "it" } else { "them" },
+            if changed == 1 { "it" } else { "them" }
+        ));
     }
     if unheld > 0 {
         lines.push(format!(
@@ -271,11 +291,13 @@ fn ago(secs: u64) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// What `rebuild` left out or changed: files gone since the scan, and the
-/// deletions whose kept copy was among them, which are now REVIEW.
+/// What `rebuild` left out or changed: files gone since the scan, the
+/// deletions whose kept copy was among them, which are now REVIEW, and files
+/// changed since the scan (`changed_since`).
 struct Rebuilt {
     gone: usize,
     unheld: usize,
+    changed: usize,
 }
 
 /// The kept report as the run held it: the files numbered as they first
@@ -286,7 +308,14 @@ struct Rebuilt {
 /// window) — except a deletion resting on a file that has gone, which no
 /// longer has anything to rest on: the content rule's is REVIEW, and the
 /// group rules judge only by representatives still there.
-fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Vec<PathBuf>, report::FileFacts, Rebuilt) {
+///
+/// **A file changed since the scan finished (`finished`) is treated as the
+/// window's Trash treats it**: it is not the file the scan judged, so it is
+/// not suggested for deletion, nor is a file whose deletion rests on it, and
+/// the group rules do not judge by it. `--last` used to check only whether a
+/// file was still there, and wrote DELETE beside a file since replaced by
+/// another picture, which a script deleting the DELETEs would have deleted.
+fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, finished: Option<u64>) -> (Output, Vec<PathBuf>, report::FileFacts, Rebuilt) {
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut stated: Vec<(usize, Option<(u32, u32)>, Option<u64>, bool)> = Vec::new();
@@ -355,6 +384,9 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
     let gone: HashSet<usize> = (0..files.len())
         .filter(|&i| std::fs::symlink_metadata(&files[i]).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))
         .collect();
+    let changed: HashSet<usize> = (0..files.len())
+        .filter(|&i| std::fs::metadata(&files[i]).is_ok_and(|md| changed_since(&md, stated[i].2.unwrap_or(0), finished)))
+        .collect();
     let mut unheld = 0;
     let (actions, kept_by) = match mode {
         suggest::Mode::Content => {
@@ -376,6 +408,13 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
                     unheld += 1;
                 }
             }
+            // Nor on one changed since, nor is one changed since deleted.
+            for i in 0..files.len() {
+                if content[i] == Some(Action::Delete) && (changed.contains(&i) || kept_by[i].is_some_and(|k| changed.contains(&k))) {
+                    content[i] = Some(Action::Review);
+                    kept_by[i] = None;
+                }
+            }
             (content, kept_by)
         }
         // The other two rules judge a file by the representatives it was
@@ -384,8 +423,14 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
         // group's every remaining file was DELETE, resting on a file no
         // longer there. A file it alone held has no suggestion.
         _ => {
-            let seats = seats.into_iter().filter(|(rep, _)| !gone.contains(rep)).map(|(_, s)| s);
-            (suggest::by_group(mode, files.len(), seats, min_correlation), Vec::new())
+            let seats = seats.into_iter().filter(|(rep, _)| !gone.contains(rep) && !changed.contains(rep)).map(|(_, s)| s);
+            let mut actions = suggest::by_group(mode, files.len(), seats, min_correlation);
+            for &i in &changed {
+                if actions[i] == Some(Action::Delete) {
+                    actions[i] = Some(Action::Review);
+                }
+            }
+            (actions, Vec::new())
         }
     };
     // A group keeps its files that are still there, and is left out once it
@@ -409,7 +454,7 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
         actions,
         kept: kept_by,
     };
-    (out, files, report::stated_facts(stated), Rebuilt { gone: gone.len(), unheld })
+    (out, files, report::stated_facts(stated), Rebuilt { gone: gone.len(), unheld, changed: changed.len() })
 }
 
 fn action_of(s: &str) -> Option<Action> {
@@ -458,8 +503,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut files: Vec<PathBuf> = ["a.jpg", "b;x.jpg", "c.png", "d.png", "e.png"].iter().map(|n| root.join(n)).collect();
         files.push(root.join(std::ffi::OsString::from_vec(b"f\xff.jpg".to_vec())));
-        for f in &files {
-            std::fs::write(f, b"x").unwrap();
+        // Each as long as the scan below says it is, so that none reads as
+        // changed since.
+        for (k, f) in files.iter().enumerate() {
+            std::fs::write(f, vec![b'x'; k + 1]).unwrap();
         }
         let mut pairs = vec![pair(0, 1, &files), pair(0, 2, &files), pair(0, 3, &files), pair(4, 3, &files), pair(4, 5, &files)];
         pairs[0].identical = true;
@@ -495,7 +542,7 @@ mod tests {
         };
         let kept_json = write(&out, &files, &facts, "kept.json", report::Format::Json);
         let kept: Kept = serde_json::from_slice(&kept_json).unwrap();
-        let (again, again_files, again_facts, done) = rebuild(kept, suggest::Mode::Content, 0.6);
+        let (again, again_files, again_facts, done) = rebuild(kept, suggest::Mode::Content, 0.6, None);
         assert_eq!((done.gone, done.unheld), (0, 0));
         for (name, format) in [("txt", report::Format::Txt), ("csv", report::Format::Csv), ("json", report::Format::Json)] {
             assert_eq!(
@@ -507,7 +554,7 @@ mod tests {
 
         // The other rules, from the groups alone.
         let kept: Kept = serde_json::from_slice(&kept_json).unwrap();
-        let (again, again_files, _, _) = rebuild(kept, suggest::Mode::Representative, 0.6);
+        let (again, again_files, _, _) = rebuild(kept, suggest::Mode::Representative, 0.6, None);
         let of = |p: &PathBuf| again.actions[again_files.iter().position(|f| f == p).unwrap()];
         assert_eq!(of(&files[0]), Some(Action::Keep));
         assert_eq!(of(&files[2]), Some(Action::Delete));
@@ -517,7 +564,7 @@ mod tests {
         // they were compared with, so it goes; `d.png` stays in the first.
         std::fs::remove_file(&files[4]).unwrap();
         let kept: Kept = serde_json::from_slice(&kept_json).unwrap();
-        let (again, again_files, _, done) = rebuild(kept, suggest::Mode::Content, 0.6);
+        let (again, again_files, _, done) = rebuild(kept, suggest::Mode::Content, 0.6, None);
         assert_eq!(done.gone, 1);
         assert_eq!(again.groups.len(), 1);
         assert_eq!(again.groups[0].members.len(), 4);
@@ -567,13 +614,13 @@ mod tests {
         report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
         let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
 
-        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6);
+        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, None);
         let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
         assert_eq!(done.unheld, 0);
         assert_eq!(again.kept[at(&files[2])], Some(at(&files[0])), "the end of the chain, not the nearest holder");
 
         std::fs::remove_file(&files[0]).unwrap();
-        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6);
+        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, None);
         let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
         assert_eq!(done.unheld, 2);
         for f in &files[1..] {
@@ -618,18 +665,79 @@ mod tests {
         let p = root.join("kept.json");
         report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
         let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
-        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Correlation, 0.6);
+        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Correlation, 0.6, None);
         let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
         assert_eq!(again.actions[at(&files[1])], Some(Action::Delete), "with its representative, by its best agreement");
 
         std::fs::remove_file(&files[0]).unwrap();
         for mode in [suggest::Mode::Correlation, suggest::Mode::Representative] {
-            let (again, again_files, _, _) = rebuild(read(), mode, 0.6);
+            let (again, again_files, _, _) = rebuild(read(), mode, 0.6, None);
             let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
             let want = if mode == suggest::Mode::Correlation { Some(Action::Keep) } else { Some(Action::Delete) };
             assert_eq!(again.actions[at(&files[1])], want, "{mode:?}: judged by the representative still there");
             assert_eq!(again.actions[at(&files[2])], None, "{mode:?}: only the gone one held it");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file changed since the scan — another length, or touched after it
+    /// finished — is not suggested for deletion, nor is a file whose deletion
+    /// rests on it; a file that has not changed is as the scan left it.
+    #[test]
+    fn a_file_changed_since_the_scan_is_not_deleted_nor_relied_on() {
+        let root = std::env::temp_dir().join(format!("img-fp-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let files: Vec<PathBuf> = ["keep.jpg", "copy.jpg", "other.jpg"].iter().map(|n| root.join(n)).collect();
+        for f in &files {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let out = Output {
+            tool: "img-fp",
+            config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.6}),
+            files_enumerated: 3,
+            files_analysed: 3,
+            failures: vec![],
+            runtime_seconds: 1.0,
+            groups: vec![OutGroup {
+                representative: files[0].display().to_string(),
+                files: files.iter().map(|f| f.display().to_string()).collect(),
+                rep: 0,
+                members: vec![0, 1, 2],
+            }],
+            pairs: vec![pair(0, 1, &files), pair(0, 2, &files)],
+            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Delete)],
+            kept: vec![None, Some(0), Some(0)],
+        };
+        let facts = report::read_facts(&out, &files, &[(8, 8); 3], &[false; 3], &[1; 3]);
+        let p = root.join("kept.json");
+        report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
+        let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
+        let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60;
+
+        // Unchanged: as the scan said.
+        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, Some(later));
+        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
+        assert_eq!(done.changed, 0);
+        assert_eq!(again.actions[at(&files[1])], Some(Action::Delete));
+
+        // `copy.jpg` replaced by another picture of another length.
+        std::fs::write(&files[1], b"another picture").unwrap();
+        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, Some(later));
+        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
+        assert_eq!(done.changed, 1);
+        assert_eq!(again.actions[at(&files[1])], Some(Action::Review));
+        assert_eq!(again.actions[at(&files[2])], Some(Action::Delete), "an unchanged file is as it was");
+
+        // `keep.jpg` touched after the scan finished, at the same length:
+        // what rested on it rests on nothing, by every rule.
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 60;
+        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Content, 0.6, Some(before));
+        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
+        assert_eq!(again.actions[at(&files[2])], Some(Action::Review));
+        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Representative, 0.6, Some(before));
+        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
+        assert_eq!(again.actions[at(&files[2])], None, "judged by its representative, which changed");
         let _ = std::fs::remove_dir_all(&root);
     }
 

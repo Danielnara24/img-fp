@@ -76,6 +76,8 @@ unsafe extern "C" {
     fn execv(path: *const std::ffi::c_char, argv: *const *const std::ffi::c_char) -> i32;
     fn write(fd: i32, buf: *const u8, n: usize) -> isize;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn getpid() -> i32;
+    fn getppid() -> i32;
     fn __errno_location() -> *mut i32;
     fn _exit(code: i32) -> !;
 }
@@ -118,6 +120,8 @@ fn spawn(program: &Path, argv: &[OsString]) -> std::io::Result<Child> {
     // closed the pipe.
     let (mut fail_r, fail_w) = std::io::pipe()?;
     let (null_fd, out_fd, err_fd, fail_fd) = (null.as_raw_fd(), out_w.as_raw_fd(), err_w.as_raw_fd(), fail_w.as_raw_fd());
+    // SAFETY: no arguments, no failure.
+    let window = unsafe { getpid() };
 
     // SAFETY: the child runs only async-signal-safe calls on memory made
     // before the fork, and leaves by `execv` or `_exit`.
@@ -127,6 +131,13 @@ fn spawn(program: &Path, argv: &[OsString]) -> std::io::Result<Child> {
             if dup2(null_fd, 0) >= 0 && dup2(out_fd, 1) >= 0 && dup2(err_fd, 2) >= 0 {
                 signal(SIGPIPE, SIG_DFL);
                 prctl(PR_SET_PDEATHSIG, SIGTERM as u64, 0, 0, 0);
+                // The death signal is for a parent that dies from here on. One
+                // that died between the fork and the line above sends none,
+                // and the scan ran on, orphaned, to the end; its parent is
+                // then no longer the window.
+                if getppid() != window {
+                    _exit(EXIT_INTERRUPTED);
+                }
                 execv(program.as_ptr(), argp.as_ptr());
             }
             let errno = (*__errno_location()).to_ne_bytes();

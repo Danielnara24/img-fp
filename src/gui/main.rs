@@ -64,16 +64,15 @@ struct GuiArgs {
 }
 
 fn main() -> glib::ExitCode {
+    // Before anything else, for the reason `check_cpu` gives: in a build for
+    // a CPU this one is not, the argument parser is as likely as anything to
+    // hold the first instruction it lacks, so not even `--help` comes first.
+    // A refusal ends the process itself.
+    let _ = img_fp::check_cpu_for_window();
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == scan::WORKER_FLAG) {
-        // Before anything else, for the reason `check_cpu` gives.
-        if let Err(e) = img_fp::check_cpu_for_window() {
-            eprintln!("Error: {e:#}");
-            return glib::ExitCode::FAILURE;
-        }
         return worker(args.split_off(2));
     }
-    // `--help` and `--version` answer on any CPU; nothing else has run yet.
     // Absolute, as every folder the window keeps is: they are remembered for
     // the next window, which may start anywhere.
     let folders: Vec<PathBuf> = <GuiArgs as clap::Parser>::parse_from(&args)
@@ -81,10 +80,6 @@ fn main() -> glib::ExitCode {
         .into_iter()
         .map(|f| std::path::absolute(&f).unwrap_or(f))
         .collect();
-    if let Err(e) = img_fp::check_cpu_for_window() {
-        eprintln!("Error: {e:#}");
-        return glib::ExitCode::FAILURE;
-    }
     // Drawn in software unless someone asks otherwise. The window is a form
     // and a grid of still pictures, which a GPU does not draw any better, and
     // the GL renderer brings Mesa's shader compiler with it: measured idle,

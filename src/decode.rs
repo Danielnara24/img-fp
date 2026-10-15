@@ -136,11 +136,12 @@ impl CellColour {
         }
     }
 
-    fn value(&self) -> f32 {
-        let (mut total, mut cells) = (0f64, 0f64);
-        for (s, &n) in self.sum.iter().zip(&self.n) {
-            if n > 0.0 {
-                let (r, g, b) = if self.ycbcr {
+    /// Each cell's mean colour as RGB, `None` for a cell no pixel reached.
+    fn rgb(&self) -> [Option<(f64, f64, f64)>; 16] {
+        std::array::from_fn(|c| {
+            let (s, n) = (&self.sum[c], self.n[c]);
+            (n > 0.0).then(|| {
+                if self.ycbcr {
                     // JFIF's conversion, which is linear, so the mean colour
                     // of a cell is the conversion of its mean Y, Cb and Cr.
                     // Converted pixel by pixel, by zune-jpeg's integer path,
@@ -150,13 +151,38 @@ impl CellColour {
                     (y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb)
                 } else {
                     (s[0] / n, s[1] / n, s[2] / n)
-                };
-                total += (r - g).abs() + (g - b).abs();
-                cells += 1.0;
-            }
+                }
+            })
+        })
+    }
+
+    fn value(&self) -> f32 {
+        let (mut total, mut cells) = (0f64, 0f64);
+        for (r, g, b) in self.rgb().into_iter().flatten() {
+            total += (r - g).abs() + (g - b).abs();
+            cells += 1.0;
         }
         if cells > 0.0 { (total / cells) as f32 } else { 0.0 }
     }
+
+    /// Each cell's colour with its brightness taken out: `r - g` and `g - b`
+    /// of its mean, the two differences `value` sums. Zero for a cell no
+    /// pixel reached.
+    fn chroma(&self) -> Chroma {
+        self.rgb().map(|c| c.map_or([0.0; 2], |(r, g, b)| [(r - g) as f32, (g - b) as f32]))
+    }
+}
+
+/// The colour of a 4x4 grid's cells, as `CellColour::chroma` gives it, over
+/// the picture as it is shown: what two pictures of the same grey can still
+/// differ in. See `chroma_of`.
+pub type Chroma = [[f32; 2]; 16];
+
+/// How far apart two pictures' colours are: the mean over the cells of
+/// |Δ(r - g)| + |Δ(g - b)|, which is `Traits::colour`'s measure taken of the
+/// difference. A grey picture against itself in colour reads its own colour.
+pub fn chroma_distance(a: &Chroma, b: &Chroma) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x[0] - y[0]).abs() + (x[1] - y[1]).abs()).sum::<f32>() / 16.0
 }
 
 /// How far apart the rows `detail` is measured on are.
@@ -387,6 +413,17 @@ pub const EXTENSIONS: [&str; 37] = [
     "heics", "heif", "hif", "jxl", "ico", "pnm", "pbm", "pgm", "ppm", "pam", "tga", "qoi", "exr",
     "hdr", "ff",
 ];
+
+/// The error `decode` gives for a macOS metadata file (AppleDouble or
+/// AppleSingle, by its first four bytes): the `._` twin a Mac leaves beside a
+/// file it copies, which carries the picture's name and none of its pixels.
+/// A skip whatever it is called; see `problems::Problems::mac_metadata`.
+pub const MAC_METADATA: &str = "a macOS metadata file, not a picture";
+
+/// Whether a file's head is AppleDouble's or AppleSingle's magic number.
+fn mac_metadata(head: &[u8]) -> bool {
+    matches!(head.get(..4), Some([0x00, 0x05, 0x16, 0x07] | [0x00, 0x05, 0x16, 0x00]))
+}
 
 /// The error `decode` gives for bytes that are no picture format at all, as
 /// opposed to a picture that would not decode. Under a wildcard walk the first
@@ -813,6 +850,9 @@ fn open_if_image(path: &Path) -> Result<(std::fs::File, Vec<u8>, u64)> {
     let mut f = std::fs::File::open(path).with_context(ctx)?;
     let mut bytes = Vec::with_capacity(HEAD);
     (&mut f).take(HEAD as u64).read_to_end(&mut bytes).with_context(ctx)?;
+    if mac_metadata(&bytes) {
+        bail!(MAC_METADATA);
+    }
     if !head_is_image(&bytes, path) {
         bail!(NOT_AN_IMAGE);
     }
@@ -2373,6 +2413,30 @@ fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
 /// picture at about 0.6 of the RGB figure, against the one bar for both.
 /// Anything else is read through `preview`.
 pub fn colour_of(path: &Path) -> Option<f32> {
+    Some(cells_of(path)?.0.value())
+}
+
+/// The colour of `path`'s cells as it is shown, the picture turned as its
+/// EXIF orientation says: what `lib::same_analysis` asks of two files whose
+/// grey is the same, since the analysis sees nothing else. Decoded as
+/// `colour_of` decodes, over every fourth row of a JPEG.
+pub fn chroma_of(path: &Path) -> Option<Chroma> {
+    let (cells, orientation) = cells_of(path)?;
+    let chroma = cells.chroma();
+    // Where each cell of the grid as shown is read from: the grid turned by
+    // the same mapping a working plane is turned by.
+    let mut index = Gray::new(4, 4);
+    for (k, v) in index.px.iter_mut().enumerate() {
+        *v = k as f32;
+    }
+    let from = orient(index, orientation);
+    Some(std::array::from_fn(|k| chroma[from.px[k] as usize]))
+}
+
+/// The cells' colour sums for `colour_of` and `chroma_of`, and the turn the
+/// picture is shown with, which a JPEG's own decode here does not apply.
+fn cells_of(path: &Path) -> Option<(CellColour, image::metadata::Orientation)> {
+    use image::metadata::Orientation;
     let bytes = std::fs::read(path).ok()?;
     if let Kind::Image(ImageFormat::Jpeg) = sniff(&bytes) {
         use zune_core::colorspace::ColorSpace;
@@ -2383,8 +2447,10 @@ pub fn colour_of(path: &Path) -> Option<f32> {
             .jpeg_set_out_colorspace(ColorSpace::YCbCr);
         let mut dec = zune_jpeg::JpegDecoder::new_with_options(zune_core::bytestream::ZCursor::new(&bytes[..]), opts);
         dec.decode_headers().ok()?;
+        let orientation = dec.exif().and_then(|e| Orientation::from_exif_chunk(e)).unwrap_or(Orientation::NoTransforms);
         match dec.input_colorspace()? {
-            ColorSpace::Luma => return Some(0.0),
+            // Every cell grey, without decoding a pixel.
+            ColorSpace::Luma => return Some((CellColour { n: [1.0; 16], ..Default::default() }, orientation)),
             ColorSpace::YCbCr => {
                 let (w, h) = dec.dimensions()?;
                 let n = dec.output_buffer_size()?;
@@ -2396,13 +2462,14 @@ pub fn colour_of(path: &Path) -> Option<f32> {
                     for y in (0..h).step_by(4) {
                         c.add_row(y, h, &buf[y * w * 3..(y + 1) * w * 3], 3, 1);
                     }
-                    return Some(c.value());
+                    return Some((c, orientation));
                 }
             }
             _ => {}
         }
     }
     drop(bytes);
+    // `preview` turns the picture itself.
     let (w, h, rgba) = preview(path, 256).ok()?;
     let (w, h) = (w as usize, h as usize);
     if w == 0 || h == 0 {
@@ -2412,7 +2479,53 @@ pub fn colour_of(path: &Path) -> Option<f32> {
     for y in 0..h {
         c.add_row(y, h, &rgba[y * w * 4..(y + 1) * w * 4], 4, 1);
     }
-    Some(c.value())
+    Some((c, Orientation::NoTransforms))
+}
+
+/// Whether two JPEGs hold the same coded picture and differ only in their
+/// metadata: the same bytes once every APPn and COM segment is left out of
+/// each. Such files decode alike in every channel, which is the common way
+/// two JPEGs come to share their grey: a copy with its EXIF stripped or
+/// edited. `None` when either is not a JPEG this can walk.
+pub fn same_jpeg_coding(a: &Path, b: &Path) -> Option<bool> {
+    let (x, y) = (std::fs::read(a).ok()?, std::fs::read(b).ok()?);
+    Some(jpeg_coding(&x)? == jpeg_coding(&y)?)
+}
+
+/// A JPEG's bytes without its APPn and COM segments, up to and including its
+/// first scan's data, which runs to the end of the file.
+fn jpeg_coding(b: &[u8]) -> Option<Vec<u8>> {
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 2;
+    loop {
+        // Fill bytes before a marker are allowed.
+        while b.get(i) == Some(&0xFF) && b.get(i + 1) == Some(&0xFF) {
+            i += 1;
+        }
+        if b.get(i) != Some(&0xFF) {
+            return None;
+        }
+        let marker = *b.get(i + 1)?;
+        let len = u16::from_be_bytes([*b.get(i + 2)?, *b.get(i + 3)?]) as usize;
+        let end = i.checked_add(2 + len)?;
+        if end > b.len() {
+            return None;
+        }
+        let metadata = matches!(marker, 0xE0..=0xEF | 0xFE);
+        if marker == 0xDA {
+            // The scan header and everything after it: entropy-coded data,
+            // and any further scans and segments a progressive file has.
+            out.extend_from_slice(&b[i..]);
+            return Some(out);
+        }
+        if !metadata {
+            out.extend_from_slice(&b[i..end]);
+        }
+        i = end;
+    }
 }
 
 /// A picture for a person to look at rather than for the analysis: colour,
@@ -2905,6 +3018,62 @@ mod tests {
             let (.., lossless) = decode_jxl(bytes, 64).unwrap();
             assert_eq!(lossless, want);
         }
+    }
+
+    /// A JPEG's coding is its bytes without APPn and COM segments: a copy with
+    /// its metadata added, edited or stripped has the same, a copy coded
+    /// with another table does not.
+    #[test]
+    fn a_jpegs_metadata_is_not_its_coding() {
+        let seg = |m: u8, body: &[u8]| -> Vec<u8> { [vec![0xFF, m], ((body.len() + 2) as u16).to_be_bytes().to_vec(), body.to_vec()].concat() };
+        let scan = [seg(0xDA, &[1, 2]), vec![9, 9, 0xFF, 0x00, 7, 0xFF, 0xD9]].concat();
+        let jpeg = |parts: &[Vec<u8>]| [vec![0xFF, 0xD8], parts.concat(), scan.clone()].concat();
+        let plain = jpeg(&[seg(0xDB, &[0, 1, 2]), seg(0xC0, &[8, 0, 1])]);
+        let tagged = jpeg(&[seg(0xE0, b"JFIF\0"), seg(0xE1, b"Exif\0\0..."), seg(0xDB, &[0, 1, 2]), seg(0xFE, b"note"), seg(0xC0, &[8, 0, 1])]);
+        let other = jpeg(&[seg(0xDB, &[0, 1, 3]), seg(0xC0, &[8, 0, 1])]);
+        assert_eq!(jpeg_coding(&plain), jpeg_coding(&tagged));
+        assert_ne!(jpeg_coding(&plain), jpeg_coding(&other));
+        assert_eq!(jpeg_coding(b"\x89PNG\r\n\x1a\n"), None);
+        assert_eq!(jpeg_coding(&plain[..9]), None, "a segment past the end");
+    }
+
+    /// A macOS metadata file is turned away as one, whatever it is called,
+    /// before a byte past its head is read; it is not a picture for the exact
+    /// pass either.
+    #[test]
+    fn a_mac_metadata_file_is_not_a_broken_picture() {
+        let dir = std::env::temp_dir().join(format!("img-fp-appledouble-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("._IMG_1234.JPG");
+        let mut b = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+        b.extend_from_slice(b"Mac OS X        ");
+        b.resize(4096, 0);
+        std::fs::write(&path, &b).unwrap();
+        assert_eq!(decode(&path, 512).err().map(|e| e.to_string()).as_deref(), Some(MAC_METADATA));
+        assert!(!may_be_image(&path));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The colour of a picture's grid: nothing between a picture and itself
+    /// saved again, its own colour between it and its grey.
+    #[test]
+    fn a_grey_copy_differs_from_its_original_by_its_colour() {
+        let dir = std::env::temp_dir().join(format!("img-fp-chroma-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 200]));
+        let grey = image::GrayImage::from_fn(64, 48, |x, y| {
+            let p = img.get_pixel(x, y);
+            image::Luma([luma(p[0], p[1], p[2]).round() as u8])
+        });
+        let (a, b, c) = (dir.join("a.png"), dir.join("b.tif"), dir.join("grey.png"));
+        img.save(&a).unwrap();
+        img.save(&b).unwrap();
+        grey.save(&c).unwrap();
+        let (ca, cb, cc) = (chroma_of(&a).unwrap(), chroma_of(&b).unwrap(), chroma_of(&c).unwrap());
+        assert_eq!(chroma_distance(&ca, &cb), 0.0);
+        assert!(chroma_distance(&ca, &cc) > 50.0, "{}", chroma_distance(&ca, &cc));
+        assert_eq!(chroma_distance(&cc, &[[0.0; 2]; 16]), 0.0, "a grey picture has no colour");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A preview is the size its place asks for, and a PNG read a row at a

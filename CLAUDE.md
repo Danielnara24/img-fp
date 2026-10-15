@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.46.1)
+## Status (0.47.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -20,12 +20,21 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   0.44.0's, not re-measured. At 640: F1 0.9826. SSCD, the best competitor:
   F1 0.748, and every other tool has zero perfect transforms
   (`benchmark/BASELINE.md`, field in `out/v17-all4`).
+- 0.47.0 (audit fixes, `out/v35-audit`): F1 **0.9823**, recall 96.93%,
+  same 7 cross-family pairs and trap FPs, 48 perfect transforms; keep rule
+  17,299 DELETE, none loses content, 276 / 304.
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
   (`out/v31-cost-cliff`).
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
 - Released binary is the **plain x86-64 build** (`target/plain`), which
   `bench.py` measures by default. It differs from a native build only on
-  JPEG XL (jxl-grid's FMA rounding).
+  JPEG XL (jxl-grid's FMA rounding). The repo no longer ships a
+  `.cargo/config.toml` with `target-cpu=native`, so a plain `cargo build` is
+  the release build too (a native build on an AVX-512 host SIGILLed on AVX2
+  machines). `check_cpu` reads `cpuid` itself (`lib::cpu`):
+  `is_x86_feature_detected!` is constant `true` for features the build
+  assumes, so the old check could never fire; it refuses with raw `write` +
+  `_exit`, since formatting an error ran AVX-512 code.
 - Grey is BT.601 luma; a JPEG's grey is its Y plane.
 - Shipped `--min-pixel-correlation` is 0.6, chosen for what users want
   grouped (0.5 grouped merely similar photos), not for F1.
@@ -161,6 +170,15 @@ Each was measured; changing one needs a re-measure.
 - **Three acceptance tiers** (`verify::Policy`): `anchor`, `propagated`
   (no inlier count, no enclosure), `corroborated` (anchor minus
   `CLUSTER_SLACK_*`). Collapsing them costs recall or precision.
+- **Whole-frame matches** (`Rules::framed`, `verify::frame_onto_frame`):
+  a verdict whose transform puts each of A's corners on B's same corner
+  (inlier tolerance; resize only: a half-turn let a `quadrant_rotate` and a
+  `tile_shuffle` of one dark seed in on 3 points and delete the trap) clears
+  anchor/corroborated with >= 3 aligned
+  points if `blk_min >= CLEAN_WORST_BLOCK`; never clean, so it adds a file
+  and joins no clusters. For icons/logos: a 512 px icon vs its 128 px copy
+  had 7 points at 0.997. Featureless files (no keypoints) still match only
+  identical / same-pixel copies.
 - **Weak bridges are dropped** (`drop_weak_bridges`): any bridge whose far
   side is more than one file, including mirrored/inverted anchors. Since
   0.44.0 a dropped bridge is kept as a weak anchor (may add one file, counts
@@ -190,7 +208,11 @@ Each was measured; changing one needs a re-measure.
 - **Byte-identical copies and same-analysis twins** (`lib::Planes`,
   `lib::same_analysis`) are matched through one original and get its pairs
   via `with_copies`; otherwise they count each other as matches and suppress
-  the second look. Twins are reported as `same_pixels`.
+  the second look. Twins are reported as `same_pixels`. A twin must also
+  match in colour (`lib::same_colour`: measured colour equal to the bit, or
+  two JPEGs differing only in APPn/COM, else `decode::chroma_of` grids within
+  `COLOURFUL`): grey is luma only, so a lossless-greyscale JPEG was a twin of
+  its colour original, stood as one with it, and won as the smaller file.
 - **Area rule** (`decode::area_factor`, 0.44.0): a picture wider than 4:3
   gets the pixels a 4:3 one gets (factor `sqrt(3/4 * long/short)`, thumbnail
   too, capped by `THUMB_MAX_SIDES`). 4:3 or squarer is untouched.
@@ -270,7 +292,11 @@ with the window); `--last` re-writes text/CSV byte-for-byte, JSON without
 `pairs`. Not kept under `--no-cache`, `--no-last`, `--against`, or a walk
 that found no picture; the window keeps by the same rule. Paths are kept absolute (`keep_scan`): read back from another folder,
 or by the window from `$HOME`, relative ones named other files. The window's
-Trash leaves a file whose length differs from the scan's.
+Trash leaves a file whose length differs from the scan's, or whose ctime is
+after the scan finished (`last::changed_since`); `--last` suggests deleting
+no such file and nothing resting on one. The Trash dialog also warns when a
+marked DELETE's kept copy is marked (groups overlap, so "every image of a
+group marked" missed an original + re-encode marked with a crop left).
 
 ### `--skip-mirrored`
 
@@ -483,9 +509,12 @@ Do not retry without new evidence:
   without `--hidden`, Trash/thumbnail/NAS recycle and snapshot folders
   (`walk::SetAside`: `#recycle`, `@eaDir`, `#snapshot`, `@Recycle`,
   `@__thumb`, `@Recently-Snapshot` too), symlinks
-  without `--follow-symlinks`, second names for one (device, inode).
+  without `--follow-symlinks`, second names for one (device, inode),
+  macOS `._` metadata files (AppleDouble magic, any name; were a problem and
+  a byte-identical "image" pair), featureless images (were a problem: a
+  folder with one plain backdrop exited 2 every run).
   Problems: undecodable, unreadable path, unresolved `--exclude`,
-  featureless, cut-off JPEG (`decode::jpeg_cut_off`; analysed, marked
+  cut-off JPEG (`decode::jpeg_cut_off`; analysed, marked
   `DAMAGED`, never cached), cache I/O failure.
 - `-o`, `--dump`, `--log-file` may not name a picture or each other; at most
   one may be stdout. `--cache` with `--no-cache` only beside

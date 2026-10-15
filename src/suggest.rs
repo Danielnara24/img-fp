@@ -250,7 +250,7 @@ const WHOLE_GRID: usize = 64;
 /// counts as grey, which costs nothing: a grey copy of such a picture loses
 /// next to nothing. Swept on IMGS-ALL, 1.5 to 3 is flat (271-272 families
 /// keep their original, 301-302 a faithful copy), and 1 is below the floor.
-const COLOURFUL: f32 = 1.5;
+pub(crate) const COLOURFUL: f32 = 1.5;
 
 /// One strong pair, seen from one end `f`.
 #[derive(Clone, Copy)]

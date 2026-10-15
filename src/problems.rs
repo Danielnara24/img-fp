@@ -137,12 +137,13 @@ pub struct Problems<'a> {
     symlink_loop: Tally,
     listed_twice: Tally,
     excluded: Tally,
+    mac_metadata: Tally,
+    featureless: Tally,
 
     // Problems: what was asked for and did not happen.
     unresolved_exclude: Tally,
     unscannable: Tally,
     unreadable: Tally,
-    featureless: Tally,
     damaged: Tally,
     cache: Tally,
 }
@@ -159,6 +160,7 @@ impl<'a> Problems<'a> {
             symlink_loop: Tally::default(),
             listed_twice: Tally::default(),
             excluded: Tally::default(),
+            mac_metadata: Tally::default(),
             unresolved_exclude: Tally::default(),
             unscannable: Tally::default(),
             unreadable: Tally::default(),
@@ -230,6 +232,29 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.listed_twice, "skip/listed-twice", path.into());
     }
 
+    /// A macOS metadata file (AppleDouble): the `._` twin a Mac writes
+    /// beside every file it copies onto a drive or a share that cannot hold
+    /// its extended attributes, and puts in `__MACOSX` in a zip. It carries
+    /// the picture's name, `._IMG_1234.JPG`, and no picture. Read as one, every
+    /// such file was an image that would not decode, exit 2, and two of them
+    /// alike — which they often are — a byte-identical *image* with one of
+    /// them suggested for deletion.
+    pub fn mac_metadata(&mut self, path: &str) {
+        record(self.log, &mut self.mac_metadata, "skip/mac-metadata", path.into());
+    }
+
+    /// An image that decoded and described to nothing: no local features at
+    /// all, which happens to a blank or near-blank picture — a solid colour,
+    /// a smooth gradient. It can match nothing but a byte-identical copy of
+    /// itself, because there is nothing for the geometry to agree about, and
+    /// that is worth a line; but nothing failed, so it is a skip and does not
+    /// move the exit code. It used to be a problem, and a folder holding one
+    /// plain backdrop exited 2 on every run, which a script reads as a scan
+    /// that went wrong.
+    pub fn featureless(&mut self, path: &str) {
+        record(self.log, &mut self.featureless, "skip/featureless", path.into());
+    }
+
     // ---- problems
 
     /// An `--exclude` path that does not resolve, and so excludes nothing. A
@@ -253,17 +278,6 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.unreadable, "problem/unreadable", format!("{path}: {err}"));
     }
 
-    /// An image that decoded and described to nothing: no local features at
-    /// all, which happens to a blank or near-blank picture. Nothing failed,
-    /// and that is exactly why it is worth a line — the file is in the corpus,
-    /// it is in `files_analysed`, and it cannot match anything but a
-    /// byte-identical copy of itself, because there is nothing for the
-    /// geometry to agree about. Declining to answer is not the same as having
-    /// answered.
-    pub fn featureless(&mut self, path: &str) {
-        record(self.log, &mut self.featureless, "problem/featureless", path.into());
-    }
-
     /// An image that decoded only in part: a JPEG cut off in its image data,
     /// which the decoder fills out with grey rather than refuse.
     /// It is analysed — what is there may still be worth matching — and its
@@ -285,7 +299,7 @@ impl<'a> Problems<'a> {
 
     // ---- reporting
 
-    fn skips(&self) -> [(&Tally, &'static str); 8] {
+    fn skips(&self) -> [(&Tally, &'static str); 10] {
         [
             (&self.not_an_image, "file(s) whose extension is not searched, or with none (see -x)"),
             (&self.set_aside, "Trash, thumbnail or snapshot folder(s), not gone into (name one to scan it)"),
@@ -295,18 +309,17 @@ impl<'a> Problems<'a> {
             (&self.symlink_loop, "symlink(s) leading back into a folder already being walked"),
             (&self.listed_twice, "path(s) already listed under another name (named twice, overlapping roots, a symlink or a hard link)"),
             (&self.excluded, "named path(s) skipped because --exclude covers them"),
+            (&self.mac_metadata, "macOS metadata file(s) (\"._\" files), which hold no picture"),
+            // The label says what it costs rather than what the code did.
+            (&self.featureless, "image(s) with no detail to match, such as a blank picture: only an identical copy can match one"),
         ]
     }
 
-    fn problems(&self) -> [(&Tally, &'static str); 6] {
+    fn problems(&self) -> [(&Tally, &'static str); 5] {
         [
             (&self.unresolved_exclude, "--exclude path(s) could not be resolved; nothing was excluded for them"),
             (&self.unscannable, "path(s) could not be scanned"),
             (&self.unreadable, "image(s) could not be read"),
-            // Not "failed": the analysis ran and came back empty-handed. The
-            // label says what it costs the user rather than what the code did,
-            // because the count is only worth printing for that consequence.
-            (&self.featureless, "image(s) have no features and can only match a byte-identical copy"),
             (&self.damaged, "image(s) are cut off and were analysed as far as they could be read"),
             (&self.cache, "cache problem(s)"),
         ]
@@ -425,6 +438,8 @@ mod tests {
         p.symlink_loop("/a/up");
         p.listed_twice("/a.jpg");
         p.excluded("/keep");
+        p.mac_metadata("/._a.jpg");
+        p.featureless("/blank.png");
         assert_eq!(p.count(), 0, "skips are not failures");
         assert!(!p.any(), "so a scan of a home directory still exits 0");
     }
@@ -435,9 +450,9 @@ mod tests {
         let mut p = p(&log);
         p.unscannable("/nope", &"No such file or directory");
         p.unreadable("/a.jpg", "unsupported");
-        p.featureless("/blank.png");
         p.cache("could not write /tmp/c".into());
         p.unresolved_exclude("/kepe", &"No such file or directory");
+        p.damaged("/cut.jpg", "cut off");
         assert_eq!(p.count(), 5);
     }
 

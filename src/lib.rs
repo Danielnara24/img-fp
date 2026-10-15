@@ -188,7 +188,9 @@ struct Args {
 
     /// Matching points two images must share before they count as duplicates.
     ///
-    /// Higher is stricter. Below 3 behaves as 3.
+    /// Higher is stricter. Below 3 behaves as 3. An image that is the whole of
+    /// the other, only resized, needs 3 if every part of it agrees: a plain
+    /// picture such as an icon or a logo has few points to match.
     #[arg(long, value_name = "N", default_value_t = 10)]
     min_aligned_points: u32,
 
@@ -932,7 +934,9 @@ pub fn cli_main() -> Result<()> {
 ///
 /// It checks exactly the features this binary was compiled with, so a build
 /// for the machine it runs on (`target-cpu=native`) always passes, and a
-/// portable one (`x86-64`) checks nothing.
+/// portable one (`x86-64`) checks nothing. A refusal is said on stderr and
+/// ends the process with exit 1 there and then (see `cpu`), so it is the
+/// first thing either binary does.
 pub fn check_cpu() -> Result<()> {
     check_cpu_for("img-fp", "cargo install img-fp --locked")
 }
@@ -947,24 +951,189 @@ pub fn check_cpu_for_window() -> Result<()> {
 fn check_cpu_for(program: &str, install: &str) -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     {
-        let mut missing: Vec<&str> = Vec::new();
+        // Never set in a build that assumes nothing, hence the `allow`.
+        #[allow(unused_mut)]
+        let mut missing = false;
+        // Each feature asked only of a build that has it.
         macro_rules! need {
             ($($f:tt),*) => {$(
-                if cfg!(target_feature = $f) && !std::arch::is_x86_feature_detected!($f) {
-                    missing.push($f);
+                #[cfg(target_feature = $f)]
+                if !cpu::has($f) {
+                    cpu::say(if missing { ", " } else { "Error: this build of " });
+                    if !missing {
+                        cpu::say(program);
+                        cpu::say(" needs a CPU with ");
+                    }
+                    cpu::say($f);
+                    missing = true;
                 }
             )*};
         }
-        need!("sse4.2", "popcnt", "avx", "avx2", "fma", "bmi1", "bmi2", "lzcnt", "movbe", "f16c");
-        if !missing.is_empty() {
-            anyhow::bail!(
-                "this build of {program} needs a CPU with {}, which this one does not have. \
-                 Build it for this machine instead: {install}",
-                missing.join(", ")
-            );
+        // Every instruction set rustc can be told to assume, not only the
+        // x86-64-v3 ones. `target-cpu=native` on a machine with AVX-512 turns
+        // it on, and the compiler then uses it everywhere.
+        need!(
+            "sse3", "ssse3", "sse4.1", "sse4.2", "sse4a", "popcnt", "cmpxchg16b", "avx", "avx2", "fma", "bmi1", "bmi2", "lzcnt",
+            "movbe", "f16c", "adx", "aes", "pclmulqdq", "rdrand", "rdseed", "rtm", "sha", "sha512", "sm3", "sm4", "tbm", "gfni",
+            "vaes", "vpclmulqdq", "kl", "widekl", "xsave", "xsavec", "xsaveopt", "xsaves", "avxifma", "avxneconvert", "avxvnni",
+            "avxvnniint8", "avxvnniint16", "avx512f", "avx512cd", "avx512bw", "avx512dq", "avx512vl", "avx512ifma", "avx512vbmi",
+            "avx512vbmi2", "avx512vnni", "avx512bitalg", "avx512vpopcntdq", "avx512bf16", "avx512fp16", "avx512vp2intersect"
+        );
+        if missing {
+            cpu::say(", which this one does not have. Build it for this machine instead: ");
+            cpu::say(install);
+            cpu::say("\n");
+            cpu::refuse();
         }
     }
+    let _ = (program, install);
     Ok(())
+}
+
+/// What the CPU says it has, asked of `cpuid` itself, and the refusal.
+///
+/// **The refusal is written a string at a time and ends the process at
+/// once.** Every line of this binary is compiled for the features it assumes,
+/// so the first allocation or format on the way to an ordinary error may be
+/// one of the instructions the CPU lacks: a build for AVX-512 found what was
+/// missing and died building the message (`anyhow::Error::construct`, its
+/// first `vmovups` of a ZMM register). A `write` of a string the binary holds
+/// and an `_exit` copy nothing.
+///
+/// **Not `is_x86_feature_detected!`**, which answers `true` without asking
+/// for any feature the build was compiled with — `cfg!(target_feature)` is
+/// the first half of its expansion — so in exactly the builds `check_cpu` is
+/// for, it said every feature was there: a build for AVX-512 passed the check
+/// on a Zen 2 and died with SIGILL in the argument parser.
+#[cfg(target_arch = "x86_64")]
+// `cpuid` is a safe call from Rust 1.89 and unsafe before it; and a build
+// that assumes nothing past x86-64 asks it nothing outside the tests.
+#[allow(unused_unsafe, dead_code)]
+mod cpu {
+    use std::arch::x86_64::{CpuidResult, __cpuid, __cpuid_count};
+
+    fn leaf(l: u32, sub: u32) -> CpuidResult {
+        // SAFETY: `cpuid` exists on every x86-64 CPU, and a leaf past the
+        // highest one is asked only below once that one is known.
+        unsafe { __cpuid_count(l, sub) }
+    }
+
+    /// The register bits the OS saves on a switch (XCR0), when it says.
+    fn xcr0() -> u64 {
+        if leaf(1, 0).ecx >> 27 & 1 == 0 {
+            return 0;
+        }
+        #[target_feature(enable = "xsave")]
+        unsafe fn read() -> u64 {
+            unsafe { std::arch::x86_64::_xgetbv(0) }
+        }
+        // SAFETY: OSXSAVE is set, so `xgetbv` is there and enabled.
+        unsafe { read() }
+    }
+
+    /// `s` on stderr, as it is.
+    pub fn say(s: &str) {
+        unsafe extern "C" {
+            fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+        }
+        // SAFETY: `s` is valid for its length; a failed write is dropped.
+        unsafe {
+            write(2, s.as_ptr(), s.len());
+        }
+    }
+
+    /// End the process as a fatal error does: exit 1.
+    pub fn refuse() -> ! {
+        unsafe extern "C" {
+            fn _exit(status: i32) -> !;
+        }
+        // SAFETY: nothing has started that needs to finish.
+        unsafe { _exit(1) }
+    }
+
+    /// Whether the CPU, and for the vector extensions the OS, has `name`.
+    pub fn has(name: &str) -> bool {
+        // SAFETY: as in `leaf`.
+        let max = unsafe { __cpuid(0) }.eax;
+        let max_ext = unsafe { __cpuid(0x8000_0000) }.eax;
+        let bit = |l: u32, sub: u32, reg: char, b: u32| -> bool {
+            let ok = if l >= 0x8000_0000 { l <= max_ext } else { l <= max };
+            if !ok {
+                return false;
+            }
+            let r = leaf(l, sub);
+            let v = match reg {
+                'a' => r.eax,
+                'b' => r.ebx,
+                'c' => r.ecx,
+                _ => r.edx,
+            };
+            v >> b & 1 == 1
+        };
+        let x = xcr0();
+        // AVX state (SSE and YMM), and AVX-512's (opmask, ZMM halves).
+        let avx_os = x & 0b110 == 0b110;
+        let avx512_os = avx_os && x & 0b1110_0000 == 0b1110_0000;
+        let (avx, avx512) = (|b: bool| b && avx_os, |b: bool| b && avx512_os);
+        match name {
+            "sse3" => bit(1, 0, 'c', 0),
+            "pclmulqdq" => bit(1, 0, 'c', 1),
+            "ssse3" => bit(1, 0, 'c', 9),
+            "fma" => avx(bit(1, 0, 'c', 12)),
+            "cmpxchg16b" => bit(1, 0, 'c', 13),
+            "sse4.1" => bit(1, 0, 'c', 19),
+            "sse4.2" => bit(1, 0, 'c', 20),
+            "movbe" => bit(1, 0, 'c', 22),
+            "popcnt" => bit(1, 0, 'c', 23),
+            "aes" => bit(1, 0, 'c', 25),
+            "xsave" => bit(1, 0, 'c', 26),
+            "avx" => avx(bit(1, 0, 'c', 28)),
+            "f16c" => avx(bit(1, 0, 'c', 29)),
+            "rdrand" => bit(1, 0, 'c', 30),
+            "bmi1" => bit(7, 0, 'b', 3),
+            "avx2" => avx(bit(7, 0, 'b', 5)),
+            "bmi2" => bit(7, 0, 'b', 8),
+            "rtm" => bit(7, 0, 'b', 11),
+            "avx512f" => avx512(bit(7, 0, 'b', 16)),
+            "avx512dq" => avx512(bit(7, 0, 'b', 17)),
+            "rdseed" => bit(7, 0, 'b', 18),
+            "adx" => bit(7, 0, 'b', 19),
+            "avx512ifma" => avx512(bit(7, 0, 'b', 21)),
+            "avx512cd" => avx512(bit(7, 0, 'b', 28)),
+            "sha" => bit(7, 0, 'b', 29),
+            "avx512bw" => avx512(bit(7, 0, 'b', 30)),
+            "avx512vl" => avx512(bit(7, 0, 'b', 31)),
+            "avx512vbmi" => avx512(bit(7, 0, 'c', 1)),
+            "avx512vbmi2" => avx512(bit(7, 0, 'c', 6)),
+            "gfni" => bit(7, 0, 'c', 8),
+            "vaes" => avx(bit(7, 0, 'c', 9)),
+            "vpclmulqdq" => avx(bit(7, 0, 'c', 10)),
+            "avx512vnni" => avx512(bit(7, 0, 'c', 11)),
+            "avx512bitalg" => avx512(bit(7, 0, 'c', 12)),
+            "avx512vpopcntdq" => avx512(bit(7, 0, 'c', 14)),
+            "kl" => bit(7, 0, 'c', 23),
+            "avx512vp2intersect" => avx512(bit(7, 0, 'd', 8)),
+            "avx512fp16" => avx512(bit(7, 0, 'd', 23)),
+            "sha512" => avx(bit(7, 1, 'a', 0)),
+            "sm3" => avx(bit(7, 1, 'a', 1)),
+            "sm4" => avx(bit(7, 1, 'a', 2)),
+            "avxvnni" => avx(bit(7, 1, 'a', 4)),
+            "avx512bf16" => avx512(bit(7, 1, 'a', 5)),
+            "avxifma" => avx(bit(7, 1, 'a', 23)),
+            "avxvnniint8" => avx(bit(7, 1, 'd', 4)),
+            "avxneconvert" => avx(bit(7, 1, 'd', 5)),
+            "avxvnniint16" => avx(bit(7, 1, 'd', 10)),
+            "xsaveopt" => bit(0xD, 1, 'a', 0),
+            "xsavec" => bit(0xD, 1, 'a', 1),
+            "xsaves" => bit(0xD, 1, 'a', 3),
+            "widekl" => bit(0x19, 0, 'b', 2),
+            "lzcnt" => bit(0x8000_0001, 0, 'c', 5),
+            "sse4a" => bit(0x8000_0001, 0, 'c', 6),
+            "tbm" => bit(0x8000_0001, 0, 'c', 21),
+            // A name not in this table is not one `check_cpu` asks about.
+            _ => true,
+        }
+    }
 }
 
 /// The scan `img-fp-gui` runs: the command line's own, in a child process, with
@@ -1746,6 +1915,16 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // with (see `same_analysis`). A file answered for by another is given that
     // file's pairs at the end, as a byte-identical copy is.
     let pixel_of = timed!(37, same_analysis(&items, |i| twin_of[i] == i && items[i].ok && items[i].feats.len() > 0));
+    // And of those, which are the same pixels in colour too; see
+    // `colour_heads`. A byte copy is its original's colour.
+    let chroma = std::sync::Mutex::new(HashMap::new());
+    let colour_head = timed!(37, colour_heads(&pixel_of, |a, b| same_colour(&files, &items, &chroma, a, b)));
+    drop(chroma);
+    let hue: Vec<usize> = (0..n).map(|i| colour_head[twin_of[i]]).collect();
+    drop(colour_head);
+    // Each file's keypoints, for the grey twins' stated pairs once the
+    // descriptors are let go.
+    let n_kps: Vec<u32> = items.iter().map(|it| it.feats.len() as u32).collect();
     let match_of: Vec<usize> = (0..n).map(|i| pixel_of[twin_of[i]]).collect();
     drop(pixel_of);
     // `--prune-cache` keeps only what this scan found, and gives that up when
@@ -1851,15 +2030,18 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // from the same `items`: this is the last point every file has been
     // through, and a fatal error further down should not lose the account of
     // what would not open.
+    // And a macOS metadata file, whatever it is called: it is named for the
+    // picture it was copied beside, and holds none of it.
     let not_asked: Vec<bool> = (0..n)
         .map(|i| {
-            !wanted.is_a_guess_at_images()
-                && !extensions::names_an_image(&files[i])
-                && items[i].err.as_deref() == Some(decode::NOT_AN_IMAGE)
+            let err = items[i].err.as_deref();
+            err == Some(decode::MAC_METADATA)
+                || (!wanted.is_a_guess_at_images() && !extensions::names_an_image(&files[i]) && err == Some(decode::NOT_AN_IMAGE))
         })
         .collect();
     for (i, it) in items.iter().enumerate() {
         match &it.err {
+            Some(e) if e == decode::MAC_METADATA => problems.mac_metadata(&files[i].display().to_string()),
             // A file a wildcard walk reached that is no picture at all never
             // claimed to be one; see `extensions.rs`.
             Some(_) if not_asked[i] => problems.not_image_content(&files[i].display().to_string()),
@@ -2608,6 +2790,60 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // met — the order `graph` and every tie in the sort below keep. The
     // records themselves are a million strings on a large corpus, so they are
     // made afterwards on every thread rather than here on one.
+    //
+    // The files that decode to one picture come first: their pairs, each
+    // the same pixels or, for two alike only in grey (`colour_heads`), a
+    // match as perfect as a match is, made here since no pass verified one.
+    let mut same: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for i in (0..n).filter(|&i| match_of[i] != twin_of[i] && items[i].ok) {
+        same.entry(match_of[i]).or_insert_with(|| vec![match_of[i]]).push(i);
+    }
+    // Each original's byte-identical copies, found once. They were looked for
+    // over every file for each class, which is quadratic in the corpus: 792
+    // classes by 27,659 files on IMGS-ALL, and a minute's work at a million.
+    let mut copies_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in (0..n).filter(|&i| twin_of[i] != i) {
+        copies_of.entry(twin_of[i]).or_default().push(i);
+    }
+    let mut same_pairs: Vec<(usize, usize, bool)> = Vec::new();
+    let mut grey_twins: Vec<(usize, usize, Affine, bool, Verdict)> = Vec::new();
+    for (_, mut class) in same {
+        // With each one's byte-identical copies, which share its pixels too.
+        let copies: Vec<usize> = class.iter().flat_map(|o| copies_of.get(o).into_iter().flatten().copied()).collect();
+        class.extend(copies);
+        class.sort_unstable();
+        class.dedup();
+        for w in 0..class.len() {
+            for x in w + 1..class.len() {
+                let (a, b) = (class[w], class[x]);
+                let alike = hue[a] == hue[b];
+                same_pairs.push((a, b, alike));
+                if !alike {
+                    // One working image, so the identity, every point of it
+                    // aligned and every block agreeing.
+                    let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+                    let k = n_kps[a];
+                    let v = Verdict {
+                        m: id,
+                        n_in: k,
+                        n_match: k,
+                        centred: true,
+                        framed: true,
+                        ov_a: 1.0,
+                        ov_b: 1.0,
+                        scale: 1.0,
+                        blk: 1.0,
+                        blk_n: 1,
+                        blk_min: 1.0,
+                        ncc: 1.0,
+                        ..Default::default()
+                    };
+                    grey_twins.push((a, b, id, false, v));
+                }
+            }
+        }
+    }
+    drop(copies_of);
     let mut graph: Vec<(usize, usize)> = Vec::new();
     let mut stated: Vec<Stated> = Vec::new();
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
@@ -2624,26 +2860,15 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     }
     // Then the files that decode to one picture, each pair of them, which
     // are the same claim one step down: not the same bytes, the same pixels.
-    let mut same: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
-    for i in (0..n).filter(|&i| match_of[i] != twin_of[i] && items[i].ok) {
-        same.entry(match_of[i]).or_insert_with(|| vec![match_of[i]]).push(i);
-    }
-    for (_, mut class) in same {
-        // With each one's byte-identical copies, which share its pixels too.
-        let copies: Vec<usize> = (0..n).filter(|&i| twin_of[i] != i && class.contains(&twin_of[i])).collect();
-        class.extend(copies);
-        class.sort_unstable();
-        class.dedup();
-        for w in 0..class.len() {
-            for x in w + 1..class.len() {
-                let (a, b) = (class[w], class[x]);
-                if seen.insert((a, b)) {
-                    graph.push((a, b));
-                    stated.push(Stated::SamePixels);
-                }
-            }
+    let mut grey = grey_twins.iter();
+    for &(a, b, alike) in &same_pairs {
+        let twin = if alike { None } else { grey.next() };
+        if seen.insert((a, b)) {
+            graph.push((a, b));
+            stated.push(twin.map_or(Stated::SamePixels, |e| Stated::Edge(e, false)));
         }
     }
+    drop(same_pairs);
     let tiers = all.iter().map(|e| (e, false)).chain(propagated.iter().map(|e| (e, false)));
     for (e, corroborated) in tiers.chain(corroborated.iter().map(|e| (e, true))) {
         let (a, b) = (e.0, e.1);
@@ -3174,6 +3399,10 @@ enum Stated<'a> {
 ///
 /// A featureless file is never a candidate. Two blank pictures of one size
 /// stretch to the same thumbnail whatever their shade.
+///
+/// Alike here is alike in grey, which is all the analysis sees, and that is
+/// what matching them as one rests on; whether they are also the same
+/// *pixels* is `colour_heads`'s question.
 fn same_analysis(items: &[Item], candidate: impl Fn(usize) -> bool + Sync) -> Vec<usize> {
     use std::hash::{BuildHasher, Hash, Hasher};
     let n = items.len();
@@ -3210,20 +3439,108 @@ fn same_analysis(items: &[Item], candidate: impl Fn(usize) -> bool + Sync) -> Ve
             && ta.px == tb.px
     };
     let mut of: Vec<usize> = (0..n).collect();
-    for (_, mut group) in by_hash {
-        if group.len() < 2 {
-            continue;
-        }
-        group.sort_unstable();
-        let mut firsts: Vec<usize> = Vec::new();
-        for i in group {
-            match firsts.iter().find(|&&f| alike(&items[f], &items[i])) {
-                Some(&f) => of[i] = f,
-                None => firsts.push(i),
+    // On every thread, since the colour may have to be decoded.
+    let groups: Vec<Vec<usize>> = by_hash.into_values().filter(|g| g.len() > 1).collect();
+    let answered: Vec<(usize, usize)> = groups
+        .into_par_iter()
+        .flat_map_iter(|mut group| {
+            group.sort_unstable();
+            let mut firsts: Vec<usize> = Vec::new();
+            let mut out = Vec::new();
+            for i in group {
+                match firsts.iter().find(|&&f| alike(&items[f], &items[i])) {
+                    Some(&f) => out.push((i, f)),
+                    None => firsts.push(i),
+                }
             }
-        }
+            out
+        })
+        .collect();
+    for (i, f) in answered {
+        of[i] = f;
     }
     of
+}
+
+/// For every file, the lowest-indexed file `same_analysis` put with it that
+/// is also alike in colour (`same_colour`), and itself otherwise: the files
+/// that are the same *pixels*, of those the analysis cannot tell apart.
+///
+/// **Grey is all the analysis sees**, and a JPEG's grey is its Y plane, so a
+/// copy with its colour taken out losslessly (`jpegtran -grayscale`, a
+/// viewer's "lossless greyscale", the benchmark's own `greyscale`) or its
+/// chroma edited has its original's analysis to the bit. Stated as the same
+/// pixels, it stood as one file with the original in the keep rule, the
+/// smaller of the two stood for both — the grey copy — and the colour
+/// photograph was suggested for deletion. Such a pair is still matched as
+/// one file, since its matches are the same matches (matched apart, each
+/// counted the other and stopped the second look: 0.07 points of recall on
+/// IMGS-ALL); it is stated as the perfect match it is in grey, and the keep
+/// rule's colour over grey decides between them.
+fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync) -> Vec<usize> {
+    let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &o) in of.iter().enumerate() {
+        if o != i {
+            classes.entry(o).or_insert_with(|| vec![o]).push(i);
+        }
+    }
+    // On every thread, since the colour may have to be decoded.
+    let answered: Vec<(usize, usize)> = classes
+        .into_values()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .flat_map_iter(|mut class| {
+            class.sort_unstable();
+            let mut heads: Vec<usize> = Vec::new();
+            let mut out = Vec::new();
+            for i in class {
+                match heads.iter().find(|&&h| same_colour(h, i)) {
+                    Some(&h) => out.push((i, h)),
+                    None => heads.push(i),
+                }
+            }
+            out
+        })
+        .collect();
+    let mut head: Vec<usize> = (0..of.len()).collect();
+    for (i, h) in answered {
+        head[i] = h;
+    }
+    head
+}
+
+/// Whether two files analysed alike are alike in colour too; see
+/// `same_analysis`. Cheapest proof first: a colour the decode measured, the
+/// same to the bit, which is what files of the same RGB give (a PNG and its
+/// TIFF or lossless WebP); two JPEGs that differ only in their metadata;
+/// and failing those, the colour of each one's grid read from the file
+/// (`decode::chroma_of`), which costs a decode of each.
+///
+/// The colours are the same when they differ by no more than `COLOURFUL`:
+/// the most colour codec noise gives a grey picture, so it is the most two
+/// encodings of one picture's colour can differ by and still be noise. A
+/// colour photograph against its grey copy differs by its own colour.
+fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<HashMap<usize, Option<decode::Chroma>>>, a: usize, b: usize) -> bool {
+    let (ca, cb) = (items[a].traits.colour, items[b].traits.colour);
+    if ca >= 0.0 && ca.to_bits() == cb.to_bits() {
+        return true;
+    }
+    // Both JPEGs with colour planes, which a decode to grey does not measure.
+    if ca < 0.0 && cb < 0.0 && decode::same_jpeg_coding(&files[a], &files[b]) == Some(true) {
+        return true;
+    }
+    let of = |i: usize| -> Option<decode::Chroma> {
+        if let Some(&c) = chroma.lock().unwrap().get(&i) {
+            return c;
+        }
+        let c = decode::chroma_of(&files[i]);
+        chroma.lock().unwrap().insert(i, c);
+        c
+    };
+    match (of(a), of(b)) {
+        (Some(x), Some(y)) => decode::chroma_distance(&x, &y) <= suggest::COLOURFUL,
+        _ => false,
+    }
 }
 
 /// `edges`, which run between originals, stated for every copy of either end
@@ -3252,8 +3569,10 @@ fn with_copies(edges: Vec<(usize, usize, Affine, bool, Verdict)>, twin_of: &[usi
     }
     let mut out = Vec::with_capacity(edges.len());
     for (a, b, m, inv, v) in edges.iter() {
-        let one = |x: &usize| std::slice::from_ref(x).to_vec();
-        let (sa, sb) = (copies.get(a).cloned().unwrap_or_else(|| one(a)), copies.get(b).cloned().unwrap_or_else(|| one(b)));
+        fn all<'a>(copies: &'a HashMap<usize, Vec<usize>>, x: &'a usize) -> &'a [usize] {
+            copies.get(x).map_or(std::slice::from_ref(x), Vec::as_slice)
+        }
+        let (sa, sb) = (all(&copies, a), all(&copies, b));
         for &x in sa.iter() {
             for &y in sb.iter() {
                 if (x < y) == (a < b) {
@@ -3741,6 +4060,12 @@ mod tests {
         ];
         let of = same_analysis(&items, |i| items[i].feats.len() > 0 && i != 6);
         assert_eq!(of, vec![0, 1, 0, 3, 4, 5, 6]);
+        // Alike in grey and in colour, the same pixels; alike in grey only,
+        // as a grey copy of a colour JPEG is, its own colour.
+        assert_eq!(colour_heads(&of, |_, _| true), vec![0, 1, 0, 3, 4, 5, 6]);
+        assert_eq!(colour_heads(&of, |a, b| (a, b) != (0, 2)), vec![0, 1, 2, 3, 4, 5, 6]);
+        let of = vec![0, 1, 0, 3, 0];
+        assert_eq!(colour_heads(&of, |a, b| (a, b) != (0, 2) && (a, b) != (0, 4)), vec![0, 1, 2, 3, 2], "the first file of its colour");
     }
 
     /// The vocabulary has to scale with the corpus, and the reason is a bug
@@ -4313,5 +4638,27 @@ mod tests {
     #[test]
     fn this_machine_has_what_this_build_needs() {
         assert!(check_cpu().is_ok());
+    }
+
+    /// The check's own reading of `cpuid` says what the standard library's
+    /// detector says, for every feature the detector really asks about in
+    /// this build: one the build does not assume.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_cpu_check_reads_cpuid_as_std_does() {
+        macro_rules! agree {
+            ($($f:tt),*) => {$(
+                if !cfg!(target_feature = $f) {
+                    assert_eq!(cpu::has($f), std::arch::is_x86_feature_detected!($f), $f);
+                }
+            )*};
+        }
+        agree!(
+            "sse3", "ssse3", "sse4.1", "sse4.2", "sse4a", "popcnt", "cmpxchg16b", "avx", "avx2", "fma", "bmi1", "bmi2", "lzcnt",
+            "movbe", "f16c", "adx", "aes", "pclmulqdq", "rdrand", "rdseed", "rtm", "sha", "tbm", "gfni", "vaes", "vpclmulqdq",
+            "xsave", "xsavec", "xsaveopt", "xsaves", "avx512f", "avx512cd", "avx512bw", "avx512dq", "avx512vl", "avx512ifma",
+            "avx512vbmi", "avx512vbmi2", "avx512vnni", "avx512bitalg", "avx512vpopcntdq", "avx512bf16", "avx512fp16",
+            "avx512vp2intersect"
+        );
     }
 }

@@ -43,11 +43,11 @@ jobs:
     name: x86_64 Linux binary
     runs-on: ubuntu-24.04
     env:
-      # .cargo/config.toml says `target-cpu=native`, which is right on the
-      # machine the benchmarks run on and wrong here: native on a CI runner is
+      # Said outright, though it is the default, so that no RUSTFLAGS in the
+      # runner's environment can make it native: native on a CI runner is
       # whatever that host happens to be (often AVX-512), and the binary would
-      # die with SIGILL on older users' CPUs. RUSTFLAGS replaces the config's
-      # rustflags outright. Plain x86-64 runs on every 64-bit x86 CPU: the hot
+      # die with SIGILL on older users' CPUs. Plain x86-64 runs on every
+      # 64-bit x86 CPU: the hot
       # loops are compiled twice, once for x86-64-v3 (AVX2 + FMA + BMI2,
       # Haswell 2013+, every Zen), and the CPU is asked which to run when the
       # binary starts; see src/simd.rs. It is the build `cargo install` makes

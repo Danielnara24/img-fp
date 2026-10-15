@@ -366,7 +366,7 @@ to stderr.
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--work-size <PX>` | Long side, in pixels, the images are analysed at. Larger images are shrunk to it and small ones enlarged up to it; a picture much wider or taller than 4:3 gets a longer side, for as many pixels as a 4:3 one. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `512` |
-| `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3 | `10` |
+| `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3. An image that is all of the other, only resized, needs 3 if every part of it agrees | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.6` |
 | `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |

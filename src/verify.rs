@@ -58,6 +58,9 @@ pub struct Verdict {
     /// Whether the inliers enclose the centre of the overlap the transform
     /// claims. See `encloses_centre`.
     pub centred: bool,
+    /// The transform takes A's frame onto B's whole, each corner onto its own:
+    /// one picture is all of the other, resized. See `frame_onto_frame`.
+    pub framed: bool,
     pub n_match: u32,
     /// Fraction of A's frame that lands inside B, and the reverse.
     pub ov_a: f32,
@@ -81,6 +84,7 @@ impl Default for Verdict {
             variant: Variant::default(),
             n_in: 0,
             centred: false,
+            framed: false,
             n_match: 0,
             ov_a: 0.0,
             ov_b: 0.0,
@@ -118,7 +122,31 @@ pub struct Rules {
     /// The lowest correlation any one detailed block of the overlap may have.
     /// Zero everywhere but `Policy::clean`.
     pub min_worst_block: f32,
+    /// Whether a verdict that takes one frame onto the other whole, resized
+    /// (`framed`),
+    /// may have fewer aligned points than `min_aligned_points` — as few as a
+    /// transform is fitted through — when every detailed block of it agrees
+    /// as a clean anchor's does (`CLEAN_WORST_BLOCK`).
+    ///
+    /// **The points are there to vouch for the geometry, and a frame landing
+    /// on a frame vouches for it instead.** A count of aligned points is a
+    /// defence against a transform that a few coincidental correspondences
+    /// happen to agree on; four corners landing on four corners, within the
+    /// tolerance an inlier is held to, is not something such a transform
+    /// does. What it cannot vouch for is the content, and that is the pixel
+    /// check's at the bar a cluster is built on. A picture with little
+    /// detail — an icon, a logo, a plain diagram — has a handful of features
+    /// and was matched to its own resized copy by none of them: a 512-pixel
+    /// icon and its 128-pixel copy had 7 aligned points and correlated at
+    /// 0.997 on every block. Not for `Policy::clean`: a match on this
+    /// evidence may add a file to a cluster and never join two.
+    pub framed: bool,
 }
+
+/// The lowest correlation every detailed block of a clean anchor reaches
+/// (`Policy::clean`), and of a whole-frame match short of aligned points
+/// (`Rules::framed`).
+pub const CLEAN_WORST_BLOCK: f32 = 0.9;
 
 /// The three tests, and why they differ.
 ///
@@ -182,6 +210,7 @@ impl Default for Rules {
             max_scale: 16.0,
             centred_evidence: false,
             min_worst_block: 0.0,
+            framed: false,
         }
     }
 }
@@ -238,6 +267,7 @@ impl Policy {
             min_frame_overlap,
             min_pixel_correlation,
             centred_evidence: true,
+            framed: true,
             ..Default::default()
         };
         Policy {
@@ -254,7 +284,7 @@ impl Policy {
             // above the old cliff. A count of aligned points was tried beside
             // it and is worse: a dark or plain picture has few features and
             // good pixels, and its family fell apart. See CLAUDE.md.
-            clean: Rules { min_worst_block: 0.9, ..anchor },
+            clean: Rules { min_worst_block: CLEAN_WORST_BLOCK, framed: false, ..anchor },
             propagated: Rules {
                 min_aligned_points: 0,
                 centred_evidence: false,
@@ -327,7 +357,8 @@ impl Verdict {
         self.scale.is_finite()
             && self.scale >= 1.0 / r.max_scale
             && self.scale <= r.max_scale
-            && self.n_in >= r.min_aligned_points
+            && (self.n_in >= r.min_aligned_points
+                || (r.framed && self.framed && self.n_in >= 3 && self.blk_min >= CLEAN_WORST_BLOCK))
             && (!r.centred_evidence || self.centred)
             && self.ov_a.max(self.ov_b) >= r.min_frame_overlap
             && self.blk >= r.min_pixel_correlation
@@ -826,6 +857,26 @@ fn encloses_centre(a: &Features, b: &Features, m: &Affine, pairs: &[(u32, u32)],
 
 /// Fraction of each frame that maps inside the other.
 #[cfg_attr(dispatch, inline(always))]
+/// Whether `m` takes A's frame onto B's whole, resized and nothing else: each
+/// of A's four corners lands on the same corner of B, within the inlier
+/// tolerance (`best_transform`'s).
+///
+/// **Not turned or flipped.** A turn of a frame lands on a frame as well, and
+/// so does what a rearrangement of a picture's parts makes: on IMGS-ALL a
+/// `quadrant_rotate` and a `tile_shuffle` of one dark photograph, turned half
+/// a turn onto each other, met it on three aligned points and nine detailed
+/// blocks, and the rearranged copy was suggested for deletion. A resize is the
+/// one way round the frame vouches for; a turned or mirrored copy is held to
+/// the aligned points as before.
+fn frame_onto_frame(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> bool {
+    let tol = (0.015 * (bw * bw + bh * bh).sqrt()).max(3.0);
+    [((0.0, 0.0), (0.0, 0.0)), ((aw, 0.0), (bw, 0.0)), ((0.0, ah), (0.0, bh)), ((aw, ah), (bw, bh))].iter().all(|&((x, y), (cx, cy))| {
+        let (u, v) = apply(m, x, y);
+        // Squared, not `hypot`: glibc's `hypotf` would raise the floor.
+        (u - cx) * (u - cx) + (v - cy) * (v - cy) <= tol * tol
+    })
+}
+
 fn overlap(m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, f32) {
     const N: usize = 16;
     let mut inside = 0;
@@ -1848,6 +1899,11 @@ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     v.m = m;
     v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
+    // Asked first, since a verdict that lands frame on frame is read below
+    // the gate as well (`Rules::framed`): four corners, so it costs nothing,
+    // and a transform from a few coincidental points almost never passes.
+    v.framed = frame_onto_frame(&m, aw, ah, bw, bh);
+    let floor = |gate: u32| if v.framed { 3 } else { gate.max(3) };
     // **Everything below is gated on the aligned points, not just the pixels.**
     //
     // `gate.0` is the fewest any consumer of this verdict will accept, and
@@ -1860,11 +1916,11 @@ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     // measurements nobody would read: `encloses_centre`, which transforms every
     // keypoint of both images and costs as much as the geometry fit that
     // preceded it, and the sort in `distinct_inliers`.
-    if n_agreeing < gate.0.max(3) as usize {
+    if n_agreeing < floor(gate.0) as usize {
         return v;
     }
     v.n_in = distinct_inliers(p.fa, matches, &scratch.mask, &mut scratch.pts);
-    if v.n_in < gate.0.max(3) {
+    if v.n_in < floor(gate.0) {
         return v;
     }
     v.centred = timed!(18, encloses_centre(p.fa, p.fb, &m_query, matches, &scratch.mask));
@@ -2090,6 +2146,42 @@ mod bench {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame lands on a frame resized; turned, flipped, cropped, shifted or
+    /// inside the other, it does not.
+    #[test]
+    fn a_frame_onto_a_frame_is_the_whole_picture_resized() {
+        let (aw, ah) = (512.0, 384.0);
+        // A quarter the size, and squashed to another shape.
+        assert!(frame_onto_frame(&[0.25, 0.0, 0.0, 0.0, 0.25, 0.0], aw, ah, 128.0, 96.0));
+        assert!(frame_onto_frame(&[0.5, 0.0, 0.0, 0.0, 1.0, 0.0], aw, ah, 256.0, 384.0));
+        // Mirrored, turned a quarter, turned a half.
+        assert!(!frame_onto_frame(&[-1.0, 0.0, aw, 0.0, 1.0, 0.0], aw, ah, aw, ah));
+        assert!(!frame_onto_frame(&[0.0, -1.0, ah, 1.0, 0.0, 0.0], aw, ah, ah, aw));
+        assert!(!frame_onto_frame(&[-1.0, 0.0, aw, 0.0, -1.0, ah], aw, ah, aw, ah));
+        // A few pixels out, as a fitted transform is.
+        assert!(frame_onto_frame(&[1.005, 0.0, 2.0, 0.0, 0.995, -1.5], aw, ah, aw, ah));
+        // A crop of half of it, a shift, a frame inside another.
+        assert!(!frame_onto_frame(&[2.0, 0.0, 0.0, 0.0, 2.0, 0.0], aw, ah, aw, ah));
+        assert!(!frame_onto_frame(&[1.0, 0.0, 40.0, 0.0, 1.0, 0.0], aw, ah, aw, ah));
+        assert!(!frame_onto_frame(&[0.5, 0.0, 100.0, 0.0, 0.5, 100.0], aw, ah, aw, ah));
+        // Squashed inside the other's frame.
+        assert!(!frame_onto_frame(&[1.0, 0.0, 0.0, 0.0, 0.1, 0.0], aw, ah, aw, ah));
+    }
+
+    /// Below the aligned-points bar, a verdict is accepted only when it lands
+    /// frame on frame and every detailed block agrees, and never as clean.
+    #[test]
+    fn a_whole_frame_match_needs_fewer_points_and_every_block() {
+        let policy = Policy::new(10, 0.85, 0.6);
+        let v = Verdict { n_in: 7, framed: true, centred: true, ov_a: 1.0, ov_b: 1.0, scale: 1.0, blk: 0.99, blk_min: 0.95, ..Default::default() };
+        assert!(v.accepted(&policy.anchor));
+        assert!(!v.accepted(&policy.clean), "it may add a file to a cluster and never join two");
+        assert!(!Verdict { framed: false, ..v }.accepted(&policy.anchor));
+        assert!(!Verdict { blk_min: 0.85, ..v }.accepted(&policy.anchor), "one block disagreeing");
+        assert!(!Verdict { n_in: 2, ..v }.accepted(&policy.anchor));
+        assert!(Verdict { n_in: 10, framed: false, blk_min: 0.5, ..v }.accepted(&policy.anchor), "the bar met is the bar as it was");
+    }
 
     /// The pyramid one output at a time, each pixel the [1 3 3 1]/8 filter
     /// both ways over the level below: the reference `Pyramid::fill` is held

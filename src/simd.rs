@@ -14,9 +14,9 @@
 //! `target-cpu=native` on a modern machine, or one for `x86-64-v3`.
 //!
 //! **A build for plain x86-64 is the case this exists for**: it is the release
-//! (since 0.30.0), and it is the one `cargo install img-fp` makes: `cargo install` reads no `.cargo/config.toml`
-//! from the package it builds, so the `target-cpu=native` there never reaches
-//! it. That build used to have neither half — no hand-written kernels, since
+//! (since 0.30.0), the one `cargo install img-fp` makes, and, since the repo
+//! stopped asking for `target-cpu=native` in its `.cargo/config.toml`, the
+//! one a plain `cargo build` makes too. That build used to have neither half — no hand-written kernels, since
 //! they were selected with `cfg(target_feature = "avx2")`, and four-lane
 //! loops — and it cost **45% more CPU** to extract and **43% more** to match,
 //! on a machine that had every feature the release uses. Now (`cfg(dispatch)`,
@@ -92,8 +92,8 @@ pub fn force_plain(on: bool) {
 /// architecture.
 ///
 /// Nor where `build.rs` and the compiler disagree about AVX2, which rustdoc
-/// can make happen — it compiles the crate without `.cargo/config.toml`'s
-/// flags, while the build script saw them. The portable paths are compiled
+/// can make happen — it compiles the crate without the `RUSTFLAGS` the build
+/// script saw. The portable paths are compiled
 /// into every build without AVX2, so that case is merely slow.
 #[cfg(not(any(target_feature = "avx2", dispatch)))]
 #[inline(always)]
