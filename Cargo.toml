@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.46.0"
+version = "0.46.1"
 edition = "2024"
 # The oldest compiler the dependencies build with (`image` and `jxl-oxide`'s
 # parts need 1.88). Said here so that an older one is told so by cargo,
@@ -54,7 +54,7 @@ libloading = "0.8"
 # data, to tell a cut-off file from a whole one (`decode::jpeg_cut_off`).
 memchr = "2"
 rayon = "1.12.0"
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
 walkdir = "2.5.0"
 # Ctrl-C keeps what the analysis has finished; see `interrupt` in main.rs. The

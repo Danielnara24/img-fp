@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.46.0)
+## Status (0.46.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -70,6 +70,7 @@ src/
   problems.rs   skips, problems, exit codes, --log-file
   progress.rs   progress bar
   simd.rs       x86-64-v3 vs portable kernels (`dispatched!`, `v3()`)
+  spill.rs      analysis arrays in an unlinked scratch file, read via mmap
 build.rs        sets cfg(dispatch) for x86-64 builds without AVX2
 benchmark/
   bench.py      measurement harness (cold, sequential, instrumented)
@@ -349,9 +350,25 @@ cores / 8 threads, power-capped):
   `-o b.json`. The exceptions (byte centres, luma, streamed resample, area
   rule) were measured for accuracy instead.
 - Peak memory depends on `MemAvailable` (decode budget); use `-t 1` for a
-  deterministic reading, PSS + swap for the real one. IMGS-ALL peaks at the
-  end of verification (analysis held whole: descriptors ~1.4 GB); IMGS peaks
-  inside decodes.
+  deterministic reading. **The analysis is not in the heap** (`spill.rs`):
+  each record's descriptors, keypoints and thumbnail pixels are written as
+  made (cold, and on cache unpack) to an unlinked file beside the cache and
+  read back through a read-only `MAP_SHARED` mapping; the same bytes, so
+  output is byte-identical. Their pages are the kernel's to drop and re-read.
+  So the real figure is **RssAnon + swap**, not PSS, which counts the mapped
+  file pages. IMGS (5,641 files): heap held after analysis 426 -> 56 MB, at
+  the end of verification 480 -> 118 MB; a cached run under a 380 MB cgroup
+  cap with no swap finished (old build OOM-killed), at 300 MB it thrashed.
+  What is left peaks inside decodes (a per-thread transient) and, cached, at
+  assembly (the pair records, which scale with pairs). Writes go through
+  `pwrite`, never the mapping (ENOSPC is an error, not a SIGBUS); any failure
+  leaves that record in the heap. IMGS-ALL (`out/v34-spill`): heap peak
+  2,330 -> ~1,040 MB, PSS unchanged at ~2,340, output identical, CPU within
+  the base runs' own spread; then 776 MB once assembly stopped holding a
+  second copy of the pairs, dump-only verdicts and a path string per pair
+  end (`OutPair` names are shared `Arc<str>`). The peak is still assembly
+  (graph, suggestion, `OutPair`s and the stable sort's buffer); matching
+  ~390 MB, analysis transients ~300 MB.
 
 Portability: `cargo install` builds plain x86-64; `simd.rs` dispatches the
 hand kernels and `dispatched!` gives hot functions a v3 copy. **Anything that
@@ -507,7 +524,8 @@ Do not retry without new evidence:
 - Clear tool caches (img-fp `--no-cache`, czkawka `-H`, imgdupes
   `--no-cache`, fresh dupeGuru db, SSCD without `--embeddings`) and evict the
   corpus with `posix_fadvise(DONTNEED)` (no sudo here).
-- Peak memory: PSS summed over the process tree, plus swap (swappiness 100).
+- Peak memory: RssAnon summed over the process tree, plus swap (swappiness
+  100). PSS also counts `spill.rs`'s mapped file pages, which are reclaimable.
 - `bench.py --only <tool>` merges into `metrics.json`; give it a fresh
   `--out`.
 - `derived/Desktop` (636 files) is the quick subset; `--cache` isolates the

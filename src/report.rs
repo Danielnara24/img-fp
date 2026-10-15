@@ -148,8 +148,11 @@ pub fn raw_bytes(p: &Path) -> Option<Vec<u8>> {
 
 #[derive(Serialize)]
 pub struct OutPair {
-    pub a: String,
-    pub b: String,
+    /// Shared with every other pair naming the same file, and written as the
+    /// string it is: a copy of both names per pair was 2.3 million strings on
+    /// 27,000 pictures, the largest thing alive where such a run peaks.
+    pub a: std::sync::Arc<str>,
+    pub b: std::sync::Arc<str>,
     /// `a` and `b` as bytes, for a name that is not UTF-8; see `raw_bytes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub a_bytes: Option<Vec<u8>>,
@@ -666,8 +669,8 @@ mod tests {
 
     fn pair(ia: usize, ib: usize) -> OutPair {
         OutPair {
-            a: format!("/{ia}.jpg"),
-            b: format!("/{ib}.jpg"),
+            a: format!("/{ia}.jpg").into(),
+            b: format!("/{ib}.jpg").into(),
             a_bytes: None,
             b_bytes: None,
             aligned_points: 42,
@@ -846,7 +849,7 @@ mod tests {
         files[2] = PathBuf::from(std::ffi::OsString::from_vec(odd.clone()));
         let mut out = output();
         out.groups[0].files[2] = files[2].display().to_string();
-        out.pairs[1].b = files[2].display().to_string();
+        out.pairs[1].b = files[2].display().to_string().into();
         out.pairs[1].b_bytes = raw_bytes(&files[2]);
         let facts = HashMap::new();
 

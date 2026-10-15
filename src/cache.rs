@@ -346,7 +346,7 @@ fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     // blocks of literals. Every record is packed by the worker that made it,
     // so on a cold run with the cache on this was some 3 ms an image.
     let mut out = Vec::with_capacity(n * DESC_LEN);
-    for stream in [&planes, &f.desc, &resid] {
+    for stream in [&planes[..], &f.desc[..], &resid[..]] {
         let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
         z.write_all(stream)?;
         let z = z.finish()?;
@@ -1386,8 +1386,8 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
                 (
                     h.key,
                     Some(Record {
-                        feats: Features { w: h.w, h: h.h, kps, desc },
-                        thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px),
+                        feats: Features { w: h.w, h: h.h, kps: kps.into(), desc: desc.into() }.spilled(),
+                        thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px).spilled(),
                         dims: h.dims,
                         traits: h.traits,
                     }),
@@ -1571,7 +1571,7 @@ mod tests {
             // wrong at the edges.
             let desc: Vec<u8> = (0..n * DESC_LEN).map(|i| ((i * 37 + i / 128) % 256) as u8).collect();
             let px: Vec<u8> = (0..w * h).map(|i| ((i * 91) % 256) as u8).collect();
-            let feats = Features { w: 640, h: 480, kps, desc };
+            let feats = Features { w: 640, h: 480, kps: kps.clone().into(), desc: desc.clone().into() };
             let thumb = Thumb::new(w as u16, h as u16, 0.25, px);
 
             let blob = pack(&feats, &thumb).unwrap();
@@ -1592,7 +1592,7 @@ mod tests {
     /// short one.
     #[test]
     fn a_short_record_is_rejected_rather_than_trusted() {
-        let feats = Features { w: 8, h: 8, kps: Vec::new(), desc: Vec::new() };
+        let feats = Features { w: 8, h: 8, ..Default::default() };
         let thumb = Thumb::new(4, 4, 1.0, vec![7; 16]);
         let blob = pack(&feats, &thumb).unwrap();
         assert!(unpack(&blob[..blob.len() - 1], 0, 4, 4).is_err());

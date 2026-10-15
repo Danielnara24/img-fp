@@ -881,7 +881,8 @@ pub struct Thumb {
     pub h: u16,
     /// Scale from working-image coordinates to thumbnail coordinates.
     pub scale: f32,
-    pub px: Vec<u8>,
+    /// In the heap, or in the run's scratch file (`spill`).
+    pub px: crate::spill::Shared<u8>,
     /// Which thumbnail this is, for a worker's `Pyramid` to know it already
     /// holds its levels: unique to each `Thumb::new`, and shared only by a
     /// clone, which holds the same pixels. 0, a default thumbnail's, is none.
@@ -1096,7 +1097,12 @@ impl Thumb {
     /// A thumbnail from its level zero, which is all there is of one.
     pub fn new(w: u16, h: u16, scale: f32, px: Vec<u8>) -> Thumb {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Thumb { w, h, scale, px, id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+        Thumb { w, h, scale, px: px.into(), id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
+
+    /// The same thumbnail, its pixels in the run's scratch file.
+    pub fn spilled(self) -> Thumb {
+        Thumb { px: crate::spill::share(crate::spill::Kind::Thumbs, self.px), ..self }
     }
 
 
@@ -1938,9 +1944,9 @@ mod bench {
     }
 
     fn feats(rng: &mut Lcg, n: usize, w: u32, h: u32) -> Features {
-        let mut f = Features { w, h, kps: Vec::with_capacity(n), desc: Vec::with_capacity(n * DESC_LEN) };
+        let (mut kps, mut desc) = (Vec::with_capacity(n), Vec::with_capacity(n * DESC_LEN));
         for _ in 0..n {
-            f.kps.push(Keypoint {
+            kps.push(Keypoint {
                 x: rng.f(w as f32),
                 y: rng.f(h as f32),
                 sigma: 1.6 + rng.f(20.0),
@@ -1950,10 +1956,10 @@ mod bench {
             // rest of the fixture is the same draw it always was.
             let _ = rng.f(1.0);
             for _ in 0..DESC_LEN {
-                f.desc.push(rng.byte());
+                desc.push(rng.byte());
             }
         }
-        f
+        Features { w, h, kps: kps.into(), desc: desc.into() }
     }
 
     fn ms(mut f: impl FnMut()) -> f64 {

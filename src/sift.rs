@@ -15,6 +15,7 @@
 //!     those hypotheses cost no extra extraction.
 
 use crate::decode::Gray;
+use crate::spill::Shared;
 use crate::timed;
 
 pub const DESC_LEN: usize = 128;
@@ -83,7 +84,8 @@ impl Default for Params {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
 pub struct Keypoint {
     pub x: f32,
     pub y: f32,
@@ -93,13 +95,18 @@ pub struct Keypoint {
     pub angle: f32,
 }
 
+// SAFETY: four `f32`s, `repr(C)`, no padding.
+unsafe impl crate::spill::Plain for Keypoint {}
+
+/// An image's features. The two arrays are in the heap when made and may move
+/// to the run's scratch file (`spill`), which is the same bytes.
 #[derive(Clone, Debug, Default)]
 pub struct Features {
     pub w: u32,
     pub h: u32,
-    pub kps: Vec<Keypoint>,
+    pub kps: Shared<Keypoint>,
     /// `kps.len() * DESC_LEN` bytes.
-    pub desc: Vec<u8>,
+    pub desc: Shared<u8>,
 }
 
 impl Features {
@@ -109,6 +116,12 @@ impl Features {
     }
     pub fn len(&self) -> usize {
         self.kps.len()
+    }
+
+    /// The same features with both arrays in the run's scratch file.
+    pub fn spilled(self) -> Features {
+        use crate::spill::{share, Kind};
+        Features { w: self.w, h: self.h, kps: share(Kind::Features, self.kps), desc: share(Kind::Features, self.desc) }
     }
 }
 
@@ -935,10 +948,11 @@ crate::simd::dispatched! {
 /// that the x86-64-v3 copy is vectorised throughout.
 #[cfg_attr(dispatch, inline(always))]
 fn extract_any(g: &Gray, p: &Params) -> Features {
-    let mut feats = Features { w: g.w as u32, h: g.h as u32, ..Default::default() };
+    let (w, h) = (g.w as u32, g.h as u32);
     if g.w < 8 || g.h < 8 {
-        return feats;
+        return Features { w, h, ..Default::default() };
     }
+    let (mut kps, mut desc): (Vec<Keypoint>, Vec<u8>) = (Vec::new(), Vec::new());
     // A small image is enlarged until it is worth analysing. A 225x225 seed
     // scaled to 12% is 28 pixels across and has essentially no scale-space to
     // search: doubling it once, as a standard SIFT does, still leaves 56. The
@@ -1047,7 +1061,7 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
     let mut response: Vec<f32> = Vec::new();
     timed!(9, {
         for c in cands.iter() {
-            if feats.kps.len() >= stop_at && c.response < response[stop_at - 1] {
+            if kps.len() >= stop_at && c.response < response[stop_at - 1] {
                 break;
             }
             let oct_scale = (1u32 << c.octave) as f32 * coord_scale;
@@ -1078,15 +1092,15 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
                     kp.angle = angle;
                     let mut d = [0u8; DESC_LEN];
                     timed!(31, descriptor(grad, h, px, py, angle, scl_octv, &mut d));
-                    feats.kps.push(kp);
+                    kps.push(kp);
                     response.push(c.response);
-                    feats.desc.extend_from_slice(&d);
+                    desc.extend_from_slice(&d);
                 }
             }
         }
     });
-    timed!(10, retain_best(&mut feats, &response, p.max_features));
-    feats
+    let (kps, desc) = timed!(10, retain_best(&kps, &desc, &response, p.max_features));
+    Features { w, h, kps: kps.into(), desc: desc.into() }
 }
 
 /// Larger of two, written as the comparison it is so that the compiler emits
@@ -1693,10 +1707,10 @@ fn descriptor(g: &Grad, h: usize, px: f32, py: f32, kp_angle: f32, scl: f32, dst
 
 /// Keep the strongest `n` keypoints (by DoG contrast), dropping exact
 /// duplicates. Order is deterministic: response desc, then position.
-fn retain_best(f: &mut Features, response: &[f32], n: usize) {
-    let mut idx: Vec<usize> = (0..f.kps.len()).collect();
+fn retain_best(all: &[Keypoint], all_desc: &[u8], response: &[f32], n: usize) -> (Vec<Keypoint>, Vec<u8>) {
+    let mut idx: Vec<usize> = (0..all.len()).collect();
     idx.sort_by(|&a, &b| {
-        let (ka, kb) = (&f.kps[a], &f.kps[b]);
+        let (ka, kb) = (&all[a], &all[b]);
         response[b]
             .partial_cmp(&response[a])
             .unwrap()
@@ -1709,20 +1723,19 @@ fn retain_best(f: &mut Features, response: &[f32], n: usize) {
     let mut desc = Vec::with_capacity(n.min(idx.len()) * DESC_LEN);
     let mut last: Option<(i32, i32, i32, i32)> = None;
     for &i in &idx {
-        let k = f.kps[i];
+        let k = all[i];
         let key = ((k.x * 4.0) as i32, (k.y * 4.0) as i32, (k.sigma * 16.0) as i32, (k.angle * 2.0) as i32);
         if last == Some(key) {
             continue;
         }
         last = Some(key);
         kps.push(k);
-        desc.extend_from_slice(f.d(i));
+        desc.extend_from_slice(&all_desc[i * DESC_LEN..(i + 1) * DESC_LEN]);
         if kps.len() >= n {
             break;
         }
     }
-    f.kps = kps;
-    f.desc = desc;
+    (kps, desc)
 }
 
 // ---------------------------------------------------------------- variants

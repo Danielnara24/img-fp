@@ -46,6 +46,7 @@ use progress::Stage;
 mod report;
 mod sift;
 mod simd;
+mod spill;
 mod suggest;
 pub use suggest::{by_group, kept_at_end, Action, Mode as SuggestMode, Seat};
 pub use cache::file_name as cache_file_name;
@@ -654,9 +655,9 @@ fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::P
             let t1 = Instant::now();
             let (feats, thumb) = planes.analysis(&d.work, || {
                 let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
-                let feats = sift::extract(&d.work, &p);
+                let feats = sift::extract(&d.work, &p).spilled();
                 let thumb = timed!(4, Thumb::build(&d.work, ((THUMB_LONG as f64 * decode::area_factor(d.work.w, d.work.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
-                (feats.into(), thumb.into())
+                (feats.into(), thumb.spilled().into())
             });
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
             let traits = decode::Traits { grid: grey_grid(&d.work), ..d.traits };
@@ -848,7 +849,8 @@ fn quantise_any(vocab: &Vocabulary, f: &Features) -> WordList {
 /// image: descriptor bins permuted, keypoints moved. Building this costs a
 /// permutation rather than a second extraction pass.
 fn variant_features(f: &Features, var: Variant) -> Features {
-    let mut out = Features { w: f.w, h: f.h, kps: f.kps.clone(), desc: vec![0u8; f.desc.len()] };
+    let mut kps = f.kps.to_vec();
+    let mut desc = vec![0u8; f.desc.len()];
     let mut perm: [u8; DESC_LEN] = std::array::from_fn(|i| i as u8);
     if var.mirror {
         perm = compose_perm(&perm, &sift::mirror_perm());
@@ -857,10 +859,10 @@ fn variant_features(f: &Features, var: Variant) -> Features {
         perm = compose_perm(&perm, &sift::invert_perm());
     }
     for i in 0..f.len() {
-        sift::permute(f.d(i), &perm, &mut out.desc[i * DESC_LEN..(i + 1) * DESC_LEN]);
+        sift::permute(f.d(i), &perm, &mut desc[i * DESC_LEN..(i + 1) * DESC_LEN]);
     }
     let w = f.w as f32;
-    for k in out.kps.iter_mut() {
+    for k in kps.iter_mut() {
         if var.mirror {
             k.x = w - 1.0 - k.x;
             k.angle = (180.0 - k.angle).rem_euclid(360.0);
@@ -869,7 +871,7 @@ fn variant_features(f: &Features, var: Variant) -> Features {
             k.angle = (k.angle + 180.0).rem_euclid(360.0);
         }
     }
-    out
+    Features { w: f.w, h: f.h, kps: kps.into(), desc: desc.into() }
 }
 
 fn compose_perm(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> [u8; DESC_LEN] {
@@ -1387,6 +1389,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         None if args.no_cache => say!("Cache: off (--no-cache)"),
         None => say!("Cache: off"),
     }
+    // The analysis goes to a scratch file beside the cache as it is made, and
+    // is read back through a mapping; see `spill`. Where that cannot be, it
+    // stays in the heap, as it always did, and the run is the same run.
+    let scratch = cache::locate(args.cache.as_deref()).parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    match std::fs::create_dir_all(&scratch).and_then(|()| spill::begin(&scratch)) {
+        Ok(()) => stage!(t_start, "scratch file in {}", scratch.display()),
+        Err(e) => stage!(t_start, "no scratch file in {} ({e}): the analysis is held in memory", scratch.display()),
+    }
     let named: Vec<&PathBuf> = args.roots.iter().filter(|p| p.as_os_str() != "-").collect();
     if !named.is_empty() || lists.is_empty() {
         say!("Scanning: {:?}", named);
@@ -1811,6 +1821,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
     }
     drop(store);
+    // Nothing more is analysed or read from the cache. What was written stays
+    // readable for as long as it is held.
+    spill::end();
     // What is left in the map is the analyses of files this run did not walk,
     // which the save above has just finished borrowing. Nothing reads them
     // again and they are megabytes apiece.
@@ -2569,6 +2582,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             say!("dumped verdicts -> {}", path.display());
         }
     }
+    // Every verdict the matching made, and what the dump alone reads: nothing
+    // below does. Held to the end, they were 65 MB on 27,000 pictures through
+    // the assembly, which is where such a run peaks.
+    drop(all_direct);
+    drop(variant_all);
+    drop(all_propagated);
 
     // ---- assemble
     //
@@ -2584,7 +2603,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // Every pair so far is between originals. A copy is the same bytes as its
     // original, so each pair is now stated for each copy of either file, with
     // the verdict its original's pair was found on.
-    let (all, propagated, corroborated) = (with_copies(&all, &match_of), with_copies(&propagated, &match_of), with_copies(&corroborated, &match_of));
+    let (all, propagated, corroborated) = (with_copies(all, &match_of), with_copies(propagated, &match_of), with_copies(corroborated, &match_of));
     // Which pairs are stated, and from what, in the order they are first
     // met — the order `graph` and every tie in the sort below keep. The
     // records themselves are a million strings on a large corpus, so they are
@@ -2706,7 +2725,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             .collect();
         suggest::suggest_pinned(&pics, &links, args.min_pixel_correlation, |i| decode::colour_of(&files[i]).unwrap_or(0.0), pinned)
     })};
-    let names: Vec<String> = files.par_iter().map(|f| f.display().to_string()).collect();
+    // One name per file, shared by every pair that names it; see `OutPair::a`.
+    let names: Vec<std::sync::Arc<str>> = files.par_iter().map(|f| f.display().to_string().into()).collect();
     let mut out_pairs: Vec<OutPair> = graph
         .par_iter()
         .zip(stated.par_iter())
@@ -3215,7 +3235,12 @@ fn same_analysis(items: &[Item], candidate: impl Fn(usize) -> bool + Sync) -> Ve
 /// runs from the lower index to the higher, so a copy on the other side of
 /// the other end takes the verdict reversed — its scale is then the scale
 /// between the files it names.
-fn with_copies(edges: &[(usize, usize, Affine, bool, Verdict)], twin_of: &[usize]) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+///
+/// Taken and handed back rather than copied: these are the run's whole list of
+/// pairs, and a copy beside the original (or, with no copies at all, a
+/// duplicate of it) was held to the end of the run, some 110 MB on 27,000
+/// pictures at the point where the run peaks.
+fn with_copies(edges: Vec<(usize, usize, Affine, bool, Verdict)>, twin_of: &[usize]) -> Vec<(usize, usize, Affine, bool, Verdict)> {
     let mut copies: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, &o) in twin_of.iter().enumerate() {
         if o != i {
@@ -3223,7 +3248,7 @@ fn with_copies(edges: &[(usize, usize, Affine, bool, Verdict)], twin_of: &[usize
         }
     }
     if copies.is_empty() {
-        return edges.to_vec();
+        return edges;
     }
     let mut out = Vec::with_capacity(edges.len());
     for (a, b, m, inv, v) in edges.iter() {
@@ -3691,8 +3716,8 @@ mod tests {
         let feats = |seed: u8| Features {
             w: 64,
             h: 48,
-            kps: vec![sift::Keypoint { x: 1.0, y: 2.0, sigma: 1.6, angle: seed as f32 }],
-            desc: vec![seed; DESC_LEN],
+            kps: vec![sift::Keypoint { x: 1.0, y: 2.0, sigma: 1.6, angle: seed as f32 }].into(),
+            desc: vec![seed; DESC_LEN].into(),
         };
         let item = |f: Features, t: u8| Item {
             feats: Arc::new(f),
@@ -4074,7 +4099,7 @@ mod tests {
         let edges = vec![(1usize, 3usize, m, false, v)];
         // 0 and 4 are copies of 1; 2 is a copy of 3.
         let twin_of = vec![1, 1, 3, 3, 1];
-        let out = with_copies(&edges, &twin_of);
+        let out = with_copies(edges.clone(), &twin_of);
         let mut names: Vec<(usize, usize)> = out.iter().map(|e| (e.0, e.1)).collect();
         names.sort_unstable();
         assert_eq!(names, [(0, 2), (0, 3), (1, 2), (1, 3), (2, 4), (3, 4)]);
@@ -4086,7 +4111,7 @@ mod tests {
             assert_eq!(*em, ev.m);
             assert_eq!((ev.ov_a, ev.ov_b), if from_one { (0.25, 1.0) } else { (1.0, 0.25) });
         }
-        let alone = with_copies(&edges, &[0, 1, 2, 3]);
+        let alone = with_copies(edges, &[0, 1, 2, 3]);
         assert_eq!(alone.len(), 1);
         assert_eq!((alone[0].0, alone[0].1), (1, 3));
     }

@@ -327,8 +327,8 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32) -> (Output, Ve
             }
             let how = r.relation.as_deref().unwrap_or("direct");
             pairs.entry((i.min(rep), i.max(rep))).or_insert_with(|| OutPair {
-                a: files[rep].display().to_string(),
-                b: files[i].display().to_string(),
+                a: files[rep].display().to_string().into(),
+                b: files[i].display().to_string().into(),
                 a_bytes: None,
                 b_bytes: None,
                 aligned_points: r.aligned_points.unwrap_or(0),
@@ -428,8 +428,8 @@ mod tests {
 
     fn pair(ia: usize, ib: usize, files: &[PathBuf]) -> OutPair {
         OutPair {
-            a: files[ia].display().to_string(),
-            b: files[ib].display().to_string(),
+            a: files[ia].display().to_string().into(),
+            b: files[ib].display().to_string().into(),
             a_bytes: None,
             b_bytes: None,
             aligned_points: 42,
