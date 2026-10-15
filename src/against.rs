@@ -262,12 +262,7 @@ pub fn write(
         }
     };
     match &target.sink {
-        Sink::File(path) => {
-            let ctx = || format!("could not write {}", path.display());
-            let f = std::fs::File::create(path).with_context(ctx)?;
-            let mut w = std::io::BufWriter::new(f);
-            body(&mut w).and_then(|()| w.flush()).with_context(ctx)
-        }
+        Sink::File(path) => report::write_whole(path, body),
         Sink::Stdout => {
             let mut w = std::io::BufWriter::new(std::io::stdout().lock());
             match body(&mut w).and_then(|()| w.flush()) {

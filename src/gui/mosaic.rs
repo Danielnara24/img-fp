@@ -10,6 +10,16 @@
 //! the tiles are a pool, each told in turn which picture it shows, so a
 //! page of thousands costs what a screenful does.
 //!
+//! **Zoom** (`zoom`) picks the row height instead: rows that tall, flowing
+//! down a page that scrolls — unless the whole group fits the page with rows
+//! at least that tall, when it is fitted as before, so a height chosen for a
+//! group of hundreds does not leave a group of three small. Each step is a
+//! factor of √2, which doubles or halves every picture's area. The limits are
+//! the page's: a row no taller than the part of the page shown, since a
+//! taller one cannot be seen whole, and no shorter than the controls a tile
+//! draws over its picture need (`connect_least_row`); and no step down while every picture is already on screen,
+//! since a smaller one would show nothing more.
+//!
 //! A picture is never cropped to fit its place: the place has the picture's
 //! own shape. Cropping would make a crop and its original look alike, which
 //! is the difference a person deciding what to delete most needs to see.
@@ -37,24 +47,27 @@ pub struct Rect {
 }
 
 /// Where each of pictures of aspect `a` (width over height) goes in a page
-/// `w` wide whose visible part is `h` high, and how tall it all is.
-pub fn layout(a: &[f32], w: f32, h: f32) -> (Vec<Rect>, f32) {
+/// `w` wide whose visible part is `h` high, and how tall it all is. `row` is
+/// the row height chosen by zooming, `None` for the page's own fit.
+pub fn layout(a: &[f32], w: f32, h: f32, row: Option<f32>) -> (Vec<Rect>, f32) {
     if a.is_empty() || w <= 0.0 {
         return (Vec::new(), 0.0);
     }
-    match fit(a, w, h) {
+    // Never taller than the page shows: see the head of the file.
+    let row = row.map(|r| r.min(h).max(1.0));
+    match fit(a, w, h, row.unwrap_or(MIN_ROW)) {
         Some(r) => (r, h),
-        None => flow(a, w),
+        None => flow(a, w, row.unwrap_or(ROW), h),
     }
 }
 
 /// Every picture on one screen, in as many rows as gives them the most area,
-/// or `None` when that would make a row shorter than `MIN_ROW`.
-fn fit(a: &[f32], w: f32, h: f32) -> Option<Vec<Rect>> {
+/// or `None` when that would make a row shorter than `least`.
+fn fit(a: &[f32], w: f32, h: f32, least: f32) -> Option<Vec<Rect>> {
     let n = a.len();
     let total: f32 = a.iter().sum();
-    // k rows each at least MIN_ROW tall need k * MIN_ROW of height.
-    let most = (((h + GAP) / (MIN_ROW + GAP)).floor() as usize).min(n);
+    // k rows each at least `least` tall need k * `least` of height.
+    let most = (((h + GAP) / (least + GAP)).floor() as usize).min(n);
     // (area, rows, row heights before scaling, scale)
     type Candidate = (f32, Vec<Vec<usize>>, Vec<f32>, f32);
     let mut best: Option<Candidate> = None;
@@ -72,7 +85,7 @@ fn fit(a: &[f32], w: f32, h: f32) -> Option<Vec<Rect>> {
         }
         let tall = hs.iter().sum::<f32>() + GAP * (k - 1) as f32;
         let scale = (h / tall).min(1.0);
-        if hs.iter().any(|&x| x * scale < MIN_ROW) {
+        if hs.iter().any(|&x| x * scale < least) {
             continue;
         }
         let area = scale * scale * w * tall;
@@ -122,25 +135,40 @@ fn split(a: &[f32], total: f32, k: usize) -> Vec<Vec<usize>> {
     rows
 }
 
-/// Rows `ROW` tall, each stretched to the width but the last, for a group
-/// that cannot fit one screen.
-fn flow(a: &[f32], w: f32) -> (Vec<Rect>, f32) {
+/// Rows about `row` tall, each stretched or shrunk to the width but the
+/// last, for a group that cannot fit one screen.
+///
+/// **Each row ends where its height comes nearest `row`**: before the picture
+/// that overflows the width, stretching the row, or after it, shrinking it,
+/// whichever is the smaller factor away. Ending always after it was right for
+/// rows a sixth of the page wide and wrong for zoomed ones a third or half of
+/// it, where shrinking to the width made one row half the height of the
+/// next. A stretched row is never taller than `most`, the page's height.
+fn flow(a: &[f32], w: f32, row: f32, most: f32) -> (Vec<Rect>, f32) {
     let mut out = Vec::with_capacity(a.len());
     let mut y = 0.0;
     let mut start = 0;
+    let height = |sum: f32, n: usize| (w - GAP * (n - 1) as f32) / sum;
     while start < a.len() {
         let mut end = start;
         let mut sum = 0.0;
         while end < a.len() {
             sum += a[end];
             end += 1;
-            if sum * ROW + GAP * (end - start - 1) as f32 >= w {
+            if sum * row + GAP * (end - start - 1) as f32 >= w {
                 break;
             }
         }
-        let gaps = GAP * (end - start - 1) as f32;
-        let full = sum * ROW + gaps >= w;
-        let rh = if full { (w - gaps) / sum } else { ROW };
+        let full = sum * row + GAP * (end - start - 1) as f32 >= w;
+        let mut rh = if full { height(sum, end - start) } else { row };
+        // One picture fewer, stretched to the width, when that is nearer.
+        if full && end - start > 1 {
+            let short = height(sum - a[end - 1], end - start - 1);
+            if short <= most && (short / row).ln().abs() < (row / rh).ln().abs() {
+                end -= 1;
+                rh = short;
+            }
+        }
         let mut x = 0.0;
         for &ai in &a[start..end] {
             out.push(Rect { x, y, w: ai * rh, h: rh });
@@ -153,9 +181,9 @@ fn flow(a: &[f32], w: f32) -> (Vec<Rect>, f32) {
 }
 
 /// The tiles of pictures of aspect `a` in a mosaic `width` wide that shows
-/// `h` of its height, `PAD` included.
-fn placed(a: &[f32], width: i32, h: f32) -> Vec<Rect> {
-    let (mut rects, _) = layout(a, width as f32 - 2.0 * PAD, (h - 2.0 * PAD).max(1.0));
+/// `h` of its height, `PAD` included, at zoom `row`.
+fn placed(a: &[f32], width: i32, h: f32, row: Option<f32>) -> Vec<Rect> {
+    let (mut rects, _) = layout(a, width as f32 - 2.0 * PAD, (h - 2.0 * PAD).max(1.0), row);
     for r in rects.iter_mut() {
         r.x += PAD;
         r.y += PAD;
@@ -228,6 +256,14 @@ mod imp {
         /// Where they all go, at `laid_for`'s width and viewport.
         pub rects: RefCell<Vec<Rect>>,
         pub laid_for: Cell<(i32, f32)>,
+        /// The row height zooming chose, `None` for the page's own fit.
+        pub row: Cell<Option<f32>>,
+        /// Told whether a step in and a step out would each change anything,
+        /// when that changes.
+        pub on_zoomable: RefCell<Option<Rc<dyn Fn(bool, bool)>>>,
+        /// Asked for the shortest row a tile can take (`connect_least_row`).
+        pub least: RefCell<Option<Rc<dyn Fn() -> f32>>>,
+        pub zoomable: Cell<Option<(bool, bool)>>,
         /// The height the page shows of it, from the scrolled window, and
         /// how far down it is scrolled.
         pub viewport: Cell<f32>,
@@ -271,7 +307,7 @@ mod imp {
         pub fn rects_for(&self, width: i32) -> std::cell::Ref<'_, Vec<Rect>> {
             let key = (width, self.viewport.get());
             if self.laid_for.get() != key || self.rects.borrow().len() != self.aspects.borrow().len() {
-                let r = placed(&self.aspects.borrow(), width, self.viewport.get());
+                let r = placed(&self.aspects.borrow(), width, self.viewport.get(), self.row.get());
                 *self.rects.borrow_mut() = r;
                 self.laid_for.set(key);
             }
@@ -354,6 +390,38 @@ mod imp {
             }
         }
 
+        /// Whether a step in, and a step out, would change anything; see the
+        /// head of the file.
+        pub fn can_zoom(&self) -> (bool, bool) {
+            let (width, _) = self.laid_for.get();
+            if width <= 0 {
+                return (false, false);
+            }
+            let page = (self.viewport.get() - 2.0 * PAD).max(1.0);
+            let rects = self.rects_for(width);
+            let Some(row) = rects.iter().map(|r| r.h).reduce(f32::max) else { return (false, false) };
+            let tall = rects.iter().map(|r| r.y + r.h).fold(0.0f32, f32::max) - PAD;
+            drop(rects);
+            (row < page - 0.5, tall > page + 0.5 && row > self.least_row() + 0.5)
+        }
+
+        /// The shortest row a tile can take, as its owner says
+        /// (`connect_least_row`): what the tile draws over its picture.
+        pub fn least_row(&self) -> f32 {
+            let least = self.least.borrow().clone();
+            least.map_or(1.0, |f| f()).max(1.0)
+        }
+
+        /// Say whether the zoom can move, if that changed.
+        fn tell_zoomable(&self) {
+            let now = self.can_zoom();
+            if self.zoomable.replace(Some(now)) != Some(now)
+                && let Some(f) = self.on_zoomable.borrow().clone()
+            {
+                glib::idle_add_local_once(move || f(now.0, now.1));
+            }
+        }
+
         /// Rebind once the main loop is free: never inside an allocation,
         /// where a tile told of a new picture would change its style.
         pub fn rebind_soon(&self) {
@@ -416,6 +484,7 @@ mod imp {
             if stale {
                 self.rebind_soon();
             }
+            self.tell_zoomable();
             // Pictures are made at the size their tile is drawn, so a tile
             // given another size wants another picture: said once the
             // allocation is over, never during it.
@@ -504,7 +573,7 @@ impl Mosaic {
         if width <= 0 || h <= 0.0 {
             return None;
         }
-        Some(placed(&aspects(sizes), width, h).iter().map(|r| (pixels(r).2, pixels(r).3)).collect())
+        Some(placed(&aspects(sizes), width, h, self.imp().row.get()).iter().map(|r| (pixels(r).2, pixels(r).3)).collect())
     }
 
     /// The size tile `slot` was last allocated, its style's border included.
@@ -515,6 +584,66 @@ impl Mosaic {
     /// Call `f` when the tiles shown have new sizes.
     pub fn connect_resized(&self, f: impl Fn() + 'static) {
         *self.imp().on_resized.borrow_mut() = Some(std::rc::Rc::new(f));
+    }
+
+    /// One step larger (`in_`) or smaller; see the head of the file. Whether
+    /// anything changed.
+    pub fn zoom(&self, in_: bool) -> bool {
+        let imp = self.imp();
+        let (can_in, can_out) = imp.can_zoom();
+        if !(if in_ { can_in } else { can_out }) {
+            return false;
+        }
+        let (width, _) = imp.laid_for.get();
+        let page = (imp.viewport.get() - 2.0 * PAD).max(1.0);
+        // The height asked for, where the group flows at it; the fitted
+        // rows' otherwise.
+        let (rows, tall) = {
+            let rects = imp.rects_for(width);
+            (rects.iter().map(|r| r.h).fold(0.0f32, f32::max), rects.iter().map(|r| r.y + r.h).fold(0.0f32, f32::max) - PAD)
+        };
+        let now = match imp.row.get() {
+            Some(r) if tall > page + 0.5 => r.min(page),
+            _ => rows,
+        };
+        let row = if in_ { (now * std::f32::consts::SQRT_2).min(page) } else { (now / std::f32::consts::SQRT_2).max(imp.least_row()) };
+        self.set_row(Some(row));
+        true
+    }
+
+    /// Back to the page's own fit. Whether anything changed.
+    pub fn zoom_fit(&self) -> bool {
+        if self.imp().row.get().is_none() {
+            return false;
+        }
+        self.set_row(None);
+        true
+    }
+
+    fn set_row(&self, row: Option<f32>) {
+        let imp = self.imp();
+        imp.row.set(row);
+        imp.laid_for.set((0, 0.0));
+        let (w, vp) = (self.width(), imp.viewport.get());
+        if w > 0 {
+            imp.laid_for.set((w, vp));
+            imp.rects.borrow_mut().clear();
+            imp.rebind();
+        }
+        self.queue_resize();
+    }
+
+    /// Ask `f` for the shortest row a tile can take. An overlay's size is its
+    /// picture's alone, so what is drawn over it — which a row must still
+    /// have room for — only the tiles' owner can say.
+    pub fn connect_least_row(&self, f: impl Fn() -> f32 + 'static) {
+        *self.imp().least.borrow_mut() = Some(std::rc::Rc::new(f));
+    }
+
+    /// Call `f` with whether a step in and a step out would change anything,
+    /// whenever that changes.
+    pub fn connect_zoomable(&self, f: impl Fn(bool, bool) + 'static) {
+        *self.imp().on_zoomable.borrow_mut() = Some(std::rc::Rc::new(f));
     }
 
     /// The height the page shows, which is what a group is fitted into.
@@ -570,7 +699,7 @@ mod tests {
     #[test]
     fn a_group_that_fits_fills_one_screen_at_its_own_shapes() {
         let a = [1.33, 1.5, 0.75, 1.33, 1.0, 1.77, 1.33, 1.2, 1.33, 1.33, 2.0];
-        let (r, tall) = layout(&a, 1300.0, 800.0);
+        let (r, tall) = layout(&a, 1300.0, 800.0, None);
         assert_eq!(tall, 800.0);
         assert!(inside(&r, 1300.0, 800.0));
         for (rect, aspect) in r.iter().zip(a) {
@@ -582,7 +711,7 @@ mod tests {
     #[test]
     fn a_group_too_large_to_fit_scrolls_in_rows_of_row_height() {
         let a = vec![1.33; 200];
-        let (r, tall) = layout(&a, 1300.0, 700.0);
+        let (r, tall) = layout(&a, 1300.0, 700.0, None);
         assert!(tall > 700.0);
         assert!(r.iter().all(|r| r.x + r.w <= 1300.01));
         assert!(r.iter().all(|r| r.h <= ROW + 60.0));
@@ -591,14 +720,41 @@ mod tests {
     #[test]
     fn more_pictures_than_a_row_has_room_for_gaps_still_scroll() {
         let a = vec![1.0; 400];
-        let (r, tall) = layout(&a, 1171.0, 725.0);
+        let (r, tall) = layout(&a, 1171.0, 725.0, None);
         assert!(tall > 725.0);
         assert!(r.iter().all(|r| r.x >= 0.0 && r.x + r.w <= 1171.01 && r.h <= ROW + 60.0));
     }
 
+    /// A row height chosen by zooming: rows that tall where the group does
+    /// not fit, the fit where it does with rows at least that tall, and never
+    /// a row taller than the page shows.
+    #[test]
+    fn a_zoomed_group_flows_at_its_row_unless_it_fits_at_least_that_tall() {
+        let many = vec![1.33; 200];
+        let (r, tall) = layout(&many, 1300.0, 700.0, Some(100.0));
+        assert!(tall > 700.0 && r.iter().all(|r| r.h <= 700.01));
+        assert!(r.iter().filter(|r| (r.h - 100.0).abs() < 15.0).count() > 150, "rows of the height asked");
+        let few = [1.33, 1.5, 0.75];
+        let (r, tall) = layout(&few, 1300.0, 800.0, Some(100.0));
+        assert_eq!(tall, 800.0, "three fit the page larger than asked, and are fitted");
+        assert!(r.iter().all(|r| r.h > 100.0));
+        let (r, tall) = layout(&few, 1300.0, 800.0, Some(5000.0));
+        assert!(r.iter().all(|r| r.h <= 800.01), "no row taller than the page: {tall}");
+    }
+
+    /// Rows a third of the page wide end where their height is nearest the
+    /// row asked for, stretched or shrunk, rather than always shrunk: no row
+    /// half the height of the next.
+    #[test]
+    fn a_wide_row_ends_where_its_height_is_nearest() {
+        let a = [1.5, 1.33, 1.5, 1.5, 1.33, 1.5, 0.75, 1.5, 1.33, 1.77, 1.5];
+        let (r, _) = layout(&a, 1340.0, 730.0, Some(660.0));
+        assert!(r.iter().all(|r| (r.h / 660.0).ln().abs() < std::f32::consts::LN_2 / 2.0 + 0.2), "{:?}", r.iter().map(|r| r.h).collect::<Vec<_>>());
+    }
+
     #[test]
     fn the_pictures_near_the_screen_are_a_range() {
-        let (r, _) = layout(&vec![1.0; 1000], 1000.0, 600.0);
+        let (r, _) = layout(&vec![1.0; 1000], 1000.0, 600.0, None);
         let v = visible(&r, 2000.0, 600.0, 600.0);
         assert!(r[v.start].y + r[v.start].h >= 1400.0 && (v.start == 0 || r[v.start - 1].y + r[v.start - 1].h < 1400.0));
         assert!(r[v.end - 1].y <= 3200.0 && r.get(v.end).is_none_or(|n| n.y > 3200.0));

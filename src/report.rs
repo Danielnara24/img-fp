@@ -95,6 +95,57 @@ pub fn check_writable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write the file at `path` whole, or leave the one there as it was.
+///
+/// **A report replaces the last one only once it is written.** It used to be
+/// created over it and filled in place, so a run that died while writing —
+/// an interrupt during a quarter-gigabyte JSON, a disk filling up — left the
+/// last run's report cut off where this one stopped: a valid 179 KB report
+/// became 16 KB of JSON nothing could parse. Now it is written beside its
+/// destination (through any symlink, as before) and renamed over it, with the
+/// mode the file it replaces had; an interrupt removes the half-written one
+/// (`cache::seal`). A folder that will not take a new file, where the file
+/// itself may still be written, is written in place as before.
+pub(crate) fn write_whole(path: &Path, body: impl FnOnce(&mut dyn Write) -> std::io::Result<()>) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let ctx = || format!("could not write {}", path.display());
+    let dest = link_target(path);
+    let name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(&name);
+    tmp_name.push(format!(".img-fp-{}.new", std::process::id()));
+    let tmp = dest.with_file_name(tmp_name);
+    let mode = std::fs::metadata(&dest).ok().map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()));
+    let _ = std::fs::remove_file(&tmp);
+    crate::cache::begin_partial(&tmp);
+    let made = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode.unwrap_or(0o666)).open(&tmp);
+    let f = match made {
+        Ok(f) => f,
+        Err(_) => {
+            crate::cache::abandon_partial(&tmp);
+            let f = std::fs::File::create(path).with_context(ctx)?;
+            let mut w = std::io::BufWriter::new(f);
+            return body(&mut w).and_then(|()| w.flush()).with_context(ctx);
+        }
+    };
+    let written = (|| -> std::io::Result<()> {
+        // The mode asked for at creation is cut by the umask; the file it
+        // replaces had the one it had.
+        if let Some(m) = mode {
+            f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(m))?;
+        }
+        let mut w = std::io::BufWriter::new(&f);
+        body(&mut w)?;
+        w.flush()?;
+        drop(w);
+        crate::cache::finish_partial(&tmp, &dest)
+    })();
+    if written.is_err() {
+        crate::cache::abandon_partial(&tmp);
+    }
+    written.with_context(ctx)
+}
+
 /// Whether writing to `a` and writing to `b` would write one file.
 ///
 /// Two files that exist are one when they are one inode, which catches a hard
@@ -242,15 +293,10 @@ pub fn write_with(target: &Target, out: &Output, files: &[PathBuf], facts: &File
         }
     };
     match &target.sink {
-        Sink::File(path) => {
-            // Fatal, and the context is the whole of what makes exit 1 useful:
-            // this is the run's output, there is nowhere else it went, and
-            // "No such file or directory" on its own does not say which file.
-            let ctx = || format!("could not write {}", path.display());
-            let f = std::fs::File::create(path).with_context(ctx)?;
-            let mut w = std::io::BufWriter::new(f);
-            body(&mut w).and_then(|()| w.flush()).with_context(ctx)
-        }
+        // Fatal, and the context is the whole of what makes exit 1 useful:
+        // this is the run's output, there is nowhere else it went, and "No
+        // such file or directory" on its own does not say which file.
+        Sink::File(path) => write_whole(path, body),
         Sink::Stdout => {
             let mut w = std::io::BufWriter::new(std::io::stdout().lock());
             match body(&mut w).and_then(|()| w.flush()) {
@@ -895,6 +941,33 @@ mod tests {
         let mut buf = Vec::new();
         csv_row(&mut buf, &[b"a\"b;c", b"plain"]).unwrap();
         assert_eq!(buf, b"\"a\"\"b;c\";plain\n");
+    }
+
+    /// A report replaces the last one only once it is written whole: one that
+    /// fails part-way leaves the last as it was and nothing beside it, and
+    /// one written through a symlink keeps the link and the target's mode.
+    #[test]
+    fn a_report_replaces_the_last_only_when_written_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("img-fp-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("r.json");
+        std::fs::write(&out, "the last report").unwrap();
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let failed = write_whole(&out, |w| {
+            w.write_all(b"half of a new")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "the last report");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "nothing left beside it");
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink("r.json", &link).unwrap();
+        write_whole(&link, |w| w.write_all(b"the new report")).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "the new report");
+        assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o640);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Checking that `-o` can be written leaves a symlink a symlink, and

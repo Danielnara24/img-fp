@@ -314,7 +314,8 @@ fn is_hidden(dir: &Path) -> bool {
 /// folders a NAS keeps on each share — Synology's `#recycle`, `@eaDir` (a
 /// thumbnail of every photo beside it) and `#snapshot`, QNAP's `@Recycle`,
 /// `@__thumb` and `@Recently-Snapshot`: a recycle bin's copy became a group's
-/// KEEP and the live file its DELETE, exactly as a Trash's did; and by
+/// KEEP and the live file its DELETE, exactly as a Trash's did; fsck's
+/// `lost+found` (see `holds`); and by
 /// place, the home Trash and thumbnail cache under the XDG folders, whose own
 /// names (`Trash`, `thumbnails`) are too ordinary to go by. Only a folder met
 /// during a walk is passed over. Named as a root, it is scanned like any
@@ -353,6 +354,14 @@ impl SetAside {
         // metadata folders and snapshot view, and QNAP's recycle bin,
         // thumbnails and snapshot view.
         if matches!(name.as_str(), "#recycle" | "@eadir" | "#snapshot" | "@recycle" | "@__thumb" | "@recently-snapshot") {
+            return true;
+        }
+        // fsck's: at the root of every ext2/3/4 filesystem, root's alone and
+        // unreadable to anyone else, so a walk of a drive met it as a folder
+        // it could not open — a problem, exit 2, and `--prune-cache`
+        // refused, on every scan of every such drive. What it holds is
+        // fragments fsck recovered, not the library.
+        if name == "lost+found" {
             return true;
         }
         if self.places.is_empty() {
@@ -698,7 +707,16 @@ mod tests {
             s.file(&format!("drive/{rel}"));
         }
         let kept = s.file("drive/trash-talk/f.jpg");
-        assert_eq!(run(&[s.0.join("drive")], &[], true, false).files, vec![a.clone(), kept.clone()]);
+        // fsck's, root's alone on a real drive: not a folder it failed to read.
+        s.file("drive/lost+found/#1234");
+        let lost = s.dir("drive/lost+found");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&lost, fs::Permissions::from_mode(0o000)).unwrap();
+        let r = run(&[s.0.join("drive")], &[], true, false);
+        fs::set_permissions(&lost, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(r.files, vec![a.clone(), kept.clone()]);
+        assert_eq!(r.problems, 0, "lost+found is set aside, not a folder that would not open");
+        assert!(r.walk_complete);
         // Named, it is scanned.
         let t = s.0.join("drive/.Trash-1000");
         assert_eq!(run(&[t.clone()], &[], true, false).files, vec![t.join("files/a.jpg")]);

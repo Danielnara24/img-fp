@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.48.1)
+## Status (0.49.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -35,6 +35,16 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   held back only by that is KEEP. Before, an original among several soft
   same-size copies was outvoted and deleted (177 / 178 synthetic families,
   now 6). IMGS-ALL: 17,259 DELETE, none lost, 297 / 304, REVIEW unchanged.
+- 0.49.0 (audit fixes, no change to pairs or suggestions): a header
+  claiming more pixels than memory is a per-file problem, not an abort of
+  the run (`fits_in_memory`), and decoder panics are caught; reports and the
+  dump are written whole (`report::write_whole`); `lost+found` set aside; the
+  window names a kept copy's folder and zooms its images (`[-][+]`).
+  Measured weak points of the content rule on pairs, open, under the
+  constraints in memory: a q95 original deleted for its q50 re-encode
+  (13/16, smaller file wins); a tone-edit pair kept by path order (no grey
+  majority of two); colour-only edits invisible to `whole_worst`; a lone
+  padded or captioned copy deleting its original.
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
   (`out/v31-cost-cliff`).
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -443,6 +453,11 @@ Decoder hazards:
   file). libheif is dlopened; missing libheif makes HEIF files a problem.
 - `max_alloc` = `MemAvailable` (min 512 MiB), applied to JXL headers and
   HEIF headers too. PNGs (8-bit) and JXL renders stream a row at a time.
+  `into_decoder` + `from_decoder` skip the crate's own `limits.reserve`, so
+  `decode::fits_in_memory` asks first: without it an 18 KB BMP claiming
+  96 x 788M px allocated 227 GB and aborted the whole run (3 of 3,000
+  fuzzed files). Decoder panics are a per-file problem (`decode_guarded`,
+  `probe`), never the end of the run or of a window thumbnail worker.
 
 Measurement tools:
 - `--features prof`: per-stage table, timed with `rdtsc` (this machine's
@@ -509,6 +524,13 @@ Do not retry without new evidence:
   Alt); F1 lists keys; dark theme followed from the desktop's text colour;
   tree view by folder (`gui/folders.rs`).
 - Mnemonics live in `gui/labels.rs` with a clash test; add labels there.
+- Zoom (`Mosaic::zoom`, header `[-][+]`, Ctrl+Plus/Minus/0): a chosen row
+  height, steps of √2 (twice/half the area); a group that fits the page at
+  rows at least that tall is fitted as before. Limits are the page's: a row
+  no taller than the page shown, none shorter than the tick plus a badge line
+  (`Results::least_row`; an overlay measures as its main child only), no
+  step down while all is on screen. `flow` ends each row where its height is
+  nearest the target (stretch or shrink), not always after the overflow.
 - Only paths persist (`$XDG_CONFIG_HOME/img-fp/gui.json`); options open at
   CLI defaults; `recursive` on. Folders on the command line replace the
   remembered ones. Last scan and its marks (`marks.json`, keyed by scan id)
@@ -539,7 +561,8 @@ Do not retry without new evidence:
   a wildcard (`decode::plausible` checks short signatures), hidden folders
   without `--hidden`, Trash/thumbnail/NAS recycle and snapshot folders
   (`walk::SetAside`: `#recycle`, `@eaDir`, `#snapshot`, `@Recycle`,
-  `@__thumb`, `@Recently-Snapshot` too), symlinks
+  `@__thumb`, `@Recently-Snapshot` too; and `lost+found`, root's 0700 on
+  every ext4 drive, which made a drive scan exit 2 and refuse a prune), symlinks
   without `--follow-symlinks`, second names for one (device, inode),
   macOS `._` metadata files (AppleDouble magic, any name; were a problem and
   a byte-identical "image" pair), featureless images (were a problem: a
@@ -548,7 +571,10 @@ Do not retry without new evidence:
   cut-off JPEG (`decode::jpeg_cut_off`; analysed, marked
   `DAMAGED`, never cached), cache I/O failure.
 - `-o`, `--dump`, `--log-file` may not name a picture or each other; at most
-  one may be stdout. `--cache` with `--no-cache` only beside
+  one may be stdout. Reports and the dump are written whole or not at all
+  (`report::write_whole`: beside the destination, through any symlink, with
+  its mode, then renamed; an interrupt removes the half-written one): a
+  failed write used to leave the last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
 - **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin`
   (named for its format, so upgrades start a new file). Records keyed by

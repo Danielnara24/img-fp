@@ -43,7 +43,8 @@
 //! Keyboard: arrows move between images, Space or Delete marks the one under
 //! the keyboard, Shift and an arrow marks the images it passes as the last
 //! one marked by hand was (Shift and a click, the range from it), Enter opens it large, the Menu key (or Shift+F10, or a right
-//! click) offers the rest, Ctrl+Page Down / Ctrl+Page Up change group, and
+//! click) offers the rest, Ctrl+Page Down / Ctrl+Page Up change group,
+//! Ctrl+Plus / Ctrl+Minus / Ctrl+0 zoom the images (`Mosaic::zoom`), and
 //! every button has an Alt mnemonic.
 
 use crate::folders::{self, Tree};
@@ -579,12 +580,25 @@ impl Results {
         fill_menu(&menu, false);
         let more = gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).tooltip_text("The selected image, the group or folder, and the view").build();
 
+        // The pictures' size, beside what it applies to: the page below.
+        let smaller = gtk::Button::from_icon_name("zoom-out-symbolic");
+        smaller.set_tooltip_text(Some("Smaller images (Ctrl+Minus; Ctrl+0 fits the group to the page)"));
+        let larger = gtk::Button::from_icon_name("zoom-in-symbolic");
+        larger.set_tooltip_text(Some("Larger images (Ctrl+Plus; Ctrl+0 fits the group to the page)"));
+        for b in [&smaller, &larger] {
+            b.set_sensitive(false);
+        }
+        let zoom = gtk::Box::builder().css_classes(["linked"]).margin_end(8).build();
+        zoom.append(&smaller);
+        zoom.append(&larger);
+
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         head.append(&prev);
         head.append(&next);
         head.append(&title);
         title.set_hexpand(true);
         title.set_margin_start(4);
+        head.append(&zoom);
         head.append(&rule_label);
         head.append(&rule);
         head.append(&mark_suggested);
@@ -775,6 +789,16 @@ impl Results {
             }
         };
         prev.connect_clicked(with(|me| me.step(-1)));
+        smaller.connect_clicked(with(|me| me.zoom(Some(false))));
+        larger.connect_clicked(with(|me| me.zoom(Some(true))));
+        me.mosaic.connect_least_row({
+            let weak = Rc::downgrade(&me);
+            move || weak.upgrade().map_or(1.0, |me| me.least_row())
+        });
+        me.mosaic.connect_zoomable(move |can_in, can_out| {
+            larger.set_sensitive(can_in);
+            smaller.set_sensitive(can_out);
+        });
         next.connect_clicked(with(|me| me.step(1)));
         me.trash.connect_clicked(with(|me| me.confirm_trash()));
         mark_suggested.connect_clicked(with(|me| me.mark_suggested()));
@@ -1119,6 +1143,10 @@ impl Results {
                 match key {
                     gdk::Key::Page_Down | gdk::Key::KP_Page_Down => me.step(1),
                     gdk::Key::Page_Up | gdk::Key::KP_Page_Up => me.step(-1),
+                    // Plus is Shift+= on most layouts, so = is plus too.
+                    gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => me.zoom(Some(true)),
+                    gdk::Key::minus | gdk::Key::underscore | gdk::Key::KP_Subtract => me.zoom(Some(false)),
+                    gdk::Key::_0 | gdk::Key::KP_0 => me.zoom(None),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -1126,6 +1154,28 @@ impl Results {
         });
         me.app.window.add_controller(keys);
         me
+    }
+
+    /// The pictures one step larger (`Some(true)`), smaller, or (`None`)
+    /// fitted to the page again (`Mosaic::zoom`), with the selected image
+    /// kept in view once the page has been laid out anew.
+    fn zoom(self: &Rc<Self>, step: Option<bool>) {
+        let moved = match step {
+            Some(in_) => self.mosaic.zoom(in_),
+            None => self.mosaic.zoom_fit(),
+        };
+        if !moved {
+            return;
+        }
+        // At idle priority, which is after the frame's layout.
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(me) = weak.upgrade()
+                && let Some(i) = me.selected.get()
+            {
+                me.scroll_into_view(i);
+            }
+        });
     }
 
     /// Whether this page is the one on screen, and so the window's keys are
@@ -1693,6 +1743,25 @@ impl Results {
         (6, 6)
     }
 
+    /// The shortest row a tile can take: its border, the mark's tick with
+    /// its margin at the top, and a line of the badge's text with its margin
+    /// at the bottom, which lie at opposite corners and must not meet.
+    fn least_row(&self) -> f32 {
+        let tiles = self.tiles.borrow();
+        let Some(t) = tiles.first() else { return 1.0 };
+        let mut tick = 0;
+        let mut c = t.child.first_child();
+        while let Some(w) = c {
+            if w.has_css_class("tick") {
+                tick = w.measure(gtk::Orientation::Vertical, -1).0 + w.margin_top();
+            }
+            c = w.next_sibling();
+        }
+        // Measured from its text, since it is hidden on most tiles.
+        let badge = t.pill.create_pango_layout(Some("Reference")).pixel_size().1 + t.pill.margin_bottom();
+        (self.border().1 + tick + badge) as f32
+    }
+
     /// The tile image `i` is on, if it is on one.
     fn tile_of(&self, i: usize) -> Option<Tile> {
         self.mosaic.slot_of(i).and_then(|s| self.tiles.borrow().get(s).cloned())
@@ -1821,7 +1890,18 @@ impl Results {
         child.add_overlay(&tick);
         let weak = gtk::Box::builder().css_classes(["weak"]).halign(gtk::Align::End).valign(gtk::Align::Start).tooltip_text("Weak match").visible(false).build();
         child.add_overlay(&weak);
-        let pill = gtk::Label::builder().css_classes(["pill"]).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(6).margin_bottom(6).visible(false).build();
+        // Shortened rather than cut off on a tile narrower than it, which a
+        // tall picture's is once the images are made small (`Mosaic::zoom`).
+        let pill = gtk::Label::builder()
+            .css_classes(["pill"])
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::End)
+            .margin_start(6)
+            .margin_end(6)
+            .margin_bottom(6)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .visible(false)
+            .build();
         child.add_overlay(&pill);
         tick.connect_clicked({
             let (weak, item) = (Rc::downgrade(self), item.clone());
@@ -1975,7 +2055,7 @@ impl Results {
         d.why.set_text(&evidence(&m));
         let action = s.action(m.id);
         let kept = match (action, s.kept_of.get(m.id as usize).copied().flatten()) {
-            (Some(Action::Delete), Some(k)) if s.mode == 0 => format!("Everything in it is also in {}", file_name(&s.paths[k as usize])),
+            (Some(Action::Delete), Some(k)) if s.mode == 0 => held_by(&m.path, &s.paths[k as usize]),
             _ => String::new(),
         };
         let kept = match (kept.is_empty(), s.changed.get(m.id as usize).copied().unwrap_or(false), s.mode == 0, s.unheld_of(m.id)) {
@@ -1985,6 +2065,8 @@ impl Results {
             _ => kept,
         };
         d.why_note.set_text(&kept);
+        // Whole, for a folder the bar has cut short.
+        d.why_note.set_tooltip_text(Some(&kept).filter(|k| !k.is_empty()).map(|k| k.as_str()));
         let said = s.said(m.id);
         d.suggestion.set_text(said);
         // Hidden by opacity, not visibility, so that the stack keeps showing it.
@@ -2642,6 +2724,19 @@ fn numbers(ns: &[usize]) -> String {
     }
 }
 
+/// What the bar says of a deletion's kept copy: its name, and its folder
+/// when that is not the deleted file's own.
+///
+/// It said the name alone, and copies are what share names: a backup's
+/// `IMG_0001.jpg` deleted for the library's read "Everything in it is also
+/// in IMG_0001.jpg", which looks like the file vouching for itself.
+fn held_by(file: &Path, kept: &Path) -> String {
+    match kept.parent().filter(|&d| Some(d) != file.parent()) {
+        Some(dir) => format!("Everything in it is also in {}, in {}", file_name(kept), dir.display()),
+        None => format!("Everything in it is also in {}", file_name(kept)),
+    }
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -2930,6 +3025,15 @@ mod tests {
             assert_eq!(t.by_mode[mode][2], d, "{:?}: an unchanged copy is as it was", MODES[mode]);
         }
         assert_eq!(t.said(1), "review: changed since the scan");
+    }
+
+    /// A kept copy in another folder is named with its folder: copies share
+    /// names, and the name alone read as the file vouching for itself.
+    #[test]
+    fn a_kept_copy_elsewhere_is_named_with_its_folder() {
+        let (a, b, c) = (Path::new("/backup/IMG_0001.jpg"), Path::new("/photos/IMG_0001.jpg"), Path::new("/backup/IMG_0001 (1).jpg"));
+        assert_eq!(held_by(a, b), "Everything in it is also in IMG_0001.jpg, in /photos");
+        assert_eq!(held_by(c, a), "Everything in it is also in IMG_0001.jpg");
     }
 
     #[test]

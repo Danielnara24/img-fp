@@ -1052,6 +1052,11 @@ pub struct Probe {
 /// an orientation of 6, was reported 4032x3024 beside an upright copy of
 /// itself at 3024x4032, in every report and on the window's cards.
 pub fn probe(path: &Path) -> Option<Probe> {
+    // A header parser is a decoder too; see `decode_guarded`.
+    std::panic::catch_unwind(|| probe_header(path)).ok().flatten()
+}
+
+fn probe_header(path: &Path) -> Option<Probe> {
     use std::io::{BufRead, BufReader};
     let mut r = BufReader::with_capacity(16 << 10, std::fs::File::open(path).ok()?);
     let head = r.fill_buf().ok()?;
@@ -1438,6 +1443,7 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
         image::ColorType::Rgb8 | image::ColorType::Rgba8 | image::ColorType::L8 | image::ColorType::La8
     );
     let (dw, dh) = decoder.dimensions();
+    fits_in_memory(&decoder)?;
     let _permit = cover(
         bytes.len() as u64
             + decoder.total_bytes()
@@ -1449,6 +1455,44 @@ fn decode_whole(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u32, u32
     let (w, h) = shown_size(img.width(), img.height(), orientation);
     drop(img);
     Ok((w, h, orient(gray, orientation)))
+}
+
+/// `decode`, with a panic inside it made an error for this file.
+///
+/// The decoders are other people's code reading bytes nobody vouches for,
+/// and a panic in one, unwinding through the parallel analysis, ended the
+/// whole run — and every rescan, at the same file. Caught here it is that
+/// file's problem, as any refusal is. Nothing the decode holds outlives it
+/// in a broken state: its budget claim is given back as it unwinds.
+pub fn decode_guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(p) => {
+            let why = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+            bail!("the decoder failed: {}", why.unwrap_or_else(|| "panic".into()))
+        }
+    }
+}
+
+/// Refuse a picture whose decoded buffer would be larger than `max_alloc`,
+/// before anything allocates it.
+///
+/// **`into_decoder` and `from_decoder` do not ask.** The crate's own
+/// `ImageReader::decode` reserves the decoder's `total_bytes` against the
+/// limits first (its source carries a FIXME saying the check belongs in
+/// `from_decoder`); taking the decoder out to read its orientation and size
+/// skipped that, so `max_alloc` was never applied to a BMP or a TIFF. An
+/// 18 KB BMP whose header claimed 96 x 788 million pixels asked the
+/// allocator for 227 GB, and a failed allocation aborts the process: the
+/// whole scan ended, exit 134, with no file named, and every rescan ended at
+/// the same file. Three of 3,000 randomly damaged small pictures did it.
+fn fits_in_memory(decoder: &impl image::ImageDecoder) -> Result<()> {
+    let (w, h) = decoder.dimensions();
+    let (need, limit) = (decoder.total_bytes(), max_alloc());
+    if need > limit {
+        bail!("a {w}x{h} picture needs {} MB to decode, more than the {} MB this machine has available", need >> 20, limit >> 20);
+    }
+    Ok(())
 }
 
 /// A PNG decoded a row at a time straight into the box reduction, so that the
@@ -2542,7 +2586,7 @@ fn jpeg_coding(b: &[u8]) -> Option<Vec<u8>> {
 pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
     // The whole picture shrunk, as it always was: a scan reads this
     // (`colour_of`), so it does not take `preview_fit`'s reductions.
-    let img = preview_image(path, None)?;
+    let img = decode_guarded(|| preview_image(path, None))?;
     let long = long.max(1);
     let img = if img.width().max(img.height()) > long { img.thumbnail(long, long) } else { img };
     let rgba = img.into_rgba8();
@@ -2560,7 +2604,7 @@ pub fn preview(path: &Path, long: u32) -> Result<(u32, u32, Vec<u8>)> {
 /// at a time into the reduction, so a 44-megapixel one never exists whole.
 pub fn preview_fit(path: &Path, w: u32, h: u32, cover: bool) -> Result<(u32, u32, Vec<u8>)> {
     let (w, h) = (w.max(1), h.max(1));
-    let img = preview_image(path, Some((w, h, cover)))?;
+    let img = decode_guarded(|| preview_image(path, Some((w, h, cover))))?;
     Ok(fit_preview(img, w, h, cover))
 }
 
@@ -2713,6 +2757,7 @@ fn preview_image_crate(bytes: &[u8], fmt: ImageFormat) -> Result<DynamicImage> {
     reader.limits(limits());
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    fits_in_memory(&decoder)?;
     let mut img = DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
     Ok(img)
@@ -2778,6 +2823,36 @@ fn preview_heif(bytes: &[u8]) -> Result<DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A header claiming more pixels than the machine has memory for is an
+    /// error for that file, not an allocation that aborts the process: an
+    /// 18 KB BMP claiming 96 x 788 million pixels asked for 227 GB, and the
+    /// whole scan ended with it.
+    #[test]
+    fn a_header_claiming_too_many_pixels_is_refused_not_allocated() {
+        let mut bmp = Vec::new();
+        let (w, h): (i32, i32) = (96, -788_529_016);
+        let data = vec![0x80u8; 96 * 3 * 64];
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&((54 + data.len()) as u32).to_le_bytes());
+        bmp.extend_from_slice(&[0, 0, 0, 0]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&w.to_le_bytes());
+        bmp.extend_from_slice(&h.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 24]);
+        bmp.extend_from_slice(&data);
+        let dir = std::env::temp_dir().join(format!("img-fp-huge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("huge.bmp");
+        std::fs::write(&p, &bmp).unwrap();
+        let err = decode(&p, 512).err().expect("refused").to_string();
+        assert!(err.contains("needs"), "{err}");
+        assert!(preview(&p, 256).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Whether a picture is stored losslessly, on files the tools write:
     /// a WebP with EXIF is the extended layout whatever its picture is, a

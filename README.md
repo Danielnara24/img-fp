@@ -141,7 +141,7 @@ scanned once. Symlinks met inside a folder are skipped unless you pass
 skipped too, since they hold copies of pictures that are elsewhere or were
 deleted; so are a Synology or QNAP NAS's recycle bin, thumbnail and snapshot
 folders (`#recycle`, `@eaDir`, `#snapshot`, `@Recycle`, `@__thumb`,
-`@Recently-Snapshot`). Name one directly to scan it. Hidden folders (names starting with a
+`@Recently-Snapshot`) and a drive's `lost+found`. Name one directly to scan it. Hidden folders (names starting with a
 dot) are skipped unless you pass `--hidden`, since in a home folder they hold
 programs' icons and themes rather than photos; a hidden folder named directly is
 scanned.
@@ -230,7 +230,9 @@ Trash.
   it with the arrow keys, to see its name, size, how it matched and what the
   scan suggests doing with it, in the bar at the bottom. The reference image,
   the one the others were matched against, is labelled, and weak matches have
-  a yellow corner.
+  a yellow corner. The magnifier buttons at the top (or Ctrl+Plus and
+  Ctrl+Minus) make the images larger or smaller, and Ctrl+0 fits the group to
+  the window again.
 - Click the circle on an image, or press Space, to mark it for the Trash.
   Double click or Enter opens it large.
   Shift and a click marks or unmarks every image from the last one you

@@ -650,7 +650,7 @@ fn enlarge_below(work: usize, upsample_below: usize) -> usize {
 
 fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> Item {
     let t0 = Instant::now();
-    let r = decode::decode_with(path, work, header);
+    let r = decode::decode_guarded(|| decode::decode_with(path, work, header));
     T_DECODE.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
     match r {
         Ok(d) => {
@@ -2753,54 +2753,53 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     };
 
     if let Some(path) = &args.dump {
-        // `-` is stdout, which `stdout_has_one_reader` has kept for it alone.
-        let sink: Box<dyn Write> = if path == stdout_path() {
-            Box::new(std::io::stdout().lock())
-        } else {
-            Box::new(std::fs::File::create(path).with_context(|| format!("could not create {}", path.display()))?)
-        };
-        let mut w = std::io::BufWriter::new(sink);
-        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min,m0,m1,m2,m3,m4,m5,aw,ah,bw,bh")?;
-        let all_direct: Vec<Edge> = all_direct.iter().map(direct_edge).collect();
-        for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
-            for (a, b, m, iv, v) in set.iter() {
-                // The paths as their own bytes, quoted the way CSV quotes:
-                // written with `{:?}`, a name holding a quote or a comma split
-                // into two columns, and a tab or a non-UTF-8 byte came out as
-                // an escape that names no file.
-                use std::os::unix::ffi::OsStrExt;
-                let figures = [
-                    kind.to_string(),
-                    v.n_match.to_string(),
-                    v.n_in.to_string(),
-                    format!("{:.4}", v.ov_a),
-                    format!("{:.4}", v.ov_b),
-                    format!("{:.5}", v.scale),
-                    format!("{:.1}", v.rot_deg),
-                    format!("{:.4}", v.blk),
-                    v.blk_n.to_string(),
-                    format!("{:.4}", v.ncc),
-                    (v.centred as u8).to_string(),
-                    (*iv as u8).to_string(),
-                    format!("{:.4}", v.blk_min),
-                ];
-                // The transform from `a`'s working image to `b`'s, and the two
-                // working images' sizes, which the suggestion's frame tests read.
-                let figures: Vec<String> = figures
-                    .into_iter()
-                    .chain(m.iter().map(|x| format!("{x:.6}")))
-                    .chain([items[*a].feats.w, items[*a].feats.h, items[*b].feats.w, items[*b].feats.h].map(|x| x.to_string()))
-                    .collect();
-                let mut row: Vec<&[u8]> = vec![files[*a].as_os_str().as_bytes(), files[*b].as_os_str().as_bytes()];
-                row.extend(figures.iter().map(|f| f.as_bytes()));
-                report::csv_row_with(&mut w, &row, b',')?;
+        let write = |w: &mut dyn Write| -> std::io::Result<()> {
+            writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min,m0,m1,m2,m3,m4,m5,aw,ah,bw,bh")?;
+            let all_direct: Vec<Edge> = all_direct.iter().map(direct_edge).collect();
+            for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
+                for (a, b, m, iv, v) in set.iter() {
+                    // The paths as their own bytes, quoted the way CSV quotes:
+                    // written with `{:?}`, a name holding a quote or a comma split
+                    // into two columns, and a tab or a non-UTF-8 byte came out as
+                    // an escape that names no file.
+                    use std::os::unix::ffi::OsStrExt;
+                    let figures = [
+                        kind.to_string(),
+                        v.n_match.to_string(),
+                        v.n_in.to_string(),
+                        format!("{:.4}", v.ov_a),
+                        format!("{:.4}", v.ov_b),
+                        format!("{:.5}", v.scale),
+                        format!("{:.1}", v.rot_deg),
+                        format!("{:.4}", v.blk),
+                        v.blk_n.to_string(),
+                        format!("{:.4}", v.ncc),
+                        (v.centred as u8).to_string(),
+                        (*iv as u8).to_string(),
+                        format!("{:.4}", v.blk_min),
+                    ];
+                    // The transform from `a`'s working image to `b`'s, and the two
+                    // working images' sizes, which the suggestion's frame tests read.
+                    let figures: Vec<String> = figures
+                        .into_iter()
+                        .chain(m.iter().map(|x| format!("{x:.6}")))
+                        .chain([items[*a].feats.w, items[*a].feats.h, items[*b].feats.w, items[*b].feats.h].map(|x| x.to_string()))
+                        .collect();
+                    let mut row: Vec<&[u8]> = vec![files[*a].as_os_str().as_bytes(), files[*b].as_os_str().as_bytes()];
+                    row.extend(figures.iter().map(|f| f.as_bytes()));
+                    report::csv_row_with(w, &row, b',')?;
+                }
             }
-        }
-        w.flush()?;
-        drop(w);
+            Ok(())
+        };
+        // `-` is stdout, which `stdout_has_one_reader` has kept for it alone;
+        // a file is written whole or not at all, as the report is.
         if path == stdout_path() {
+            let mut w = std::io::BufWriter::new(std::io::stdout().lock());
+            write(&mut w).and_then(|()| w.flush())?;
             say!("dumped verdicts -> stdout");
         } else {
+            report::write_whole(path, write)?;
             say!("dumped verdicts -> {}", path.display());
         }
     }

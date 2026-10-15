@@ -514,9 +514,9 @@ pub struct Span {
 /// said what the file holds.
 static WRITING: Mutex<()> = Mutex::new(());
 
-/// The temporary files a compaction or a fresh cache is being written into,
-/// while there are any: the handler removes them, since the files they would
-/// have replaced are still there and still whole.
+/// The temporary files a compaction, a fresh cache or a report is being
+/// written into, while there are any: the handler removes them, since the
+/// files they would have replaced are still there and still whole.
 ///
 /// A list although a run writes one cache at a time. As a single slot, two
 /// stores written at once — which the tests do, one per test thread — took
@@ -549,6 +549,33 @@ pub fn seal() -> (MutexGuard<'static, ()>, usize) {
         std::fs::remove_file(tmp).ok();
     }
     (held, APPENDED.load(Ordering::SeqCst))
+}
+
+/// A temporary file that will replace another once it is written whole:
+/// the interrupt handler removes it if it gets there first (`seal`).
+pub(crate) fn begin_partial(tmp: &Path) {
+    lock(&PARTIAL).push(tmp.to_path_buf());
+}
+
+/// Put `tmp`, begun with `begin_partial`, in `dest`'s place. Under the list's
+/// lock, so an interrupt either removed it first — and this fails, in a
+/// process that is exiting — or finds nothing to remove.
+pub(crate) fn finish_partial(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    let mut partial = lock(&PARTIAL);
+    let Some(k) = partial.iter().position(|p| p == tmp) else {
+        return Err(std::io::Error::other("interrupted"));
+    };
+    partial.swap_remove(k);
+    std::fs::rename(tmp, dest)
+}
+
+/// Give up on `tmp`, begun with `begin_partial`, and remove it.
+pub(crate) fn abandon_partial(tmp: &Path) {
+    let mut partial = lock(&PARTIAL);
+    if let Some(k) = partial.iter().position(|p| p == tmp) {
+        partial.swap_remove(k);
+    }
+    std::fs::remove_file(tmp).ok();
 }
 
 /// Write a new file at `path` through a temporary one, and hand back the new

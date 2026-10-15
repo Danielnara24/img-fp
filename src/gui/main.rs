@@ -304,6 +304,8 @@ fn show_shortcuts(parent: &gtk::ApplicationWindow) {
             ("Menu, Shift+F10, right click", "The same, as a menu"),
             ("Ctrl+Page Down", "Next group or folder"),
             ("Ctrl+Page Up", "Previous group or folder"),
+            ("Ctrl+Plus, Ctrl+Minus", "Larger or smaller images"),
+            ("Ctrl+0", "Images as large as fit the page"),
         ]),
         ("Large view", &[
             ("Left, Right", "Previous or next image"),
