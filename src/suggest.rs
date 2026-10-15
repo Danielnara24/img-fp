@@ -240,6 +240,30 @@ const TAU: f32 = 3.0;
 /// keep their original; 0.025 to 0.05 is a plateau, and wider erodes it
 /// slowly (270 with no bar), as blurred copies come in.
 const SOFT_TIE: f32 = 0.05;
+/// How much softer than a file another of its size may be and still delete
+/// it (`Ctx::softer`).
+///
+/// **The keeper is chosen by majority** — the grey middle (`TAU`) and the
+/// softness median (`SOFT_TIE`) — and on its own a majority can be wrong:
+/// an original among nine enlargements of its own third-size copy, each
+/// as large as it and softer, was deleted for one of them in 177 of 178
+/// families. Sharpness cannot say which file is the original instead: a
+/// noisy, halftoned or sharpened copy reads sharper than its original
+/// (to -1.5), so a rule keeping the sharpest keeps the edit. What it can
+/// say is which deletions lose detail, and this refuses those, whoever was
+/// chosen: a file held back only by it is kept, and deletion goes on from
+/// it. It only ever removes a deletion.
+///
+/// Measured on IMGS-ALL's same-size copies against their originals: faithful
+/// lossy re-encodes soften by 0.15-0.16 at p95 (jpeg_mid, to_jxl,
+/// jpeg_magick), so below that a softer re-encode could not stand in for a
+/// sharper one; the soft enlargements above read 0.21-0.29 at p01 (IMGS3+4).
+/// Swept at 0.15, 0.2, 0.25, 0.3, and off: originals deleted in those sets
+/// 5+1, 9+1, 15+7, 22+16, 68+110 (IMGS+IMGS2, IMGS3+IMGS4: what is left
+/// at 0.15 is soft seeds, whose downscale holds them, and a text page); on
+/// IMGS-ALL 17,259, 17,271, 17,286, 17,288, 17,300 DELETE, REVIEW
+/// 2,496-2,499, 297 / 304 originals and no content lost at every one.
+const SOFT_GAP: f32 = 0.15;
 /// The most a block of the whole-frame check may disagree, in grey levels.
 const WHOLE_RESIDUAL: f32 = 12.0;
 /// Samples a side of the whole-frame check (`whole_worst`), which is also
@@ -501,6 +525,13 @@ impl Ctx<'_> {
         self.frame(f, g) && !self.frame(g, f)
     }
 
+    /// `k` is the size of `d` and softer than it by more than `SOFT_GAP`:
+    /// it does not show `d` at `d`'s detail, so it may not stand in for it.
+    fn softer(&self, k: usize, d: usize) -> bool {
+        let Some(e) = self.side(d, k) else { return false };
+        !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.pics[k].traits) - softness(self.pics[d].traits) > SOFT_GAP
+    }
+
     /// `g` shows all of `f`'s picture, at `f`'s detail or finer.
     fn holds(&self, g: usize, f: usize) -> bool {
         let Some(e) = self.side(f, g) else { return false };
@@ -574,6 +605,9 @@ impl Ctx<'_> {
         // gave up 108 deletions the fourth holder or a later one passed, none
         // of them losing anything, for no time measurable on it or on the
         // found corpus (0.1 s), since `whole` is memoised by pair.
+        // Files a deletion was refused because the would-be keeper is softer
+        // (`Ctx::softer`); see the loop below.
+        let sharper: std::cell::RefCell<Vec<usize>> = Default::default();
         let mut can_delete = |k: usize, d: usize| -> bool {
             if !self.holds(k, d) {
                 return false;
@@ -583,10 +617,15 @@ impl Ctx<'_> {
             // the larger frame may delete what it holds.
             let lone = !any_plain;
             let shape = self.same(k, d) || (self.strict_in(d, k) && part[&d] && (plain[&k] || lone));
-            if !shape {
+            if !shape || whole(k, d) > WHOLE_RESIDUAL {
                 return false;
             }
-            whole(k, d) <= WHOLE_RESIDUAL
+            // Asked last, so that what it holds back is what it alone held back.
+            if self.softer(k, d) {
+                sharper.borrow_mut().push(d);
+                return false;
+            }
+            true
         };
         // Classes: files of one frame, each holding the other.
         let mut class: HashMap<usize, usize> = HashMap::new();
@@ -655,6 +694,14 @@ impl Ctx<'_> {
             // that no settled file did: what could have deleted it was never
             // settled itself. It is kept, and deletion goes on from it.
             q.extend(chosen.iter().copied().filter(|k| !action.contains_key(k)));
+            // And a file only a softer one could have deleted: it holds detail
+            // nothing settled has, so it is kept, and deletion goes on from
+            // it, rather than left for a look.
+            let mut kept_back: Vec<usize> = sharper.borrow().iter().copied().filter(|d| !action.contains_key(d)).collect();
+            kept_back.sort_unstable();
+            kept_back.dedup();
+            kept_back.retain(|d| !q.contains(d));
+            q.extend(kept_back);
             if q.is_empty() {
                 break;
             }
@@ -1094,6 +1141,29 @@ mod tests {
         let got = suggest(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
         // The same pixels: the smaller file is kept.
         assert_eq!(got, [Some(Action::Delete), Some(Action::Keep)]);
+    }
+
+    /// An original among several softer copies of its size is not deleted
+    /// for one of them, however many there are: the majority picks the
+    /// keeper, and none of them may stand in for the sharper file.
+    #[test]
+    fn a_softer_copy_does_not_delete_a_sharper_one_of_its_size() {
+        let t = thumb();
+        let sharp = Traits { detail: [10.0, 12.5, 16.0, 20.0, 10.0, 12.5], colour: 30.0, ..Default::default() };
+        let soft = Traits { detail: [5.0, 10.0, 15.0, 19.0, 5.0, 10.0], colour: 30.0, ..Default::default() };
+        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes };
+        // The original, then three softer copies, each the smaller file.
+        let pics = [pic(&sharp, 5_000), pic(&soft, 1_000), pic(&soft, 1_100), pic(&soft, 1_200)];
+        let v = verdict(1.0, 1.0);
+        let links: Vec<(usize, usize, Link)> =
+            (0..4).flat_map(|a| (a + 1..4).map(move |b| (a, b))).map(|(a, b)| (a, b, Link::Edge(&v, IDENTITY, false))).collect();
+        let (got, keeper) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
+        assert_eq!(got[0], Some(Action::Keep), "{got:?}");
+        assert!((1..4).all(|i| keeper[i] != Some(1) || got[1] == Some(Action::Keep)));
+        // Alike in softness, the smallest is kept as before.
+        let pics = [pic(&soft, 5_000), pic(&soft, 1_000), pic(&soft, 1_100), pic(&soft, 1_200)];
+        let got = suggest(&pics, &links, 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Delete), Some(Action::Keep), Some(Action::Delete), Some(Action::Delete)]);
     }
 
     #[test]

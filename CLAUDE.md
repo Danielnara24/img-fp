@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.48.0)
+## Status (0.48.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -30,6 +30,11 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   "changed since the scan" counts from its start, the window demotes
   suggestions resting on a changed kept copy as `--last` does, and a JPEG's
   measured colour is kept in its cache record.
+- 0.48.1: a same-size copy softer by more than
+  `SOFT_GAP` (0.15) may not delete a file (`suggest::Ctx::softer`); a file
+  held back only by that is KEEP. Before, an original among several soft
+  same-size copies was outvoted and deleted (177 / 178 synthetic families,
+  now 6). IMGS-ALL: 17,259 DELETE, none lost, 297 / 304, REVIEW unchanged.
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
   (`out/v31-cost-cliff`).
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -56,11 +61,8 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   re-asked only where the first pass anchored <2 times; nothing tested above
   ~30k images; on the found corpus about half of sampled reported pairs are
   different specimens of one species, leaking through the propagated tier;
-  `suggest::choose`'s grey middle (`TAU`) and softness median are majority
-  votes, so several same-size soft copies (enlargements of a small copy)
-  outvote the original: it is DELETEd for one of them (synthetic sets: 177
-  of 178 families holding nine such copies, in 0.47.0 and 0.48.0; the
-  corpora have one `upscale` a family).
+  5 of the 7 families not keeping their original are grey or near-grey
+  originals beaten by a tinted copy (`temperature`) on "colour over grey".
 
 Docs split: `benchmark/BASELINE.md` (competition), `benchmark/VALIDATION.md`
 (held-out experiment), `README.md` is **users only**: install and usage, no
@@ -239,8 +241,9 @@ Each was measured; changing one needs a re-measure.
 User requirement: **a deletion never loses picture content.** Keeps may be
 the original, a lossless copy, a re-encode, or a composite holding the whole
 photo. REVIEW is for weak matches close to a copy; nothing acts on it.
-On IMGS-ALL at 512: 17,300 DELETE, none loses content, 297/304 families
-keep the original or a lossless copy, 304/304 a faithful full copy (0.47.0:
+On IMGS-ALL at 512: 17,259 DELETE, none loses content, 297/304 families
+keep the original or a lossless copy, 304/304 a faithful full copy (0.48.0:
+17,300; 0.47.0:
 17,299, 0, 276, 304; 0.45.0: 17,986, 1 lost, 272, 299). Scored by `suggest_score.py`
 (`benchmark/suggest_score.py REPORT.json`, ~100 s a cached run).
 
@@ -261,7 +264,12 @@ every deletion (`whole_worst`, 12 grey levels on a 64-sample grid,
 composites of one photograph deleted each other; losses at 32/48/64/96:
 3/1/0/0), every holder asked in turn
 (a cap of three tries, removed: it cost 108 safe deletions and no time);
-composites are deleted only by their own copies; tie-break by grey closeness
+composites are deleted only by their own copies; no file is deleted by one
+of its size softer by more than `SOFT_GAP` = 0.15 (the p95 softening of a
+faithful lossy re-encode; the keeper is chosen by majority, and nine soft
+enlargements outvoted their original; a file held back only by this is
+KEEP, the test asked last so it holds back nothing else);
+tie-break by grey closeness
 (`TAU` = 3, the p99 grey-grid distance between two files holding the same
 pixels), sharpness (`SOFT_TIE` = 0.05, the p99 softening of a q84-96 JPEG
 re-encode), lossless, EXIF, size, colour (`COLOURFUL` = 1.5, above the 1.31
