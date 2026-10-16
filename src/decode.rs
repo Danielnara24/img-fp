@@ -75,6 +75,12 @@ pub struct Traits {
     pub lossless: bool,
     /// The file carries an EXIF block.
     pub exif: bool,
+    /// The file holds more than one picture — an animation's frames, a
+    /// TIFF's pages, an image sequence — of which the analysis read the
+    /// first (`more_than_one_picture`). The rest are pictures no match was
+    /// made on, so the suggestion deletes such a file only for a copy of its
+    /// bytes.
+    pub frames: bool,
 }
 
 /// `Traits::detail` and `colour` as they are summed, one decode per thread.
@@ -434,6 +440,190 @@ fn mac_metadata(head: &[u8]) -> bool {
 /// is a file that never claimed to be an image, and is a skip, not a problem.
 pub const NOT_AN_IMAGE: &str = "not an image";
 
+/// The error a camera's raw file is refused with (`tiff_head`).
+pub const CAMERA_RAW: &str = "a camera raw file, which img-fp does not read";
+
+/// What the suggestion and the raw test ask of a TIFF's directories.
+struct TiffHead {
+    /// Directories holding a whole picture rather than a reduced copy of one
+    /// (`NewSubfileType` without its first bit), up to two.
+    pictures: usize,
+    /// A camera's raw file: a DNG (`DNGVersion`), a Canon CR2 (`CR` after
+    /// the header), or a first directory that is a reduced-resolution
+    /// preview, or that names a camera (`Make`) and keeps its pictures in
+    /// `SubIFDs` — the layout of NEF, ARW, PEF, SRW and their kin.
+    raw: bool,
+}
+
+/// A TIFF's chain of directories, read off its bytes; `None` if they do not
+/// read as one. Classic TIFF and BigTIFF, either byte order.
+fn tiff_head(b: &[u8]) -> Option<TiffHead> {
+    let le = match b.get(..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let at = |o: usize, n: usize| -> Option<u64> {
+        let s = b.get(o..o.checked_add(n)?)?;
+        Some(if le { s.iter().rev().fold(0u64, |v, &x| v << 8 | x as u64) } else { s.iter().fold(0u64, |v, &x| v << 8 | x as u64) })
+    };
+    // Field sizes: classic, or BigTIFF's.
+    let (big, first) = match at(2, 2)? {
+        42 => (false, at(4, 4)?),
+        43 => (true, at(8, 8)?),
+        _ => return None,
+    };
+    let (count_len, entry_len, value_len) = if big { (8, 20, 8) } else { (2, 12, 4) };
+    let cr2 = b.get(8..10) == Some(b"CR");
+    let mut head = TiffHead { pictures: 0, raw: cr2 };
+    let mut seen = std::collections::HashSet::new();
+    let mut ifd = first as usize;
+    for k in 0..64 {
+        if ifd == 0 || !seen.insert(ifd) {
+            break;
+        }
+        let n = at(ifd, count_len)? as usize;
+        let (mut reduced, mut make, mut subifds, mut dng) = (false, false, false, false);
+        for e in 0..n.min(4096) {
+            let o = ifd + count_len + e * entry_len;
+            let Some(tag) = at(o, 2) else { break };
+            match tag {
+                254 => {
+                    // LONG, whose value fits the entry; its low bit says
+                    // "reduced resolution".
+                    let ty = at(o + 2, 2).unwrap_or(4);
+                    let v = if ty == 3 { at(o + 4 + (value_len), 2) } else { at(o + 4 + (value_len), 4) };
+                    reduced = v.is_some_and(|v| v & 1 == 1);
+                }
+                271 => make = true,
+                330 => subifds = true,
+                50706 => dng = true,
+                _ => {}
+            }
+        }
+        if k == 0 {
+            head.raw |= dng || reduced || (make && subifds);
+        }
+        head.pictures += !reduced as usize;
+        if head.pictures >= 2 {
+            break;
+        }
+        ifd = at(ifd + count_len + n * entry_len, value_len).unwrap_or(0) as usize;
+    }
+    Some(head)
+}
+
+/// Whether a file holds more than one picture (`Traits::frames`), read off
+/// its bytes, which the decode already holds: an animated GIF, PNG or WebP,
+/// a TIFF of several pages, a HEIF or AVIF image sequence. JPEG XL says so in
+/// its header (`decode_jxl`). A JPEG's MPF images are not counted: they are
+/// a camera's own previews, depth maps and gain maps of the one picture.
+fn more_than_one_picture(kind: Kind, b: &[u8]) -> bool {
+    match kind {
+        Kind::Image(ImageFormat::Gif) => gif_frames(b) >= 2,
+        Kind::Image(ImageFormat::Png) => apng_animated(b),
+        Kind::Image(ImageFormat::WebP) => riff_chunks(b, b"ANMF") >= 2,
+        Kind::Image(ImageFormat::Tiff) => tiff_head(b).is_some_and(|t| t.pictures >= 2),
+        Kind::Heif => heif_sequence(b),
+        _ => false,
+    }
+}
+
+/// How many images a GIF holds: its image descriptors, walked block by block.
+fn gif_frames(b: &[u8]) -> usize {
+    if b.len() < 13 {
+        return 0;
+    }
+    let table = |flags: u8| if flags & 0x80 != 0 { 3 << ((flags & 7) + 1) } else { 0 };
+    let mut i = 13 + table(b[10]);
+    let mut frames = 0;
+    // Data sub-blocks: a length byte and that many bytes, to a zero length.
+    let skip_blocks = |mut i: usize| -> Option<usize> {
+        loop {
+            let n = *b.get(i)? as usize;
+            i += 1 + n;
+            if n == 0 {
+                return Some(i);
+            }
+        }
+    };
+    while let Some(&tag) = b.get(i) {
+        match tag {
+            0x2C => {
+                frames += 1;
+                if frames >= 2 {
+                    break;
+                }
+                let Some(&flags) = b.get(i + 9) else { break };
+                // Descriptor, local table, LZW code size, then data.
+                match skip_blocks(i + 10 + table(flags) + 1) {
+                    Some(n) => i = n,
+                    None => break,
+                }
+            }
+            0x21 => match skip_blocks(i + 2) {
+                Some(n) => i = n,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    frames
+}
+
+/// Whether a PNG is an animation: an `acTL` chunk, with more than one frame
+/// or with the one frame not the picture `IDAT` holds.
+fn apng_animated(b: &[u8]) -> bool {
+    let mut i = 8;
+    let mut frames = None;
+    let mut control_before_data = false;
+    while i + 8 <= b.len() {
+        let n = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
+        match &b[i + 4..i + 8] {
+            b"acTL" => frames = b.get(i + 8..i + 12).map(|v| u32::from_be_bytes([v[0], v[1], v[2], v[3]])),
+            b"fcTL" => control_before_data = true,
+            b"IDAT" | b"IEND" => break,
+            _ => {}
+        }
+        i = match i.checked_add(12 + n) {
+            Some(j) => j,
+            None => break,
+        };
+    }
+    frames.is_some_and(|f| f > 1 || !control_before_data)
+}
+
+/// How many top-level chunks of a RIFF file (a WebP) carry `fourcc`, counted
+/// to two.
+fn riff_chunks(b: &[u8], fourcc: &[u8; 4]) -> usize {
+    let mut i = 12;
+    let mut count = 0;
+    while i + 8 <= b.len() && count < 2 {
+        let n = u32::from_le_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]) as usize;
+        if &b[i..i + 4] == fourcc {
+            count += 1;
+        }
+        // Chunks are padded to an even length.
+        i = match i.checked_add(8 + n + (n & 1)) {
+            Some(j) => j,
+            None => break,
+        };
+    }
+    count
+}
+
+/// Whether a HEIF's `ftyp` names an image sequence: `msf1`, or the HEVC
+/// (`hevc`, `hevx`, `hevs`) or AV1 (`avis`) sequence brands.
+fn heif_sequence(b: &[u8]) -> bool {
+    let Some(len) = b.get(..4).map(|v| u32::from_be_bytes([v[0], v[1], v[2], v[3]]) as usize) else { return false };
+    if b.get(4..8) != Some(b"ftyp") || len < 16 {
+        return false;
+    }
+    let brands = b.get(8..len.min(b.len())).unwrap_or(&[]);
+    // Major brand, minor version, then compatible brands.
+    brands.chunks_exact(4).enumerate().filter(|(k, _)| *k != 1).any(|(_, x)| matches!(x, b"msf1" | b"hevc" | b"hevx" | b"hevs" | b"avis"))
+}
+
 /// Identify a format from the first bytes.
 ///
 /// Four of these signatures are two to four bytes long — `BM`, `P1` to `P7`,
@@ -619,12 +809,68 @@ fn decode_budget() -> usize {
     }
 }
 
-/// What the machine reports it can still hand out, in bytes: `MemAvailable`.
+/// What the machine reports it can still hand out, in bytes: `MemAvailable`,
+/// or less where the process's control group has less left (`cgroup_room`).
+///
+/// **`MemAvailable` is the host's**, inside a container, a `systemd-run -p
+/// MemoryMax=` scope or a batch job alike, and it is not what such a process
+/// may use: under a 300 MB limit on a machine with 2.2 GB free, one 1.5 MB
+/// TIFF of 12000x12000 16-bit pixels passed `fits_in_memory`, and the kernel
+/// killed the whole run (exit 137, no report) where the same picture should
+/// have been one file's problem.
 fn mem_available() -> Option<usize> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
     let kb = line.split_whitespace().nth(1)?.parse::<usize>().ok()?;
-    Some(kb.saturating_mul(1024))
+    let host = kb.saturating_mul(1024);
+    Some(cgroup_room().map_or(host, |c| c.min(host)))
+}
+
+/// How much more the control groups this process is in will let it use: the
+/// least, over the group and every group above it that has a memory limit,
+/// of the limit less what the group uses, its reclaimable page cache
+/// (`inactive_file`) counted as free, as `MemAvailable` counts it. `None`
+/// when no group has a limit, which is the ordinary desktop session.
+///
+/// cgroup v2 (`memory.max`, `memory.current`), and v1's memory controller
+/// (`memory.limit_in_bytes`, `memory.usage_in_bytes`), whose "no limit" is a
+/// number near `i64::MAX`. Inside a container the group's path reads `/`,
+/// and `/sys/fs/cgroup` is the container's own group.
+fn cgroup_room() -> Option<usize> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let read = |p: &Path| std::fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    let inactive = |dir: &Path| {
+        std::fs::read_to_string(dir.join("memory.stat")).ok().and_then(|s| {
+            s.lines().find_map(|l| l.strip_prefix("inactive_file ").or_else(|| l.strip_prefix("total_inactive_file ")).and_then(|v| v.trim().parse::<u64>().ok()))
+        })
+    };
+    let mut least: Option<u64> = None;
+    for line in own.lines() {
+        // `hierarchy:controllers:path`.
+        let mut parts = line.splitn(3, ':');
+        let (Some(_), Some(controllers), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let (root, limit, usage) = if controllers.is_empty() {
+            (std::path::PathBuf::from("/sys/fs/cgroup"), "memory.max", "memory.current")
+        } else if controllers.split(',').any(|c| c == "memory") {
+            (std::path::PathBuf::from("/sys/fs/cgroup/memory"), "memory.limit_in_bytes", "memory.usage_in_bytes")
+        } else {
+            continue;
+        };
+        let mut dir = root.join(path.trim_start_matches('/'));
+        loop {
+            // A v1 "unlimited" is page-rounded `i64::MAX`; nothing real is
+            // within a factor of two of it.
+            if let Some(max) = read(&dir.join(limit)).filter(|&m| m < u64::MAX / 4) {
+                let used = read(&dir.join(usage)).unwrap_or(0).saturating_sub(inactive(&dir).unwrap_or(0));
+                let room = max.saturating_sub(used);
+                least = Some(least.map_or(room, |l| l.min(room)));
+            }
+            if dir == root || !dir.pop() || !dir.starts_with(&root) {
+                break;
+            }
+        }
+    }
+    least.map(|b| b as usize)
 }
 
 /// The most a single decoder may allocate: what the machine has available
@@ -644,8 +890,13 @@ fn mem_available() -> Option<usize> {
 /// Taken once, like the budget. Without `/proc` there is nothing to measure
 /// and the crate's own default stands.
 fn max_alloc() -> u64 {
-    static MAX: std::sync::LazyLock<u64> =
-        std::sync::LazyLock::new(|| mem_available().map_or(512 << 20, |b| (b as u64).max(512 << 20)));
+    // The floor is the crate's own default, and no floor stands above what a
+    // control group has left: there it is the kernel that refuses, by
+    // killing the run.
+    static MAX: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        let floor = mem_available().map_or(512 << 20, |b| (b as u64).max(512 << 20));
+        cgroup_room().map_or(floor, |c| floor.min(c as u64))
+    });
     *MAX
 }
 
@@ -990,6 +1241,13 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     let kind = sniff(&bytes);
     let mut damaged = None;
     let mut lossless_jxl = false;
+    let mut animated_jxl = false;
+    // A camera's raw file in a TIFF container: its first picture is the
+    // camera's preview, and read as the photograph it would be judged at a
+    // few hundred pixels and suggested for deletion beside its own JPEG.
+    if kind == Kind::Image(ImageFormat::Tiff) && tiff_head(&bytes).is_some_and(|t| t.raw) {
+        bail!(CAMERA_RAW);
+    }
     measure_begin();
     let (w, h, gray) = match kind {
         // The two formats that are almost all of a real corpus get their own
@@ -1011,8 +1269,9 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
         },
         Kind::Image(fmt) => decode_image_crate(&bytes, fmt, work_size)?,
         Kind::Jxl => {
-            let (w, h, g, lossless) = timed!(26, decode_jxl(&bytes, work_size)?);
+            let (w, h, g, lossless, animated) = timed!(26, decode_jxl(&bytes, work_size)?);
             lossless_jxl = lossless;
+            animated_jxl = animated;
             (w, h, g)
         }
         Kind::Heif => timed!(27, decode_heif(&bytes, work_size)?),
@@ -1024,6 +1283,7 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     let mut traits = measure_end();
     traits.lossless = lossless_jxl || lossless_format(kind, &bytes);
     traits.exif = has_exif(&bytes);
+    traits.frames = animated_jxl || more_than_one_picture(kind, &bytes);
     Ok(Decoded { work: gray, size: (w, h), damaged, traits })
 }
 
@@ -1254,7 +1514,183 @@ fn decode_image_crate(bytes: &[u8], fmt: ImageFormat, work: usize) -> Result<(u3
             return Ok(done);
         }
     }
+    if fmt == ImageFormat::Tiff {
+        if let Some(done) = decode_tiff_chunks(bytes, work) {
+            return Ok(done);
+        }
+        // What a stream that gave up part-way measured is not the picture's.
+        measure_begin();
+    }
     decode_whole(bytes, fmt, work)
+}
+
+/// A sixteen-bit sample as `image` makes it eight bits: `round(c / 257)`,
+/// which is `c * 255 / 65535` rounded; no sample sits on a half.
+#[inline(always)]
+fn sample8(c: u16) -> u8 {
+    ((c as u32 + 128) / 257) as u8
+}
+
+/// One row of sixteen-bit samples, `ch` to a pixel, as RGBA8, the way the
+/// general path's `to_rgba8` makes them: grey repeated to red, green and
+/// blue, and an opaque alpha where there is none.
+fn row16_to_rgba8(samples: impl Iterator<Item = u16>, ch: usize, out: &mut [u8]) {
+    let mut s = samples.map(sample8);
+    for px in out.chunks_exact_mut(4) {
+        let mut next = || s.next().unwrap_or(0);
+        let p = match ch {
+            1 => {
+                let l = next();
+                [l, l, l, 255]
+            }
+            2 => {
+                let l = next();
+                [l, l, l, next()]
+            }
+            3 => [next(), next(), next(), 255],
+            _ => [next(), next(), next(), next()],
+        };
+        px.copy_from_slice(&p);
+    }
+}
+
+/// A TIFF read a strip, or a row of tiles, at a time into the reduction,
+/// rather than decoded whole: the format of scans and of sixteen-bit masters,
+/// and so of the largest pictures a library holds. Decoded whole, a
+/// 12000x12000 picture peaked at 850 MB as an 8-bit TIFF and 1.69 GB as a
+/// 16-bit one — the frame, and for sixteen bits a second, RGBA8 copy of it —
+/// against 19 MB as a PNG, which was already read a row at a time.
+///
+/// **It gives the general path's pixels exactly**: the rows `image`'s TIFF
+/// decoder would have produced from the same `tiff` decoder, sixteen bits
+/// made eight as `to_rgba8` makes them (`row16_to_rgba8`), into the same
+/// reduction. `None`, which takes the general path, for anything else: a
+/// layout of planes, a sample that is not an unsigned 8- or 16-bit integer,
+/// one bit a pixel, a palette, CMYK, YCbCr — and any error, so that a broken
+/// file fails with the general path's message. Every chunk is read, the
+/// rows the reduction drops included, so a file broken in its last rows
+/// fails here as it fails there.
+fn decode_tiff_chunks(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
+    use tiff::decoder::{Decoder, DecodingResult};
+    use tiff::tags::Tag;
+    use tiff::ColorType as T;
+    let mut limits = tiff::decoder::Limits::default();
+    let cap = usize::try_from(max_alloc()).unwrap_or(usize::MAX);
+    limits.decoding_buffer_size = cap;
+    limits.intermediate_buffer_size = cap;
+    limits.ifd_value_size = cap;
+    let mut dec = Decoder::new(Cursor::new(bytes)).ok()?.with_limits(limits);
+    let (w, h) = dec.dimensions().ok()?;
+    let (ch, sixteen) = match dec.colortype().ok()? {
+        T::Gray(8) => (1, false),
+        T::Gray(16) => (1, true),
+        T::GrayA(8) => (2, false),
+        T::GrayA(16) => (2, true),
+        T::RGB(8) => (3, false),
+        T::RGB(16) => (3, true),
+        T::RGBA(8) => (4, false),
+        T::RGBA(16) => (4, true),
+        _ => return None,
+    };
+    if dec.find_tag_unsigned_vec::<u16>(Tag::SampleFormat).ok()?.is_some_and(|f| f.iter().any(|&s| s != 1)) {
+        return None;
+    }
+    if dec.find_tag_unsigned::<u16>(Tag::PlanarConfiguration).ok()?.is_some_and(|p| p != 1) {
+        return None;
+    }
+    let orientation = dec
+        .find_tag(Tag::Orientation)
+        .ok()
+        .flatten()
+        .and_then(|v| image::metadata::Orientation::from_exif(v.into_u16().ok()?.min(255) as u8))
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let (cw, chh) = dec.chunk_dimensions();
+    if cw == 0 || chh == 0 {
+        return None;
+    }
+    let (wu, hu) = (w as usize, h as usize);
+    let across = w.div_ceil(cw);
+    let down = h.div_ceil(chh);
+    // The pixels the reduction is handed: the file's own channels at eight
+    // bits, or RGBA8 made from sixteen.
+    let out_ch = if sixteen { 4 } else { ch };
+    let band_bytes = wu * chh as usize * out_ch;
+    // The file, the working plane, one band of rows and one chunk of the
+    // decoder's (sixteen bits a sample at most).
+    let _permit = cover(bytes.len() as u64 + working_bytes(wu, hu, work) + band_bytes as u64 + (cw as u64 * chh as u64 * ch as u64 * 2));
+    let mut band = vec![0u8; band_bytes];
+    let mut band_rows = 0usize;
+    let mut at = 0usize;
+    let mut next_band = 0u32;
+    let mut failed = false;
+    let read_band = |dec: &mut Decoder<Cursor<&[u8]>>, band: &mut [u8], r: u32| -> Option<usize> {
+        let mut rows = 0;
+        for c in 0..across {
+            let i = r * across + c;
+            let (dw, dh) = dec.chunk_data_dimensions(i);
+            let (dw, dh) = (dw as usize, dh as usize);
+            rows = dh;
+            let x0 = (c * cw) as usize;
+            if x0 + dw > wu || dh > chh as usize {
+                return None;
+            }
+            match dec.read_chunk(i).ok()? {
+                DecodingResult::U8(v) if !sixteen => {
+                    if v.len() < dw * dh * ch {
+                        return None;
+                    }
+                    for y in 0..dh {
+                        band[(y * wu + x0) * ch..(y * wu + x0 + dw) * ch].copy_from_slice(&v[y * dw * ch..(y + 1) * dw * ch]);
+                    }
+                }
+                DecodingResult::U16(v) if sixteen => {
+                    if v.len() < dw * dh * ch {
+                        return None;
+                    }
+                    for y in 0..dh {
+                        let src = v[y * dw * ch..(y + 1) * dw * ch].iter().copied();
+                        row16_to_rgba8(src, ch, &mut band[(y * wu + x0) * 4..(y * wu + x0 + dw) * 4]);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(rows)
+    };
+    let reduced = timed!(1, reduce_rows(wu, hu, out_ch, sixteen || ch == 2 || ch == 4, work, |line| {
+        if failed {
+            return;
+        }
+        if at == band_rows {
+            if next_band >= down {
+                failed = true;
+                return;
+            }
+            match read_band(&mut dec, &mut band, next_band) {
+                Some(r) => {
+                    band_rows = r;
+                    at = 0;
+                    next_band += 1;
+                }
+                None => {
+                    failed = true;
+                    return;
+                }
+            }
+        }
+        line.copy_from_slice(&band[at * wu * out_ch..(at + 1) * wu * out_ch]);
+        at += 1;
+    }));
+    // The rest of the file, read and checked as the general path reads it.
+    while !failed && next_band < down {
+        failed = read_band(&mut dec, &mut band, next_band).is_none();
+        next_band += 1;
+    }
+    if failed {
+        return None;
+    }
+    let (w, h) = shown_size(w, h, orientation);
+    Some((w, h, orient(reduced, orientation)))
 }
 
 /// A JPEG, decoded to its luma plane when it has one and through the general
@@ -1509,8 +1945,10 @@ fn fits_in_memory(decoder: &impl image::ImageDecoder) -> Result<()> {
 ///
 /// `None` means "take the general path", and it is what this says about
 /// anything it is not sure it would read identically: an interlaced or
-/// animated file, sixteen bits a channel — and any error at all, so that a
-/// broken file fails with the message the general path gives it.
+/// animated file, a palette — and any error at all, so that a broken file
+/// fails with the message the general path gives it. Sixteen bits a channel
+/// are made eight as the general path's `to_rgba8` makes them, and reduced
+/// as RGBA8 (`png_rows16`).
 ///
 /// **A frame larger than `max_alloc` is read here too.** It used to be sent
 /// to the general path, to be refused there as it would have been — but the
@@ -1547,10 +1985,25 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let (w, h) = (info.width, info.height);
     let (color, depth) = reader.output_color_type();
+    let (wu, hu) = (w as usize, h as usize);
+    // Sixteen bits a sample, made eight as the general path's `to_rgba8`
+    // makes them, into the reduction it uses for RGBA8.
+    if depth == png::BitDepth::Sixteen {
+        let ch = match color {
+            png::ColorType::Grayscale => 1,
+            png::ColorType::GrayscaleAlpha => 2,
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            png::ColorType::Indexed => return None,
+        };
+        let _permit = cover(bytes.len() as u64 + working_bytes(wu, hu, work) + 2 * reader.output_line_size(w)? as u64 + wu as u64 * 4);
+        let reduced = timed!(1, png_rows16(&mut reader, wu, hu, ch, work)?);
+        let (w, h) = shown_size(w, h, orientation);
+        return Some((w, h, orient(reduced, orientation)));
+    }
     if depth != png::BitDepth::Eight {
         return None;
     }
-    let (wu, hu) = (w as usize, h as usize);
     // What this holds: the file, the working plane, and a row or two of the
     // decoder's own. The frame the general path would claim is not among them.
     let _permit = cover(bytes.len() as u64 + working_bytes(wu, hu, work) + 2 * reader.output_line_size(w)? as u64);
@@ -1563,6 +2016,25 @@ fn decode_png_rows(bytes: &[u8], work: usize) -> Option<(u32, u32, Gray)> {
     });
     let (w, h) = shown_size(w, h, orientation);
     Some((w, h, orient(reduced, orientation)))
+}
+
+/// `png_rows` for sixteen-bit rows, `ch` samples a pixel, each made RGBA8.
+fn png_rows16<R: std::io::BufRead + std::io::Seek>(reader: &mut png::Reader<R>, w: usize, h: usize, ch: usize, work: usize) -> Option<Gray> {
+    let mut r = Reducer::<4, true>::new(w, h, work);
+    let mut line = vec![0u8; w * 4];
+    for _ in 0..h {
+        let row = reader.next_row().ok()??;
+        let data = row.data();
+        if data.len() != w * ch * 2 {
+            return None;
+        }
+        row16_to_rgba8(data.chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])), ch, &mut line);
+        r.push(&line);
+    }
+    if reader.next_row().ok()?.is_some() {
+        return None;
+    }
+    Some(r.finish())
 }
 
 fn png_rows<R: std::io::BufRead + std::io::Seek, const CH: usize, const ALPHA: bool>(
@@ -2377,7 +2849,7 @@ fn too_large(what: &str, w: u32, h: u32, per_px: u64, limit: u64) -> Result<()> 
 }
 
 /// The picture, and whether it is lossless (`jxl_lossless`).
-fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray, bool)> {
+fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray, bool, bool)> {
     let image = jxl_image(bytes, max_alloc())?;
     // What the render holds: two frames' worth of float planes at its widest,
     // measured — the decoded frame and the one the colour transform writes.
@@ -2422,7 +2894,9 @@ fn decode_jxl(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray, bool)> {
             }
         }
     });
-    Ok((w as u32, h as u32, g, jxl_lossless(&image)))
+    // An animation's frames after the first are pictures of their own.
+    let animated = image.image_header().metadata.animation.is_some();
+    Ok((w as u32, h as u32, g, jxl_lossless(&image), animated))
 }
 
 fn decode_heif(bytes: &[u8], work: usize) -> Result<(u32, u32, Gray)> {
@@ -3094,7 +3568,7 @@ mod tests {
         let mm = [b"MM\0*".as_slice(), &8u32.to_be_bytes(), &1u16.to_be_bytes(), &259u16.to_be_bytes(), &3u16.to_be_bytes(), &1u32.to_be_bytes(), &7u16.to_be_bytes(), &[0, 0]].concat();
         assert_eq!(tiff_compression(&|at, n| mm.get(at as usize..at as usize + n).map(<[u8]>::to_vec)), Some(7));
         for (bytes, want) in [(&JXL_LOSSLESS[..], true), (&JXL_LOSSY[..], false), (&JXL_FROM_JPEG[..], false)] {
-            let (.., lossless) = decode_jxl(bytes, 64).unwrap();
+            let (.., lossless, _) = decode_jxl(bytes, 64).unwrap();
             assert_eq!(lossless, want);
         }
     }
@@ -3319,8 +3793,10 @@ mod tests {
             (C::Grayscale, D::Four, true),
             (C::Indexed, D::Eight, true),
             (C::Indexed, D::Two, true),
-            (C::Rgb, D::Sixteen, false),
-            (C::Rgba, D::Sixteen, false),
+            (C::Rgb, D::Sixteen, true),
+            (C::Rgba, D::Sixteen, true),
+            (C::Grayscale, D::Sixteen, true),
+            (C::GrayscaleAlpha, D::Sixteen, true),
         ];
         for &(color, depth, streams) in layouts.iter() {
             for &(w, h, work) in &[(37u32, 23u32, 64usize), (300, 200, 64), (257, 511, 64), (900, 5, 64), (5, 700, 64), (64, 64, 0)] {
@@ -3344,6 +3820,150 @@ mod tests {
                 (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "cut {cut}"),
                 (a, b) => panic!("cut {cut}: {:?} against {:?}", a.is_ok(), b.is_ok()),
             }
+        }
+    }
+
+    /// A TIFF read a strip at a time gives the general path's pixels and
+    /// traits, bit for bit, at 8 and 16 bits and with and without alpha;
+    /// broken anywhere, its error. (Tiled, compressed and turned TIFFs were
+    /// checked against `decode_whole` on files ImageMagick wrote, which the
+    /// encoder here cannot make.)
+    #[test]
+    fn tiff_chunks_decode_exactly_as_the_whole_picture_does() {
+        use image::{ExtendedColorType as E, ImageEncoder};
+        let tiff_of = |w: u32, h: u32, ty: E| {
+            let n = match ty {
+                E::L8 => 1,
+                E::Rgb8 => 3,
+                E::Rgba8 => 4,
+                E::L16 => 2,
+                E::Rgb16 => 6,
+                _ => 8,
+            } * (w * h) as usize;
+            let px: Vec<u8> = (0..n).map(|i| ((i * 2654435761usize) >> 13) as u8).collect();
+            let mut out = Vec::new();
+            image::codecs::tiff::TiffEncoder::new(Cursor::new(&mut out)).write_image(&px, w, h, ty).unwrap();
+            out
+        };
+        for ty in [E::L8, E::Rgb8, E::Rgba8, E::L16, E::Rgb16, E::Rgba16] {
+            for &(w, h, work) in &[(37u32, 23u32, 64usize), (300, 200, 64), (257, 511, 64), (900, 5, 64), (64, 64, 0)] {
+                let bytes = tiff_of(w, h, ty);
+                let tag = format!("{ty:?} {w}x{h}@{work}");
+                assert!(decode_tiff_chunks(&bytes, work).is_some(), "{tag}");
+                measure_begin();
+                let got = decode_image_crate(&bytes, ImageFormat::Tiff, work).unwrap().2;
+                let got_traits = measure_end();
+                measure_begin();
+                let want = decode_whole(&bytes, ImageFormat::Tiff, work).unwrap().2;
+                let want_traits = measure_end();
+                assert_eq!((got.w, got.h), (want.w, want.h), "{tag}");
+                assert!(got.px.iter().zip(want.px.iter()).all(|(a, b)| a.to_bits() == b.to_bits()), "{tag}");
+                assert_eq!(got_traits, want_traits, "{tag}");
+            }
+        }
+        let bytes = tiff_of(300, 200, E::Rgb16);
+        for cut in [40, 200, bytes.len() / 2, bytes.len() - 20] {
+            let got = decode_image_crate(&bytes[..cut], ImageFormat::Tiff, 64).map(|r| r.2.px);
+            let want = decode_whole(&bytes[..cut], ImageFormat::Tiff, 64).map(|r| r.2.px);
+            match (got, want) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "cut {cut}"),
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "cut {cut}"),
+                (a, b) => panic!("cut {cut}: {:?} against {:?}", a.is_ok(), b.is_ok()),
+            }
+        }
+    }
+
+    /// Sixteen bits made eight as `image` makes them, for every value.
+    #[test]
+    fn a_sixteen_bit_sample_is_made_eight_as_image_makes_it() {
+        let all: Vec<u16> = (0..=u16::MAX).collect();
+        let img = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(all.len() as u32, 1, all.clone()).unwrap();
+        let want = image::DynamicImage::ImageLuma16(img).to_luma8();
+        assert!(all.iter().zip(want.as_raw()).all(|(&c, &w)| sample8(c) == w));
+    }
+
+    /// What says a file holds more than one picture, and what says a TIFF is
+    /// a camera's raw file.
+    #[test]
+    fn several_pictures_and_raw_files_are_told_by_their_bytes() {
+        use image::{codecs::gif::GifEncoder, Frame, RgbaImage};
+        let gif = |n: usize| {
+            let mut out = Vec::new();
+            {
+                let mut e = GifEncoder::new(&mut out);
+                for k in 0..n {
+                    e.encode_frame(Frame::new(RgbaImage::from_pixel(8, 8, image::Rgba([k as u8 * 40, 0, 0, 255])))).unwrap();
+                }
+            }
+            out
+        };
+        assert_eq!(gif_frames(&gif(1)), 1);
+        assert_eq!(gif_frames(&gif(3)), 2, "counted to two");
+        let gif_kind = Kind::Image(ImageFormat::Gif);
+        assert!(!more_than_one_picture(gif_kind, &gif(1)) && more_than_one_picture(gif_kind, &gif(2)));
+        // An APNG: acTL ahead of IDAT, one or two frames, the default image
+        // one of them (an fcTL ahead of IDAT) or not.
+        let chunk = |name: &[u8; 4], data: &[u8]| [&(data.len() as u32).to_be_bytes()[..], name, data, &[0, 0, 0, 0]].concat();
+        let png = |frames: Option<u32>, fctl_first: bool| {
+            let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+            b.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+            if let Some(f) = frames {
+                b.extend(chunk(b"acTL", &[&f.to_be_bytes()[..], &[0, 0, 0, 0]].concat()));
+            }
+            if fctl_first {
+                b.extend(chunk(b"fcTL", &[0; 26]));
+            }
+            b.extend(chunk(b"IDAT", &[0; 4]));
+            b
+        };
+        assert!(!apng_animated(&png(None, false)));
+        assert!(!apng_animated(&png(Some(1), true)), "one frame, and it is the picture");
+        assert!(apng_animated(&png(Some(1), false)), "one frame, not the picture IDAT holds");
+        assert!(apng_animated(&png(Some(2), true)));
+        let riff = |n: usize| {
+            let mut b = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+            b.extend([10, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            for _ in 0..n {
+                b.extend(b"ANMF\x03\0\0\0abc\0");
+            }
+            b
+        };
+        assert_eq!(riff_chunks(&riff(1), b"ANMF"), 1);
+        assert_eq!(riff_chunks(&riff(2), b"ANMF"), 2);
+        assert!(heif_sequence(b"\0\0\0\x18ftypmsf1\0\0\0\0mif1heic"));
+        assert!(!heif_sequence(b"\0\0\0\x18ftypheic\0\0\0\0mif1heic"));
+        // TIFFs: one page; two; a reduced first page (a raw file's preview);
+        // a DNG; a camera's make with sub-directories; either byte order.
+        let tiff = |le: bool, ifds: &[&[(u16, u32)]]| {
+            let w16 = |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+            let w32 = |v: u32| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+            let mut b = Vec::new();
+            b.extend(if le { b"II" } else { b"MM" });
+            b.extend(w16(42));
+            b.extend(w32(8));
+            for (k, tags) in ifds.iter().enumerate() {
+                b.extend(w16(tags.len() as u16));
+                for &(tag, v) in tags.iter() {
+                    b.extend(w16(tag));
+                    b.extend(w16(4));
+                    b.extend(w32(1));
+                    b.extend(w32(v));
+                }
+                let next = if k + 1 < ifds.len() { b.len() as u32 + 4 } else { 0 };
+                b.extend(w32(next));
+            }
+            b
+        };
+        for le in [true, false] {
+            let head = |ifds: &[&[(u16, u32)]]| tiff_head(&tiff(le, ifds)).unwrap();
+            let page: &[(u16, u32)] = &[(256, 8), (257, 8)];
+            assert!(head(&[page]).pictures == 1 && !head(&[page]).raw);
+            assert_eq!(head(&[page, page]).pictures, 2);
+            assert_eq!(head(&[page, &[(254, 1)]]).pictures, 1, "a thumbnail page is not a picture of its own");
+            assert!(head(&[&[(254, 1)], page]).raw, "a reduced first directory: a raw file's preview");
+            assert!(head(&[&[(256, 8), (50706, 0x01040000)]]).raw);
+            assert!(head(&[&[(271, 0), (330, 0)]]).raw);
+            assert!(!head(&[&[(271, 0)]]).raw, "a camera's own TIFF");
         }
     }
 
@@ -3665,7 +4285,7 @@ mod bench {
             0x80, 0x00, 0x88, 0x24, 0x89, 0x24, 0x89, 0x24, 0xc9, 0x24, 0xb9, 0x3d, 0x00, 0x80, 0xf1, 0x2c,
         ];
         assert_eq!(sniff(&JXL), Kind::Jxl);
-        let (w, h, g, _) = decode_jxl(&JXL, 384).unwrap();
+        let (w, h, g, ..) = decode_jxl(&JXL, 384).unwrap();
         assert_eq!((w, h, g.w, g.h), (16, 8, 16, 8));
         // Refused from the header: 16x8 grey is 512 bytes of float plane.
         let e = jxl_image(&JXL, 500).err().expect("past the limit").to_string();

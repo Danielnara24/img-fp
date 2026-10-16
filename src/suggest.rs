@@ -60,6 +60,13 @@
 //!   2, `on_canvas`). The price is REVIEW: 29,368 of the 54,710 files, from
 //!   8,114, every lone re-encode or format conversion among them; on
 //!   IMGS-ALL 3,004 from 2,499, and 386 fewer deletions.
+//! - **What no check can see is not deleted.** A lossless file is deleted
+//!   only for its own pixels, a larger frame or more detail, never for a
+//!   file of its frame and size whose pixels differ (`own_pixels`): the
+//!   difference may be finer than the run compares, as a changed figure on
+//!   an invoice is. And a file of several pictures — an animation, a TIFF's
+//!   pages — only for its own bytes, since only its first was matched. Such
+//!   a file is kept, and nothing is deleted on its strength.
 //! - **Deletion spreads from the keeps**, each file deleted by one already
 //!   settled.
 
@@ -553,6 +560,26 @@ impl Ctx<'_> {
         !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.pics[k].traits) - softness(self.pics[d].traits) > SOFT_GAP
     }
 
+    /// `d` is a lossless file of `k`'s frame and size whose pixels are not
+    /// `k`'s (not the same bytes, nor the same decoded pixels): two
+    /// pictures, as far as anything says.
+    ///
+    /// **The run cannot see what tells two such files apart.** Every check
+    /// it has reads the picture at a thumbnail's 128 pixels, or at a
+    /// sixty-fourth of the frame, and its keypoints at the working size: two
+    /// screenshots of an invoice, one total reading $1,250 and the other
+    /// $9,750, agreed at 1.00 and shared every keypoint at distance 0, and of
+    /// an invoice, its re-encode and the other invoice, the other was deleted;
+    /// a line of text changed, the original was. A lossy file differs from
+    /// its source by the codec everywhere, so its pixels say nothing either
+    /// way; a lossless one differs only where it was changed. No number is
+    /// read here: the formats say it.
+    fn own_pixels(&self, k: usize, d: usize) -> bool {
+        self.pics[d].traits.lossless
+            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME)
+            && self.same(k, d)
+    }
+
     /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
     /// besides `d` holds no picture.
     ///
@@ -698,9 +725,24 @@ impl Ctx<'_> {
         // Files a deletion was refused because their class is two pictures
         // and nothing says which is the original; see the loop below.
         let undecided: std::cell::RefCell<Vec<usize>> = Default::default();
-        let sharper: std::cell::RefCell<Vec<usize>> = Default::default();
+        // Files a deletion was refused because the would-be keeper is softer
+        // (`Ctx::softer`); see the loop below.
+        let kept_back: std::cell::RefCell<Vec<usize>> = Default::default();
+        // Files a deletion was refused for what no check can show another
+        // file holds: more pictures (`Traits::frames`), or pixels a lossy
+        // file of their size cannot vouch for (`Ctx::own_pixels`). They are
+        // kept, and nothing is deleted on their strength: they are not known
+        // to be better, only not known to be the same — a lossless edit kept
+        // this way deleted its own original.
+        let held: std::cell::RefCell<Vec<usize>> = Default::default();
         let mut can_delete = |k: usize, d: usize| -> bool {
             if !self.holds(k, d) {
+                return false;
+            }
+            // A file of several pictures shows more than the first, which is
+            // all any match was made on: only a copy of its bytes holds it.
+            if self.pics[d].traits.frames && !self.side(d, k).is_some_and(|e| e.exact) {
+                held.borrow_mut().push(d);
                 return false;
             }
             // In a set with no picture copied at its own frame — a photograph
@@ -728,9 +770,27 @@ impl Ctx<'_> {
                 undecided.borrow_mut().push(d);
                 return false;
             }
+            // A lossless file's pixels are its picture, and a file of its frame
+            // and size whose pixels are not the same is another picture or
+            // cannot be shown not to be: what tells them apart may be finer
+            // than anything the run compares (`own_pixels`). Two such
+            // lossless files are a pair nothing decides, as above, and a lossy
+            // one does not stand in for a lossless one: against a library,
+            // whose lossy copy of a picture answers for it by the user's
+            // decision, only a lossless library file is asked.
+            if self.own_pixels(k, d) {
+                if self.pics[k].traits.lossless {
+                    undecided.borrow_mut().push(d);
+                    return false;
+                }
+                if !self.is_pinned(k) {
+                    held.borrow_mut().push(d);
+                    return false;
+                }
+            }
             // Asked last, so that what it holds back is what it alone held back.
             if self.softer(k, d) {
-                sharper.borrow_mut().push(d);
+                kept_back.borrow_mut().push(d);
                 return false;
             }
             true
@@ -781,7 +841,7 @@ impl Ctx<'_> {
             // And a file only a softer one could have deleted: it holds detail
             // nothing settled has, so it is kept, and deletion goes on from
             // it, rather than left for a look.
-            let mut kept_back: Vec<usize> = sharper.borrow().iter().copied().filter(|d| !action.contains_key(d)).collect();
+            let mut kept_back: Vec<usize> = kept_back.borrow().iter().copied().filter(|d| !action.contains_key(d)).collect();
             kept_back.sort_unstable();
             kept_back.dedup();
             kept_back.retain(|d| !q.contains(d));
@@ -828,10 +888,11 @@ impl Ctx<'_> {
         // A file that stays and was only ever matched weakly is for a person
         // to look at, whatever it was chosen as — unless a deletion rests on
         // it, which makes it the copy to keep.
+        let held: std::collections::HashSet<usize> = held.into_inner().into_iter().collect();
         members
             .iter()
             .map(|&i| {
-                let a = action.get(&i).copied().unwrap_or(Action::Review);
+                let a = action.get(&i).copied().unwrap_or(if held.contains(&i) { Action::Keep } else { Action::Review });
                 let weak_only = !deleters.contains(&i) && !self.sides[i].iter().any(|e| e.clean) && !self.is_pinned(i);
                 let undecided = open.contains(&i) && !deleters.contains(&i) && !self.is_pinned(i);
                 let a = if a == Action::Keep && (weak_only || undecided) { Action::Review } else { a };
@@ -1258,6 +1319,54 @@ mod tests {
         let pics = [pic(&soft, 5_000), pic(&soft, 1_000), pic(&soft, 1_100), pic(&soft, 1_200)];
         let got = suggest(&pics, &links, 0.6, |_| 30.0);
         assert_eq!(got, [Some(Action::Delete), Some(Action::Keep), Some(Action::Delete), Some(Action::Delete)]);
+    }
+
+    /// Every pair of `n` files, matched through the identity at `v`.
+    fn all_pairs(n: usize, v: &Verdict) -> Vec<(usize, usize, Link<'_>)> {
+        (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).map(|(a, b)| (a, b, Link::Edge(v, IDENTITY, false))).collect()
+    }
+
+    /// A file of several pictures is deleted only for a copy of its bytes:
+    /// two animations sharing their first frame, or an animation and a still
+    /// of that frame, are each kept.
+    #[test]
+    fn a_file_of_several_pictures_is_deleted_only_for_its_bytes() {
+        let t = thumb();
+        let still = colourful();
+        let anim = Traits { frames: true, ..colourful() };
+        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes };
+        let v = verdict(1.0, 1.0);
+        let pics = [pic(&anim, 9_000), pic(&anim, 8_000), pic(&still, 1_000), pic(&still, 1_100)];
+        let got = suggest(&pics, &all_pairs(4, &v), 0.6, |_| 30.0);
+        assert!(got[0] == Some(Action::Keep) && got[1] == Some(Action::Keep), "{got:?}");
+        // Its bytes again may go.
+        let got = suggest(&pics[..2], &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
+        assert_eq!(got.iter().filter(|a| **a == Some(Action::Delete)).count(), 1, "{got:?}");
+    }
+
+    /// Two lossless files of one frame and size whose pixels differ are two
+    /// pictures, whatever a majority says: of a lossless original, its lossy
+    /// re-encode and another lossless picture that every measure takes for
+    /// it, neither lossless file is deleted. Nor is a lossless file deleted
+    /// for a lossy one of its size.
+    #[test]
+    fn a_lossless_file_is_deleted_only_for_its_own_pixels() {
+        let t = thumb();
+        let png = Traits { lossless: true, ..colourful() };
+        let jpg = colourful();
+        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes };
+        let v = verdict(1.0, 1.0);
+        let pics = [pic(&png, 5_000), pic(&jpg, 2_000), pic(&png, 5_100)];
+        let got = suggest(&pics, &all_pairs(3, &v), 0.6, |_| 30.0);
+        assert!(got[0] != Some(Action::Delete) && got[2] != Some(Action::Delete), "{got:?}");
+        assert_eq!(got[1], Some(Action::Delete), "the re-encode still goes: {got:?}");
+        // A lossless file and two lossy copies, which outvote it.
+        let pics = [pic(&png, 5_000), pic(&jpg, 2_000), pic(&jpg, 1_500)];
+        let got = suggest(&pics, &all_pairs(3, &v), 0.6, |_| 30.0);
+        assert_eq!(got[0], Some(Action::Keep), "{got:?}");
+        // The same pixels are one picture, and one of them goes.
+        let got = suggest(&pics[..1].iter().chain(&pics[..1]).copied().collect::<Vec<_>>(), &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
+        assert_eq!(got.iter().filter(|a| **a == Some(Action::Delete)).count(), 1, "{got:?}");
     }
 
     #[test]

@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.50.0)
+## Status (0.51.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -54,6 +54,50 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   copies is the original (IMGS-PROVENANCE keeps it in 34 / 266, a faithful
   copy in all; size picks a q97 re-save instead, so it is no answer), and
   colour edits in families of three or more.
+- 0.51.0 (audit fixes A-F; cache format IMGFPC14):
+  - **A**: a lossless file is not deleted for a file of its frame and size
+    whose pixels differ (`suggest::Ctx::own_pixels`): two lossless files
+    are an undecided pair (REVIEW), a lossy one does not stand in for a
+    lossless one. Why: invoice screenshots differing in the total ($1,250 /
+    $9,750) or a line of text agreed at 1.00 and one was deleted (with a
+    re-encode as third file, the other invoice; with a changed line, the
+    original). Nothing the run keeps can see it: their keypoints matched at
+    descriptor distance 0, and a residual at full working resolution read
+    5.4 for the other invoice against 9-10.6 for a plain downscale. So lossy
+    documents (two JPEG invoices) are **still open**.
+  - **B**: `Traits::frames` (GIF/APNG/WebP animation, TIFF pages, HEIF
+    sequence brands, JXL animation): deleted only for its own bytes, never a
+    same-pixels twin (`same_analysis` skips it). Before: two GIFs sharing a
+    first frame were "same pixels" and one DELETE; a 3-page TIFF DELETE for
+    a PNG of page 1.
+  - **C**: TIFF-container camera raw (`DNGVersion`, `CR` at byte 8, a
+    reduced-resolution first directory, or `Make` + `SubIFDs`) is refused
+    as a skip (`decode::CAMERA_RAW`), still in the exact pass. Before: read
+    as its 256-px preview and DELETE beside its JPEG under `-x '*'`.
+  - **D**: a 16-bit master next to two JPEGs of its 8-bit export was
+    outside `TAU` (7.96 summed, 0.5/cell: one requantisation) and was
+    deleted for the q85. Now held by A (KEEP; the q85 stays KEEP too).
+  - **E**: `decode::cgroup_room` (v2 and v1, ancestors included): budget
+    and `max_alloc` no longer use the host's `MemAvailable` alone. Before:
+    under `MemoryMax=300M` one 1.5 MB TIFF OOM-killed the run (137).
+  - **F**: TIFF read a strip / tile row at a time (`decode_tiff_chunks`)
+    and 16-bit PNG rows (`png_rows16`), bit-identical to `decode_whole`
+    (pixels and traits; 8/16-bit, alpha, grey, tiled, LZW, deflate+
+    predictor, JPEG, oriented, truncated). 12000x12000 TIFF peak RSS:
+    8-bit 850 -> 20 MB, 16-bit 1.69 GB -> 19 MB.
+  - Measured: IMGS-ALL pairs and groups byte-identical (1,128,340 pairs),
+    0 lost, 297 / 304, 304 / 304, DELETE 16,873 -> 16,767, REVIEW 3,004 ->
+    3,052 (lossless halftone / channel_swap / posterize edits now kept);
+    pairs.py and IMGS-PROVENANCE unchanged to the row.
+  - Cost, alternating pairs, cold unless said: IMGS-ALL -t 8 (bench.py,
+    ABBAAB) base 2,735 / 2,690 / 2,647 CPU-s, new 2,804 / 2,838 / 2,794,
+    every new run at a lower mean clock (1,789-1,833 vs 1,886-1,943 MHz);
+    IMGS-ALL -t 4 (ABBA) the other way, new 1,632 / 1,675 vs 1,724 /
+    1,746, the new runs at the higher clock. Sign follows the clock, so
+    neither is the code: IMGS -t 4 -v (ABBA x2) base 262.9 / new 261.5 CPU-s
+    mean, decode 93.25 / 93.5 s, features 120 / 120 s; IMGS-ALL cached
+    (ABBA x2) 438.0 / 438.75; per-symbol ymm counts identical; the 304
+    IMGS-ALL TIFFs decode 4% faster streamed. Peak PSS within run spread.
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
   (`out/v31-cost-cliff`).
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -316,6 +360,13 @@ colour and no bar separated it from a faint tint. A palette (indexed PNG,
 JPEG-compressed TIFF; a WebP is lossless when its picture chunk is `VP8L`
 wherever it lies (EXIF or ICC make the first chunk `VP8X`), a JPEG XL when
 its first frame is Modular without XYB (a recompressed JPEG is VarDCT).
+A lossless file is not deleted for a file of its frame and size whose
+pixels are not its own (`own_pixels`): another lossless file makes an
+undecided pair, a lossy one does not stand in for it. A file of several
+pictures (`Traits::frames`) is deleted only for its bytes. Files refused by
+either are KEEP and **delete nothing themselves** (`held`, unlike
+`SOFT_GAP`'s `kept_back`): spreading from them let a kept posterize edit
+delete its original.
 
 A DELETE row carries `kept_copy` (JSON only), which the window shows: the
 end of its chain of holders (`suggest::kept_at_end`), which stays. Deletion
@@ -473,8 +524,10 @@ Decoder hazards:
   `JxlThreadPool::none()`, and a thread already holding a claim never queues.
 - `image` is built with decoders only, no `rayon` (exr spawned a pool per
   file). libheif is dlopened; missing libheif makes HEIF files a problem.
-- `max_alloc` = `MemAvailable` (min 512 MiB), applied to JXL headers and
-  HEIF headers too. PNGs (8-bit) and JXL renders stream a row at a time.
+- `max_alloc` = `MemAvailable` (min 512 MiB, but never above the
+  control group's room, `cgroup_room`), applied to JXL headers and HEIF
+  headers too. PNGs (8- and 16-bit), TIFFs (strips or rows of tiles; not
+  planar, CMYK, palette or 1-bit) and JXL renders stream a row at a time.
   `into_decoder` + `from_decoder` skip the crate's own `limits.reserve`, so
   `decode::fits_in_memory` asks first: without it an 18 KB BMP claiming
   96 x 788M px allocated 227 GB and aborted the whole run (3 of 3,000
@@ -496,6 +549,12 @@ Measurement tools:
 ### Tried and rejected (numbers in `git show 5de81bc:CLAUDE.md`)
 
 Do not retry without new evidence:
+- `TAU` less one shift of every cell alike, up to half a grey level (for
+  a 16-bit master against its 8-bit export): a posterize edit, whose tones
+  move nearly uniformly, came into the keep candidates, was chosen, and
+  deleted its original (IMGS3 `red_rocks_sign1`, 297 -> 296).
+- Fine-detail deletion check from keypoints (correspondence at the fitted
+  transform) or from a full-working-resolution residual: see A above.
 - Second look: narrowing its descent, dropping any variant, cutting its
   candidate list, inlier or correspondence ceilings, dropping unseen words,
   relabelling words instead of descending (-21% of its pairs), an
@@ -598,7 +657,7 @@ Do not retry without new evidence:
   its mode, then renamed; an interrupt removes the half-written one): a
   failed write used to leave the last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC14.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record. Records for
   paths a run did not walk are carried over while the file exists, or

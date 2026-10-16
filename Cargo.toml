@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.50.0"
+version = "0.51.0"
 edition = "2024"
 # The oldest compiler the dependencies build with (`image` and `jxl-oxide`'s
 # parts need 1.88). Said here so that an older one is told so by cargo,
@@ -44,6 +44,10 @@ png = "0.18"
 # be decoded to its luma plane alone; see `decode_jpeg_luma`. Kept at the
 # versions `image` resolves to, so there is one copy of each in the build.
 zune-jpeg = "0.5.15"
+# The decoder `image` itself uses for TIFF, asked directly so that a TIFF can
+# be read a strip or a row of tiles at a time into the reduction; see
+# `decode_tiff_chunks`. Kept at the version `image` resolves to.
+tiff = "0.11.3"
 zune-core = "0.5.3"
 jxl-oxide = "0.12.6"
 # libheif, for HEIC, HEIF and AVIF, is loaded when the first such file is met

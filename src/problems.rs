@@ -138,6 +138,7 @@ pub struct Problems<'a> {
     listed_twice: Tally,
     excluded: Tally,
     mac_metadata: Tally,
+    camera_raw: Tally,
     featureless: Tally,
 
     // Problems: what was asked for and did not happen.
@@ -161,6 +162,7 @@ impl<'a> Problems<'a> {
             listed_twice: Tally::default(),
             excluded: Tally::default(),
             mac_metadata: Tally::default(),
+            camera_raw: Tally::default(),
             unresolved_exclude: Tally::default(),
             unscannable: Tally::default(),
             unreadable: Tally::default(),
@@ -243,6 +245,16 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.mac_metadata, "skip/mac-metadata", path.into());
     }
 
+    /// A camera's raw file in a TIFF container (`decode::CAMERA_RAW`). Its
+    /// first picture is the camera's preview, a few hundred pixels across,
+    /// and read as the photograph it was judged at that size and suggested
+    /// for deletion beside the camera's own JPEG of it. Not read, so a skip:
+    /// nothing failed. A byte-identical copy of one is still found, as the
+    /// exact pass reads bytes, not pictures.
+    pub fn camera_raw(&mut self, path: &str) {
+        record(self.log, &mut self.camera_raw, "skip/camera-raw", path.into());
+    }
+
     /// An image that decoded and described to nothing: no local features at
     /// all, which happens to a blank or near-blank picture — a solid colour,
     /// a smooth gradient. It can match nothing but a byte-identical copy of
@@ -299,7 +311,7 @@ impl<'a> Problems<'a> {
 
     // ---- reporting
 
-    fn skips(&self) -> [(&Tally, &'static str); 10] {
+    fn skips(&self) -> [(&Tally, &'static str); 11] {
         [
             (&self.not_an_image, "file(s) whose extension is not searched, or with none (see -x)"),
             (&self.set_aside, "Trash, thumbnail or snapshot folder(s), not gone into (name one to scan it)"),
@@ -310,6 +322,7 @@ impl<'a> Problems<'a> {
             (&self.listed_twice, "path(s) already listed under another name (named twice, overlapping roots, a symlink or a hard link)"),
             (&self.excluded, "named path(s) skipped because --exclude covers them"),
             (&self.mac_metadata, "macOS metadata file(s) (\"._\" files), which hold no picture"),
+            (&self.camera_raw, "camera raw file(s), which img-fp does not read (only a byte-identical copy is found)"),
             // The label says what it costs rather than what the code did.
             (&self.featureless, "image(s) with no detail to match, such as a blank picture: only an identical copy can match one"),
         ]

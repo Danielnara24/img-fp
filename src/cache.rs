@@ -124,7 +124,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// does not reach (`decode::CellColour`); and `Traits::lossless` is said of a
 /// WebP with metadata, a JPEG-compressed TIFF and a JPEG XL by what their
 /// pictures are (`decode::lossless_format`). A record of 12 says neither.
-const MAGIC: &[u8; 8] = b"IMGFPC13";
+/// 14: a record says whether its file holds more than one picture
+/// (`decode::Traits::frames`), which a record of 13 cannot, and a 16-bit
+/// TIFF or PNG is read as `image` read it but a row at a time.
+const MAGIC: &[u8; 8] = b"IMGFPC14";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -186,7 +189,7 @@ pub struct Key {
     pub ctime: i64,
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC13.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC14.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -472,7 +475,7 @@ fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), tr: &Traits, f: &F
     for v in tr.detail.iter().chain([&tr.colour]).chain(tr.grid.iter()) {
         b.f32(*v)?;
     }
-    b.u32(tr.lossless as u32 | (tr.exif as u32) << 1)?;
+    b.u32(tr.lossless as u32 | (tr.exif as u32) << 1 | (tr.frames as u32) << 2)?;
     b.u32(f.w)?;
     b.u32(f.h)?;
     b.u32(f.kps.len() as u32)?;
@@ -1388,6 +1391,7 @@ where
     let flags = r.u32()?;
     traits.lossless = flags & 1 != 0;
     traits.exif = flags & 2 != 0;
+    traits.frames = flags & 4 != 0;
     let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
     let (tw, th) = (r.u32()?, r.u32()?);
     let scale = r.f32()?;

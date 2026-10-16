@@ -1946,7 +1946,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // byte original, and then whichever file that one shares its analysis
     // with (see `same_analysis`). A file answered for by another is given that
     // file's pairs at the end, as a byte-identical copy is.
-    let pixel_of = timed!(37, same_analysis(&items, |i| twin_of[i] == i && items[i].ok && items[i].feats.len() > 0));
+    // Not a file of several pictures: one whose first picture is another
+    // file's is not that file — two animations from one first frame, a
+    // document whose first page is a picture — so it is matched as any
+    // other file is, and stated as no more than a match.
+    let pixel_of = timed!(37, same_analysis(&items, |i| twin_of[i] == i && items[i].ok && items[i].feats.len() > 0 && !items[i].traits.frames));
     // And of those, which are the same pixels in colour too; see
     // `colour_heads`. A byte copy is its original's colour.
     let chroma = std::sync::Mutex::new(HashMap::new());
@@ -2082,6 +2086,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     for (i, it) in items.iter().enumerate() {
         match &it.err {
             Some(e) if e == decode::MAC_METADATA => problems.mac_metadata(&files[i].display().to_string()),
+            // A raw file is a picture, not read: a skip, and still in its
+            // exact group, since a copy of its bytes is a copy of it.
+            Some(e) if e == decode::CAMERA_RAW => problems.camera_raw(&files[i].display().to_string()),
             // A file a wildcard walk reached that is no picture at all never
             // claimed to be one; see `extensions.rs`.
             Some(_) if not_asked[i] => problems.not_image_content(&files[i].display().to_string()),
@@ -3067,7 +3074,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .iter()
         .enumerate()
         .filter_map(|(i, it)| {
-            let e = it.err.as_ref().filter(|_| !not_asked[i])?;
+            let e = it.err.as_ref().filter(|e| !not_asked[i] && *e != decode::CAMERA_RAW)?;
             let mut f = serde_json::json!({"path": files[i].display().to_string(), "error": e});
             if let Some(b) = report::raw_bytes(&files[i]) {
                 f["path_bytes"] = b.into();

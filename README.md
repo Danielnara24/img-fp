@@ -377,7 +377,7 @@ to stderr.
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC14.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -401,10 +401,19 @@ TGA files have no signature and are recognised by the `.tga` extension.
 A JPEG that is cut off, such as an interrupted download, is still analysed as
 far as it goes, and is marked `DAMAGED` in the report.
 
+An animation (GIF, APNG, WebP, JPEG XL) or a TIFF of several pages is compared
+by its first picture. It is suggested for deletion only when another file
+holds exactly the same bytes, since the rest of its pictures were not
+compared.
+
+Camera raw files (DNG, NEF, ARW, CR2 and the like) are not read, and are
+listed as skipped: their first picture is only the camera's small preview.
+Byte-identical copies of them are still found.
+
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC13.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC13.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC14.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC14.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Use `--clear-cache`
 to start over.

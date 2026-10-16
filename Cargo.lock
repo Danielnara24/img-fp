@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "img-fp"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -829,6 +829,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tiff",
  "walkdir",
  "zune-core",
  "zune-jpeg",
