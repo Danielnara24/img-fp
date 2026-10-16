@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.49.0"
+version = "0.50.0"
 edition = "2024"
 # The oldest compiler the dependencies build with (`image` and `jxl-oxide`'s
 # parts need 1.88). Said here so that an older one is told so by cargo,

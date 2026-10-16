@@ -7,8 +7,10 @@
 //! say so. Everything the run cannot prove redundant stays: as REVIEW when it
 //! was only ever matched weakly but closely enough to be a copy, as KEEP
 //! otherwise. Measured against the benchmark corpora's generated ground
-//! truth, none of 17,293 deletions loses anything; the measurement and the
-//! cases behind each piece are in CLAUDE.md.
+//! truth, none of IMGS-ALL's 16,873 deletions loses anything, and on its
+//! families taken two files at a time (`benchmark/pairs.py`) 24 of 5,394,
+//! where the `extra` test takes a reduction for an enlargement; the
+//! measurement and the cases behind each piece are in CLAUDE.md.
 //!
 //! The pieces, in the order they are applied:
 //!
@@ -36,12 +38,28 @@
 //!   holds something nothing else does, and a thumbnail cannot check what.
 //!   Weak pairs count for that, since a composite matches its photograph
 //!   weakly. Where no file of a set is copied at its own frame — a photograph
-//!   and a crop of it — nothing says which is a composite, and the larger
-//!   frame may delete what it holds.
+//!   and a crop of it — the larger frame may delete what it holds, unless
+//!   what it has besides reads as a canvas rather than more of the picture
+//!   (`on_canvas`): a border, a caption bar, a slide.
 //! - **Of files that hold each other, one is kept**: the one closest to the
 //!   rest in grey (`TAU`), not softer than the rest, then the one leaving out
 //!   least of the others, colour over grey, lossless over lossy, EXIF, and the
 //!   smaller file. Pixel-identical files stand as one, the smallest.
+//! - **Choosing needs a majority.** The keeper is the middle of what the
+//!   files of a frame agree on, and two different pictures of one frame have
+//!   no middle: an original and its re-encode, its edit, its recolouring look
+//!   alike to every measure the run has, and file size or name order decided
+//!   which went. So two pictures of a frame with no third, of which nothing
+//!   measured says one shows more (`more`, or a size gap past `SHRINK` that
+//!   `holds` tested), are neither deleted,
+//!   and both are REVIEW (same bytes or same pixels count as one picture, and
+//!   a library file, being kept whatever it is, decides as before). Taken two
+//!   files at a time, IMGS-ALL's families lost content in 2,241 of 27,355
+//!   pairs that way, the original deleted for its brightened, sharpened,
+//!   recoloured or watermarked copy; now in 22 (and the composites' 133 in
+//!   2, `on_canvas`). The price is REVIEW: 29,368 of the 54,710 files, from
+//!   8,114, every lone re-encode or format conversion among them; on
+//!   IMGS-ALL 3,004 from 2,499, and 386 fewer deletions.
 //! - **Deletion spreads from the keeps**, each file deleted by one already
 //!   settled.
 
@@ -433,10 +451,12 @@ pub fn suggest_pinned(
         components.push(members);
     }
     let ctx = Ctx { pics, links, sides: &sides, all_sides: &all_sides, pinned };
-    let settled: Vec<Vec<(usize, Action, Option<usize>)>> = components.par_iter().map(|m| ctx.settle(m, &colour)).collect();
-    for (i, a, k) in settled.into_iter().flatten() {
+    let settled: Vec<Vec<(usize, Action, Option<usize>, bool)>> = components.par_iter().map(|m| ctx.settle(m, &colour)).collect();
+    let mut undecided = vec![false; n];
+    for (i, a, k, u) in settled.into_iter().flatten() {
         action[i] = Some(a);
         keeper[i] = k;
+        undecided[i] = u;
     }
     // Pinned and reached only by pairs too weak to settle anything: kept.
     for (i, a) in action.iter_mut().enumerate() {
@@ -454,8 +474,9 @@ pub fn suggest_pinned(
             best[*b] = best[*b].max(v.blk);
         }
     }
+    // An undecided pair is a strong match, not another photograph.
     for i in 0..n {
-        if action[i] == Some(Action::Review) && best[i] < REVIEW {
+        if action[i] == Some(Action::Review) && best[i] < REVIEW && !undecided[i] {
             action[i] = Some(Action::Keep);
         }
     }
@@ -532,6 +553,41 @@ impl Ctx<'_> {
         !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.pics[k].traits) - softness(self.pics[d].traits) > SOFT_GAP
     }
 
+    /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
+    /// besides `d` holds no picture.
+    ///
+    /// **Read off the detail both files already measured.** Over its whole
+    /// frame `k`'s detail is `d`'s where `d` lies and the rest's elsewhere,
+    /// so if the rest is flat `k` reads `f` times `d`'s, `f` the share of
+    /// `k`'s frame that is `d`; if it is more of the picture, about `d`'s
+    /// own. `k` is a canvas when it is nearer the first, split at their
+    /// geometric middle, `sqrt(f)`. Eight pixels apart, the coarsest the
+    /// measure has: that is the structure a picture's content holds, which
+    /// two renderings of one region share, where pixel-scale detail is what
+    /// re-encoding, noise and resampling move. At one pixel apart a third of
+    /// slightly cropped photographs read as canvases.
+    ///
+    /// It decides only what nothing else can (`settle`'s `lone`): a set with
+    /// no picture copied at its own frame. On the pairs benchmark
+    /// (`benchmark/pairs.py`), composites deleted their original 971 times,
+    /// 133 of them losing content; with this, 40 and 2 — a caption bar of a
+    /// tenth of the frame is near the split — while crops and turns kept
+    /// 2,729 of their 3,014 deletions. On IMGS-ALL it never applies: every
+    /// family there has its picture copied at its own frame.
+    fn on_canvas(&self, k: usize, d: usize) -> bool {
+        let Some(e) = self.side(d, k) else { return false };
+        let (pd, pk) = (&self.pics[d], &self.pics[k]);
+        let area = |p: &Picture| p.dims.0 as f32 * p.dims.1 as f32;
+        if area(pk) <= 0.0 || area(pd) <= 0.0 {
+            return false;
+        }
+        let f = (area(pd) * (e.sx + e.sy).exp2() / area(pk)).clamp(1e-3, 1.0);
+        // How many of `d`'s pixels one of `k`'s spans.
+        let s = (-(e.sx + e.sy) / 2.0).exp2();
+        let (td, tk) = (&pd.traits.detail, &pk.traits.detail);
+        tk[3] / at_distance(&td[..4], 8.0 * s).max(1e-4) < f.sqrt()
+    }
+
     /// `g` shows all of `f`'s picture, at `f`'s detail or finer.
     fn holds(&self, g: usize, f: usize) -> bool {
         let Some(e) = self.side(f, g) else { return false };
@@ -571,7 +627,9 @@ impl Ctx<'_> {
         }
     }
 
-    fn settle(&self, members: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> Vec<(usize, Action, Option<usize>)> {
+    /// Each member's action, the file a deletion rests on, and whether it is
+    /// one of an undecided pair (which stays REVIEW however it agrees).
+    fn settle(&self, members: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> Vec<(usize, Action, Option<usize>, bool)> {
         let mut action: HashMap<usize, Action> = HashMap::new();
         let mut keeper: HashMap<usize, usize> = HashMap::new();
         let frame_any = |f: usize, g: usize| -> bool {
@@ -607,26 +665,6 @@ impl Ctx<'_> {
         // found corpus (0.1 s), since `whole` is memoised by pair.
         // Files a deletion was refused because the would-be keeper is softer
         // (`Ctx::softer`); see the loop below.
-        let sharper: std::cell::RefCell<Vec<usize>> = Default::default();
-        let mut can_delete = |k: usize, d: usize| -> bool {
-            if !self.holds(k, d) {
-                return false;
-            }
-            // In a set with no picture copied at its own frame — a photograph
-            // and its crop, say — nothing says which file is a composite, and
-            // the larger frame may delete what it holds.
-            let lone = !any_plain;
-            let shape = self.same(k, d) || (self.strict_in(d, k) && part[&d] && (plain[&k] || lone));
-            if !shape || whole(k, d) > WHOLE_RESIDUAL {
-                return false;
-            }
-            // Asked last, so that what it holds back is what it alone held back.
-            if self.softer(k, d) {
-                sharper.borrow_mut().push(d);
-                return false;
-            }
-            true
-        };
         // Classes: files of one frame, each holding the other.
         let mut class: HashMap<usize, usize> = HashMap::new();
         let mut classes: Vec<Vec<usize>> = Vec::new();
@@ -651,6 +689,52 @@ impl Ctx<'_> {
             list.sort_unstable();
             classes.push(list);
         }
+        // How many different pictures each class holds: its files, each
+        // set of the same bytes or the same pixels counted once.
+        let distinct: Vec<usize> = classes
+            .iter()
+            .map(|c| c.iter().enumerate().filter(|&(i, &f)| !c[..i].iter().any(|&g| self.side(f, g).is_some_and(|e| e.exact))).count())
+            .collect();
+        // Files a deletion was refused because their class is two pictures
+        // and nothing says which is the original; see the loop below.
+        let undecided: std::cell::RefCell<Vec<usize>> = Default::default();
+        let sharper: std::cell::RefCell<Vec<usize>> = Default::default();
+        let mut can_delete = |k: usize, d: usize| -> bool {
+            if !self.holds(k, d) {
+                return false;
+            }
+            // In a set with no picture copied at its own frame — a photograph
+            // and its crop, say — nothing says which file is a composite, and
+            // the larger frame may delete what it holds: unless what it has
+            // besides reads as a canvas rather than more of the picture.
+            let lone = !any_plain && !self.on_canvas(k, d);
+            let shape = self.same(k, d) || (self.strict_in(d, k) && part[&d] && (plain[&k] || lone));
+            if !shape || whole(k, d) > WHOLE_RESIDUAL {
+                return false;
+            }
+            // Two different pictures of one frame and nothing else of it, and
+            // nothing measured says which shows more: nothing says which is
+            // the original. Something has when the two differ in size by more
+            // than `SHRINK`, where `holds` asked whether the larger's extra
+            // pixels hold detail, or when one shows detail the other lacks
+            // (`more`). A pinned file is kept whatever it is, so against a
+            // library the question is not asked.
+            if !self.is_pinned(k)
+                && class.get(&k).is_some_and(|&c| class.get(&d) == Some(&c) && distinct[c] < 3)
+                && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
+                && !self.more(k, d)
+                && !self.more(d, k)
+            {
+                undecided.borrow_mut().push(d);
+                return false;
+            }
+            // Asked last, so that what it holds back is what it alone held back.
+            if self.softer(k, d) {
+                sharper.borrow_mut().push(d);
+                return false;
+            }
+            true
+        };
         let mut deleters: std::collections::HashSet<usize> = Default::default();
         // The pinned files are kept before anything is chosen, and deletion
         // spreads from them first: a file both a pinned file and another
@@ -733,6 +817,14 @@ impl Ctx<'_> {
                 }
             }
         }
+        // A class of two pictures whose deletion was refused for want of a
+        // third is for a person to look at, both of it: the one `choose`
+        // picked is no likelier the original than the other. Unless a
+        // deletion rests on it, which makes it the copy to keep.
+        let mut open: std::collections::HashSet<usize> = Default::default();
+        for &d in undecided.borrow().iter().filter(|d| !action.contains_key(d)) {
+            open.extend(classes[class[&d]].iter().copied());
+        }
         // A file that stays and was only ever matched weakly is for a person
         // to look at, whatever it was chosen as — unless a deletion rests on
         // it, which makes it the copy to keep.
@@ -741,7 +833,9 @@ impl Ctx<'_> {
             .map(|&i| {
                 let a = action.get(&i).copied().unwrap_or(Action::Review);
                 let weak_only = !deleters.contains(&i) && !self.sides[i].iter().any(|e| e.clean) && !self.is_pinned(i);
-                (i, if a == Action::Keep && weak_only { Action::Review } else { a }, keeper.get(&i).copied())
+                let undecided = open.contains(&i) && !deleters.contains(&i) && !self.is_pinned(i);
+                let a = if a == Action::Keep && (weak_only || undecided) { Action::Review } else { a };
+                (i, a, keeper.get(&i).copied(), undecided && a == Action::Review)
             })
             .collect()
     }
@@ -1193,9 +1287,12 @@ mod tests {
             let got = suggest(&pics[..2], &[(0, 1, Link::Edge(v, IDENTITY, inverted))], 0.6, |_| 30.0);
             assert_eq!(got, [Some(want), Some(want)]);
         }
-        // Strong, or weak and agreeing almost everywhere, it settles them.
+        // Strong, or weak and agreeing almost everywhere, it settles them,
+        // beside a third copy that says which is the picture.
+        let strong = verdict(1.0, 1.0);
         for v in [&c, &verdict(0.97, 0.5)] {
-            let got = suggest(&pics[..2], &[(0, 1, Link::Edge(v, IDENTITY, false))], 0.6, |_| 30.0);
+            let links = [(0, 1, Link::Edge(v, IDENTITY, false)), (0, 2, Link::Edge(&strong, IDENTITY, false)), (1, 2, Link::Edge(&strong, IDENTITY, false))];
+            let got = suggest(&pics, &links, 0.6, |_| 30.0);
             assert!(got.contains(&Some(Action::Keep)) && got.contains(&Some(Action::Delete)), "{got:?}");
         }
         assert_eq!(suggest(&pics, &[], 0.6, |_| 30.0), [None, None, None], "a file in no pair has no action");
@@ -1210,12 +1307,65 @@ mod tests {
         let v = verdict(0.99, 0.98);
         let flip: Affine = [-1.0, 0.0, 127.0, 0.0, 1.0, 0.0];
         assert_eq!(suggest(&pics, &[(0, 1, Link::Edge(&v, flip, false))], 0.6, |_| 30.0), [Some(Action::Review); 2]);
-        // Beside an upright copy, the upright pair settles and the mirror waits.
-        let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }];
-        let links = [(0, 1, Link::Edge(&v, IDENTITY, false)), (1, 2, Link::Edge(&v, flip, false)), (0, 2, Link::Edge(&v, flip, false))];
+        // Beside upright copies, they settle and the mirror waits.
+        let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }, Picture { bytes: 4_000, ..pic }];
+        let links = [
+            (0, 1, Link::Edge(&v, IDENTITY, false)),
+            (0, 3, Link::Edge(&v, IDENTITY, false)),
+            (1, 3, Link::Edge(&v, IDENTITY, false)),
+            (1, 2, Link::Edge(&v, flip, false)),
+            (0, 2, Link::Edge(&v, flip, false)),
+        ];
         let got = suggest(&pics, &links, 0.6, |_| 30.0);
         assert_eq!(got[2], Some(Action::Review), "{got:?}");
-        assert!(got[..2].contains(&Some(Action::Keep)) && got[..2].contains(&Some(Action::Delete)), "{got:?}");
+        assert!(got.contains(&Some(Action::Keep)) && got.contains(&Some(Action::Delete)), "{got:?}");
+    }
+
+    /// Two different pictures of one frame and nothing else of it: neither
+    /// is deleted, and both are left for a look, however closely they agree.
+    /// A third settles it; the same pixels need none; a library file is kept
+    /// whatever it is, and settles it as before.
+    #[test]
+    fn two_pictures_of_one_frame_alone_are_both_left_for_a_look() {
+        let (t, tr) = (thumb(), colourful());
+        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000 };
+        let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }];
+        let (v, low) = (verdict(1.0, 1.0), verdict(0.8, 0.9));
+        for v in [&v, &low] {
+            let got = suggest(&pics[..2], &[(0, 1, Link::Edge(v, IDENTITY, false))], 0.6, |_| 30.0);
+            assert_eq!(got, [Some(Action::Review); 2], "{}", v.blk);
+        }
+        let links = [(0, 1, Link::Edge(&v, IDENTITY, false)), (0, 2, Link::Edge(&v, IDENTITY, false)), (1, 2, Link::Edge(&v, IDENTITY, false))];
+        let got = suggest(&pics, &links, 0.6, |_| 30.0);
+        assert_eq!(got.iter().filter(|a| **a == Some(Action::Delete)).count(), 2, "{got:?}");
+        assert!(suggest(&pics[..2], &[(0, 1, Link::Exact)], 0.6, |_| 30.0).contains(&Some(Action::Delete)));
+        let (got, keeper) = suggest_pinned(&pics[..2], &[(0, 1, Link::Edge(&v, IDENTITY, false))], 0.6, |_| 30.0, &[true, false]);
+        assert_eq!((got, keeper), (vec![Some(Action::Keep), Some(Action::Delete)], vec![None, Some(0)]));
+    }
+
+    /// A picture and a larger frame holding it with nothing else of either:
+    /// the larger deletes it when what it has besides is more of the picture
+    /// (an uncropped original), and not when it is a flat canvas (a caption
+    /// bar, a border), which its detail, spread over more frame, says; then
+    /// both are kept, as a composite and its photograph are.
+    #[test]
+    fn a_larger_frame_deletes_what_it_holds_unless_the_rest_is_canvas() {
+        // A smooth picture, so that its edge reads alike in both thumbnails.
+        let t = Thumb::new(16, 12, 0.125, (0..12).flat_map(|y| (0..16).map(move |x| (x * 12 + y * 7) as u8)).collect());
+        // The small picture is the larger frame's left half, thumbnail and all.
+        let half = Thumb::new(8, 12, 0.125, (0..12).flat_map(|y| t.px[y * 16..y * 16 + 8].to_vec()).collect());
+        let photo = Traits { detail: [8.0, 12.0, 16.0, 20.0, 8.0, 12.0], colour: 30.0, ..Default::default() };
+        // Half the larger frame is the photograph: on a flat canvas its
+        // detail reads half; as more of the photograph, the same.
+        let canvas = Traits { detail: [4.0, 6.0, 8.0, 10.0, 4.0, 6.0], colour: 30.0, ..Default::default() };
+        let small = Picture { dims: (64, 96), work: (64, 96), thumb: &half, traits: &photo, bytes: 1_000 };
+        let v = verdict(1.0, 1.0);
+        // Both kept: a composite and its photograph are two things to keep.
+        for (traits, want) in [(&photo, Action::Delete), (&canvas, Action::Keep)] {
+            let large = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes: 2_000 };
+            let got = suggest(&[small, large], &[(0, 1, Link::Edge(&v, IDENTITY, false))], 0.6, |_| 30.0);
+            assert_eq!(got[0], Some(want), "{got:?}");
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.49.0)
+## Status (0.50.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -40,11 +40,20 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   the run (`fits_in_memory`), and decoder panics are caught; reports and the
   dump are written whole (`report::write_whole`); `lost+found` set aside; the
   window names a kept copy's folder and zooms its images (`[-][+]`).
-  Measured weak points of the content rule on pairs, open, under the
-  constraints in memory: a q95 original deleted for its q50 re-encode
-  (13/16, smaller file wins); a tone-edit pair kept by path order (no grey
-  majority of two); colour-only edits invisible to `whole_worst`; a lone
-  padded or captioned copy deleting its original.
+- 0.50.0: the keep rule on two-file families (`benchmark/pairs.py`:
+  every seed's original + one variant, each transform alone). 0.49.0 lost
+  content in 2,241 of 27,355 pairs (an original deleted for its brightened,
+  recoloured, sharpened, watermarked copy, or for a composite holding it);
+  now 24, all where `extra` takes a reduction past `SHRINK` for an
+  enlargement, as before. Two rules: a frame of two different pictures
+  that nothing measured separates is undecided, both REVIEW; and a lone
+  larger frame whose extra area reads as canvas (`on_canvas`) does not delete
+  what it holds. REVIEW in pairs 8,114 -> 29,368 of 54,710 files (every lone
+  re-encode and format conversion). IMGS-ALL: 16,873 DELETE, none lost,
+  297 / 304, 304 / 304, REVIEW 3,004. Still open: which of several lossy
+  copies is the original (IMGS-PROVENANCE keeps it in 34 / 266, a faithful
+  copy in all; size picks a q97 re-save instead, so it is no answer), and
+  colour edits in families of three or more.
 - Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
   (`out/v31-cost-cliff`).
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -110,6 +119,7 @@ benchmark/
   score.py      F1 vs generated ground truth
   analyse.py    + traps vs cross-family, merges, two seed halves
   suggest_score.py / against_score.py   score `action` / --against reports
+  pairs.py      the keep rule on two-file families (each transform alone)
   replay.py     replay anchor tier + bridge test off one --dump
   runners/      one wrapper per competitor -> canonical JSON
   corpus/       transforms.py (CATALOGUE), make_variants.py, make_combined.py,
@@ -251,11 +261,15 @@ Each was measured; changing one needs a re-measure.
 User requirement: **a deletion never loses picture content.** Keeps may be
 the original, a lossless copy, a re-encode, or a composite holding the whole
 photo. REVIEW is for weak matches close to a copy; nothing acts on it.
-On IMGS-ALL at 512: 17,259 DELETE, none loses content, 297/304 families
-keep the original or a lossless copy, 304/304 a faithful full copy (0.48.0:
-17,300; 0.47.0:
+On IMGS-ALL at 512: 16,873 DELETE, none loses content, 297/304 families
+keep the original or a lossless copy, 304/304 a faithful full copy (0.49.0:
+17,259; 0.48.0: 17,300; 0.47.0:
 17,299, 0, 276, 304; 0.45.0: 17,986, 1 lost, 272, 299). Scored by `suggest_score.py`
-(`benchmark/suggest_score.py REPORT.json`, ~100 s a cached run).
+(`benchmark/suggest_score.py REPORT.json`, ~100 s a cached run), and on
+two-file families by `pairs.py` (`run BINARY OUT --cache CACHE`, a cache
+an IMGS-ALL run made, ~11 min; `score`, `compare`): **IMGS-ALL cannot see
+the pair regime**, where every majority the rule chooses by is missing.
+0.49.0: 2,241 of 27,355 pairs lost content; now 24.
 
 Rules (constants in `suggest.rs` with reasons): clean pair at 0.85 (its own
 bar now, not `Policy::clean`'s; 0.85/0.9/0.95 lose the same, delete ~the
@@ -274,7 +288,15 @@ every deletion (`whole_worst`, 12 grey levels on a 64-sample grid,
 composites of one photograph deleted each other; losses at 32/48/64/96:
 3/1/0/0), every holder asked in turn
 (a cap of three tries, removed: it cost 108 safe deletions and no time);
-composites are deleted only by their own copies; no file is deleted by one
+composites are deleted only by their own copies; where no picture of a set
+is copied at its own frame, a larger frame deletes what it holds only if its
+8-px detail reads nearer "the rest is more picture" than "the rest is flat"
+(`on_canvas`, split at sqrt of the share: at 1 px a third of slight crops
+read as canvas; composites deleting their original in pairs 971 -> 40, losing
+content 133 -> 2); a class of two different pictures of one frame (twins
+count once) that neither `more` nor a size gap past `SHRINK` separates
+deletes nothing and is REVIEW, both files, however they agree (not against a
+library: a pinned file decides); no file is deleted by one
 of its size softer by more than `SOFT_GAP` = 0.15 (the p95 softening of a
 faithful lossy re-encode; the keeper is chosen by majority, and nine soft
 enlargements outvoted their original; a file held back only by this is
