@@ -16,8 +16,8 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
   99.57% precision, 96.90% recall, 47 perfect transforms; 7 cross-family
   pairs, no family merge (`out/v33-fit-pyramid/RESULTS.md`; 0.45.0 was
-  0.9805 / 95 cross-family). 640 and the per-corpus figures below are
-  0.44.0's, not re-measured. At 640: F1 0.9826. SSCD, the best competitor:
+  0.9805 / 95 cross-family). At 640 (0.51.0, `out/v36-cliffs`): F1
+  0.9846, recall 97.40%, 8 cross-family, no merge. SSCD, the best competitor:
   F1 0.748, and every other tool has zero perfect transforms
   (`benchmark/BASELINE.md`, field in `out/v17-all4`).
 - 0.47.0 (audit fixes, `out/v35-audit`): F1 **0.9823**, recall 96.93%,
@@ -98,8 +98,8 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     mean, decode 93.25 / 93.5 s, features 120 / 120 s; IMGS-ALL cached
     (ABBA x2) 438.0 / 438.75; per-symbol ymm counts identical; the 304
     IMGS-ALL TIFFs decode 4% faster streamed. Peak PSS within run spread.
-- Per-corpus at 512: IMGS 0.9711, IMGS2 0.9808, IMGS3 0.9861, IMGS4 0.9854
-  (`out/v31-cost-cliff`).
+- Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
+  IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
 - Released binary is the **plain x86-64 build** (`target/plain`), which
   `bench.py` measures by default. It differs from a native build only on
@@ -438,19 +438,23 @@ a parameter is the cheap experiment; run it before adding one.
 - Self-deriving the aligned-points bar from a null model was built and is
   worse (coincidence was never the binding constraint).
 
-Cliffs at 0.44.0, distance from shipped to nearest merge
-(`out/v31-cost-cliff/cliffs.txt`). **Not re-measured since 0.46's fit and
-pyramid changes, which move every pixel figure; only the clean bar was.**
+Cliffs at 0.51.0, distance from shipped to nearest merge, on the four
+corpora and IMGS-ALL (`out/v36-cliffs/cliffs.txt`; 0.44.0's in
+`out/v31-cost-cliff`).
 
 | option | 512 (default) | 640 |
 |---|---|---|
-| `--min-aligned-points` 10 | none down to 3 | 3 steps (`bust` at 7) |
-| `--min-frame-overlap` 0.85 | 0.35 (`docks`, `Henares` at 0.3) | 0.25 (`docks` at 0.6) |
-| `--min-pixel-correlation` 0.6 | none 0.2-0.8 | 0.2 below (`game` at 0.4) |
+| `--min-aligned-points` 10 | none down to 3 | none down to 3 (0.44.0: `bust` at 7) |
+| `--min-frame-overlap` 0.85 | 0.35 (`docks` at 0.5) | 0.25 (`docks` at 0.6) |
+| `--min-pixel-correlation` 0.6 | none 0.2-0.8 | 0.2 below (`game` at 0.4, IMGS3) |
 | `-k` 150 | none from 10 up | none |
 
-`-k` below 25 measures the propagation budget (clusters get starred), not the
-candidate list. Every remaining merge is two photographs of one scene.
+`bust` no longer merges at 640 on any corpus, and `Henares` no longer joins
+`docks` at 512 overlap 0.3. Nearest misses (no seed pair >= 300): IMGS 640
+correlation 0.2, `product-white-bg`|`sunflowers` 261; IMGS-ALL 640 overlap
+<= 0.5, `Antoniego` 258-262. `-k` below 25 measures the propagation budget
+(clusters get starred), not the candidate list. Every remaining merge is two
+photographs of one scene.
 
 Internal constants, measured (`out/v24-constants`, `out/v25-slack-budget`):
 thumbnail 128 is the low edge of a plateau; **`GRID / BLOCK` (48/8 = 6 blocks
