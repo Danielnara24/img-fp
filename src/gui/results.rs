@@ -8,14 +8,14 @@
 //! **The pictures take the page, and the words wait to be asked for.** A
 //! group's images fill the space beside the strip of groups, each at its own
 //! shape (`mosaic.rs`), and nothing is written on them but what a person needs
-//! to see at a glance: which one is the reference, which are weak matches, and
+//! to see at a glance: which one is the reference, which are to be looked at, and
 //! which are marked. Pointing at an image, or moving to it with the keyboard,
 //! puts its details in the bar at the bottom of the page, so the picture being
 //! judged is never covered.
 //!
 //! **The scan's suggestion is shown and offered, never applied.** The bar says
-//! what img-fp suggests for the image (keep, delete, or "weak match"), and a
-//! weak match has a yellow corner. *Mark suggested deletions* makes the marks
+//! what img-fp suggests for the image (keep, delete, or review), and one to
+//! review has a yellow corner. *Mark suggested deletions* makes the marks
 //! exactly the files suggested for deletion, in every group, unmarking any
 //! other, by the user's decision; the person still moves them to the Trash
 //! themselves. *Suggestion rule* chooses the rule, and changes the suggestions
@@ -99,7 +99,7 @@ overlay.tile button.tick { min-width: 22px; min-height: 22px; padding: 0; margin
   background: alpha(black, 0.3); color: transparent; box-shadow: 0 1px 3px alpha(black, 0.5); opacity: 0; }
 overlay.tile:hover button.tick, overlay.tile.picked button.tick, overlay.tile.marked button.tick { opacity: 1; }
 overlay.tile.marked button.tick { background: @error_color; border-color: @error_color; color: white; }
-overlay.tile .weak { min-width: 20px; min-height: 20px; background-image: linear-gradient(to bottom left, @warning_color 50%, transparent 50%); }
+overlay.tile .look { min-width: 20px; min-height: 20px; background-image: linear-gradient(to bottom left, @warning_color 50%, transparent 50%); }
 overlay.tile label.pill, .strip label.badge { background-color: alpha(black, 0.68); color: white; border-radius: 999px; padding: 0 7px; font-size: smaller; font-weight: bold; }
 .strip label.badge.marked, .tree label.badge.marked { background-color: @error_color; }
 .tree label.badge { border-radius: 999px; padding: 0 7px; font-size: smaller; font-weight: bold; color: white; }
@@ -156,7 +156,7 @@ struct State {
     kept_of: Vec<Option<u32>>,
     /// Files the content rule deleted and now leaves for a look because the
     /// file that held them has gone (`drop_gone`) or changed since the scan
-    /// (`note_changed`): a REVIEW that is not a weak match.
+    /// (`note_changed`): a REVIEW that is not one of the scan's own.
     unheld: Vec<Unheld>,
     /// Files changed since the scan (`last::changed_since`): not the files it
     /// judged, so no rule suggests deleting them, nor anything resting on
@@ -167,7 +167,7 @@ struct State {
     /// The correlation bar the scan ran at, which the correlation rule cuts
     /// from.
     min_correlation: f32,
-    /// The time, in seconds since 1970, a file changed after is not the file
+    /// The time, in nanoseconds since 1970, a file changed after is not the file
     /// the scan judged (`last::Notes::changed_after`): what the Trash and the
     /// suggestions check each file against.
     changed_after: Option<u64>,
@@ -205,9 +205,10 @@ impl State {
         self.unheld.get(id as usize).copied().unwrap_or_default()
     }
 
-    /// Whether file `id` is a weak match to look at: a REVIEW, except one
-    /// that is only there because it or its kept copy has gone or changed.
-    fn weak(&self, id: u32) -> bool {
+    /// Whether file `id` is for a person to look at, as the scan said: a
+    /// REVIEW, except one that is only there because it or its kept copy has
+    /// gone or changed since.
+    fn to_look_at(&self, id: u32) -> bool {
         self.action(id) == Some(Action::Review)
             && !self.changed.get(id as usize).copied().unwrap_or(false)
             && !(MODES[self.mode] == SuggestMode::Content && self.unheld_of(id) != Unheld::No)
@@ -351,7 +352,7 @@ struct Card {
 struct Tile {
     child: gtk::Overlay,
     still: Still,
-    weak: gtk::Box,
+    look: gtk::Box,
     pill: gtk::Label,
     /// The image it shows, by its place in the group or folder.
     item: Rc<Cell<Option<usize>>>,
@@ -559,7 +560,7 @@ impl Results {
         let rule = gtk::DropDown::from_strings(RULES);
         rule.set_tooltip_text(Some(
             "Keep all content: delete only an image that a kept image shows all of, at about the same detail.\n\
-             By correlation: keep each group's reference image, delete the images that agree with it closely, keep the rest, and call weak matches weak.\n\
+             By correlation: keep each group's reference image, delete the images that agree with it closely, keep the rest, and leave weak matches to review.\n\
              Reference images only: keep each group's reference image and delete everything else.\n\
              The last two can suggest deleting an image that shows something the reference image does not, such as a collage or the uncropped photo.",
         ));
@@ -1842,10 +1843,10 @@ impl Results {
         }
         let (review, marked) = {
             let s = self.state.borrow();
-            (s.weak(m.id), s.is_marked(m.id))
+            (s.to_look_at(m.id), s.is_marked(m.id))
         };
-        if t.weak.is_visible() != review {
-            t.weak.set_visible(review);
+        if t.look.is_visible() != review {
+            t.look.set_visible(review);
         }
         set_class(&t.child, "review", review);
         set_class(&t.child, "marked", marked);
@@ -1888,8 +1889,8 @@ impl Results {
         let veil = gtk::Box::builder().css_classes(["veil"]).can_target(false).build();
         child.add_overlay(&veil);
         child.add_overlay(&tick);
-        let weak = gtk::Box::builder().css_classes(["weak"]).halign(gtk::Align::End).valign(gtk::Align::Start).tooltip_text("Weak match").visible(false).build();
-        child.add_overlay(&weak);
+        let look = gtk::Box::builder().css_classes(["look"]).halign(gtk::Align::End).valign(gtk::Align::Start).tooltip_text(REVIEW_TIP).visible(false).build();
+        child.add_overlay(&look);
         // Shortened rather than cut off on a tile narrower than it, which a
         // tall picture's is once the images are made small (`Mosaic::zoom`).
         let pill = gtk::Label::builder()
@@ -1976,7 +1977,7 @@ impl Results {
             }
         });
         child.add_controller(motion);
-        Tile { child, still, weak, pill, item }
+        Tile { child, still, look, pill, item }
     }
 
     /// The image menu at card `i`: at `at` in the card, or at its middle.
@@ -2874,10 +2875,10 @@ impl Prepared {
         self.analysed
     }
 
-    /// A file changed after `secs` (since 1970) is not the file the scan
+    /// A file changed after `ns` (nanoseconds since 1970) is not the file the scan
     /// judged (`last::Notes::changed_after`).
-    pub fn set_changed_after(&mut self, secs: u64) {
-        self.changed_after = Some(secs);
+    pub fn set_changed_after(&mut self, ns: u64) {
+        self.changed_after = Some(ns);
     }
 
     /// It is the scan kept on disk as `id` (`last::Notes::id`).
@@ -2918,12 +2919,19 @@ pub fn prepare(found: Found) -> Prepared {
     Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots: Vec::new(), min_correlation, changed_after: None }
 }
 
+/// What a REVIEW is, for the yellow corner: either of the two reasons the
+/// content rule leaves a file to a person (`suggest.rs`), a match too weak to
+/// delete on, or one of two versions of one picture where nothing the scan
+/// measured says which is the original. The second is most of them, and it
+/// was labelled "weak match" beside a correlation of 1.00.
+const REVIEW_TIP: &str = "Review: a close copy that could not be confirmed, or one of two versions of the same picture where nothing says which is the original";
+
 /// What is suggested for a file, in a few words.
 fn suggestion(action: Option<Action>) -> &'static str {
     match action {
         Some(Action::Keep) => "suggested: keep",
         Some(Action::Delete) => "suggested: delete",
-        Some(Action::Review) => "weak match",
+        Some(Action::Review) => "suggested: review",
         None => "",
     }
 }
@@ -3003,7 +3011,7 @@ mod tests {
         assert_eq!((s.kept_of[1], s.unheld[1]), (None, Unheld::Changed));
         s.mode = 0;
         assert_eq!(s.said(1), "review: its kept copy has changed");
-        assert!(!s.weak(1), "not a weak match");
+        assert!(!s.to_look_at(1), "not one the scan left to look at");
         for mode in 1..3 {
             assert_eq!(s.by_mode[mode], vec![None; 3], "{:?}: judged by a reference that changed", MODES[mode]);
         }

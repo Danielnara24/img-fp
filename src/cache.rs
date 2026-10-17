@@ -1561,10 +1561,9 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
 /// the next time it was plugged in. So a record whose file is missing is kept
 /// when the file lies on a volume that is not mounted (`unmounted`).
 pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
-    // On every thread: one `stat` per record of every other folder this cache
-    // has seen, which on a network share is a round trip apiece.
     type Kept<'a> = Vec<(&'a Path, Span)>;
-    let (mut kept, missing): (Kept, Kept) = cached.par_iter().map(|(path, e)| (path.as_path(), e.2)).partition(|(path, _)| !gone(path));
+    let gone = gone(cached.keys().map(PathBuf::as_path));
+    let (mut kept, missing): (Kept, Kept) = cached.iter().map(|(path, e)| (path.as_path(), e.2)).partition(|(path, _)| !gone.contains(path));
     // Each volume asked once, however many of its records are missing.
     let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
     for (path, span) in missing {
@@ -1576,20 +1575,38 @@ pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
     kept
 }
 
-/// Whether the file a record names is no longer there: the filesystem says
-/// so, and not merely that it cannot be asked right now.
+/// Which of `paths`, the files records name, are no longer there: the
+/// filesystem says so, and not merely that it cannot be asked right now.
 ///
 /// `Path::exists` is false on any error, so a file in a folder made
 /// unreadable, on an sshfs mount whose connection dropped ("Transport
 /// endpoint is not connected") or behind a stale NFS handle counted as
 /// deleted, and once such records were a quarter of the file the next scan
-/// of anything else compacted them away. Only "no such file", or a part of
-/// the path that is no longer a folder, says the file has gone.
-pub fn gone(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(_) => false,
-        Err(e) => matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+/// of anything else compacted them away. Only a folder's listing without the
+/// name, or a folder that is itself no longer there (or no longer a folder),
+/// says a file has gone.
+///
+/// **A folder at a time.** Every run asks this of every record of every
+/// folder the cache has seen but the run did not scan, and it was a `stat` a
+/// file: a round trip apiece on a network share, for a library there of
+/// thousands of photographs on every scan of anything else. A listing of
+/// each folder is one or a few, whatever it holds.
+pub fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> std::collections::HashSet<&'a Path> {
+    let mut by_folder: HashMap<&Path, Vec<&Path>> = HashMap::new();
+    for p in paths {
+        by_folder.entry(p.parent().unwrap_or(Path::new("/"))).or_default().push(p);
     }
+    by_folder
+        .into_par_iter()
+        .flat_map_iter(|(folder, files)| {
+            let names: Option<std::collections::HashSet<std::ffi::OsString>> = match std::fs::read_dir(folder) {
+                Ok(list) => list.map(|e| e.map(|e| e.file_name())).collect::<std::io::Result<_>>().ok(),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Some(Default::default()),
+                Err(_) => None,
+            };
+            files.into_iter().filter(move |f| names.as_ref().is_some_and(|n| f.file_name().is_none_or(|f| !n.contains(f))))
+        })
+        .collect()
 }
 
 /// The folder a removable drive or a network share holding `path` is mounted
@@ -2136,6 +2153,24 @@ mod tests {
         let s = &got[Path::new("shared.jpg")];
         assert_eq!((s.0.len, &s.1.as_ref().unwrap().feats.desc), (2, &f2.desc), "the later record still wins");
         assert_eq!(store.records(), 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file is gone when its folder's listing lacks it or the folder is
+    /// gone; one beside it that is there is not.
+    #[test]
+    fn gone_is_asked_a_folder_at_a_time() {
+        let dir = scratch("gone");
+        let (here, deleted) = (dir.join("a.jpg"), dir.join("b.jpg"));
+        std::fs::write(&here, b"x").unwrap();
+        let in_gone_folder = dir.join("removed/c.jpg");
+        let in_file = here.join("d.jpg");
+        let asked = [here.as_path(), deleted.as_path(), in_gone_folder.as_path(), in_file.as_path()];
+        let mut found: Vec<&Path> = gone(asked.into_iter()).into_iter().collect();
+        found.sort();
+        let mut want = vec![deleted.as_path(), in_file.as_path(), in_gone_folder.as_path()];
+        want.sort();
+        assert_eq!(found, want);
         std::fs::remove_dir_all(&dir).ok();
     }
 

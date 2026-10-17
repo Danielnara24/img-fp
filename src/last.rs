@@ -39,10 +39,13 @@ pub struct Notes {
     pub took: String,
     /// Seconds since 1970 when it finished.
     pub finished: u64,
-    /// Seconds since 1970 when it started, before anything was read: a file
-    /// changed since then may have changed after the scan read it. `None` in
-    /// a scan kept by an earlier version, which said only when it finished.
+    /// Nanoseconds since 1970 when it started, before anything was read: a
+    /// file changed since then may have changed after the scan read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ns: Option<u64>,
+    /// The same to the second, as a scan kept by 0.48 to 0.51 says it; `None`
+    /// in one kept by an earlier version, which said only when it finished.
+    #[serde(default, skip_serializing)]
     pub started: Option<u64>,
     /// Which scan this is, for its marks: nanoseconds since 1970 when it
     /// finished, which two scans do not share.
@@ -56,51 +59,64 @@ pub struct Notes {
 }
 
 impl Notes {
-    /// Notes for a scan finishing now, which started at `started` (seconds
-    /// since 1970) and took `secs`.
-    pub fn now(problems: bool, started: u64, secs: u64, log: String, roots: Vec<PathBuf>) -> Notes {
+    /// Notes for a scan finishing now, which started at `started_ns`
+    /// (`now_nanos`) and took `secs`.
+    pub fn now(problems: bool, started_ns: u64, secs: u64, log: String, roots: Vec<PathBuf>) -> Notes {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         Notes {
             problems,
             took: format!("{}:{:02}", secs / 60, secs % 60),
             finished: now.as_secs(),
-            started: Some(started),
+            started_ns: Some(started_ns),
+            started: None,
             id: now.as_nanos() as u64,
             log,
             roots,
         }
     }
 
-    /// The time a file changed after is not the file this scan judged
-    /// (`changed_since`): the second before the scan started.
+    /// The time, in nanoseconds since 1970, a file changed after is not the
+    /// file this scan judged (`changed_since`): when the scan started.
     ///
     /// **Its start, not its end.** A scan reads each file once, somewhere in
     /// the middle, and a file written after that — an edit saved during a
     /// long scan — changed before the scan finished, so measured against the
     /// end it passed for the file the scan judged, and its length alone could
-    /// tell it apart. The second the scan started counts too, since a change
-    /// time is to the second here: a file changed just before the scan is
-    /// taken for one changed during it, which costs at most a suggestion.
+    /// tell it apart.
     pub fn changed_after(&self) -> u64 {
-        self.started.map_or(self.finished, |s| s.saturating_sub(1))
+        const NS: u64 = 1_000_000_000;
+        self.started_ns.or(self.started.map(|s| s * NS)).unwrap_or(self.finished * NS)
     }
 }
 
-/// Seconds since 1970, now: what `Notes::started` holds.
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+/// Nanoseconds since 1970, now: what `Notes::started_ns` holds.
+pub fn now_nanos() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
 /// Whether a file is not the file a scan judged: its length is not the one
 /// the scan found (`scanned`, `0` when it did not say), or it changed after
-/// `after` (seconds since 1970; `Notes::changed_after`). Its change time is the
+/// `after` (nanoseconds since 1970; `Notes::changed_after`). Its change time is the
 /// kernel's, which `cp -p` and `rsync -a` cannot put back as they put back a
 /// modification time; a rename or a `chmod` since counts too, which is the
 /// side to err on. The window's Trash leaves such a file where it is, and
 /// `--last` suggests deleting neither it nor anything resting on it.
+///
+/// **To the nanosecond, as the kernel keeps it.** It was to the second, so
+/// a file written in the second a scan started — copied in just before it,
+/// by a script that then scans — was taken for one changed since: never
+/// suggested for deletion, and left behind by the Trash even when marked. A
+/// change time with no fraction at all is one a filesystem keeps to the
+/// second (FAT, some network shares), and is still read that way: changed
+/// in the second the scan started, it may have changed after it.
 pub fn changed_since(md: &std::fs::Metadata, scanned: u64, after: Option<u64>) -> bool {
     use std::os::unix::fs::MetadataExt;
-    (scanned > 0 && md.len() != scanned) || after.is_some_and(|f| md.ctime() > f as i64)
+    const NS: i64 = 1_000_000_000;
+    let changed_after = |t: u64| match md.ctime_nsec() {
+        0 => md.ctime() >= t as i64 / NS,
+        ns => md.ctime().saturating_mul(NS).saturating_add(ns) > t as i64,
+    };
+    (scanned > 0 && md.len() != scanned) || after.is_some_and(changed_after)
 }
 
 /// Where the scan is kept for a run whose `--cache` is `cache`: `last-scan/`
@@ -747,7 +763,7 @@ mod tests {
         let p = root.join("kept.json");
         report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
         let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
-        let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60;
+        let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 + 60_000_000_000;
 
         // Unchanged: as the scan said.
         let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, Some(later));
@@ -765,7 +781,7 @@ mod tests {
 
         // `keep.jpg` touched after the scan finished, at the same length:
         // what rested on it rests on nothing, by every rule.
-        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 60;
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 - 60_000_000_000;
         let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Content, 0.6, Some(before));
         let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
         assert_eq!(again.actions[at(&files[2])], Some(Action::Review));
@@ -777,17 +793,35 @@ mod tests {
 
     /// A file changed while the scan ran — after it was read, before the
     /// scan finished — is changed since the scan, at the length it had.
+    /// The file's change time, in nanoseconds since 1970.
+    fn ctime_ns(md: &std::fs::Metadata) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        (md.ctime() * 1_000_000_000 + md.ctime_nsec()) as u64
+    }
+
     #[test]
     fn a_file_changed_during_the_scan_is_changed_since_it() {
         let f = std::env::temp_dir().join(format!("img-fp-during-{}", std::process::id()));
         std::fs::write(&f, b"x").unwrap();
         let md = std::fs::metadata(&f).unwrap();
-        let now = now_secs();
-        let notes = |started: Option<u64>| Notes { problems: false, took: "1:00".into(), finished: now + 30, started, id: 1, log: String::new(), roots: vec![] };
-        assert!(changed_since(&md, md.len(), Some(notes(Some(now - 30)).changed_after())), "written during the scan");
-        assert!(!changed_since(&md, md.len(), Some(notes(Some(now + 5)).changed_after())), "written before it");
-        // A scan kept by an earlier version says only when it finished.
-        assert!(!changed_since(&md, md.len(), Some(notes(None).changed_after())));
+        let now = ctime_ns(&md);
+        let ns = 1_000_000_000;
+        let notes = |started_ns: Option<u64>, started: Option<u64>| Notes {
+            problems: false,
+            took: "1:00".into(),
+            finished: now / ns + 30,
+            started_ns,
+            started,
+            id: 1,
+            log: String::new(),
+            roots: vec![],
+        };
+        assert!(changed_since(&md, md.len(), Some(notes(Some(now - 1), None).changed_after())), "written during the scan");
+        assert!(!changed_since(&md, md.len(), Some(notes(Some(now + 1), None).changed_after())), "written before it, if only just");
+        // A scan kept by 0.48 to 0.51 says when it started to the second, and
+        // one kept before that only when it finished.
+        assert!(changed_since(&md, md.len(), Some(notes(None, Some(now / ns - 1)).changed_after())));
+        assert!(!changed_since(&md, md.len(), Some(notes(None, None).changed_after())));
         let _ = std::fs::remove_file(&f);
     }
 

@@ -1493,7 +1493,7 @@ fn interrupt() -> Result<()> {
 fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> Result<()> {
     // Before anything is read: a file changed since is not one this run can
     // vouch for (`last::Notes::changed_after`).
-    let started = last::now_secs();
+    let started = last::now_nanos();
     // Before anything else: a `-x` that can match no file is a mistake to
     // stop on, not a walk to take.
     let (wanted, extensions_note) = extensions::normalize(&args.extensions)?;
@@ -2007,8 +2007,12 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         // `--work-size` doubled the cache for good: nothing short of
         // `--clear-cache`, which takes every record with it, could give the
         // copy back.
-        let others: Vec<(PathBuf, cache::Span)> =
-            store.other_settings().par_iter().filter(|(p, _)| !prune && !cache::gone(p)).cloned().collect();
+        let others: Vec<(PathBuf, cache::Span)> = if prune {
+            Vec::new()
+        } else {
+            let gone = cache::gone(store.other_settings().iter().map(|(p, _)| p.as_path()));
+            store.other_settings().iter().filter(|(p, _)| !gone.contains(p.as_path())).cloned().collect()
+        };
         if !others.is_empty() {
             stage!(t_start, "cache: {} records kept from other working sizes", others.len());
         }

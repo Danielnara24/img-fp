@@ -72,9 +72,47 @@ fn from_extension(path: &Path) -> Format {
     }
 }
 
-/// Fails now if `path` could not be created later: it is a directory, its
+/// What writing to a path writes to.
+///
+/// **Only a regular file is replaced.** A report is written beside its
+/// destination and renamed over it, so that a run that dies part-way leaves
+/// the last report whole; but a rename puts a new file where the old name
+/// was, and that is a mistake for anything a name can stand for that is not
+/// a file. It used to be done to all of them: `-o /dev/stdout` into a pipe,
+/// and `-o >(gzip > r.gz)`, failed before the run began, since their link
+/// ends in `pipe:[…]`, which names nothing a file can be made beside; a named
+/// pipe was opened by the probe and closed again, which its reader took for
+/// the end, and was then replaced by a file; `-o /dev/stdout >> log` replaced
+/// the log instead of adding to it; and as root, `-o /dev/null` would have
+/// put a file in place of the device.
+enum Dest {
+    /// A descriptor this process holds, named through `/dev/fd/N` or
+    /// `/proc/self/fd/N` (which `/dev/stdout` and its kin are links to): it
+    /// is written as it was opened, so a pipe stays a pipe and `>>` appends.
+    Fd(i32),
+    /// Not a regular file nor a folder: a named pipe, a device. Opened by its
+    /// name and written in place.
+    Special,
+    /// A regular file, or nothing yet: at the end of any chain of symlinks.
+    File(PathBuf),
+}
+
+fn destination(path: &Path) -> Dest {
+    let (end, fd) = resolve(path);
+    if let Some(fd) = fd {
+        return Dest::Fd(fd);
+    }
+    match std::fs::metadata(&end) {
+        Ok(m) if !m.is_file() && !m.is_dir() => Dest::Special,
+        _ => Dest::File(end),
+    }
+}
+
+/// Fails now if `path` could not be written later: it is a directory, its
 /// parent is missing, or either refuses writes. Touches nothing that exists,
-/// and removes the probe file when there was nothing there before.
+/// and removes the probe file when there was nothing there before. A
+/// descriptor or a pipe is only asked whether it is there: opening a pipe to
+/// find out is a write its reader sees end.
 pub fn check_writable(path: &Path) -> Result<()> {
     let fail = || format!("cannot write output to {}", path.display());
     if path.is_dir() {
@@ -85,12 +123,17 @@ pub fn check_writable(path: &Path) -> Result<()> {
     // file not yet there had its target made and the *link* deleted, so the
     // report was later written as a plain file in the link's place and an
     // empty file was left where the link had pointed.
-    let dest = link_target(path);
-    if dest.exists() {
-        std::fs::OpenOptions::new().write(true).open(&dest).with_context(fail)?;
-    } else {
-        std::fs::File::create(&dest).with_context(fail)?;
-        let _ = std::fs::remove_file(&dest);
+    match destination(path) {
+        Dest::Fd(_) | Dest::Special => {
+            std::fs::metadata(path).with_context(fail)?;
+        }
+        Dest::File(dest) if dest.exists() => {
+            std::fs::OpenOptions::new().write(true).open(&dest).with_context(fail)?;
+        }
+        Dest::File(dest) => {
+            std::fs::File::create(&dest).with_context(fail)?;
+            let _ = std::fs::remove_file(&dest);
+        }
     }
     Ok(())
 }
@@ -105,11 +148,21 @@ pub fn check_writable(path: &Path) -> Result<()> {
 /// destination (through any symlink, as before) and renamed over it, with the
 /// mode the file it replaces had; an interrupt removes the half-written one
 /// (`cache::seal`). A folder that will not take a new file, where the file
-/// itself may still be written, is written in place as before.
+/// itself may still be written, is written in place as before, and so is
+/// anything that is not a regular file (`Dest`).
 pub(crate) fn write_whole(path: &Path, body: impl FnOnce(&mut dyn Write) -> std::io::Result<()>) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let ctx = || format!("could not write {}", path.display());
-    let dest = link_target(path);
+    let dest = match destination(path) {
+        Dest::Fd(fd) => {
+            // SAFETY: `fd` is open in this process, or `metadata` would not
+            // have reached it; the clone is ours to close.
+            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }.try_clone_to_owned().with_context(ctx)?;
+            return write_into(std::fs::File::from(fd), body).with_context(ctx);
+        }
+        Dest::Special => return write_into(std::fs::OpenOptions::new().write(true).open(path).with_context(ctx)?, body).with_context(ctx),
+        Dest::File(dest) => dest,
+    };
     let name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(&name);
@@ -123,9 +176,7 @@ pub(crate) fn write_whole(path: &Path, body: impl FnOnce(&mut dyn Write) -> std:
         Ok(f) => f,
         Err(_) => {
             crate::cache::abandon_partial(&tmp);
-            let f = std::fs::File::create(path).with_context(ctx)?;
-            let mut w = std::io::BufWriter::new(f);
-            return body(&mut w).and_then(|()| w.flush()).with_context(ctx);
+            return write_into(std::fs::File::create(path).with_context(ctx)?, body).with_context(ctx);
         }
     };
     let written = (|| -> std::io::Result<()> {
@@ -134,16 +185,20 @@ pub(crate) fn write_whole(path: &Path, body: impl FnOnce(&mut dyn Write) -> std:
         if let Some(m) = mode {
             f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(m))?;
         }
-        let mut w = std::io::BufWriter::new(&f);
-        body(&mut w)?;
-        w.flush()?;
-        drop(w);
+        write_into(&f, body)?;
         crate::cache::finish_partial(&tmp, &dest)
     })();
     if written.is_err() {
         crate::cache::abandon_partial(&tmp);
     }
     written.with_context(ctx)
+}
+
+/// `body`, written into `f` through a buffer.
+fn write_into(f: impl Write, body: impl FnOnce(&mut dyn Write) -> std::io::Result<()>) -> std::io::Result<()> {
+    let mut w = std::io::BufWriter::new(f);
+    body(&mut w)?;
+    w.flush()
 }
 
 /// Whether writing to `a` and writing to `b` would write one file.
@@ -158,7 +213,7 @@ pub fn same_destination(a: &Path, b: &Path) -> bool {
         return (x.dev(), x.ino()) == (y.dev(), y.ino());
     }
     let lands = |p: &Path| -> Option<PathBuf> {
-        let t = link_target(p);
+        let t = resolve(p).0;
         let dir = match t.parent() {
             Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
             _ => PathBuf::from("."),
@@ -168,18 +223,26 @@ pub fn same_destination(a: &Path, b: &Path) -> bool {
     matches!((lands(a), lands(b)), (Some(x), Some(y)) if x == y)
 }
 
-/// Where writing to `path` would land: `path` itself, or the end of the chain
-/// of symlinks it starts, however far that is from existing.
-fn link_target(path: &Path) -> PathBuf {
+/// Where writing to `path` would land: the end of the chain of symlinks it
+/// starts, however far that is from existing — or, beside it, the descriptor
+/// the chain names on the way (`Dest::Fd`), where it stops.
+fn resolve(path: &Path) -> (PathBuf, Option<i32>) {
+    let fd_of = |p: &Path| -> Option<i32> {
+        let n = p.strip_prefix("/dev/fd").or_else(|_| p.strip_prefix("/proc/self/fd")).ok()?;
+        n.to_str()?.parse().ok()
+    };
     let mut p = path.to_path_buf();
     // The kernel's own limit on a chain, so a loop ends where `open` would.
     for _ in 0..40 {
+        if let Some(fd) = fd_of(&p) {
+            return (p, Some(fd));
+        }
         match std::fs::read_link(&p) {
             Ok(to) => p = p.parent().map_or(to.clone(), |dir| dir.join(&to)),
             Err(_) => break,
         }
     }
-    p
+    (p, None)
 }
 
 /// A path's bytes, when they are not UTF-8 and so cannot be a JSON string.
@@ -968,6 +1031,36 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "the new report");
         assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o640);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A report to a descriptor is written into it as it was opened: into a
+    /// pipe, which stays a pipe, and onto the end of a file opened to append;
+    /// and a device is written, not replaced.
+    #[test]
+    fn a_report_to_a_pipe_a_descriptor_or_a_device_is_written_in_place() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let (mut r, w) = std::io::pipe().unwrap();
+        let at = PathBuf::from(format!("/dev/fd/{}", w.as_raw_fd()));
+        check_writable(&at).unwrap();
+        write_whole(&at, |o| o.write_all(b"through the pipe")).unwrap();
+        drop(w);
+        let mut got = String::new();
+        r.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "through the pipe");
+
+        let dir = std::env::temp_dir().join(format!("img-fp-fd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log.txt");
+        std::fs::write(&log, "before\n").unwrap();
+        let f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        write_whole(&PathBuf::from(format!("/proc/self/fd/{}", f.as_raw_fd())), |o| o.write_all(b"after\n")).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "before\nafter\n");
+        std::fs::remove_dir_all(&dir).ok();
+
+        write_whole(Path::new("/dev/null"), |o| o.write_all(b"nothing")).unwrap();
+        use std::os::unix::fs::FileTypeExt;
+        assert!(std::fs::metadata("/dev/null").unwrap().file_type().is_char_device());
     }
 
     /// Checking that `-o` can be written leaves a symlink a symlink, and

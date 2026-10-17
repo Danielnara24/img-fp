@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.51.0)
+## Status (0.51.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -98,6 +98,16 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     mean, decode 93.25 / 93.5 s, features 120 / 120 s; IMGS-ALL cached
     (ABBA x2) 438.0 / 438.75; per-symbol ymm counts identical; the 304
     IMGS-ALL TIFFs decode 4% faster streamed. Peak PSS within run spread.
+- 0.51.1 (audit fixes, no change to pairs or suggestions): `-o`/`--dump`
+  replace only a regular file (`report::Dest`): a descriptor (`/dev/stdout`,
+  `>(...)`, `>>`) is written as opened, a FIFO or device in place, with no
+  probe open (it read as EOF to a FIFO's reader). "Changed since the scan" is
+  to the nanosecond (`Notes::started_ns`; whole-second ctimes still read
+  coarse): files written in the scan's first second were never deleted and
+  the Trash refused them. `cache::gone` lists each folder once instead of a
+  `stat` per carried record. The window says "review", not "weak match":
+  most REVIEWs are undecided same-picture pairs at 1.00. Not measured on the
+  corpora (no rule changed).
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.

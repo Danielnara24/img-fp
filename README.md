@@ -320,15 +320,18 @@ anything itself.
   different photo that only looks similar
 - `DELETE`: everything in it, apart perhaps from a thin strip at an edge, is
   also in a file marked to stay, at about the same detail or better
-- `REVIEW`: a weak match, probably a copy, such as one tinted or
-  watermarked, that could not be confirmed. Look at it before deciding
+- `REVIEW`: look at it before deciding. Either a close copy, such as one
+  tinted or watermarked, that could not be confirmed, or one of two versions
+  of the same picture, such as a photo and its re-save in another format,
+  where nothing says which one is the original
 
 A file has the same suggestion in every group it appears in. That is the
 default rule, `--suggest content`. Two simpler rules read only the groups:
 
 - `--suggest correlation`: each group's representative is `KEEP`. Another
-  file is `DELETE` when it agrees with a representative closely, from halfway
-  between `--min-pixel-correlation` and 1 (0.8 by default), `KEEP` when it agrees less, and `REVIEW` below
+  file is `DELETE` when it agrees with a representative closely, from three
+  quarters of the way between `--min-pixel-correlation` and 1 (0.9 by
+  default), `KEEP` when it agrees less, and `REVIEW` below
   `--min-pixel-correlation`
 - `--suggest representative`: each group's representative is `KEEP` and
   every other file is `DELETE`

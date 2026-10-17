@@ -756,6 +756,9 @@ impl Setup {
             return;
         }
         settings.save();
+        // Before the scan can read anything: a file changed since is not the
+        // file it judged (`last::Notes::changed_after`).
+        let started = img_fp::last::now_nanos();
         let (scan, events) = match Scan::start(&argv) {
             Ok(x) => x,
             Err(e) => {
@@ -800,9 +803,6 @@ impl Setup {
         // nothing (see `img_fp::last`). Kept regardless, a scan of an empty
         // folder replaced the last one worth having, and its marks with it.
         let keep = settings.use_cache;
-        // Before the scan reads anything: a file changed since is not the
-        // file it judged (`last::Notes::changed_after`).
-        let started = img_fp::last::now_secs();
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let mut stderr: Vec<String> = Vec::new();
@@ -843,7 +843,8 @@ impl Setup {
                                     problems: code != Some(0),
                                     took: me.took(),
                                     finished: now.as_secs(),
-                                    started: Some(started),
+                                    started_ns: Some(started),
+                                    started: None,
                                     id: now.as_nanos() as u64,
                                     log: me.app.log.text(&me.app.log.start_iter(), &me.app.log.end_iter(), false).to_string(),
                                     roots: roots.clone(),
