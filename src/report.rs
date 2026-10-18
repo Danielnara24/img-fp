@@ -288,7 +288,7 @@ pub struct OutPair {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub identical: bool,
     /// Not the same bytes, but decoded to the same picture: a lossless
-    /// re-save, a JPEG with its metadata stripped. See `lib::same_analysis`.
+    /// re-save, a JPEG with its metadata stripped. See `same::same_analysis`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub same_pixels: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]

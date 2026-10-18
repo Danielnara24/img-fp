@@ -49,9 +49,8 @@ pub fn mirror_affine(w: f32) -> Affine {
 #[derive(Clone, Copy, Debug)]
 pub struct Verdict {
     pub m: Affine,
-    /// Which permutation of the query produced this match. A direct verdict
-    /// stands for an edge by itself, and this is the edge's inversion; see
-    /// `lib::direct_edge`.
+    /// Which permutation of the query produced this match. Its inversion is
+    /// the edge's; see `lib::Edge`.
     pub variant: Variant,
     /// Inliers at distinct keypoint positions.
     pub n_in: u32,
@@ -307,6 +306,26 @@ impl Verdict {
     ///
     /// The counts, the correlations and `centred` — which passes on either
     /// frame — say the same thing both ways.
+    /// What two files with one working image are stated with when no pass
+    /// verified them (`same::Kind::SameGrey`): the identity, every one of
+    /// the `n` keypoints aligned and every block agreeing.
+    pub fn perfect(n: u32) -> Verdict {
+        Verdict {
+            n_in: n,
+            n_match: n,
+            centred: true,
+            framed: true,
+            ov_a: 1.0,
+            ov_b: 1.0,
+            scale: 1.0,
+            blk: 1.0,
+            blk_n: 1,
+            blk_min: 1.0,
+            ncc: 1.0,
+            ..Default::default()
+        }
+    }
+
     pub fn reversed(&self) -> Option<Verdict> {
         let m = invert_affine(&self.m)?;
         Some(Verdict {

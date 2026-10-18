@@ -47,6 +47,7 @@ mod report;
 mod sift;
 mod simd;
 mod spill;
+mod same;
 mod suggest;
 pub use suggest::{by_group, kept_at_end, revoke, Action, Lapse, Mode as SuggestMode, Seat};
 pub use cache::file_name as cache_file_name;
@@ -559,7 +560,7 @@ fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usiz
 /// them, one member of each group is described and the rest point at it.
 /// Copying instead meant a second megabyte-scale buffer per duplicate — three
 /// hundred of them on this corpus — for bytes that are the same bytes.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Item {
     feats: std::sync::Arc<Features>,
     thumb: std::sync::Arc<Thumb>,
@@ -615,14 +616,42 @@ const FEATURES: usize = 600;
 /// constant only exists so a pathological graph cannot spin forever.
 const PROPAGATE_MAX_ROUNDS: usize = 8;
 
-/// A verdict of the direct pass, between the files at two indices, the lower
-/// first. See `direct_edge`.
-type Direct = (u32, u32, Verdict);
+/// A verdict between the files at two indices, from the first file's working
+/// image to the second's: what every pass finds and every later stage reads.
+///
+/// The verdict is all of it. Its transform is the edge's (a mirror folded in
+/// as a negative determinant), and its variant's inversion is the edge's.
+/// Edges used to be `(usize, usize, Affine, bool, Verdict)`, the transform
+/// and the inversion kept a second time beside the verdict holding them, at
+/// 112 bytes against 76 for each edge of the lists held through the peak.
+#[derive(Clone, Copy)]
+struct Edge {
+    i: u32,
+    j: u32,
+    v: Verdict,
+}
 
-/// The edge a direct verdict stands for. Its transform is the verdict's own,
-/// and its inversion the verdict's variant's, which the direct pass never sets.
-fn direct_edge(d: &Direct) -> (usize, usize, Affine, bool, Verdict) {
-    (d.0 as usize, d.1 as usize, d.2.m, d.2.variant.invert, d.2)
+impl Edge {
+    fn new(a: usize, b: usize, v: Verdict) -> Edge {
+        Edge { i: a as u32, j: b as u32, v }
+    }
+
+    fn a(&self) -> usize {
+        self.i as usize
+    }
+
+    fn b(&self) -> usize {
+        self.j as usize
+    }
+
+    fn ends(&self) -> (usize, usize) {
+        (self.a(), self.b())
+    }
+
+    /// Whether one file is the other's negative.
+    fn inverted(&self) -> bool {
+        self.v.variant.invert
+    }
 }
 
 /// Candidate pairs verified per slice; see the verification pass in `run`.
@@ -905,6 +934,7 @@ impl Dsu {
 // ---------------------------------------------------------------- output
 
 use report::{OutGroup, OutPair, Output};
+use same::Same;
 
 // ---------------------------------------------------------------- main
 
@@ -1694,8 +1724,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // took only image names, so it asks nothing.
     let guessed = wanted.is_a_guess_at_images();
     let comparable = |i: usize| guessed || extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
-    let mut exact = timed!(33, exact_groups(&files, &stats, comparable));
+    let exact = timed!(33, exact_groups(&files, &stats, comparable));
     stage!(t_start, "exact duplicates: {} groups", exact.len());
+    let mut same = Same::of_bytes(files.len(), exact);
 
     // Decode and describe.
     let sp = sift::Params {
@@ -1778,52 +1809,37 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
     // second copy of a file is not a cheaper way to reach the same answer, it
-    // is the same work done twice: each group elects its first member and the
-    // rest are copied from it. Those groups are already claimed as duplicates
-    // in the output, so sharing one analysis between them asserts nothing the
-    // run does not assert anyway.
+    // is the same work done twice: each group's original (`Same::of_bytes`)
+    // is described and the rest are copied from it. Those groups are already
+    // claimed as duplicates in the output, so sharing one analysis between
+    // them asserts nothing the run does not assert anyway.
     //
-    // The first, whatever the cache holds. Electing the member the cache
-    // knew made the original depend on the order of whichever scan wrote the
-    // record, and the original decides what the vocabulary samples: a cached
-    // run over IMGS-AGAINST, from records IMGS-ALL's scan had written, moved
-    // 184 verdicts against the same run cold. The bytes are the same, so the
-    // analysis is: a copy's record serves its original, and stays under the
-    // copy's name in the file, where the next run finds it again.
-    //
-    // The same goes for everything after the analysis; see `with_copies`.
-    let mut twin_of: Vec<usize> = (0..n).collect();
-    let mut holds_record = vec![false; n];
-    for g in exact.iter() {
-        let original = g[0];
-        for &i in g.iter() {
-            twin_of[i] = original;
+    // The bytes are the same, so the analysis is: a copy's record serves its
+    // original, and stays under the copy's name in the file, where the next
+    // run finds it again. Any other copy keeps no record of its own: it is
+    // answered by its original on every run, cached or not, so a record under
+    // its name is the same analysis stored twice and never read. One written
+    // by an earlier build is left out of the file at the next compaction.
+    for g in same.byte_groups() {
+        let holder = g.iter().copied().find(|&i| mine[i].is_some());
+        if let Some(k) = holder.filter(|&k| k != g[0]) {
+            mine[g[0]] = mine[k].take();
         }
-        if mine[original].is_some() {
-            holds_record[original] = true;
-        } else if let Some(&k) = g.iter().find(|&&i| mine[i].is_some()) {
-            mine[original] = mine[k].take();
-            holds_record[k] = true;
-        }
-    }
-    // Any other copy keeps no record of its own: it is answered by its
-    // original on every run, cached or not, so a record under its name is the
-    // same analysis stored twice and never read. One written by an earlier
-    // build is left out of the file at the next compaction.
-    for i in 0..n {
-        if twin_of[i] != i && !holds_record[i] {
-            span_of[i] = None;
+        for &i in &g[1..] {
+            if holder != Some(i) {
+                span_of[i] = None;
+            }
         }
     }
     // What each file still to be analysed is expected to cost, for the bar
     // and nothing else. Read from headers, in parallel, and only for files the
     // cache and the exact pass have not already answered, so a cached run
     // opens nothing here.
-    let todo = (0..n).filter(|&i| twin_of[i] == i && mine[i].is_none()).count();
+    let todo = (0..n).filter(|&i| !same.is_copy(i) && mine[i].is_none()).count();
     // Whether the save below will have anything to write, as far as it can be
     // told yet: something new to describe, or a record that no longer fitted.
     let rewrite = cache_path.is_some()
-        && (superseded > 0 || same_key != in_cache || args.prune_cache || (0..n).any(|i| twin_of[i] != i && mine[i].is_some()));
+        && (superseded > 0 || same_key != in_cache || args.prune_cache || (0..n).any(|i| same.is_copy(i) && mine[i].is_some()));
     progress.forecast(|f| {
         f.to_describe = Some(todo);
         f.cache_write = rewrite;
@@ -1835,7 +1851,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .into_par_iter()
         .map(|i| {
             headers.tick();
-            if twin_of[i] != i || mine[i].is_some() {
+            if same.is_copy(i) || mine[i].is_some() {
                 return (0, None);
             }
             let probe = decode::probe(&files[i]);
@@ -1848,7 +1864,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let found = if wanted.is_a_guess_at_images() { ("image", "images") } else { ("file", "files") };
     // The three add up to `n`: a copy is answered by its original whether or
     // not the cache also knew it, so it is counted as a copy and only there.
-    let copies = (0..n).filter(|&i| twin_of[i] != i).count();
+    let copies = (0..n).filter(|&i| same.is_copy(i)).count();
     let from_cache = n - copies - todo;
     if from_cache > 0 || copies > 0 {
         say!(
@@ -1879,7 +1895,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         .into_par_iter()
         .enumerate()
         .map(|(i, rec)| {
-            if twin_of[i] != i {
+            if same.is_copy(i) {
                 return (Item::default(), None);
             }
             if let Some((rec, _)) = rec {
@@ -1921,48 +1937,21 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             *s = a;
         }
     }
-    for i in 0..n {
-        let r = twin_of[i];
-        if r == i {
-            continue;
-        }
-        // A copy of a file that would not decode fails as its original did, and
-        // is reported under its own path by the loop over `items` below. It
-        // used to be decoded again, here, on one thread, one copy after
-        // another — the same bytes through the same decoder, for the same
-        // error. (Both were read whole by the exact pass, so an original that
-        // could not be *opened* is never in a group to begin with.)
-        items[i] = Item {
-            feats: items[r].feats.clone(),
-            thumb: items[r].thumb.clone(),
-            dims: items[r].dims,
-            ok: items[r].ok,
-            err: items[r].err.clone(),
-            damaged: items[r].damaged.clone(),
-            traits: items[r].traits,
-        };
+    // A copy of a file that would not decode fails as its original did, and
+    // is reported under its own path by the loop over `items` below. It used
+    // to be decoded again, here, on one thread, one copy after another — the
+    // same bytes through the same decoder, for the same error. (Both were read
+    // whole by the exact pass, so an original that could not be *opened* is
+    // never in a group to begin with.)
+    for i in (0..n).filter(|&i| same.is_copy(i)) {
+        items[i] = items[same.original(i)].clone();
     }
-    // Who answers for each file from the vocabulary to corroboration: its
-    // byte original, and then whichever file that one shares its analysis
-    // with (see `same_analysis`). A file answered for by another is given that
-    // file's pairs at the end, as a byte-identical copy is.
-    // Not a file of several pictures: one whose first picture is another
-    // file's is not that file — two animations from one first frame, a
-    // document whose first page is a picture — so it is matched as any
-    // other file is, and stated as no more than a match.
-    let pixel_of = timed!(37, same_analysis(&items, |i| twin_of[i] == i && items[i].ok && items[i].feats.len() > 0 && !items[i].traits.frames));
-    // And of those, which are the same pixels in colour too; see
-    // `colour_heads`. A byte copy is its original's colour.
-    let chroma = std::sync::Mutex::new(HashMap::new());
-    let colour_head = timed!(37, colour_heads(&pixel_of, |a, b| same_colour(&files, &items, &chroma, a, b)));
-    drop(chroma);
-    let hue: Vec<usize> = (0..n).map(|i| colour_head[twin_of[i]]).collect();
-    drop(colour_head);
+    // Which files share an analysis, and which of those a colour too: from
+    // here to the assembly, each such set is matched as its first file.
+    timed!(37, same.analysed(&files, &items));
     // Each file's keypoints, for the grey twins' stated pairs once the
     // descriptors are let go.
     let n_kps: Vec<u32> = items.iter().map(|it| it.feats.len() as u32).collect();
-    let match_of: Vec<usize> = (0..n).map(|i| pixel_of[twin_of[i]]).collect();
-    drop(pixel_of);
     // `--prune-cache` keeps only what this scan found, and gives that up when
     // the scan is not a complete account of what is out there: a root that
     // would not resolve or a directory that would not open leaves files
@@ -1977,8 +1966,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         });
     progress.forecast(|f| {
         // What the matching stages will be handed: originals, not copies.
-        f.images = Some((0..n).filter(|&i| items[i].ok && match_of[i] == i).count());
-        f.descriptors = Some((0..n).filter(|&i| match_of[i] == i).map(|i| items[i].feats.len()).sum());
+        f.images = Some((0..n).filter(|&i| items[i].ok && same.answers_for(i) == i).count());
+        f.descriptors = Some((0..n).filter(|&i| same.answers_for(i) == i).map(|i| items[i].feats.len()).sum());
     });
     if let (Some(p), Some(store)) = (&cache_path, store.as_mut()) {
         progress.begin(Stage::CacheWrite);
@@ -2041,13 +2030,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     }
     // The store stays open until the suggestion, which keeps in it the colour
     // of each JPEG it has to decode to learn it (`cache::Store::keep_colour`).
-    // Which files hold the record each set of identical bytes is answered by.
-    let mut records_of: HashMap<usize, Vec<usize>> = HashMap::new();
-    if store.is_some() {
-        for i in (0..n).filter(|&i| span_of[i].is_some()) {
-            records_of.entry(twin_of[i]).or_default().push(i);
-        }
-    }
     // Nothing more is analysed or read from the cache. What was written stays
     // readable for as long as it is held.
     spill::end();
@@ -2109,23 +2091,13 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             problems.damaged(&files[i].display().to_string(), why);
         }
     }
-    // Two byte-identical files that are not pictures at all — a pair of empty
-    // files, two copies of a README — are identical, and are not a duplicate
-    // *image*, which is the only claim this tool makes. Only a wildcard walk
-    // can bring such files in, and they leave the exact groups here, before
-    // anything reads those groups as pairs. A byte-identical pair of broken
-    // `.jpg`s is still reported: those did claim to be images.
-    for g in exact.iter_mut() {
-        g.retain(|&i| !not_asked[i]);
-    }
-    exact.retain(|g| g.len() > 1);
     let n_ok = items.iter().filter(|i| i.ok).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(t_start, "described {n_ok}/{n} images, {n_desc} descriptors");
 
     // Everything from here to the assembly works on distinct contents: each
     // set of byte-identical files is its original, and a copy is given its
-    // original's pairs at the end (`with_copies`). A copy used to be indexed,
+    // original's pairs at the end (`Same::expand`). A copy used to be indexed,
     // queried and verified like any other file — against its own original,
     // among others, to find the identity the exact pass had already found —
     // and it took a place in every candidate list its original was in.
@@ -2138,8 +2110,8 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // no file was ever re-asked mirrored or inverted: eight photographs and
     // their mirror images, each saved three ways, found 9 of the 72 pairs
     // between a photograph and its mirror image, and 15 groups for 8.
-    let matched: Vec<bool> = (0..n).map(|i| items[i].ok && match_of[i] == i).collect();
-    let n_same = (0..n).filter(|&i| items[i].ok && twin_of[i] == i && match_of[i] != i).count();
+    let matched: Vec<bool> = (0..n).map(|i| items[i].ok && same.answers_for(i) == i).collect();
+    let n_same = (0..n).filter(|&i| items[i].ok && !same.is_copy(i) && same.answers_for(i) != i).count();
     if n_same > 0 {
         stage!(t_start, "same pixels: {n_same} files decode to a picture another file already holds");
     }
@@ -2206,7 +2178,6 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // from both sides is verified once. Containment scoring is asymmetric —
     // the crop finds the photograph much more readily than the reverse — so
     // both directions genuinely have to be asked.
-    type Edge = (usize, usize, Affine, bool, Verdict);
     let bar = progress.begin_counted(Stage::Candidates, n_desc_match as u64, n_match, "images");
     // Against a library, the scanned files ask first, and then every library
     // file a file that has asked anchored asks in turn, round after round
@@ -2218,7 +2189,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let mut asked = vec![false; n];
     let mut ask: Vec<usize> = (0..n).filter(|&i| matched[i] && !(against && library[i])).collect();
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
-    let mut all_direct: Vec<Direct> = Vec::new();
+    let mut all_direct: Vec<Edge> = Vec::new();
     let mut verified = 0usize;
     let mut round = 0usize;
     let dumping = args.dump.is_some();
@@ -2293,15 +2264,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // heap were dirtied again by the second look. The slices are taken in
     // order and each is collected in order, so the list is the one a single
     // collect gave, verdict for verdict.
-    //
-    // A verdict is kept as `Direct`, not as an `Edge`: an edge carries its
-    // transform beside the verdict that already holds it, its inversion beside
-    // the verdict's own variant, and two `usize`s for indices that fit a
-    // `u32`. That is 112 bytes against 76, for the one list of edges held
-    // through the peak — 923,601 of them on a corpus of 27,000 pictures.
     let from = all_direct.len();
     for slice in cand_pairs.chunks(VERIFY_SLICE) {
-        let part: Vec<Direct> = slice
+        let part: Vec<Edge> = slice
             .par_iter()
             .map_init(
                 || (Vec::new(), Vec::new(), verify::Scratch::default()),
@@ -2321,7 +2286,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                         tb: &items[j].thumb,
                     };
                     let v = verify::verify(&p, cands, Variant::default(), gate, matches, scratch);
-                    (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some((i as u32, j as u32, v))
+                    (v.accepted(&policy.corroborated) || (dumping && v.n_in >= 3)).then_some(Edge::new(i, j, v))
                 }),
             )
             .flatten()
@@ -2335,9 +2300,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     }
     // The library files this round's anchors reached that have not asked.
     let mut next = vec![false; n];
-    for &(i, j, ref v) in &all_direct[from..] {
-        let (i, j) = (i as usize, j as usize);
-        if v.accepted(&policy.anchor) {
+    for e in &all_direct[from..] {
+        let (i, j) = e.ends();
+        if e.v.accepted(&policy.anchor) {
             for (x, y) in [(i, j), (j, i)] {
                 if asked[x] && library[y] && !asked[y] {
                     next[y] = true;
@@ -2367,7 +2332,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // where they lie rather than copied: they are nearly all of it, and a copy
     // was another hundred-odd megabytes held through the second look, which
     // is where a large corpus's run peaks.
-    let edges = || all_direct.iter().filter(|(_, _, v)| v.accepted(&policy.anchor)).map(direct_edge);
+    let edges = || all_direct.iter().filter(|e| e.v.accepted(&policy.anchor)).copied();
     let n_edges = edges().count();
     stage!(t_start, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
 
@@ -2380,9 +2345,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // with no matches, or with so few that it may be hanging off the edge of
     // its real cluster.
     let mut degree = vec![0u32; n];
-    for (a, b, _, _, _) in edges() {
-        degree[a] += 1;
-        degree[b] += 1;
+    for e in edges() {
+        degree[e.a()] += 1;
+        degree[e.b()] += 1;
     }
     // A byte-identical copy is not counted. It is the same picture, so it says
     // nothing about whether the picture's other versions were found — and
@@ -2426,9 +2391,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         let mut rep = vec![false; n];
         if against {
             let mut d = Dsu::new(n);
-            for (a, b, _, _, v) in edges() {
-                if v.accepted(&policy.clean) {
-                    d.union(a, b);
+            for e in edges() {
+                if e.v.accepted(&policy.clean) {
+                    d.union(e.a(), e.b());
                 }
             }
             // Per component: whether a scanned file is in it, and its best-
@@ -2573,7 +2538,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                                 None => continue,
                             }
                         };
-                        out.push(((lo, hi, verdict.m, variants[v].invert, verdict), anchor));
+                        out.push((Edge::new(lo, hi, verdict), anchor));
                     }
                 }
                 bar.add(w);
@@ -2582,7 +2547,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         )
         .flatten()
         .collect();
-    let variant_edges: Vec<Edge> = variant_all.iter().filter(|e| e.1).map(|e| e.0.clone()).collect();
+    let variant_edges: Vec<Edge> = variant_all.iter().filter(|e| e.1).map(|e| e.0).collect();
     let variant_all: Vec<Edge> = if dumping { variant_all.into_iter().map(|e| e.0).collect() } else { Vec::new() };
     if args.skip_mirrored {
         stage!(t_start, "variants: skipped");
@@ -2612,7 +2577,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // find the other — and a pair counted twice is two links to the bridge
     // test, so a lone match between two clusters stopped being a bridge by
     // being found twice. The direct verdict is kept where there are two.
-    let all: Vec<Edge> = unique_pairs(edges().chain(variant_edges.iter().cloned()));
+    let all: Vec<Edge> = unique_pairs(edges().chain(variant_edges.iter().copied()));
 
     // Every anchor faces the bridge test, whichever pass produced it: a
     // mirrored match joining two clusters is exactly as consequential as a
@@ -2624,7 +2589,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     let (all, propagated, corroborated, all_propagated): (Vec<Edge>, Vec<Edge>, Vec<Edge>, Vec<Edge>) = {
     // Clusters are made from clean anchors, and an anchor that is only an
     // anchor may add a file to one but never join two; see `admit_anchors`.
-    let (clean, weak): (Vec<Edge>, Vec<Edge>) = all.into_iter().partition(|e| e.4.accepted(&policy.clean));
+    let (clean, weak): (Vec<Edge>, Vec<Edge>) = all.into_iter().partition(|e| e.v.accepted(&policy.clean));
     let n_before = clean.len();
     // A clean anchor the bridge test drops is not thrown away but kept as a
     // weak one: it may still add a file to a cluster and counts in the cover
@@ -2686,19 +2651,19 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         still_starred.extend(starred);
         let before = propagated.len();
         let seen: std::collections::HashSet<(usize, usize)> =
-            pool.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
+            pool.iter().map(Edge::ends).collect();
         let fresh: Vec<Edge> = round_all
             .iter()
-            .filter(|(a, b, _, _, v)| !seen.contains(&(*a, *b)) && v.accepted(&policy.propagated))
-            .cloned()
+            .filter(|e| !seen.contains(&e.ends()) && e.v.accepted(&policy.propagated))
+            .copied()
             .collect();
-        hypotheses.extend(round_all.iter().map(|e| (e.0, e.1)));
+        hypotheses.extend(round_all.iter().map(Edge::ends));
         if dumping {
             for e in round_all {
-                match row_of.get(&(e.0, e.1)) {
+                match row_of.get(&e.ends()) {
                     Some(&k) => all_propagated[k] = e,
                     None => {
-                        row_of.insert((e.0, e.1), all_propagated.len());
+                        row_of.insert(e.ends(), all_propagated.len());
                         all_propagated.push(e);
                     }
                 }
@@ -2708,11 +2673,11 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
         }
         let mut next = vec![false; n];
         for e in fresh.iter() {
-            next[e.0] = true;
-            next[e.1] = true;
+            next[e.a()] = true;
+            next[e.b()] = true;
         }
         dirty = Some(next);
-        propagated.extend(fresh.iter().cloned());
+        propagated.extend(fresh.iter().copied());
         pool.extend(fresh);
         stage!(t_start, "  propagation round {}: +{} pairs", round + 1, propagated.len() - before);
         if propagated.len() == before {
@@ -2745,18 +2710,14 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // and risk nothing to accept.
     let corroborated: Vec<Edge> = {
         let mut dsu = Dsu::new(n);
-        for (a, b, _, _, _) in all.iter().chain(propagated.iter()) {
-            dsu.union(*a, *b);
+        for e in all.iter().chain(propagated.iter()) {
+            dsu.union(e.a(), e.b());
         }
-        let anchored: std::collections::HashSet<(usize, usize)> =
-            all.iter().chain(propagated.iter()).map(|&(a, b, _, _, _)| (a, b)).collect();
+        let anchored: std::collections::HashSet<(usize, usize)> = all.iter().chain(propagated.iter()).map(Edge::ends).collect();
         all_direct
             .iter()
-            .filter(|(a, b, v)| {
-                let (a, b) = (*a as usize, *b as usize);
-                !anchored.contains(&(a, b)) && v.accepted(&policy.corroborated) && dsu.find(a) == dsu.find(b)
-            })
-            .map(direct_edge)
+            .filter(|e| !anchored.contains(&e.ends()) && e.v.accepted(&policy.corroborated) && dsu.find(e.a()) == dsu.find(e.b()))
+            .copied()
             .collect()
     };
     stage!(t_start, "corroborated: {} more pairs inside existing clusters", corroborated.len());
@@ -2766,9 +2727,9 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     if let Some(path) = &args.dump {
         let write = |w: &mut dyn Write| -> std::io::Result<()> {
             writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min,m0,m1,m2,m3,m4,m5,aw,ah,bw,bh")?;
-            let all_direct: Vec<Edge> = all_direct.iter().map(direct_edge).collect();
             for (kind, set) in [("direct", &all_direct), ("variant", &variant_all), ("propagated", &all_propagated)] {
-                for (a, b, m, iv, v) in set.iter() {
+                for e in set.iter() {
+                    let ((a, b), v) = (e.ends(), &e.v);
                     // The paths as their own bytes, quoted the way CSV quotes:
                     // written with `{:?}`, a name holding a quote or a comma split
                     // into two columns, and a tab or a non-UTF-8 byte came out as
@@ -2786,17 +2747,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                         v.blk_n.to_string(),
                         format!("{:.4}", v.ncc),
                         (v.centred as u8).to_string(),
-                        (*iv as u8).to_string(),
+                        (e.inverted() as u8).to_string(),
                         format!("{:.4}", v.blk_min),
                     ];
                     // The transform from `a`'s working image to `b`'s, and the two
                     // working images' sizes, which the suggestion's frame tests read.
                     let figures: Vec<String> = figures
                         .into_iter()
-                        .chain(m.iter().map(|x| format!("{x:.6}")))
-                        .chain([items[*a].feats.w, items[*a].feats.h, items[*b].feats.w, items[*b].feats.h].map(|x| x.to_string()))
+                        .chain(v.m.iter().map(|x| format!("{x:.6}")))
+                        .chain([items[a].feats.w, items[a].feats.h, items[b].feats.w, items[b].feats.h].map(|x| x.to_string()))
                         .collect();
-                    let mut row: Vec<&[u8]> = vec![files[*a].as_os_str().as_bytes(), files[*b].as_os_str().as_bytes()];
+                    let mut row: Vec<&[u8]> = vec![files[a].as_os_str().as_bytes(), files[b].as_os_str().as_bytes()];
                     row.extend(figures.iter().map(|f| f.as_bytes()));
                     report::csv_row_with(w, &row, b',')?;
                 }
@@ -2823,7 +2784,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
 
     // ---- assemble
     //
-    // The pairs are the claim. `graph` collects every one of them, and
+    // The pairs are the claim. `stated` collects every one of them, and
     // `group::find` reduces it to representatives — a representative plus the
     // files that matched it directly, which is neither the closure nor the
     // maximal cliques; both were measured and both are worse. So a group
@@ -2832,141 +2793,63 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     // matched the representative were never compared with each other. The
     // argument and the numbers are in `group.rs`.
     //
-    // Every pair so far is between originals. A copy is the same bytes as its
-    // original, so each pair is now stated for each copy of either file, with
-    // the verdict its original's pair was found on.
-    let (all, propagated, corroborated) = (with_copies(all, &match_of), with_copies(propagated, &match_of), with_copies(corroborated, &match_of));
+    // Every pair so far is between the files matched. Each is now stated for
+    // every file either end answers for, with the verdict its pair was found
+    // on; see `Same::expand`.
+    let (all, propagated, corroborated) = (same.expand(all), same.expand(propagated), same.expand(corroborated));
     // Which pairs are stated, and from what, in the order they are first
-    // met — the order `graph` and every tie in the sort below keep. The
+    // met — the order `group::find` and every tie in the sort below keep. The
     // records themselves are a million strings on a large corpus, so they are
     // made afterwards on every thread rather than here on one.
     //
-    // The files that decode to one picture come first: their pairs, each
-    // the same pixels or, for two alike only in grey (`colour_heads`), a
-    // match as perfect as a match is, made here since no pass verified one.
-    let mut same: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
-    for i in (0..n).filter(|&i| match_of[i] != twin_of[i] && items[i].ok) {
-        same.entry(match_of[i]).or_insert_with(|| vec![match_of[i]]).push(i);
-    }
-    // Each original's byte-identical copies, found once. They were looked for
-    // over every file for each class, which is quadratic in the corpus: 792
-    // classes by 27,659 files on IMGS-ALL, and a minute's work at a million.
-    let mut copies_of: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in (0..n).filter(|&i| twin_of[i] != i) {
-        copies_of.entry(twin_of[i]).or_default().push(i);
-    }
-    let mut same_pairs: Vec<(usize, usize, bool)> = Vec::new();
-    let mut grey_twins: Vec<(usize, usize, Affine, bool, Verdict)> = Vec::new();
-    for (_, mut class) in same {
-        // With each one's byte-identical copies, which share its pixels too.
-        let copies: Vec<usize> = class.iter().flat_map(|o| copies_of.get(o).into_iter().flatten().copied()).collect();
-        class.extend(copies);
-        class.sort_unstable();
-        class.dedup();
-        for w in 0..class.len() {
-            for x in w + 1..class.len() {
-                let (a, b) = (class[w], class[x]);
-                let alike = hue[a] == hue[b];
-                same_pairs.push((a, b, alike));
-                if !alike {
-                    // One working image, so the identity, every point of it
-                    // aligned and every block agreeing.
-                    let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-                    let k = n_kps[a];
-                    let v = Verdict {
-                        m: id,
-                        n_in: k,
-                        n_match: k,
-                        centred: true,
-                        framed: true,
-                        ov_a: 1.0,
-                        ov_b: 1.0,
-                        scale: 1.0,
-                        blk: 1.0,
-                        blk_n: 1,
-                        blk_min: 1.0,
-                        ncc: 1.0,
-                        ..Default::default()
-                    };
-                    grey_twins.push((a, b, id, false, v));
-                }
-            }
-        }
-    }
-    drop(copies_of);
-    let mut graph: Vec<(usize, usize)> = Vec::new();
-    let mut stated: Vec<Stated> = Vec::new();
+    // The files that are one file come first (`Same::pairs`). Two of the
+    // same bytes that are not pictures at all — a pair of empty files, two
+    // copies of a README — are identical, and are not a duplicate *image*,
+    // which is the only claim this tool makes; only a wildcard walk can bring
+    // such files in. A byte-identical pair of broken `.jpg`s is still stated:
+    // those did claim to be images. Two alike only in grey are the match they
+    // are, made here since no pass verified one.
+    let one_file = same.pairs(|i| !not_asked[i]);
+    let grey: Vec<Edge> = one_file
+        .iter()
+        .filter(|p| p.2 == same::Kind::SameGrey)
+        .map(|&(a, b, _)| Edge::new(a, b, Verdict::perfect(n_kps[a])))
+        .collect();
+    let mut grey_edges = grey.iter();
+    let ones = one_file.iter().map(|&(a, b, kind)| {
+        let s = match kind {
+            same::Kind::Identical => Stated::Identical,
+            same::Kind::SamePixels => Stated::SamePixels,
+            same::Kind::SameGrey => Stated::Match(grey_edges.next().expect("one edge per grey pair"), false),
+        };
+        (a, b, s)
+    });
+    let tiers = all.iter().map(|e| (e, false)).chain(propagated.iter().map(|e| (e, false))).chain(corroborated.iter().map(|e| (e, true)));
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
-    for g in exact.iter() {
-        for w in 0..g.len() {
-            for x in w + 1..g.len() {
-                let (a, b) = (g[w], g[x]);
-                if seen.insert((a, b)) {
-                    graph.push((a, b));
-                    stated.push(Stated::Identical);
-                }
-            }
-        }
-    }
-    // Then the files that decode to one picture, each pair of them, which
-    // are the same claim one step down: not the same bytes, the same pixels.
-    let mut grey = grey_twins.iter();
-    for &(a, b, alike) in &same_pairs {
-        let twin = if alike { None } else { grey.next() };
-        if seen.insert((a, b)) {
-            graph.push((a, b));
-            stated.push(twin.map_or(Stated::SamePixels, |e| Stated::Edge(e, false)));
-        }
-    }
-    drop(same_pairs);
-    let tiers = all.iter().map(|e| (e, false)).chain(propagated.iter().map(|e| (e, false)));
-    for (e, corroborated) in tiers.chain(corroborated.iter().map(|e| (e, true))) {
-        let (a, b) = (e.0, e.1);
-        if !seen.insert((a, b)) {
-            continue;
-        }
-        graph.push((a, b));
-        stated.push(Stated::Edge(e, corroborated));
-    }
-    drop(seen);
     // Against a library, nothing is said about two of its files: the run
     // was not asked, and in the default mode did not look.
-    if against {
-        let keep: Vec<bool> = graph.iter().map(|&(a, b)| !(library[a] && library[b])).collect();
-        let (mut k1, mut k2) = (keep.iter(), keep.iter());
-        graph.retain(|_| *k1.next().unwrap());
-        stated.retain(|_| *k2.next().unwrap());
-    }
+    let stated: Vec<(usize, usize, Stated)> = ones
+        .chain(tiers.map(|(e, corroborated)| (e.a(), e.b(), Stated::Match(e, corroborated))))
+        .filter(|&(a, b, _)| seen.insert((a, b)) && !(against && library[a] && library[b]))
+        .collect();
+    drop(seen);
+    drop(one_file);
     // The same pairs as the verdicts read them; see `against.rs`.
     let against_pairs: Vec<against::Pair> = if !against {
         Vec::new()
     } else {
-        graph
+        stated
             .iter()
-            .zip(&stated)
-            .map(|(&(a, b), s)| match *s {
-                Stated::Identical | Stated::SamePixels => against::Pair {
-                    a,
-                    b,
-                    relation: if matches!(s, Stated::Identical) { "identical" } else { "same_pixels" },
-                    aligned_points: None,
-                    frame_overlap: 1.0,
-                    pixel_correlation: 1.0,
-                    mirrored: false,
-                    inverted: false,
-                    clean: true,
-                },
-                Stated::Edge((_, _, m, inv, v), corroborated) => against::Pair {
-                    a,
-                    b,
-                    relation: if v.n_match == 0 { "propagated" } else if corroborated { "corroborated" } else { "direct" },
-                    aligned_points: (v.n_match > 0).then_some(v.n_in),
-                    frame_overlap: round3(v.ov_a.max(v.ov_b)),
-                    pixel_correlation: round3(v.blk),
-                    mirrored: m[0] * m[4] - m[1] * m[3] < 0.0,
-                    inverted: *inv,
-                    clean: v.blk_min >= suggest::CLEAN,
-                },
+            .map(|&(a, b, s)| against::Pair {
+                a,
+                b,
+                relation: s.relation(),
+                aligned_points: s.aligned_points(),
+                frame_overlap: s.frame_overlap(),
+                pixel_correlation: s.pixel_correlation(),
+                mirrored: s.mirrored(),
+                inverted: s.inverted(),
+                clean: s.clean(),
             })
             .collect()
     };
@@ -2990,14 +2873,7 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
                 bytes: st.len,
             })
             .collect();
-        let links: Vec<(usize, usize, suggest::Link)> = graph
-            .iter()
-            .zip(&stated)
-            .map(|(&(a, b), s)| match *s {
-                Stated::Identical | Stated::SamePixels => (a, b, suggest::Link::Exact),
-                Stated::Edge((_, _, m, inv, v), _) => (a, b, suggest::Link::Edge(v, *m, *inv)),
-            })
-            .collect();
+        let links: Vec<(usize, usize, suggest::Link)> = stated.iter().map(|&(a, b, s)| (a, b, s.link())).collect();
         // A JPEG's colour, which its decode to grey did not measure: kept
         // from an earlier run, or decoded once for this one and kept for the
         // next. Asked once a set of identical bytes, however many times the
@@ -3007,14 +2883,17 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
             if let Some(c) = items[i].traits.colour_kept {
                 return c;
             }
-            let o = twin_of[i];
+            let o = same.original(i);
             if let Some(&c) = measured.lock().unwrap().get(&o) {
                 return c;
             }
             let c = decode::colour_of(&files[i]).map(cache::kept_colour);
             if let (Some(c), Some(store)) = (c, store.as_ref()) {
-                for &k in records_of.get(&o).into_iter().flatten() {
-                    store.keep_colour(span_of[k].expect("a file holding a record has its span"), &names[k], c);
+                // In every record its bytes are held under.
+                for &k in same.identical_to(i) {
+                    if let Some(span) = span_of[k] {
+                        store.keep_colour(span, &names[k], c);
+                    }
                 }
             }
             let c = c.unwrap_or(0.0);
@@ -3025,51 +2904,30 @@ fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> R
     })};
     // Every colour the suggestion measured is in the cache.
     drop(store);
-    drop(records_of);
     // One name per file, shared by every pair that names it; see `OutPair::a`.
     let names: Vec<std::sync::Arc<str>> = files.par_iter().map(|f| f.display().to_string().into()).collect();
-    let mut out_pairs: Vec<OutPair> = graph
+    let mut out_pairs: Vec<OutPair> = stated
         .par_iter()
-        .zip(stated.par_iter())
-        .map(|(&(a, b), src)| match *src {
-            Stated::Identical | Stated::SamePixels => OutPair {
-                a: names[a].clone(),
-                b: names[b].clone(),
-                a_bytes: report::raw_bytes(&files[a]),
-                b_bytes: report::raw_bytes(&files[b]),
-                aligned_points: 0,
-                frame_overlap: 1.0,
-                pixel_correlation: 1.0,
-                scale: round3(file_scale(1.0, &items[a], &items[b])),
-                mirrored: false,
-                inverted: false,
-                identical: matches!(src, Stated::Identical),
-                same_pixels: matches!(src, Stated::SamePixels),
-                propagated: false,
-                corroborated: false,
-                ia: a,
-                ib: b,
-            },
-            Stated::Edge((_, _, _, inv_flag, v), corroborated) => OutPair {
-                a: names[a].clone(),
-                b: names[b].clone(),
-                a_bytes: report::raw_bytes(&files[a]),
-                b_bytes: report::raw_bytes(&files[b]),
-                aligned_points: v.n_in,
-                frame_overlap: round3(v.ov_a.max(v.ov_b)),
-                pixel_correlation: round3(v.blk),
-                scale: round3(file_scale(v.scale, &items[a], &items[b])),
-                mirrored: v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0,
-                inverted: *inv_flag,
-                identical: false,
-                same_pixels: false,
-                propagated: v.n_match == 0,
-                corroborated,
-                ia: a,
-                ib: b,
-            },
+        .map(|&(a, b, s)| OutPair {
+            a: names[a].clone(),
+            b: names[b].clone(),
+            a_bytes: report::raw_bytes(&files[a]),
+            b_bytes: report::raw_bytes(&files[b]),
+            aligned_points: s.aligned_points().unwrap_or(0),
+            frame_overlap: s.frame_overlap(),
+            pixel_correlation: s.pixel_correlation(),
+            scale: round3(file_scale(s.verdict().map_or(1.0, |v| v.scale), &items[a], &items[b])),
+            mirrored: s.mirrored(),
+            inverted: s.inverted(),
+            identical: matches!(s, Stated::Identical),
+            same_pixels: matches!(s, Stated::SamePixels),
+            propagated: s.relation() == "propagated",
+            corroborated: s.relation() == "corroborated",
+            ia: a,
+            ib: b,
         })
         .collect();
+    let graph: Vec<(usize, usize)> = if against { Vec::new() } else { stated.iter().map(|&(a, b, _)| (a, b)).collect() };
     drop(stated);
     // Stable, as `sort_by` is, so equal names keep the order they were met in.
     out_pairs.par_sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
@@ -3448,227 +3306,76 @@ fn round3(v: f32) -> f32 {
     (v * 1000.0).round() / 1000.0
 }
 
-/// What a pair in the report is stated from.
+/// What a pair in the report is stated from, and what every reader of the
+/// report's pairs (the report, `--against`, the keep rule) reads off it.
 #[derive(Clone, Copy)]
 enum Stated<'a> {
     /// The same bytes; see `exact_groups`.
     Identical,
-    /// Not the same bytes, the same picture; see `same_analysis`.
+    /// Not the same bytes, the same picture; see `same::Kind`.
     SamePixels,
     /// A verified edge, and whether it was corroborated.
-    Edge(&'a (usize, usize, Affine, bool, Verdict), bool),
+    Match(&'a Edge, bool),
 }
 
-/// For every file, the file whose analysis stands for it: the lowest-indexed
-/// of the files `candidate` admits that were analysed to exactly the same
-/// features and thumbnail, and itself otherwise.
-///
-/// **The analysis is a function of the working plane and nothing else**, so
-/// two files analysed alike are two files that decoded to one picture at the
-/// working size — a photograph saved again as PNG, TIFF or lossless WebP, a
-/// JPEG with its metadata stripped — and matching them separately compares a
-/// picture with itself. It is decided from the analysis rather than from the
-/// plane (as `Planes` does), so that a cached run, which decodes nothing,
-/// decides it alike. A hash of the keypoints and the thumbnail finds the
-/// candidates, and every one is then compared whole, descriptors included: a
-/// shared hash is a reason to compare, as in the exact pass.
-///
-/// A featureless file is never a candidate. Two blank pictures of one size
-/// stretch to the same thumbnail whatever their shade.
-///
-/// Alike here is alike in grey, which is all the analysis sees, and that is
-/// what matching them as one rests on; whether they are also the same
-/// *pixels* is `colour_heads`'s question.
-fn same_analysis(items: &[Item], candidate: impl Fn(usize) -> bool + Sync) -> Vec<usize> {
-    use std::hash::{BuildHasher, Hash, Hasher};
-    let n = items.len();
-    let keys = std::collections::hash_map::RandomState::new();
-    let hashed: Vec<(u64, usize)> = (0..n)
-        .into_par_iter()
-        .filter(|&i| candidate(i))
-        .map(|i| {
-            let (f, t) = (&items[i].feats, &items[i].thumb);
-            let mut h = keys.build_hasher();
-            (f.w, f.h, f.kps.len(), t.w, t.h, t.scale.to_bits()).hash(&mut h);
-            for k in f.kps.iter() {
-                (k.x.to_bits(), k.y.to_bits(), k.sigma.to_bits(), k.angle.to_bits()).hash(&mut h);
-            }
-            t.px.hash(&mut h);
-            (h.finish(), i)
-        })
-        .collect();
-    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (h, i) in hashed {
-        by_hash.entry(h).or_default().push(i);
+impl<'a> Stated<'a> {
+    fn verdict(&self) -> Option<&'a Verdict> {
+        match self {
+            Stated::Match(e, _) => Some(&e.v),
+            _ => None,
+        }
     }
-    let alike = |a: &Item, b: &Item| {
-        let (fa, fb, ta, tb) = (&a.feats, &b.feats, &a.thumb, &b.thumb);
-        fa.w == fb.w
-            && fa.h == fb.h
-            && fa.kps.len() == fb.kps.len()
-            && fa.kps.iter().zip(fb.kps.iter()).all(|(p, q)| {
-                (p.x.to_bits(), p.y.to_bits(), p.sigma.to_bits(), p.angle.to_bits())
-                    == (q.x.to_bits(), q.y.to_bits(), q.sigma.to_bits(), q.angle.to_bits())
-            })
-            && fa.desc == fb.desc
-            && (ta.w, ta.h, ta.scale.to_bits()) == (tb.w, tb.h, tb.scale.to_bits())
-            && ta.px == tb.px
-    };
-    let mut of: Vec<usize> = (0..n).collect();
-    // On every thread, since the colour may have to be decoded.
-    let groups: Vec<Vec<usize>> = by_hash.into_values().filter(|g| g.len() > 1).collect();
-    let answered: Vec<(usize, usize)> = groups
-        .into_par_iter()
-        .flat_map_iter(|mut group| {
-            group.sort_unstable();
-            let mut firsts: Vec<usize> = Vec::new();
-            let mut out = Vec::new();
-            for i in group {
-                match firsts.iter().find(|&&f| alike(&items[f], &items[i])) {
-                    Some(&f) => out.push((i, f)),
-                    None => firsts.push(i),
-                }
-            }
-            out
-        })
-        .collect();
-    for (i, f) in answered {
-        of[i] = f;
-    }
-    of
-}
 
-/// For every file, the lowest-indexed file `same_analysis` put with it that
-/// is also alike in colour (`same_colour`), and itself otherwise: the files
-/// that are the same *pixels*, of those the analysis cannot tell apart.
-///
-/// **Grey is all the analysis sees**, and a JPEG's grey is its Y plane, so a
-/// copy with its colour taken out losslessly (`jpegtran -grayscale`, a
-/// viewer's "lossless greyscale", the benchmark's own `greyscale`) or its
-/// chroma edited has its original's analysis to the bit. Stated as the same
-/// pixels, it stood as one file with the original in the keep rule, the
-/// smaller of the two stood for both — the grey copy — and the colour
-/// photograph was suggested for deletion. Such a pair is still matched as
-/// one file, since its matches are the same matches (matched apart, each
-/// counted the other and stopped the second look: 0.07 points of recall on
-/// IMGS-ALL); it is stated as the perfect match it is in grey, and the keep
-/// rule's colour over grey decides between them.
-fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync) -> Vec<usize> {
-    let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, &o) in of.iter().enumerate() {
-        if o != i {
-            classes.entry(o).or_insert_with(|| vec![o]).push(i);
+    fn relation(&self) -> &'static str {
+        match self {
+            Stated::Identical => "identical",
+            Stated::SamePixels => "same_pixels",
+            Stated::Match(e, _) if e.v.n_match == 0 => "propagated",
+            Stated::Match(_, true) => "corroborated",
+            Stated::Match(_, false) => "direct",
         }
     }
-    // On every thread, since the colour may have to be decoded.
-    let answered: Vec<(usize, usize)> = classes
-        .into_values()
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .flat_map_iter(|mut class| {
-            class.sort_unstable();
-            let mut heads: Vec<usize> = Vec::new();
-            let mut out = Vec::new();
-            for i in class {
-                match heads.iter().find(|&&h| same_colour(h, i)) {
-                    Some(&h) => out.push((i, h)),
-                    None => heads.push(i),
-                }
-            }
-            out
-        })
-        .collect();
-    let mut head: Vec<usize> = (0..of.len()).collect();
-    for (i, h) in answered {
-        head[i] = h;
-    }
-    head
-}
 
-/// Whether two files analysed alike are alike in colour too; see
-/// `same_analysis`. Cheapest proof first: a colour the decode measured, the
-/// same to the bit, which is what files of the same RGB give (a PNG and its
-/// TIFF or lossless WebP); two JPEGs that differ only in their metadata;
-/// and failing those, the colour of each one's grid read from the file
-/// (`decode::chroma_of`), which costs a decode of each.
-///
-/// The colours are the same when they differ by no more than `COLOURFUL`:
-/// the most colour codec noise gives a grey picture, so it is the most two
-/// encodings of one picture's colour can differ by and still be noise. A
-/// colour photograph against its grey copy differs by its own colour.
-fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<HashMap<usize, Option<decode::Chroma>>>, a: usize, b: usize) -> bool {
-    let (ca, cb) = (items[a].traits.colour, items[b].traits.colour);
-    if ca >= 0.0 && ca.to_bits() == cb.to_bits() {
-        return true;
+    /// None for a pair no keypoint was matched for: the same file, or a
+    /// composed transform.
+    fn aligned_points(&self) -> Option<u32> {
+        self.verdict().filter(|v| v.n_match > 0).map(|v| v.n_in)
     }
-    // Both JPEGs with colour planes, which a decode to grey does not measure.
-    if ca < 0.0 && cb < 0.0 && decode::same_jpeg_coding(&files[a], &files[b]) == Some(true) {
-        return true;
-    }
-    let of = |i: usize| -> Option<decode::Chroma> {
-        if let Some(&c) = chroma.lock().unwrap().get(&i) {
-            return c;
-        }
-        let c = decode::chroma_of(&files[i]);
-        chroma.lock().unwrap().insert(i, c);
-        c
-    };
-    match (of(a), of(b)) {
-        (Some(x), Some(y)) => decode::chroma_distance(&x, &y) <= suggest::COLOURFUL,
-        _ => false,
-    }
-}
 
-/// `edges`, which run between originals, stated for every copy of either end
-/// as well: an edge from `a` to `b` becomes one from each file sharing `a`'s
-/// bytes to each file sharing `b`'s.
-///
-/// The verdict is the originals', which is the verdict the copies would have
-/// been given, since their analysis is the originals' own. Every edge still
-/// runs from the lower index to the higher, so a copy on the other side of
-/// the other end takes the verdict reversed — its scale is then the scale
-/// between the files it names.
-///
-/// Taken and handed back rather than copied: these are the run's whole list of
-/// pairs, and a copy beside the original (or, with no copies at all, a
-/// duplicate of it) was held to the end of the run, some 110 MB on 27,000
-/// pictures at the point where the run peaks.
-fn with_copies(edges: Vec<(usize, usize, Affine, bool, Verdict)>, twin_of: &[usize]) -> Vec<(usize, usize, Affine, bool, Verdict)> {
-    let mut copies: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, &o) in twin_of.iter().enumerate() {
-        if o != i {
-            copies.entry(o).or_insert_with(|| vec![o]).push(i);
+    fn frame_overlap(&self) -> f32 {
+        self.verdict().map_or(1.0, |v| round3(v.ov_a.max(v.ov_b)))
+    }
+
+    fn pixel_correlation(&self) -> f32 {
+        self.verdict().map_or(1.0, |v| round3(v.blk))
+    }
+
+    fn mirrored(&self) -> bool {
+        self.verdict().is_some_and(|v| v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0)
+    }
+
+    fn inverted(&self) -> bool {
+        matches!(self, Stated::Match(e, _) if e.inverted())
+    }
+
+    /// No block of the overlap disagrees (`suggest::CLEAN`); the same file
+    /// always is.
+    fn clean(&self) -> bool {
+        self.verdict().is_none_or(|v| v.blk_min >= suggest::CLEAN)
+    }
+
+    fn link(&self) -> suggest::Link<'a> {
+        match self {
+            Stated::Match(e, _) => suggest::Link::Edge(&e.v, e.v.m, e.inverted()),
+            _ => suggest::Link::Exact,
         }
     }
-    if copies.is_empty() {
-        return edges;
-    }
-    let mut out = Vec::with_capacity(edges.len());
-    for (a, b, m, inv, v) in edges.iter() {
-        fn all<'a>(copies: &'a HashMap<usize, Vec<usize>>, x: &'a usize) -> &'a [usize] {
-            copies.get(x).map_or(std::slice::from_ref(x), Vec::as_slice)
-        }
-        let (sa, sb) = (all(&copies, a), all(&copies, b));
-        for &x in sa.iter() {
-            for &y in sb.iter() {
-                if (x < y) == (a < b) {
-                    out.push((x, y, *m, *inv, v.clone()));
-                } else {
-                    match v.reversed() {
-                        Some(r) => out.push((y, x, r.m, *inv, r)),
-                        None => out.push((x, y, *m, *inv, v.clone())),
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 /// The first edge for each pair of files, in the order given.
-fn unique_pairs(edges: impl IntoIterator<Item = (usize, usize, Affine, bool, Verdict)>) -> Vec<(usize, usize, Affine, bool, Verdict)> {
+fn unique_pairs(edges: impl IntoIterator<Item = Edge>) -> Vec<Edge> {
     let mut seen = std::collections::HashSet::new();
-    edges.into_iter().filter(|e| seen.insert((e.0.min(e.1), e.0.max(e.1)))).collect()
+    edges.into_iter().filter(|e| seen.insert((e.a().min(e.b()), e.a().max(e.b())))).collect()
 }
 
 /// Add the anchors that are not clean to the clusters the clean ones make.
@@ -3717,10 +3424,10 @@ fn unique_pairs(edges: impl IntoIterator<Item = (usize, usize, Affine, bool, Ver
 /// once more, asked of a single file: the smaller cluster is then renderings
 /// of something the larger holds.
 fn admit_anchors(
-    clean: Vec<(usize, usize, Affine, bool, Verdict)>,
-    mut weak: Vec<(usize, usize, Affine, bool, Verdict)>,
+    clean: Vec<Edge>,
+    mut weak: Vec<Edge>,
     n: usize,
-) -> (Vec<(usize, usize, Affine, bool, Verdict)>, usize) {
+) -> (Vec<Edge>, usize) {
     let mut dsu = Dsu::new(n);
     let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     // Whether a cluster's clean anchors close a cycle, by root.
@@ -3739,19 +3446,17 @@ fn admit_anchors(
         cycle[rb] |= cycle[ra];
     }
     for e in clean.iter() {
-        let (ra, rb) = (dsu.find(e.0), dsu.find(e.1));
+        let (ra, rb) = (dsu.find(e.a()), dsu.find(e.b()));
         if ra == rb {
             cycle[ra] = true;
         }
-        join(&mut dsu, &mut members, &mut cycle, e.0, e.1);
+        join(&mut dsu, &mut members, &mut cycle, e.a(), e.b());
     }
-    weak.sort_by(|x, y| {
-        y.4.n_in.cmp(&x.4.n_in).then(y.4.blk.total_cmp(&x.4.blk)).then((x.0, x.1).cmp(&(y.0, y.1)))
-    });
+    weak.sort_by(|x, y| y.v.n_in.cmp(&x.v.n_in).then(y.v.blk.total_cmp(&x.v.blk)).then(x.ends().cmp(&y.ends())));
     let mut near: Vec<Vec<usize>> = vec![Vec::new(); n];
     for e in weak.iter() {
-        near[e.0].push(e.1);
-        near[e.1].push(e.0);
+        near[e.a()].push(e.b());
+        near[e.b()].push(e.a());
     }
     // Clusters only grow, so a join refused now can be granted after another
     // has made one side larger; the pass repeats until nothing joins.
@@ -3761,7 +3466,7 @@ fn admit_anchors(
     loop {
         let mut joined = false;
         for e in weak.iter() {
-            let (ra, rb) = (dsu.find(e.0), dsu.find(e.1));
+            let (ra, rb) = (dsu.find(e.a()), dsu.find(e.b()));
             if ra == rb {
                 continue;
             }
@@ -3794,7 +3499,7 @@ fn admit_anchors(
     let mut out = clean;
     let mut refused = 0;
     for e in weak {
-        if dsu.find(e.0) == dsu.find(e.1) {
+        if dsu.find(e.a()) == dsu.find(e.b()) {
             out.push(e);
         } else {
             refused += 1;
@@ -3818,15 +3523,14 @@ fn admit_anchors(
 /// carrying all of them. A bridge to a single isolated file is left alone:
 /// that is the ordinary case of a file matched exactly once, and it claims
 /// nothing beyond itself.
-#[allow(clippy::type_complexity)]
 fn drop_weak_bridges(
-    edges: Vec<(usize, usize, Affine, bool, Verdict)>,
+    edges: Vec<Edge>,
     n: usize,
-) -> (Vec<(usize, usize, Affine, bool, Verdict)>, Vec<(usize, usize, Affine, bool, Verdict)>) {
+) -> (Vec<Edge>, Vec<Edge>) {
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbour, edge index)
-    for (e, (a, b, _, _, _)) in edges.iter().enumerate() {
-        adj[*a].push((*b, e));
-        adj[*b].push((*a, e));
+    for (k, e) in edges.iter().enumerate() {
+        adj[e.a()].push((e.b(), k));
+        adj[e.b()].push((e.a(), k));
     }
     // Iterative Tarjan: discovery time, low-link, and the subtree size needed
     // to know how much sits on the far side of a bridge.
@@ -3909,7 +3613,7 @@ fn drop_weak_bridges(
 /// What a round of propagation proposed, and how.
 struct Propagation {
     /// Every composed hypothesis that cleared the overlap floor, verdict and all.
-    found: Vec<(usize, usize, Affine, bool, Verdict)>,
+    found: Vec<Edge>,
     /// The components the round could not afford to compare pair by pair,
     /// and compared with their root alone, each as its lowest file and its
     /// size; see `propagate`.
@@ -3960,22 +3664,22 @@ struct Propagation {
 /// marks; see the round loop in `run`.
 fn propagate(
     items: &[Item],
-    edges: &[(usize, usize, Affine, bool, Verdict)],
+    edges: &[Edge],
     n: usize,
     min_ov: f32,
     dirty: Option<&[bool]>,
     budget: usize,
 ) -> Propagation {
     let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); n];
-    for (a, b, m, inv, v) in edges.iter() {
-        adj[*a].push((*b, *m, *inv, v.n_in));
-        if let Some(mi) = verify::invert_affine(m) {
-            adj[*b].push((*a, mi, *inv, v.n_in));
+    for e in edges.iter() {
+        adj[e.a()].push((e.b(), e.v.m, e.inverted(), e.v.n_in));
+        if let Some(mi) = verify::invert_affine(&e.v.m) {
+            adj[e.b()].push((e.a(), mi, e.inverted(), e.v.n_in));
         }
     }
     let mut dsu = Dsu::new(n);
-    for (a, b, _, _, _) in edges.iter() {
-        dsu.union(*a, *b);
+    for e in edges.iter() {
+        dsu.union(e.a(), e.b());
     }
     let mut comps: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..n {
@@ -3983,8 +3687,7 @@ fn propagate(
             comps.entry(dsu.find(i)).or_default().push(i);
         }
     }
-    let known: std::collections::HashSet<(usize, usize)> =
-        edges.iter().map(|&(a, b, _, _, _)| (a, b)).collect();
+    let known: std::collections::HashSet<(usize, usize)> = edges.iter().map(Edge::ends).collect();
     // Pairs each component already holds, so that what a component would cost
     // is the pairs it would actually propose.
     let mut inside: HashMap<usize, usize> = HashMap::new();
@@ -4069,7 +3772,7 @@ fn propagate(
         let var = Variant { mirror: false, invert: ia ^ ib };
         let p = verify::Pair { fa: &items[a].feats, fb: &items[b].feats, ta: &items[a].thumb, tb: &items[b].thumb };
         let v = verify::verify_transform(&p, &m, var, min_ov);
-        (v.ov_a.max(v.ov_b) >= min_ov).then_some((a, b, m, var.invert, v))
+        (v.ov_a.max(v.ov_b) >= min_ov).then_some(Edge::new(a, b, v))
     };
     let proposed = AtomicUsize::new(0);
     let found = units
@@ -4103,47 +3806,6 @@ fn propagate(
 
 #[cfg(test)]
 mod tests {
-    /// Files analysed alike answer to the lowest of them; a file analysed
-    /// differently, a featureless one and one `candidate` refuses do not.
-    #[test]
-    fn files_analysed_alike_are_one_file() {
-        use std::sync::Arc;
-        let feats = |seed: u8| Features {
-            w: 64,
-            h: 48,
-            kps: vec![sift::Keypoint { x: 1.0, y: 2.0, sigma: 1.6, angle: seed as f32 }].into(),
-            desc: vec![seed; DESC_LEN].into(),
-        };
-        let item = |f: Features, t: u8| Item {
-            feats: Arc::new(f),
-            thumb: Arc::new(Thumb::new(4, 3, 0.0625, vec![t; 12])),
-            dims: (640, 480),
-            ok: true,
-            err: None,
-            damaged: None,
-            traits: Default::default(),
-        };
-        let items = vec![
-            item(feats(1), 9),
-            item(feats(2), 9),
-            // Its own copy of 0's analysis, as a cached run holds it.
-            item(feats(1), 9),
-            // The same features and another thumbnail.
-            item(feats(1), 8),
-            item(Features { w: 64, h: 48, ..Default::default() }, 9),
-            item(Features { w: 64, h: 48, ..Default::default() }, 9),
-            item(feats(2), 9),
-        ];
-        let of = same_analysis(&items, |i| items[i].feats.len() > 0 && i != 6);
-        assert_eq!(of, vec![0, 1, 0, 3, 4, 5, 6]);
-        // Alike in grey and in colour, the same pixels; alike in grey only,
-        // as a grey copy of a colour JPEG is, its own colour.
-        assert_eq!(colour_heads(&of, |_, _| true), vec![0, 1, 0, 3, 4, 5, 6]);
-        assert_eq!(colour_heads(&of, |a, b| (a, b) != (0, 2)), vec![0, 1, 2, 3, 4, 5, 6]);
-        let of = vec![0, 1, 0, 3, 0];
-        assert_eq!(colour_heads(&of, |a, b| (a, b) != (0, 2) && (a, b) != (0, 4)), vec![0, 1, 2, 3, 2], "the first file of its colour");
-    }
-
     /// The vocabulary has to scale with the corpus, and the reason is a bug
     /// that a single-corpus benchmark could never have shown: with a fixed
     /// 65,536 words, a folder of eight images put every descriptor in a word
@@ -4473,48 +4135,20 @@ mod tests {
     /// and the bridge test then kept a match it exists to drop.
     #[test]
     fn a_pair_found_twice_is_still_one_bridge() {
-        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let direct = Verdict { n_in: 40, ..Default::default() };
         let mirrored = Verdict { n_in: 12, ..Default::default() };
         // Two triangles {0,1,2} and {3,4,5}, joined only by 2-3: once from
         // the direct pass and once more, the other way round, from the second
         // look.
-        let mut edges: Vec<(usize, usize, Affine, bool, Verdict)> =
-            [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5), (2, 3)].iter().map(|&(a, b)| (a, b, id, false, direct.clone())).collect();
-        edges.push((3, 2, id, false, mirrored));
+        let mut edges: Vec<Edge> =
+            [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5), (2, 3)].iter().map(|&(a, b)| Edge::new(a, b, direct)).collect();
+        edges.push(Edge::new(3, 2, mirrored));
         let unique = unique_pairs(edges);
         assert_eq!(unique.len(), 7);
-        assert_eq!(unique[6].4.n_in, 40, "the first verdict for a pair is the one kept");
+        assert_eq!(unique[6].v.n_in, 40, "the first verdict for a pair is the one kept");
         let kept = drop_weak_bridges(unique, 6).0;
-        assert!(!kept.iter().any(|e| (e.0, e.1) == (2, 3)), "the lone link is dropped");
+        assert!(!kept.iter().any(|e| e.ends() == (2, 3)), "the lone link is dropped");
         assert_eq!(kept.len(), 6);
-    }
-
-    /// A pair between originals is stated for every copy of either, each
-    /// running from the lower index to the higher with the verdict turned to
-    /// match — and a run with no copies is left exactly as it was.
-    #[test]
-    fn a_pair_is_stated_for_every_copy_of_either_file() {
-        let m: Affine = [2.0, 0.0, 5.0, 0.0, 2.0, 7.0];
-        let v = Verdict { m, n_in: 30, ov_a: 0.25, ov_b: 1.0, scale: 2.0, ..Default::default() };
-        let edges = vec![(1usize, 3usize, m, false, v)];
-        // 0 and 4 are copies of 1; 2 is a copy of 3.
-        let twin_of = vec![1, 1, 3, 3, 1];
-        let out = with_copies(edges.clone(), &twin_of);
-        let mut names: Vec<(usize, usize)> = out.iter().map(|e| (e.0, e.1)).collect();
-        names.sort_unstable();
-        assert_eq!(names, [(0, 2), (0, 3), (1, 2), (1, 3), (2, 4), (3, 4)]);
-        for (a, b, em, _, ev) in out.iter() {
-            assert!(a < b);
-            // Files sharing 1's bytes are the small side: scale 2 from them.
-            let from_one = twin_of[*a] == 1;
-            assert_eq!(ev.scale, if from_one { 2.0 } else { 0.5 }, "{a}-{b}");
-            assert_eq!(*em, ev.m);
-            assert_eq!((ev.ov_a, ev.ov_b), if from_one { (0.25, 1.0) } else { (1.0, 0.25) });
-        }
-        let alone = with_copies(edges, &[0, 1, 2, 3]);
-        assert_eq!(alone.len(), 1);
-        assert_eq!((alone[0].0, alone[0].1), (1, 3));
     }
 
     /// Weak anchors join a cluster only when every file of the smaller side has
@@ -4522,8 +4156,7 @@ mod tests {
     /// with a file that does not vouch for the join does not.
     #[test]
     fn weak_anchors_join_clusters_only_when_every_file_vouches() {
-        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let e = |a: usize, b: usize, n_in: u32| (a, b, id, false, Verdict { n_in, ..Default::default() });
+        let e = |a: usize, b: usize, n_in: u32| Edge::new(a, b, Verdict { n_in, ..Default::default() });
         // Two clean clusters, {0,1,2,7} and {3,4,5}.
         let clean = vec![e(0, 1, 50), e(1, 2, 50), e(2, 7, 50), e(3, 4, 50), e(4, 5, 50)];
         // Weak links between them from three files of each, a lone file 6
@@ -4533,7 +4166,7 @@ mod tests {
         let weak = vec![e(2, 3, 12), e(1, 4, 11), e(0, 6, 11), e(3, 6, 15), e(0, 2, 10), e(3, 8, 11), e(4, 9, 11)];
         let clean = [clean, vec![e(8, 9, 50)]].concat();
         let (kept, refused) = admit_anchors(clean, weak, 10);
-        let mut pairs: Vec<(usize, usize)> = kept.iter().map(|x| (x.0, x.1)).collect();
+        let mut pairs: Vec<(usize, usize)> = kept.iter().map(Edge::ends).collect();
         pairs.sort_unstable();
         // 7 has no weak anchor into the second cluster, so the first cluster
         // never joins it however many of its other files do.
@@ -4547,15 +4180,14 @@ mod tests {
     /// chain matched the same way still joins.
     #[test]
     fn weak_anchors_join_two_clusters_with_clean_cycles_only_through_one_file() {
-        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-        let e = |a: usize, b: usize, n_in: u32| (a, b, id, false, Verdict { n_in, ..Default::default() });
+        let e = |a: usize, b: usize, n_in: u32| Edge::new(a, b, Verdict { n_in, ..Default::default() });
         // Triangles {0,1,2} and {3,4,5}; a chain {6,7,8}.
         let clean = vec![e(0, 1, 50), e(1, 2, 50), e(0, 2, 50), e(3, 4, 50), e(4, 5, 50), e(3, 5, 50), e(6, 7, 50), e(7, 8, 50)];
         // Every file of each triangle has a weak anchor into the other, and
         // every file of the chain one into the first triangle.
         let weak = vec![e(0, 3, 12), e(1, 4, 12), e(2, 5, 12), e(6, 0, 11), e(7, 1, 11), e(8, 2, 11)];
         let (kept, refused) = admit_anchors(clean, weak, 9);
-        let mut pairs: Vec<(usize, usize)> = kept.iter().map(|x| (x.0, x.1)).collect();
+        let mut pairs: Vec<(usize, usize)> = kept.iter().map(Edge::ends).collect();
         pairs.sort_unstable();
         assert_eq!(pairs, [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5), (6, 0), (6, 7), (7, 1), (7, 8), (8, 2)]);
         assert_eq!(refused, 3);
@@ -4573,11 +4205,8 @@ mod tests {
     /// the root alone — it never passes one over.
     #[test]
     fn a_component_over_the_budget_is_starred_not_skipped() {
-        let id: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         // A chain over `files`, which leaves every pair but the links to ask.
-        let chain = |files: std::ops::Range<usize>| {
-            files.clone().skip(1).map(|b| (b - 1, b, id, false, Verdict::default())).collect::<Vec<_>>()
-        };
+        let chain = |files: std::ops::Range<usize>| files.clone().skip(1).map(|b| Edge::new(b - 1, b, Verdict::default())).collect::<Vec<_>>();
         let n = 30;
         let items: Vec<Item> = (0..n).map(|_| Item::default()).collect();
         // {0..10}: 45 pairs, 9 known, 36 to ask. {10..30}: 190 pairs, 19 known, 171.
@@ -4591,7 +4220,7 @@ mod tests {
         assert_eq!(p.starred, vec![(10, 20)]);
         assert_eq!(p.full, vec![0]);
         assert_eq!(p.proposed, 36 + 17);
-        assert!(p.found.iter().filter(|e| e.0 >= 10).all(|e| e.0 == 11 || e.1 == 11), "a star is all through its root");
+        assert!(p.found.iter().filter(|e| e.a() >= 10).all(|e| e.a() == 11 || e.b() == 11), "a star is all through its root");
         // No budget at all: both are starred, and still asked.
         let p = propagate(&items, &edges, n, 0.0, None, 0);
         assert_eq!((p.starred.len(), p.proposed), (2, 7 + 17));
@@ -4602,15 +4231,15 @@ mod tests {
         assert_eq!(p1.starred, vec![(10, 20)]);
         let mut dirty = vec![false; n];
         for e in &p1.found {
-            dirty[e.0] = true;
-            dirty[e.1] = true;
+            dirty[e.a()] = true;
+            dirty[e.b()] = true;
         }
         let pool = [edges.clone(), p1.found.clone()].concat();
         let p2 = propagate(&items, &pool, n, 0.0, Some(&dirty), 180);
         assert!(p2.starred.is_empty() && p2.full.contains(&10), "{:?} {:?}", p2.starred, p2.full);
         // The order is the plan's, whatever order the work finished in.
         let again = propagate(&items, &edges, n, 0.0, None, 1_000);
-        let pairs = |p: &Propagation| p.found.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>();
+        let pairs = |p: &Propagation| p.found.iter().map(Edge::ends).collect::<Vec<_>>();
         assert_eq!(pairs(&again), pairs(&propagate(&items, &edges, n, 0.0, None, 1_000)));
         let mut sorted = pairs(&again);
         sorted.sort_unstable();

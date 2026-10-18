@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.52.0)
+## Status (0.52.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -67,7 +67,7 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     documents (two JPEG invoices) are **still open**.
   - **B**: `Traits::frames` (GIF/APNG/WebP animation, TIFF pages, HEIF
     sequence brands, JXL animation): deleted only for its own bytes, never a
-    same-pixels twin (`same_analysis` skips it). Before: two GIFs sharing a
+    same-pixels twin (`Same::settle` skips it). Before: two GIFs sharing a
     first frame were "same pixels" and one DELETE; a 3-page TIFF DELETE for
     a PNG of page 1.
   - **C**: TIFF-container camera raw (`DNGVersion`, `CR` at byte 8, a
@@ -124,6 +124,14 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   the case). `suggest::revoke` is the one place a DELETE whose kept copy or
   own file has gone or changed becomes REVIEW (`--last`, the window's
   `note_changed`, `drop_gone`, `regroup`; was six loops).
+- 0.52.1 (refactor, no change to output): "is this file another's" is
+  one `same::Same` (bytes, analysis, colour; was three parallel vectors read
+  by hand in eight places); an edge is one `Edge { i, j, v }` (the transform
+  and inversion were held twice; 112 -> 76 bytes); a stated pair's report
+  row, `--against` pair and keep-rule link are read from `Stated`'s methods
+  once. IMGS-ALL (cold and cached), dump, IMGS-AGAINST, IMGS-PROVENANCE,
+  all 90 `pairs.py` reports and the found corpus byte-identical to 0.52.0;
+  cached IMGS-ALL peak RssAnon+swap (ABBA) 729 / 685 MB base, 635 / 631 new.
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -172,6 +180,7 @@ src/
   sift.rs       local features
   index.rs      vocabulary tree, inverted file, containment scoring
   verify.rs     correspondence, geometry, pixel check, acceptance Policy
+  same.rs       which files are one file (bytes, analysis, colour), and their pairs
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
   cache.rs      on-disk analysis cache
@@ -309,11 +318,13 @@ Each was measured; changing one needs a re-measure.
 - **Inverted file indexes every word**; no frequency cap.
 - **"Identical" is a byte comparison**, after a 4x16 KB sample hash; under a
   wildcard only possible pictures are read (`decode::may_be_image`).
-- **Byte-identical copies and same-analysis twins** (`lib::Planes`,
-  `lib::same_analysis`) are matched through one original and get its pairs
-  via `with_copies`; otherwise they count each other as matches and suppress
-  the second look. Twins are reported as `same_pixels`. A twin must also
-  match in colour (`lib::same_colour`: measured colour equal to the bit, or
+- **Byte-identical copies and same-analysis twins** (`same.rs`: one
+  `Same` answers "is this file another's" for the whole run) are matched
+  through one original and get its pairs via `Same::expand`; the pairs
+  between them come from `Same::pairs`. Otherwise they count each other as
+  matches and suppress the second look. Twins are reported as `same_pixels`.
+  A twin must also match in colour (`same_colour`: measured colour equal to
+  the bit, or
   two JPEGs differing only in APPn/COM, else `decode::chroma_of` grids within
   `COLOURFUL`): grey is luma only, so a lossless-greyscale JPEG was a twin of
   its colour original, stood as one with it, and won as the smaller file.

@@ -2939,7 +2939,7 @@ pub fn colour_of(path: &Path) -> Option<f32> {
 }
 
 /// The colour of `path`'s cells as it is shown, the picture turned as its
-/// EXIF orientation says: what `lib::same_analysis` asks of two files whose
+/// EXIF orientation says: what `same::same_analysis` asks of two files whose
 /// grey is the same, since the analysis sees nothing else. Decoded as
 /// `colour_of` decodes, over every fourth row of a JPEG.
 pub fn chroma_of(path: &Path) -> Option<Chroma> {
