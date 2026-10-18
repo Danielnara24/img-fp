@@ -48,7 +48,7 @@ mod sift;
 mod simd;
 mod spill;
 mod suggest;
-pub use suggest::{by_group, kept_at_end, Action, Mode as SuggestMode, Seat};
+pub use suggest::{by_group, kept_at_end, revoke, Action, Lapse, Mode as SuggestMode, Seat};
 pub use cache::file_name as cache_file_name;
 mod verify;
 mod walk;

@@ -55,7 +55,7 @@ use crate::scan::{Found, Group, Member};
 use crate::still::Still;
 use crate::thumbs::{show_on, Key, Latest, Shown, Size, Thumbs};
 use crate::App;
-use img_fp::{Action, SuggestMode};
+use img_fp::{Action, Lapse, SuggestMode};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
@@ -118,18 +118,6 @@ struct GroupState {
     reference_gone: bool,
 }
 
-/// Why the content rule no longer deletes a file it deleted: the file that
-/// held it is not there to hold it, as the scan saw it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Unheld {
-    #[default]
-    No,
-    /// It has gone (`Results::drop_gone`).
-    Gone,
-    /// It has changed since the scan (`State::note_changed`).
-    Changed,
-}
-
 /// What the page knows, with every file by its number (`Member::id`) rather
 /// than its path: marking all of IMGS-ALL's suggestions is 17,850 files, and
 /// hashing their paths was most of what that cost once it was one pass.
@@ -153,11 +141,12 @@ struct State {
     by_mode: Vec<Vec<Option<Action>>>,
     /// For each file the content rule deletes, the file that stays and holds
     /// it, at the end of its chain of holders (`img_fp::kept_at_end`).
-    kept_of: Vec<Option<u32>>,
+    kept_of: Vec<Option<usize>>,
     /// Files the content rule deleted and now leaves for a look because the
     /// file that held them has gone (`drop_gone`) or changed since the scan
-    /// (`note_changed`): a REVIEW that is not one of the scan's own.
-    unheld: Vec<Unheld>,
+    /// (`note_changed`): a REVIEW that is not one of the scan's own
+    /// (`img_fp::revoke`).
+    unheld: Vec<Option<Lapse>>,
     /// Files changed since the scan (`last::changed_since`): not the files it
     /// judged, so no rule suggests deleting them, nor anything resting on
     /// them, as `--last` does not.
@@ -193,16 +182,16 @@ impl State {
         match self.action(id) {
             Some(Action::Review) if self.changed.get(id as usize).copied().unwrap_or(false) => "review: changed since the scan",
             Some(Action::Review) if MODES[self.mode] == SuggestMode::Content => match self.unheld_of(id) {
-                Unheld::Gone => "review: its kept copy is gone",
-                Unheld::Changed => "review: its kept copy has changed",
-                Unheld::No => suggestion(Some(Action::Review)),
+                Some(Lapse::Gone) => "review: its kept copy is gone",
+                Some(Lapse::Changed) => "review: its kept copy has changed",
+                None => suggestion(Some(Action::Review)),
             },
             a => suggestion(a),
         }
     }
 
-    fn unheld_of(&self, id: u32) -> Unheld {
-        self.unheld.get(id as usize).copied().unwrap_or_default()
+    fn unheld_of(&self, id: u32) -> Option<Lapse> {
+        self.unheld.get(id as usize).copied().flatten()
     }
 
     /// Whether file `id` is for a person to look at, as the scan said: a
@@ -211,7 +200,7 @@ impl State {
     fn to_look_at(&self, id: u32) -> bool {
         self.action(id) == Some(Action::Review)
             && !self.changed.get(id as usize).copied().unwrap_or(false)
-            && !(MODES[self.mode] == SuggestMode::Content && self.unheld_of(id) != Unheld::No)
+            && !(MODES[self.mode] == SuggestMode::Content && self.unheld_of(id).is_some())
     }
 
     /// The rules that read the groups, worked out again from the groups
@@ -233,12 +222,9 @@ impl State {
                 self.by_mode[k] = again;
             }
         }
-        for (id, _) in self.changed.iter().enumerate().filter(|(_, c)| **c) {
-            for m in self.by_mode.iter_mut() {
-                if m[id] == Some(Action::Delete) {
-                    m[id] = Some(Action::Review);
-                }
-            }
+        let changed = &self.changed;
+        for m in self.by_mode.iter_mut() {
+            img_fp::revoke(m, &mut [], |i| changed[i].then_some(Lapse::Changed));
         }
     }
 
@@ -270,18 +256,9 @@ impl State {
             self.changed[id as usize] = true;
         }
         let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-        for id in 0..self.paths.len() {
-            if self.by_mode[content][id] != Some(Action::Delete) {
-                continue;
-            }
-            if self.changed[id] {
-                self.by_mode[content][id] = Some(Action::Review);
-                self.kept_of[id] = None;
-            } else if self.kept_of[id].is_some_and(|k| self.changed[k as usize]) {
-                self.by_mode[content][id] = Some(Action::Review);
-                self.kept_of[id] = None;
-                self.unheld[id] = Unheld::Changed;
-            }
+        let changed = &self.changed;
+        for (id, why) in img_fp::revoke(&mut self.by_mode[content], &mut self.kept_of, |i| changed[i].then_some(Lapse::Changed)) {
+            self.unheld[id] = Some(why);
         }
         self.regroup();
         true
@@ -323,7 +300,7 @@ impl State {
         self.marked_ids()
             .filter(|&id| {
                 self.by_mode[content].get(id as usize).copied().flatten() == Some(Action::Delete)
-                    && self.kept_of.get(id as usize).copied().flatten().is_some_and(|k| self.is_marked(k))
+                    && self.kept_of.get(id as usize).copied().flatten().is_some_and(|k| self.is_marked(k as u32))
             })
             .count()
     }
@@ -1209,7 +1186,7 @@ impl Results {
                 kept_of,
                 marked: vec![false; n],
                 gone: vec![false; n],
-                unheld: vec![Unheld::No; n],
+                unheld: vec![None; n],
                 changed: vec![false; n],
                 problems,
                 analysed,
@@ -2056,13 +2033,13 @@ impl Results {
         d.why.set_text(&evidence(&m));
         let action = s.action(m.id);
         let kept = match (action, s.kept_of.get(m.id as usize).copied().flatten()) {
-            (Some(Action::Delete), Some(k)) if s.mode == 0 => held_by(&m.path, &s.paths[k as usize]),
+            (Some(Action::Delete), Some(k)) if s.mode == 0 => held_by(&m.path, &s.paths[k]),
             _ => String::new(),
         };
         let kept = match (kept.is_empty(), s.changed.get(m.id as usize).copied().unwrap_or(false), s.mode == 0, s.unheld_of(m.id)) {
             (true, true, _, _) => "It has changed since the scan".to_string(),
-            (true, _, true, Unheld::Gone) => "The file that held everything in it has gone".to_string(),
-            (true, _, true, Unheld::Changed) => "The file that held everything in it has changed since the scan".to_string(),
+            (true, _, true, Some(Lapse::Gone)) => "The file that held everything in it has gone".to_string(),
+            (true, _, true, Some(Lapse::Changed)) => "The file that held everything in it has changed since the scan".to_string(),
             _ => kept,
         };
         d.why_note.set_text(&kept);
@@ -2491,7 +2468,7 @@ impl Results {
                 .filter(|(_, g)| g.files.iter().all(|f| s.is_marked(f.id)))
                 .map(|(gi, _)| gi + 1)
                 .collect();
-            let kept_changed = s.marked_ids().filter(|&id| s.unheld_of(id) == Unheld::Changed).count();
+            let kept_changed = s.marked_ids().filter(|&id| s.unheld_of(id) == Some(Lapse::Changed)).count();
             (paths, bytes, whole, changed_after, s.marked_with_their_copy(), kept_changed)
         };
         if paths.is_empty() {
@@ -2643,12 +2620,10 @@ impl Results {
                 }
             }
             let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-            for id in 0..s.paths.len() {
-                if s.by_mode[content][id] == Some(Action::Delete) && s.kept_of[id].is_some_and(|k| s.gone[k as usize]) {
-                    s.by_mode[content][id] = Some(Action::Review);
-                    s.kept_of[id] = None;
-                    s.unheld[id] = Unheld::Gone;
-                }
+            let s = &mut *s;
+            let trashed = &s.gone;
+            for (id, why) in img_fp::revoke(&mut s.by_mode[content], &mut s.kept_of, |i| trashed[i].then_some(Lapse::Gone)) {
+                s.unheld[id] = Some(why);
             }
             for g in s.groups.iter_mut() {
                 if g.files.iter().any(|f| f.is_representative() && gone.contains(&f.path)) {
@@ -2848,7 +2823,7 @@ pub struct Prepared {
     paths: Vec<PathBuf>,
     sizes: Vec<u64>,
     by_mode: Vec<Vec<Option<Action>>>,
-    kept_of: Vec<Option<u32>>,
+    kept_of: Vec<Option<usize>>,
     analysed: usize,
     kept: Option<u64>,
     roots: Vec<PathBuf>,
@@ -2915,7 +2890,7 @@ pub fn prepare(found: Found) -> Prepared {
         }
     }
     let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-    let kept_of = img_fp::kept_at_end(&by_mode[content], &rests_on).into_iter().map(|k| k.map(|k| k as u32)).collect();
+    let kept_of = img_fp::kept_at_end(&by_mode[content], &rests_on);
     Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots: Vec::new(), min_correlation, changed_after: None }
 }
 
@@ -3000,7 +2975,7 @@ mod tests {
             paths: (0..3).map(|i| PathBuf::from(format!("/p/{i}.jpg"))).collect(),
             by_mode: vec![vec![Some(Action::Keep), d, d], vec![Some(Action::Keep), d, d], vec![Some(Action::Keep), d, d]],
             kept_of: vec![None, Some(0), Some(0)],
-            unheld: vec![Unheld::No; 3],
+            unheld: vec![None; 3],
             changed: vec![false; 3],
             min_correlation: 0.6,
             ..Default::default()
@@ -3008,7 +2983,7 @@ mod tests {
         assert!(!s.note_changed(&[]), "nothing changed, nothing moves");
         assert!(s.note_changed(&[0]));
         assert_eq!(s.by_mode[0], vec![Some(Action::Keep), Some(Action::Review), Some(Action::Review)]);
-        assert_eq!((s.kept_of[1], s.unheld[1]), (None, Unheld::Changed));
+        assert_eq!((s.kept_of[1], s.unheld[1]), (None, Some(Lapse::Changed)));
         s.mode = 0;
         assert_eq!(s.said(1), "review: its kept copy has changed");
         assert!(!s.to_look_at(1), "not one the scan left to look at");
@@ -3022,7 +2997,7 @@ mod tests {
             paths: s.paths.clone(),
             by_mode: vec![vec![Some(Action::Keep), d, d]; 3],
             kept_of: vec![None, Some(0), Some(0)],
-            unheld: vec![Unheld::No; 3],
+            unheld: vec![None; 3],
             changed: vec![false; 3],
             min_correlation: 0.6,
             ..Default::default()

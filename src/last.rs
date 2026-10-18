@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::report::{self, OutGroup, OutPair, Output};
-use crate::suggest::{self, Action};
+use crate::suggest::{self, Action, Lapse};
 
 pub const REPORT: &str = "result.json";
 pub const NOTES: &str = "scan.json";
@@ -437,6 +437,13 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, after: Option<
     let changed: HashSet<usize> = (0..files.len())
         .filter(|&i| std::fs::metadata(&files[i]).is_ok_and(|md| changed_since(&md, stated[i].2.unwrap_or(0), after)))
         .collect();
+    let lapsed = |i: usize| {
+        if gone.contains(&i) {
+            Some(Lapse::Gone)
+        } else {
+            changed.contains(&i).then_some(Lapse::Changed)
+        }
+    };
     let mut unheld = 0;
     let (actions, kept_by) = match mode {
         suggest::Mode::Content => {
@@ -448,23 +455,11 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, after: Option<
             // To the end of each chain: a scan kept by an earlier version names the
             // nearest holder, which may be a deletion too.
             let mut kept_by = suggest::kept_at_end(&content, &kept_by);
-            // A deletion whose kept copy has gone since the scan rests on
-            // nothing: carried out, it would take the last copy of what it
-            // shows. It is left for a person to look at.
-            for i in 0..files.len() {
-                if content[i] == Some(Action::Delete) && kept_by[i].is_some_and(|k| gone.contains(&k)) {
-                    content[i] = Some(Action::Review);
-                    kept_by[i] = None;
-                    unheld += 1;
-                }
-            }
-            // Nor on one changed since, nor is one changed since deleted.
-            for i in 0..files.len() {
-                if content[i] == Some(Action::Delete) && (changed.contains(&i) || kept_by[i].is_some_and(|k| changed.contains(&k))) {
-                    content[i] = Some(Action::Review);
-                    kept_by[i] = None;
-                }
-            }
+            // A deletion whose kept copy has gone or changed since the scan
+            // rests on nothing, and one changed since is not of the file the
+            // scan judged: each is left for a person to look at.
+            let taken = suggest::revoke(&mut content, &mut kept_by, lapsed);
+            unheld = taken.iter().filter(|(_, why)| *why == Lapse::Gone).count();
             (content, kept_by)
         }
         // The other two rules judge a file by the representatives it was
@@ -475,11 +470,7 @@ fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, after: Option<
         _ => {
             let seats = seats.into_iter().filter(|(rep, _)| !gone.contains(rep) && !changed.contains(rep)).map(|(_, s)| s);
             let mut actions = suggest::by_group(mode, files.len(), seats, min_correlation);
-            for &i in &changed {
-                if actions[i] == Some(Action::Delete) {
-                    actions[i] = Some(Action::Review);
-                }
-            }
+            suggest::revoke(&mut actions, &mut [], |i| changed.contains(&i).then_some(Lapse::Changed));
             (actions, Vec::new())
         }
     };

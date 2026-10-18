@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.51.1)
+## Status (0.52.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -108,6 +108,22 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   `stat` per carried record. The window says "review", not "weak match":
   most REVIEWs are undecided same-picture pairs at 1.00. Not measured on the
   corpora (no rule changed).
+- 0.52.0 (the keep rule rebuilt, not retuned): `suggest::Component::refusal`
+  answers "may `k` delete `d`" with a reason and decides nothing; what a
+  reason makes of a file is the order of `Refusal` (`No < Softer < Held <
+  Undecided`, by caution: the greatest of a file's refusals decides); every
+  action is read once (`Facts::action`). Before: refusals were pushed into
+  three side lists by a `bool` closure, read back with an unwritten order
+  (Softer above the rest), so a held or undecided file a softer copy also
+  refused was kept and deleted others. Proved first with that order kept: a
+  random differential test (40,000 families of up to six files, every
+  reason reached thousands of times) against the old code, identical; then
+  the order corrected: 112 of 40,000 families move (28 fewer deletions, one
+  more, a file deleted for its own bytes). IMGS-ALL, IMGS-PROVENANCE and all
+  90 `pairs.py` reports byte-identical to 0.51.1 both ways (no corpus has
+  the case). `suggest::revoke` is the one place a DELETE whose kept copy or
+  own file has gone or changed becomes REVIEW (`--last`, the window's
+  `note_changed`, `drop_gone`, `regroup`; was six loops).
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -374,16 +390,20 @@ A lossless file is not deleted for a file of its frame and size whose
 pixels are not its own (`own_pixels`): another lossless file makes an
 undecided pair, a lossy one does not stand in for it. A file of several
 pictures (`Traits::frames`) is deleted only for its bytes. Files refused by
-either are KEEP and **delete nothing themselves** (`held`, unlike
-`SOFT_GAP`'s `kept_back`): spreading from them let a kept posterize edit
-delete its original.
+either are KEEP and **delete nothing themselves** (`Refusal::Held`, unlike
+`SOFT_GAP`'s `Refusal::Softer`): spreading from them let a kept posterize
+edit delete its original.
+
+**Adding a rule**: a new refusal in `Component::refusal` and its place in
+`Refusal`'s order (what it makes of a file nothing deleted), never a new
+list or a pass after settling. The action is read in `Facts::action` only.
 
 A DELETE row carries `kept_copy` (JSON only), which the window shows: the
 end of its chain of holders (`suggest::kept_at_end`), which stays. Deletion
 spreads one holder at a time, and the nearest holder was itself a DELETE for
 15% of deletions. A deletion whose kept copy is gone (`--last`, or the
 window after the Trash or on restore) becomes REVIEW: carried out, it would
-take the last copy. The window labels it "review: its kept copy is gone", not
+take the last copy (`suggest::revoke`, shared by `--last` and the window). The window labels it "review: its kept copy is gone", not
 a weak match. The two group rules judge only by representatives still there
 (`--last` and the window): a group whose representative has gone suggests
 nothing for its files.

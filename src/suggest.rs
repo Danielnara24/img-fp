@@ -69,9 +69,20 @@
 //!   a file is kept, and nothing is deleted on its strength.
 //! - **Deletion spreads from the keeps**, each file deleted by one already
 //!   settled.
+//!
+//! How the pieces are put together: whether one file may delete another is
+//! one question (`Component::refusal`), which decides nothing itself and
+//! answers with its reason. What a reason makes of a file nothing deleted —
+//! kept and deleting on, kept and deleting nothing, left for a look with its
+//! twin, or judged by how closely it matched — is `Refusal`'s, the greatest
+//! of a file's refusals deciding; and every file's action is read once, from
+//! what settling found of it (`Facts::action`). A new rule is a refusal and
+//! its place in that order. `revoke` takes a deletion back when what it
+//! rests on is no longer the file the scan judged.
 
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::decode::Traits;
 use crate::verify::{Affine, Thumb, Verdict};
@@ -362,16 +373,12 @@ pub fn suggest_pinned(
     pinned: &[bool],
 ) -> (Vec<Option<Action>>, Vec<Option<usize>>) {
     let n = pics.len();
-    let mut keeper: Vec<Option<usize>> = vec![None; n];
-    let mut action = vec![None; n];
     let mut sides: Vec<Vec<Side>> = vec![Vec::new(); n];
     // Every pair, weak ones too, for what the frames say about which file is
     // a composite: a composite usually matches its photograph weakly, since
     // the photograph is small inside it.
     let mut all_sides: Vec<Vec<Side>> = vec![Vec::new(); n];
     for (li, (a, b, link)) in links.iter().enumerate() {
-        action[*a] = Some(Action::Review);
-        action[*b] = Some(Action::Review);
         let (pa, pb) = (&pics[*a], &pics[*b]);
         // Working pixels to the file's own, for each.
         let shrink = |p: &Picture| {
@@ -458,36 +465,123 @@ pub fn suggest_pinned(
         components.push(members);
     }
     let ctx = Ctx { pics, links, sides: &sides, all_sides: &all_sides, pinned };
-    let settled: Vec<Vec<(usize, Action, Option<usize>, bool)>> = components.par_iter().map(|m| ctx.settle(m, &colour)).collect();
-    let mut undecided = vec![false; n];
-    for (i, a, k, u) in settled.into_iter().flatten() {
-        action[i] = Some(a);
-        keeper[i] = k;
-        undecided[i] = u;
-    }
-    // Pinned and reached only by pairs too weak to settle anything: kept.
-    for (i, a) in action.iter_mut().enumerate() {
-        if a.is_some() && ctx.is_pinned(i) {
-            *a = Some(Action::Keep);
-        }
-    }
-    // A file nothing could delete whose best match agrees less than
-    // `REVIEW` is another photograph of something like it, not a copy:
-    // there is nothing to look at, and it stays.
-    let mut best = vec![0f32; n];
+    let mut facts: Vec<Option<Facts>> = vec![None; n];
     for (a, b, link) in links {
-        if let Link::Edge(v, _, false) = link {
-            best[*a] = best[*a].max(v.blk);
-            best[*b] = best[*b].max(v.blk);
+        for f in [*a, *b] {
+            let e = facts[f].get_or_insert_with(Facts::default);
+            if let Link::Edge(v, _, false) = link {
+                e.best = e.best.max(v.blk);
+            }
         }
     }
-    // An undecided pair is a strong match, not another photograph.
-    for i in 0..n {
-        if action[i] == Some(Action::Review) && best[i] < REVIEW && !undecided[i] {
-            action[i] = Some(Action::Keep);
-        }
+    let settled: Vec<Vec<(usize, Facts)>> = components.par_iter().map(|m| ctx.settle(m, &colour)).collect();
+    for (i, f) in settled.into_iter().flatten() {
+        let best = facts[i].map_or(0.0, |e| e.best);
+        facts[i] = Some(Facts { best, ..f });
     }
+    let action = (0..n).map(|i| facts[i].map(|f| f.action(ctx.is_pinned(i)))).collect();
+    let keeper = facts.iter().map(|f| f.and_then(|f| f.deleted_by())).collect();
     (action, keeper)
+}
+
+/// What settling found of one file in a pair, from which its action is read
+/// (`Facts::action`). A file in no strong component is never settled: its
+/// facts are the default, an open file nothing refused.
+#[derive(Clone, Copy, Debug, Default)]
+struct Facts {
+    state: State,
+    /// The weightiest reason a settled file gave for not deleting it, while
+    /// it was open (`Refusal`'s order).
+    refused: Option<Refusal>,
+    /// A deletion rests on it.
+    deletes: bool,
+    /// One of its strong pairs is clean.
+    clean: bool,
+    /// Its class is two pictures of a frame that nothing decided between
+    /// (`Refusal::Undecided`).
+    undecided: bool,
+    /// The best correlation of any pair it is in, negatives aside.
+    best: f32,
+}
+
+/// Where spreading deletion left a file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum State {
+    /// Neither kept nor deleted: nothing that settled could delete it, and
+    /// nothing chose it.
+    #[default]
+    Open,
+    /// Kept, and deletion spread from it.
+    Keep,
+    /// Deleted for the file it names.
+    Delete(usize),
+}
+
+/// Why a file that holds another does not delete it (`Component::refusal`), by
+/// what that makes of the file if nothing else settles it. A file several
+/// files refused for different reasons is what the greatest makes it, and
+/// they are in order of caution: a file one refusal would keep and delete on
+/// from, another would keep and delete nothing on the strength of, and a
+/// third would leave for a look, is left for a look. Up to 0.51 `Softer`
+/// came last, unwritten, and a file held or undecided that a softer copy
+/// refused too was kept and deleted others: 112 of 40,000 random families
+/// of up to six files moved when it was put first. No corpus has the case;
+/// IMGS-ALL, IMGS-PROVENANCE and `pairs.py` are unchanged to the byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Refusal {
+    /// It does not hold it, or not in a shape that may delete, or not over
+    /// the whole frame. The file stays, REVIEW or KEEP by its best match.
+    No,
+    /// It is softer (`Ctx::softer`): the file holds detail nothing settled
+    /// has, so it is kept and deletion goes on from it.
+    Softer,
+    /// What no check can show another file holds: more pictures than the
+    /// first (`Traits::frames`), or a lossless file's own pixels
+    /// (`Ctx::own_pixels`). Kept, and nothing is deleted on its strength.
+    Held,
+    /// One of two pictures of one frame and nothing says which is the
+    /// original: both are REVIEW.
+    Undecided,
+}
+
+impl Facts {
+    fn deleted_by(&self) -> Option<usize> {
+        match self.state {
+            State::Delete(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// The file's action, whole: what spreading made of it, then what it
+    /// was matched to says of a file that stays.
+    fn action(&self, pinned: bool) -> Action {
+        if pinned {
+            return Action::Keep;
+        }
+        let a = match (self.state, self.refused) {
+            (State::Delete(_), _) => return Action::Delete,
+            (State::Keep, _) | (State::Open, Some(Refusal::Held)) => Action::Keep,
+            (State::Open, _) => Action::Review,
+        };
+        // Of an undecided pair, whatever it was chosen as, unless a deletion
+        // rests on it, which makes it the copy to keep. It is a strong match,
+        // not another photograph.
+        if self.undecided && !self.deletes {
+            return Action::Review;
+        }
+        // A file that stays and was only ever matched weakly is for a person
+        // to look at, whatever it was chosen as, unless a deletion rests on
+        // it.
+        let a = if a == Action::Keep && !self.deletes && !self.clean { Action::Review } else { a };
+        // But one whose best match agrees less than `REVIEW` is another
+        // photograph of something like it, not a copy: there is nothing to
+        // look at, and it stays.
+        if a == Action::Review && self.best < REVIEW {
+            Action::Keep
+        } else {
+            a
+        }
+    }
 }
 
 /// Whether a transform turns its picture over: a left-right or top-bottom
@@ -519,6 +613,45 @@ pub fn kept_at_end(actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<
             None
         })
         .collect()
+}
+
+/// Why a file is no longer the file a scan judged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lapse {
+    /// It is not there.
+    Gone,
+    /// It has another length, or changed after the scan started
+    /// (`last::changed_since`).
+    Changed,
+}
+
+/// Take back, as REVIEW resting on nothing, each DELETE that no longer
+/// stands: one whose kept copy (`kept`, the end of its chain:
+/// `kept_at_end`) has lapsed, since carried out it would take the last copy
+/// of what it shows, and one that has lapsed itself, which is not the file
+/// the scan judged. `kept` may be shorter than `actions`, or empty, as for
+/// the group rules, which name no kept copy. The deletions taken back for
+/// their kept copy, and why it lapsed.
+///
+/// `--last` and the window both ask this, of a scan read back and of files
+/// gone to the Trash or changed since.
+pub fn revoke(actions: &mut [Option<Action>], kept: &mut [Option<usize>], lapsed: impl Fn(usize) -> Option<Lapse>) -> Vec<(usize, Lapse)> {
+    let mut unheld = Vec::new();
+    for (i, a) in actions.iter_mut().enumerate() {
+        if *a != Some(Action::Delete) {
+            continue;
+        }
+        let copy = kept.get(i).copied().flatten().and_then(&lapsed);
+        if copy.is_none() && lapsed(i).is_none() {
+            continue;
+        }
+        *a = Some(Action::Review);
+        if let Some(k) = kept.get_mut(i) {
+            *k = None;
+        }
+        unheld.extend(copy.map(|why| (i, why)));
+    }
+    unheld
 }
 
 struct Ctx<'a> {
@@ -654,203 +787,69 @@ impl Ctx<'_> {
         }
     }
 
-    /// Each member's action, the file a deletion rests on, and whether it is
-    /// one of an undecided pair (which stays REVIEW however it agrees).
-    fn settle(&self, members: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> Vec<(usize, Action, Option<usize>, bool)> {
-        let mut action: HashMap<usize, Action> = HashMap::new();
-        let mut keeper: HashMap<usize, usize> = HashMap::new();
-        let frame_any = |f: usize, g: usize| -> bool {
-            let s = &self.all_sides[f];
-            s.binary_search_by_key(&(g as u32), |e| e.to).ok().is_some_and(|k| s[k].exact || s[k].f_in)
-        };
-        let is_plain = |f: usize| self.all_sides[f].iter().any(|e| frame_any(f, e.to as usize) && frame_any(e.to as usize, f));
-        let plain: HashMap<usize, bool> = members.iter().map(|&f| (f, is_plain(f))).collect();
-        let any_plain = plain.values().any(|&p| p);
-        // A part: holds no plain picture whole and more besides.
-        let part: HashMap<usize, bool> = members
-            .iter()
-            .map(|&f| {
-                let holds_plain = self.all_sides[f].iter().any(|e| {
-                    let g = e.to as usize;
-                    frame_any(g, f) && !frame_any(f, g) && is_plain(g)
-                });
-                (f, !holds_plain)
-            })
-            .collect();
-        let mut whole_memo: HashMap<(usize, usize), f32> = HashMap::new();
-        let mut blurs = Blurs::default();
-        let mut whole = |k: usize, d: usize| -> f32 {
-            let Some(m) = self.transform(d, k) else { return 0.0 };
-            let (pd, pk) = (&self.pics[d], &self.pics[k]);
-            *whole_memo.entry((k, d)).or_insert_with(|| whole_worst(&mut blurs, (d, pd), (k, pk), &m))
-        };
-        // Every holder a file has is asked in turn until one passes. A file
-        // refused three times was once not asked again, on the guess that it
-        // held a sticker or a vignette its family lacked; on IMGS-ALL that
-        // gave up 108 deletions the fourth holder or a later one passed, none
-        // of them losing anything, for no time measurable on it or on the
-        // found corpus (0.1 s), since `whole` is memoised by pair.
-        // Files a deletion was refused because the would-be keeper is softer
-        // (`Ctx::softer`); see the loop below.
-        // Classes: files of one frame, each holding the other.
-        let mut class: HashMap<usize, usize> = HashMap::new();
-        let mut classes: Vec<Vec<usize>> = Vec::new();
-        for &f in members {
-            if class.contains_key(&f) {
-                continue;
-            }
-            let c = classes.len();
-            class.insert(f, c);
-            let mut list = vec![f];
-            let mut q = vec![f];
-            while let Some(x) = q.pop() {
-                for e in &self.sides[x] {
-                    let y = e.to as usize;
-                    if !class.contains_key(&y) && self.same(x, y) && self.holds(x, y) && self.holds(y, x) {
-                        class.insert(y, c);
-                        list.push(y);
-                        q.push(y);
-                    }
-                }
-            }
-            list.sort_unstable();
-            classes.push(list);
-        }
-        // How many different pictures each class holds: its files, each
-        // set of the same bytes or the same pixels counted once.
-        let distinct: Vec<usize> = classes
-            .iter()
-            .map(|c| c.iter().enumerate().filter(|&(i, &f)| !c[..i].iter().any(|&g| self.side(f, g).is_some_and(|e| e.exact))).count())
-            .collect();
-        // Files a deletion was refused because their class is two pictures
-        // and nothing says which is the original; see the loop below.
-        let undecided: std::cell::RefCell<Vec<usize>> = Default::default();
-        // Files a deletion was refused because the would-be keeper is softer
-        // (`Ctx::softer`); see the loop below.
-        let kept_back: std::cell::RefCell<Vec<usize>> = Default::default();
-        // Files a deletion was refused for what no check can show another
-        // file holds: more pictures (`Traits::frames`), or pixels a lossy
-        // file of their size cannot vouch for (`Ctx::own_pixels`). They are
-        // kept, and nothing is deleted on their strength: they are not known
-        // to be better, only not known to be the same — a lossless edit kept
-        // this way deleted its own original.
-        let held: std::cell::RefCell<Vec<usize>> = Default::default();
-        let mut can_delete = |k: usize, d: usize| -> bool {
-            if !self.holds(k, d) {
-                return false;
-            }
-            // A file of several pictures shows more than the first, which is
-            // all any match was made on: only a copy of its bytes holds it.
-            if self.pics[d].traits.frames && !self.side(d, k).is_some_and(|e| e.exact) {
-                held.borrow_mut().push(d);
-                return false;
-            }
-            // In a set with no picture copied at its own frame — a photograph
-            // and its crop, say — nothing says which file is a composite, and
-            // the larger frame may delete what it holds: unless what it has
-            // besides reads as a canvas rather than more of the picture.
-            let lone = !any_plain && !self.on_canvas(k, d);
-            let shape = self.same(k, d) || (self.strict_in(d, k) && part[&d] && (plain[&k] || lone));
-            if !shape || whole(k, d) > WHOLE_RESIDUAL {
-                return false;
-            }
-            // Two different pictures of one frame and nothing else of it, and
-            // nothing measured says which shows more: nothing says which is
-            // the original. Something has when the two differ in size by more
-            // than `SHRINK`, where `holds` asked whether the larger's extra
-            // pixels hold detail, or when one shows detail the other lacks
-            // (`more`). A pinned file is kept whatever it is, so against a
-            // library the question is not asked.
-            if !self.is_pinned(k)
-                && class.get(&k).is_some_and(|&c| class.get(&d) == Some(&c) && distinct[c] < 3)
-                && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
-                && !self.more(k, d)
-                && !self.more(d, k)
-            {
-                undecided.borrow_mut().push(d);
-                return false;
-            }
-            // A lossless file's pixels are its picture, and a file of its frame
-            // and size whose pixels are not the same is another picture or
-            // cannot be shown not to be: what tells them apart may be finer
-            // than anything the run compares (`own_pixels`). Two such
-            // lossless files are a pair nothing decides, as above, and a lossy
-            // one does not stand in for a lossless one: against a library,
-            // whose lossy copy of a picture answers for it by the user's
-            // decision, only a lossless library file is asked.
-            if self.own_pixels(k, d) {
-                if self.pics[k].traits.lossless {
-                    undecided.borrow_mut().push(d);
-                    return false;
-                }
-                if !self.is_pinned(k) {
-                    held.borrow_mut().push(d);
-                    return false;
-                }
-            }
-            // Asked last, so that what it holds back is what it alone held back.
-            if self.softer(k, d) {
-                kept_back.borrow_mut().push(d);
-                return false;
-            }
-            true
-        };
-        let mut deleters: std::collections::HashSet<usize> = Default::default();
+    /// Settle one strong component: keep one file of each class, spread
+    /// deletion from what is kept, and say what each member came to.
+    fn settle(&self, members: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> Vec<(usize, Facts)> {
+        let c = Component::new(self, members);
+        let mut state: HashMap<usize, State> = HashMap::new();
+        let mut refused: HashMap<usize, Refusal> = HashMap::new();
+        let mut deletes: HashSet<usize> = HashSet::new();
         // The pinned files are kept before anything is chosen, and deletion
         // spreads from them first: a file both a pinned file and another
         // could delete is the pinned one's.
-        let mut keeps: Vec<usize> = members.iter().copied().filter(|&f| self.is_pinned(f)).collect();
-        for &k in &keeps {
-            action.insert(k, Action::Keep);
-        }
-        let mut chosen = Vec::with_capacity(classes.len());
-        for (ci, c) in classes.iter().enumerate() {
-            let pinned: Vec<usize> = c.iter().copied().filter(|&f| self.is_pinned(f)).collect();
-            if !pinned.is_empty() {
-                chosen.push(self.choose(&pinned, colour));
+        let mut q: VecDeque<usize> = members.iter().copied().filter(|&f| self.is_pinned(f)).collect();
+        // Each class's choice, kept unless a file of another class may delete
+        // it. A class holding a pinned file keeps that, kept already.
+        let mut chosen = Vec::with_capacity(c.classes.len());
+        for (ci, class) in c.classes.iter().enumerate() {
+            if class.iter().any(|&f| self.is_pinned(f)) {
                 continue;
             }
-            let k = self.choose(c, colour);
+            let k = self.choose(class, colour);
             chosen.push(k);
-            let beaten = self.sides[k].iter().any(|e| {
-                let g = e.to as usize;
-                class[&g] != ci && can_delete(g, k)
-            });
-            if !beaten {
-                action.insert(k, Action::Keep);
-                keeps.push(k);
+            if !self.sides[k].iter().any(|e| c.class[&(e.to as usize)] != ci && c.refusal(e.to as usize, k).is_none()) {
+                q.push_back(k);
             }
         }
-        let mut q: std::collections::VecDeque<usize> = keeps.into_iter().collect();
+        for &k in &q {
+            state.insert(k, State::Keep);
+        }
         loop {
+            // Every settled file deletes what it may of the open files it is
+            // paired with; each refusal is noted against the file refused.
             while let Some(x) = q.pop_front() {
                 for e in &self.sides[x] {
                     let y = e.to as usize;
-                    if !action.contains_key(&y) && can_delete(x, y) {
-                        action.insert(y, Action::Delete);
-                        keeper.insert(y, x);
-                        deleters.insert(x);
-                        q.push_back(y);
+                    if state.contains_key(&y) {
+                        continue;
+                    }
+                    match c.refusal(x, y) {
+                        None => {
+                            state.insert(y, State::Delete(x));
+                            deletes.insert(x);
+                            q.push_back(y);
+                        }
+                        Some(r) => {
+                            let w = refused.entry(y).or_insert(r);
+                            *w = (*w).max(r);
+                        }
                     }
                 }
             }
-            // A class's choice that a file of another class could delete, and
-            // that no settled file did: what could have deleted it was never
-            // settled itself. It is kept, and deletion goes on from it.
-            q.extend(chosen.iter().copied().filter(|k| !action.contains_key(k)));
-            // And a file only a softer one could have deleted: it holds detail
-            // nothing settled has, so it is kept, and deletion goes on from
-            // it, rather than left for a look.
-            let mut kept_back: Vec<usize> = kept_back.borrow().iter().copied().filter(|d| !action.contains_key(d)).collect();
-            kept_back.sort_unstable();
-            kept_back.dedup();
-            kept_back.retain(|d| !q.contains(d));
-            q.extend(kept_back);
+            // Kept, and deletion goes on from them: a class's choice that a
+            // file of another class could delete and no settled file did
+            // (what could have was never settled itself), and a file only a
+            // softer one could have deleted (`Refusal::Softer`).
+            q.extend(chosen.iter().copied().filter(|k| !state.contains_key(k)));
+            let mut softer: Vec<usize> =
+                refused.iter().filter(|&(d, &r)| r == Refusal::Softer && !state.contains_key(d) && !q.contains(d)).map(|(&d, _)| d).collect();
+            softer.sort_unstable();
+            q.extend(softer);
             if q.is_empty() {
                 break;
             }
             for &k in &q {
-                action.insert(k, Action::Keep);
+                state.insert(k, State::Keep);
             }
         }
         // Which pinned file a deletion is said to rest on. Deletion spreads
@@ -863,40 +862,41 @@ impl Ctx<'_> {
         // The actions are already settled; only the name changes.
         if members.iter().any(|&f| self.is_pinned(f)) {
             for &y in members {
-                if action.get(&y) != Some(&Action::Delete) {
+                if !matches!(state.get(&y), Some(State::Delete(_))) {
                     continue;
                 }
                 let mut cands: Vec<usize> = self.sides[y].iter().map(|e| e.to as usize).filter(|&x| self.is_pinned(x)).collect();
                 while !cands.is_empty() {
                     let k = self.choose(&cands, colour);
-                    if can_delete(k, y) {
-                        keeper.insert(y, k);
+                    if c.refusal(k, y).is_none() {
+                        state.insert(y, State::Delete(k));
                         break;
                     }
                     cands.retain(|&c| c != k);
                 }
             }
         }
-        // A class of two pictures whose deletion was refused for want of a
-        // third is for a person to look at, both of it: the one `choose`
-        // picked is no likelier the original than the other. Unless a
-        // deletion rests on it, which makes it the copy to keep.
-        let mut open: std::collections::HashSet<usize> = Default::default();
-        for &d in undecided.borrow().iter().filter(|d| !action.contains_key(d)) {
-            open.extend(classes[class[&d]].iter().copied());
+        // A class of two pictures left open for want of a third is for a
+        // person to look at, both of it: the one `choose` picked is no
+        // likelier the original than the other.
+        let mut undecided: HashSet<usize> = HashSet::new();
+        for (d, &r) in &refused {
+            if r == Refusal::Undecided && !state.contains_key(d) {
+                undecided.extend(c.classes[c.class[d]].iter().copied());
+            }
         }
-        // A file that stays and was only ever matched weakly is for a person
-        // to look at, whatever it was chosen as — unless a deletion rests on
-        // it, which makes it the copy to keep.
-        let held: std::collections::HashSet<usize> = held.into_inner().into_iter().collect();
         members
             .iter()
             .map(|&i| {
-                let a = action.get(&i).copied().unwrap_or(if held.contains(&i) { Action::Keep } else { Action::Review });
-                let weak_only = !deleters.contains(&i) && !self.sides[i].iter().any(|e| e.clean) && !self.is_pinned(i);
-                let undecided = open.contains(&i) && !deleters.contains(&i) && !self.is_pinned(i);
-                let a = if a == Action::Keep && (weak_only || undecided) { Action::Review } else { a };
-                (i, a, keeper.get(&i).copied(), undecided && a == Action::Review)
+                let facts = Facts {
+                    state: state.get(&i).copied().unwrap_or_default(),
+                    refused: refused.get(&i).copied(),
+                    deletes: deletes.contains(&i),
+                    clean: self.sides[i].iter().any(|e| e.clean),
+                    undecided: undecided.contains(&i),
+                    best: 0.0,
+                };
+                (i, facts)
             })
             .collect()
     }
@@ -963,6 +963,142 @@ impl Ctx<'_> {
             }
         }
         order[0].5
+    }
+}
+
+/// One strong component as `Ctx::settle` reads it: which of its files are
+/// composites, its classes, and the whole-frame checks made so far.
+struct Component<'c, 'a> {
+    ctx: &'c Ctx<'a>,
+    /// Copied at its own frame by some file, weak pairs included.
+    plain: HashMap<usize, bool>,
+    /// Holds no plain picture whole and more besides.
+    part: HashMap<usize, bool>,
+    any_plain: bool,
+    /// Classes: files of one frame, each holding the other.
+    class: HashMap<usize, usize>,
+    classes: Vec<Vec<usize>>,
+    /// How many different pictures each class holds: its files, each set
+    /// of the same bytes or the same pixels counted once.
+    distinct: Vec<usize>,
+    /// `whole_worst` by (keeper, deleted), and the blurs it read.
+    whole: RefCell<HashMap<(usize, usize), f32>>,
+    blurs: RefCell<Blurs>,
+}
+
+impl<'c, 'a> Component<'c, 'a> {
+    fn new(ctx: &'c Ctx<'a>, members: &[usize]) -> Self {
+        let frame_any = |f: usize, g: usize| -> bool {
+            let s = &ctx.all_sides[f];
+            s.binary_search_by_key(&(g as u32), |e| e.to).ok().is_some_and(|k| s[k].exact || s[k].f_in)
+        };
+        let is_plain = |f: usize| ctx.all_sides[f].iter().any(|e| frame_any(f, e.to as usize) && frame_any(e.to as usize, f));
+        let plain: HashMap<usize, bool> = members.iter().map(|&f| (f, is_plain(f))).collect();
+        let any_plain = plain.values().any(|&p| p);
+        let part: HashMap<usize, bool> = members
+            .iter()
+            .map(|&f| {
+                let holds_plain = ctx.all_sides[f].iter().any(|e| {
+                    let g = e.to as usize;
+                    frame_any(g, f) && !frame_any(f, g) && is_plain(g)
+                });
+                (f, !holds_plain)
+            })
+            .collect();
+        let mut class: HashMap<usize, usize> = HashMap::new();
+        let mut classes: Vec<Vec<usize>> = Vec::new();
+        for &f in members {
+            if class.contains_key(&f) {
+                continue;
+            }
+            let c = classes.len();
+            class.insert(f, c);
+            let mut list = vec![f];
+            let mut q = vec![f];
+            while let Some(x) = q.pop() {
+                for e in &ctx.sides[x] {
+                    let y = e.to as usize;
+                    if !class.contains_key(&y) && ctx.same(x, y) && ctx.holds(x, y) && ctx.holds(y, x) {
+                        class.insert(y, c);
+                        list.push(y);
+                        q.push(y);
+                    }
+                }
+            }
+            list.sort_unstable();
+            classes.push(list);
+        }
+        let distinct = classes
+            .iter()
+            .map(|c| c.iter().enumerate().filter(|&(i, &f)| !c[..i].iter().any(|&g| ctx.side(f, g).is_some_and(|e| e.exact))).count())
+            .collect();
+        Component { ctx, plain, part, any_plain, class, classes, distinct, whole: Default::default(), blurs: Default::default() }
+    }
+
+    /// The whole-frame check of deleting `d` for `k` (`whole_worst`).
+    fn whole(&self, k: usize, d: usize) -> f32 {
+        let Some(m) = self.ctx.transform(d, k) else { return 0.0 };
+        let (pd, pk) = (&self.ctx.pics[d], &self.ctx.pics[k]);
+        *self.whole.borrow_mut().entry((k, d)).or_insert_with(|| whole_worst(&mut self.blurs.borrow_mut(), (d, pd), (k, pk), &m))
+    }
+
+    /// Why `k` may not delete `d`, or `None` where it may. Asked of every
+    /// pair as deletion spreads, and it decides nothing itself: what a
+    /// refusal makes of `d` is `Refusal`'s to say.
+    fn refusal(&self, k: usize, d: usize) -> Option<Refusal> {
+        let x = self.ctx;
+        if !x.holds(k, d) {
+            return Some(Refusal::No);
+        }
+        // A file of several pictures shows more than the first, which is
+        // all any match was made on: only a copy of its bytes holds it.
+        if x.pics[d].traits.frames && !x.side(d, k).is_some_and(|e| e.exact) {
+            return Some(Refusal::Held);
+        }
+        // In a set with no picture copied at its own frame — a photograph
+        // and its crop, say — nothing says which file is a composite, and
+        // the larger frame may delete what it holds: unless what it has
+        // besides reads as a canvas rather than more of the picture.
+        let shape = x.same(k, d) || (x.strict_in(d, k) && self.part[&d] && (self.plain[&k] || !self.any_plain && !x.on_canvas(k, d)));
+        if !shape || self.whole(k, d) > WHOLE_RESIDUAL {
+            return Some(Refusal::No);
+        }
+        // Two different pictures of one frame and nothing else of it, and
+        // nothing measured says which shows more: nothing says which is the
+        // original. Something has when the two differ in size by more than
+        // `SHRINK`, where `holds` asked whether the larger's extra pixels
+        // hold detail, or when one shows detail the other lacks (`more`). A
+        // pinned file is kept whatever it is, so against a library the
+        // question is not asked.
+        if !x.is_pinned(k)
+            && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.distinct[c] < 3)
+            && x.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
+            && !x.more(k, d)
+            && !x.more(d, k)
+        {
+            return Some(Refusal::Undecided);
+        }
+        // A lossless file's pixels are its picture, and a file of its frame
+        // and size whose pixels are not the same is another picture or
+        // cannot be shown not to be: what tells them apart may be finer than
+        // anything the run compares (`own_pixels`). Two such lossless files
+        // are a pair nothing decides, as above, and a lossy one does not
+        // stand in for a lossless one: against a library, whose lossy copy
+        // of a picture answers for it by the user's decision, only a
+        // lossless library file is asked.
+        if x.own_pixels(k, d) {
+            if x.pics[k].traits.lossless {
+                return Some(Refusal::Undecided);
+            }
+            if !x.is_pinned(k) {
+                return Some(Refusal::Held);
+            }
+        }
+        // Asked last, so that what it refuses is what it alone refused.
+        if x.softer(k, d) {
+            return Some(Refusal::Softer);
+        }
+        None
     }
 }
 
@@ -1263,6 +1399,32 @@ fn hypot(a: f32, b: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deletion is taken back when its kept copy has gone or changed, or it
+    /// has changed itself; only the first is said to be for its kept copy,
+    /// and a file that is not a deletion is left as it is.
+    #[test]
+    fn a_deletion_is_taken_back_when_what_it_rests_on_lapses() {
+        use Action::*;
+        // 0 kept and gone; 1 rests on it; 2 rests on 5, changed; 3 changed,
+        // resting on 0 too; 4 changed, resting on 6, which is fine; 5 a KEEP
+        // that changed; 6 kept.
+        let mut actions = [Some(Keep), Some(Delete), Some(Delete), Some(Delete), Some(Delete), Some(Keep), Some(Keep)];
+        let mut kept = [None, Some(0), Some(5), Some(0), Some(6), None, None];
+        let lapsed = |i: usize| match i {
+            0 => Some(Lapse::Gone),
+            3..=5 => Some(Lapse::Changed),
+            _ => None,
+        };
+        let taken = revoke(&mut actions, &mut kept, lapsed);
+        assert_eq!(taken, [(1, Lapse::Gone), (2, Lapse::Changed), (3, Lapse::Gone)]);
+        assert_eq!(actions, [Some(Keep), Some(Review), Some(Review), Some(Review), Some(Review), Some(Keep), Some(Keep)]);
+        assert_eq!(kept, [None; 7]);
+        // The group rules name no kept copy: only a changed deletion goes.
+        let mut actions = [Some(Delete), Some(Delete), Some(Keep)];
+        assert!(revoke(&mut actions, &mut [], |i| (i == 1).then_some(Lapse::Changed)).is_empty());
+        assert_eq!(actions, [Some(Delete), Some(Review), Some(Keep)]);
+    }
 
     /// A deletion names the file at the end of its chain of holders, which
     /// stays; a chain that ends on no such file, or loops, names none.
