@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.52.2)
+## Status (0.53.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -77,11 +77,11 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   - **D**: a 16-bit master next to two JPEGs of its 8-bit export was
     outside `TAU` (7.96 summed, 0.5/cell: one requantisation) and was
     deleted for the q85. Now held by A (KEEP; the q85 stays KEEP too).
-  - **E**: `decode::cgroup_room` (v2 and v1, ancestors included): budget
+  - **E**: `decode::budget::cgroup_room` (v2 and v1, ancestors included): budget
     and `max_alloc` no longer use the host's `MemAvailable` alone. Before:
     under `MemoryMax=300M` one 1.5 MB TIFF OOM-killed the run (137).
-  - **F**: TIFF read a strip / tile row at a time (`decode_tiff_chunks`)
-    and 16-bit PNG rows (`png_rows16`), bit-identical to `decode_whole`
+  - **F**: TIFF read a strip / tile row at a time (`tiff::chunks`)
+    and 16-bit PNG rows (`png::rows`), bit-identical to `other::whole`
     (pixels and traits; 8/16-bit, alpha, grey, tiled, LZW, deflate+
     predictor, JPEG, oriented, truncated). 12000x12000 TIFF peak RSS:
     8-bit 850 -> 20 MB, 16-bit 1.69 GB -> 19 MB.
@@ -143,6 +143,35 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   its `runtime_seconds` is the real one (was 0.0) and its log says "groups: 0"
   and "suggested: 0". Cached IMGS-ALL (ABBA): peak RssAnon+swap 633 / 631 MB
   base, 615 / 612 new; CPU 457.8 / 435.3 base, 440.2 / 437.8 new.
+- 0.53.0 (decoding rebuilt): `decode.rs` (4,327 lines; four parallel
+  `match`es on the format, for analysis, preview, colour and probe, each
+  repeating the ICO, TGA, JXL and HEIF quirks; per-format facts in three
+  more; `Traits` measured through a thread-local reset by hand) is
+  `decode/`: a file is identified once and opened once by its format's
+  module, which gives `Facts` and reads its pixels into a `Sink`; see
+  *Decoding*. Fingerprints of every file of IMGS-ALL, the found corpus and
+  a 118-file format zoo (`decode::tests::fingerprints`: working plane at 512
+  and 160, size, traits, damage, colour, chroma, `preview(256)`, four
+  `preview_fit`s, probe) identical but where meant: TGA, HDR and farbfeld
+  are lossless (TGA and HDR have no signature, and the lossless list was
+  only asked of sniffed formats, so their entries never applied); a camera
+  raw file is refused by the preview too; a TIFF directory chain is read as
+  far as it reads (a broken later pointer threw away a first directory's
+  raw marker); placed previews of TIFF, HEIF, 16-bit PNG and EXIF-turned
+  PNG are box-reduced while read, as 8-bit PNGs already were (±1 px, the
+  row path's rounding; a turned picture's factor is taken at its shown
+  size). Previews claim the decode budget. JPEG, WebP and JXL: no
+  difference at all. IMGS-ALL (cold, cached, dump), IMGS-AGAINST (report,
+  dump, `--list`), IMGS-PROVENANCE, the found corpus, the Desktop edge runs
+  (`--last`, `--skip-mirrored`, `--prune-cache`, stdout, empty walk) and all
+  90 `pairs.py` reports identical to 0.52.2 but for `runtime_seconds`.
+  12000x12000 TIFF (8, 16-bit) and 16-bit PNG still peak at ~19.5 MB; under
+  `MemoryMax=300M` both builds finish alike. Cold IMGS -t 4 -v (ABBA x2; one
+  base run at 2,109 MHz against ~2,400 dropped): CPU 302.6 / 302.4 / 307.6
+  base, 306.2 / 304.2 / 305.4 / 304.3 new; decode 122 / 106 / 111 s base,
+  105-107 new; peak RssAnon+swap 410-437 MB base, 409-453 new. Code lines
+  (no comments or blanks) 2,246 -> 2,256. Cache format IMGFPC15, for the
+  lossless change (a record of 14 would keep calling those files lossy).
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -189,7 +218,16 @@ src/
                 -> second_look -> cluster -> assemble -> finish
   main.rs       img-fp: calls cli_main
   gui/          img-fp-gui (feature `gui`, GTK 4.10+)
-  decode.rs     format sniffing, decode to one grey plane, decode budget
+  decode/       a file to a grey working plane, its traits, or a preview
+    mod.rs      public API; `open` (the one choice of format), probe, previews
+    sniff.rs    which format a file's bytes are, and whether they are one
+    picture.rs  Picture, Facts, Sink, Rows, Layout; orientation
+    jpeg.rs png.rs tiff.rs jxl.rs heif.rs other.rs   one module a format
+    reduce.rs   the analysis's Sink: rows -> working plane; area resampling
+    measure.rs  Traits measured on the reduction's rows; CellColour
+    shown.rs    the preview's Sink
+    budget.rs   decode budget, max_alloc, cgroup room
+    tests.rs    + `fingerprints`, the per-file differential check
   heif.rs       libheif loaded at run time (libloading), not linked
   sift.rs       local features
   index.rs      vocabulary tree, inverted file, containment scoring
@@ -282,6 +320,32 @@ a verdict recorded for its own sake goes to `Dump`; a new stage is a function
 between two others with its inputs and outputs typed. Not an `if` on an
 `Args` flag inside a stage.
 
+## Decoding (`decode/`)
+
+A file is identified once (`sniff::identify`: signature, then a format with
+none by its name) and opened once (`decode::open`, the only `match` that
+picks a decoder) by the module of its format. Opening gives a `Picture`:
+`facts` (lossless, frames, damage: what the file says of itself, asked by
+the analysis only) and `read`, which decodes into a `Sink`. A sink is the
+question asked of the pixels: `reduce::Reduce` (the working plane, with
+`Traits` measured on the same rows) or `shown::Shown` (a preview). A sink
+says what will do (`streams`: 8-bit rows rather than the `image` crate's
+whole picture at its own depth; `grey`: a JPEG's Y plane alone) and what it
+holds (`holds`, claimed with the decoder's buffers in `picture::claim`);
+`begin` starts it afresh, so a reader that gives up part way (PNG, TIFF)
+hands the picture to `other::whole` and leaves nothing behind. Rows are one
+of four `Layout`s; orientation travels with them and the sink applies it.
+`colour_of` reads a JPEG's own colour planes (`jpeg::cells`) and anything
+else through `preview(256)`; `probe` reads headers with each module's
+`size`, never the whole file. Verify a change with
+`decode::tests::fingerprints` on IMGS-ALL + the found corpus, base build
+against new.
+
+**Adding a format or a question**: a format is a module with `open` (its
+`Facts` and its reader) and `size`, and one arm in `decode::open` and
+`probe_header`; a question of the pixels is a `Sink`. Not an `if` on the
+format inside a sink, nor on the sink inside a reader.
+
 ## How it works: the load-bearing pieces
 
 Each was measured; changing one needs a re-measure.
@@ -370,7 +434,7 @@ Each was measured; changing one needs a re-measure.
   doubled up to `min(work, 512)`, never past the working size. 512 is the low
   edge of a plateau; no cap on the factor.
 - **EXIF orientation** is applied to the working plane, not the decoded
-  picture (`decode::orient`).
+  picture (`decode::picture::orient`).
 
 ### Keep, delete, review (`suggest.rs`)
 
@@ -425,9 +489,9 @@ the noisiest grey copy reads; `decode::colour_of`, lazily, and kept in the
 JPEG's cache record, `cache::Store::keep_colour`: it was decoded again on
 every rescan, 4.5x a cached rescan's CPU on grey JPEGs). Each derivation
 and its sweep is on the constant. Colour is the colour of a 4x4 grid's cell
-means (`decode::CellColour`): pixel by pixel, noise on a grey photo read as
+means (`decode::measure::CellColour`): pixel by pixel, noise on a grey photo read as
 colour and no bar separated it from a faint tint. A palette (indexed PNG,
-<= 8-bit BMP, colour-mapped TGA) is not lossless (`decode::indexed`): a
+<= 8-bit BMP, colour-mapped TGA) is not lossless (each format's `Facts`): a
 256-colour copy used to be kept over its PNG original. Nor is a
 JPEG-compressed TIFF; a WebP is lossless when its picture chunk is `VP8L`
 wherever it lies (EXIF or ICC make the first chunk `VP8X`), a JPEG XL when
@@ -609,7 +673,7 @@ Decoder hazards:
   headers too. PNGs (8- and 16-bit), TIFFs (strips or rows of tiles; not
   planar, CMYK, palette or 1-bit) and JXL renders stream a row at a time.
   `into_decoder` + `from_decoder` skip the crate's own `limits.reserve`, so
-  `decode::fits_in_memory` asks first: without it an 18 KB BMP claiming
+  `decode::budget::fits_in_memory` asks first: without it an 18 KB BMP claiming
   96 x 788M px allocated 227 GB and aborted the whole run (3 of 3,000
   fuzzed files). Decoder panics are a per-file problem (`decode_guarded`,
   `probe`), never the end of the run or of a window thumbnail worker.
@@ -719,7 +783,7 @@ Do not retry without new evidence:
   accepts it.
 - **Skips vs problems** (vid-fp's summary format). Skips: extension not
   taken by `-x` (extensionless files only under `-x '*'`), non-pictures under
-  a wildcard (`decode::plausible` checks short signatures), hidden folders
+  a wildcard (`decode::sniff::plausible` checks short signatures), hidden folders
   without `--hidden`, Trash/thumbnail/NAS recycle and snapshot folders
   (`walk::SetAside`: `#recycle`, `@eaDir`, `#snapshot`, `@Recycle`,
   `@__thumb`, `@Recently-Snapshot` too; and `lost+found`, root's 0700 on
@@ -729,7 +793,7 @@ Do not retry without new evidence:
   a byte-identical "image" pair), featureless images (were a problem: a
   folder with one plain backdrop exited 2 every run).
   Problems: undecodable, unreadable path, unresolved `--exclude`,
-  cut-off JPEG (`decode::jpeg_cut_off`; analysed, marked
+  cut-off JPEG (`decode::jpeg::cut_off`; analysed, marked
   `DAMAGED`, never cached), cache I/O failure.
 - `-o`, `--dump`, `--log-file` may not name a picture or each other; at most
   one may be stdout. Reports and the dump are written whole or not at all
@@ -737,7 +801,7 @@ Do not retry without new evidence:
   its mode, then renamed; an interrupt removes the half-written one): a
   failed write used to leave the last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC14.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC15.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record. Records for
   paths a run did not walk are carried over while the file exists, or
@@ -761,7 +825,7 @@ Do not retry without new evidence:
   used; refuses after a partial walk.
 - Extensions: DDS not taken; `.hdr`, `.pam`, `.apng`, `.dib`, `.avifs`,
   `.heics`, `.jif`, `.jfi`, `.pjpeg`, `.pjp`, `.jpg_large`, `.jpg_orig`,
-  `.png_large` are. ICO with an RGB PNG is read (`decode::ico_png`). HEIF is
+  `.png_large` are. ICO with an RGB PNG is read (`decode::other::ico_png`). HEIF is
   recognised by any `ftyp` brand.
 - Venvs: `vendor/venv` general; `vendor/venv-imagededup` (torch) for SSCD
   and imagededup; `vendor/venv-imgdupes` for imgdupes.

@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.52.2"
+version = "0.53.0"
 edition = "2024"
 # The oldest compiler the dependencies build with (`image` and `jxl-oxide`'s
 # parts need 1.88). Said here so that an older one is told so by cargo,
@@ -37,16 +37,16 @@ image = { version = "0.25", default-features = false, features = [
     "bmp", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp",
 ] }
 # The decoder `image` itself uses for PNG, asked directly so that a PNG can be
-# read a row at a time into the reduction; see `decode_png_rows`. Kept at the
+# read a row at a time into the reduction; see `decode::png::rows`. Kept at the
 # version `image` resolves to, so there is one copy of it in the build.
 png = "0.18"
 # The decoder `image` itself uses for JPEG, asked directly so that a JPEG can
-# be decoded to its luma plane alone; see `decode_jpeg_luma`. Kept at the
+# be decoded to its luma plane alone; see `decode::jpeg::luma`. Kept at the
 # versions `image` resolves to, so there is one copy of each in the build.
 zune-jpeg = "0.5.15"
 # The decoder `image` itself uses for TIFF, asked directly so that a TIFF can
 # be read a strip or a row of tiles at a time into the reduction; see
-# `decode_tiff_chunks`. Kept at the version `image` resolves to.
+# `decode::tiff::chunks`. Kept at the version `image` resolves to.
 tiff = "0.11.3"
 zune-core = "0.5.3"
 jxl-oxide = "0.12.6"
@@ -55,7 +55,7 @@ jxl-oxide = "0.12.6"
 # see `src/heif.rs`.
 libloading = "0.8"
 # Already in the build through serde_json; finds the markers in a JPEG's image
-# data, to tell a cut-off file from a whole one (`decode::jpeg_cut_off`).
+# data, to tell a cut-off file from a whole one (`decode::jpeg::cut_off`).
 memchr = "2"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive", "rc"] }

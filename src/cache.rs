@@ -108,12 +108,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// is the file's canonical one, so that a folder named two ways is one set of
 /// records (see `lib::cache_names`).
 /// 08: grey is BT.601 luma rather than the mean of RGB, and a JPEG's is read
-/// from its Y plane (`decode::decode_jpeg_luma`).
+/// from its Y plane (`decode::jpeg::luma`).
 /// 09: the settings moved from the header into each record, so that one file
 /// holds the analyses of several working sizes; and a record carries the
 /// picture's own size, which the report's `scale` is stated in.
 /// 10: an EXIF orientation is applied to the working plane after the
-/// reduction rather than to the decoded picture before it (`decode::orient`),
+/// reduction rather than to the decoded picture before it (`decode::picture::orient`),
 /// which moves the edge the reduction trims on every turned picture.
 /// 11: a record carries the file's `decode::Traits`, which the keep/delete
 /// suggestion reads: measured while the file is decoded, and not otherwise
@@ -121,13 +121,15 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 12: a picture wider than 4:3 is analysed with a longer long side, and its
 /// thumbnail with one to match (`decode::area_factor`).
 /// 13: `Traits::colour` is the colour of a 4x4 grid's cell means, which noise
-/// does not reach (`decode::CellColour`); and `Traits::lossless` is said of a
+/// does not reach (`decode::measure::CellColour`); and `Traits::lossless` is said of a
 /// WebP with metadata, a JPEG-compressed TIFF and a JPEG XL by what their
-/// pictures are (`decode::lossless_format`). A record of 12 says neither.
+/// pictures are (each format's `decode::picture::Facts`). A record of 12 says neither.
 /// 14: a record says whether its file holds more than one picture
 /// (`decode::Traits::frames`), which a record of 13 cannot, and a 16-bit
 /// TIFF or PNG is read as `image` read it but a row at a time.
-const MAGIC: &[u8; 8] = b"IMGFPC14";
+/// 15: `Traits::lossless` is said of a TGA, an HDR and a farbfeld file as
+/// of the other lossless formats; a record of 14 called them lossy.
+const MAGIC: &[u8; 8] = b"IMGFPC15";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -189,7 +191,7 @@ pub struct Key {
     pub ctime: i64,
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC14.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC15.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name

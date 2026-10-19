@@ -600,7 +600,7 @@ pub fn analysis_cost(probe: Option<&Probe>, bytes: u64, work: usize, upsample_be
     };
     let decode = per_px * w * h + per_byte * bytes as f64;
 
-    // The pyramid's base, as `decode::fit_to` and `sift::extract` size it.
+    // The pyramid's base, as `decode::reduce::Fit` and `sift::extract` size it.
     let long = w.max(h).max(1.0);
     let s = if work > 0 && long > work as f64 { work as f64 / long } else { 1.0 };
     let (bw, bh) = ((w * s).round().max(1.0), (h * s).round().max(1.0));

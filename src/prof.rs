@@ -30,7 +30,7 @@ pub static NAMES: [&str; N] = [
     "decode:jpeg", "decode:png", "decode:webp", "decode:tiff", "decode:jxl",
     "decode:heif",
     // assembly. Appended rather than filed with the matcher above, because
-    // the decode-format slots are addressed by number from `decode.rs`.
+    // the decode-format slots are addressed by number from `decode::prof_slot`.
     "group",
     // A second, finer pass (slots 29..): the budget queue, the two halves of
     // description, and the stages outside any worker pool.
