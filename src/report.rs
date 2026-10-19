@@ -49,6 +49,14 @@ pub struct Target {
 }
 
 impl Target {
+    /// The file the report goes to, if it goes to one.
+    pub fn file(&self) -> Option<PathBuf> {
+        match &self.sink {
+            Sink::File(path) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
     /// `--output` and `--format` read together, in the one place either is.
     pub fn of(output: Option<&Path>, format: Option<Format>) -> Target {
         match output {

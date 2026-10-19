@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.52.1)
+## Status (0.52.2)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -132,6 +132,17 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   once. IMGS-ALL (cold and cached), dump, IMGS-AGAINST, IMGS-PROVENANCE,
   all 90 `pairs.py` reports and the found corpus byte-identical to 0.52.0;
   cached IMGS-ALL peak RssAnon+swap (ABBA) 729 / 685 MB base, 635 / 631 new.
+- 0.52.2 (refactor): `run` (1,572 lines, one scope, `against` named 46
+  times, the verify step written twice, three hand-built exits) is
+  `pipeline.rs`: stage functions with typed hand-offs, a `Scope`, one
+  `Pass::verify`, a `Dump`, one `finish`; see *The pipeline*. IMGS-ALL (cold,
+  cached, dump), IMGS-AGAINST (report, dump, `--list`), IMGS-PROVENANCE, the
+  found corpus (report, dump), all 90 `pairs.py` reports, `--last`,
+  `--skip-mirrored`, `--prune-cache` and the window's worker copy identical
+  to 0.52.1 but for `runtime_seconds`. An empty walk now goes the common way:
+  its `runtime_seconds` is the real one (was 0.0) and its log says "groups: 0"
+  and "suggested: 0". Cached IMGS-ALL (ABBA): peak RssAnon+swap 633 / 631 MB
+  base, 615 / 612 new; CPU 457.8 / 435.3 base, 440.2 / 437.8 new.
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -172,7 +183,10 @@ the man page generated from `Args`. Hidden flags (`hide = true`, re-added in
 
 ```
 src/
-  lib.rs        pipeline, propagation, bridge pruning; cli_main, worker_main
+  lib.rs        Args, matching helpers (ranking, propagation, bridge pruning,
+                admit_anchors); cli_main, worker_main
+  pipeline.rs   one scan as stages: run -> analyse_all -> retrieve_and_verify
+                -> second_look -> cluster -> assemble -> finish
   main.rs       img-fp: calls cli_main
   gui/          img-fp-gui (feature `gui`, GTK 4.10+)
   decode.rs     format sniffing, decode to one grey plane, decode budget
@@ -246,6 +260,27 @@ One F1.
 (2) region IoU >= 0.95 SAME, one contains >= 95% of the other CROP, disjoint
 DIFFERENT, else PARTIAL; (3) coverage < 90% of the other's downgrades SAME to
 CROP.
+
+## The pipeline (`pipeline.rs`)
+
+`run` is a list of stage calls; each stage is a function that takes what the
+one before handed it, returns what the next reads, and lets go of the rest
+(memory peaks are kept by who owns what, not by `drop` order in one scope).
+What a run was asked about is a `Scope` (`asks_first`, `speaks_of`,
+`pinned`, `rank`): a plain scan is the scope with no library, and the
+library rounds of retrieval are the same loop, which ends after one round
+when every file has asked. `Scope::against` is read directly only where the
+library mode does something else, not the same thing with fewer files: the
+second look's per-component re-ask, the round's already-verified set, the
+report kind, and `--last`. Both verification passes put a candidate through
+`Pass::verify`. `--dump` is a `Dump` the stages hand their verdicts to.
+Every run ends in `finish` (verdicts or groups; an empty walk is the same
+path with nothing `Found`). Logging goes through `Ctx` (`stage!`, `say!`).
+
+**Adding a mode or a stage**: what the run was asked is a `Scope` method;
+a verdict recorded for its own sake goes to `Dump`; a new stage is a function
+between two others with its inputs and outputs typed. Not an `if` on an
+`Args` flag inside a stage.
 
 ## How it works: the load-bearing pieces
 
