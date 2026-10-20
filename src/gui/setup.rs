@@ -822,11 +822,11 @@ impl Setup {
                         stderr.push(line);
                     }
                     Event::Exited { code, signal } => {
-                        // The report is read on a thread of its own: on a large
+                        // The result is read on a thread of its own: on a large
                         // library it is megabytes of JSON, and parsing it here
                         // froze the window.
                         let result = me.scan.borrow().as_ref().map(|s| s.result.clone());
-                        // Exit 1 with a report is a scan that finished and
+                        // Exit 1 with a result is a scan that finished and
                         // then failed at the end — an `-o` that could not be
                         // written — and the window's copy is written before
                         // that, so that the scan can still be shown.
@@ -843,8 +843,7 @@ impl Setup {
                                     problems: code != Some(0),
                                     took: me.took(),
                                     finished: now.as_secs(),
-                                    started_ns: Some(started),
-                                    started: None,
+                                    started_ns: started,
                                     id: now.as_nanos() as u64,
                                     log: me.app.log.text(&me.app.log.start_iter(), &me.app.log.end_iter(), false).to_string(),
                                     roots: roots.clone(),
@@ -852,8 +851,8 @@ impl Setup {
                                 // Made ready for the page here too, off the
                                 // main thread (`results::prepare`).
                                 let read = gio::spawn_blocking(move || {
-                                    let found = scan::read_report(&path);
-                                    let keep = keep && found.as_ref().is_ok_and(|f| f.enumerated > 0);
+                                    let found = scan::read_result(&path);
+                                    let keep = keep && found.as_ref().is_ok_and(|f| f.head.files_enumerated > 0);
                                     let mut prepared = found.map(results::prepare);
                                     if let Ok(p) = prepared.as_mut() {
                                         p.set_roots(notes.roots.clone());

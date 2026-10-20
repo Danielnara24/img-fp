@@ -27,6 +27,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::outcome::Evidence;
 use crate::report::{self, Format, Sink, Target};
 use crate::suggest::{self, Action};
 
@@ -59,13 +60,7 @@ impl Verdict {
 pub struct Pair {
     pub a: usize,
     pub b: usize,
-    /// `identical`, `same_pixels`, `direct` or `propagated`.
-    pub relation: &'static str,
-    pub aligned_points: Option<u32>,
-    pub frame_overlap: f32,
-    pub pixel_correlation: f32,
-    pub mirrored: bool,
-    pub inverted: bool,
+    pub ev: Evidence,
     /// No block of the overlap disagrees (`suggest::CLEAN`); the same bytes
     /// or pixels always are.
     pub clean: bool,
@@ -121,14 +116,14 @@ pub fn answer(asked: &[usize], library: &[bool], pairs: &[Pair], actions: &[Opti
             // The best library match: a clean one first, then the closest.
             // A mirror image, like a negative, is not the picture as the
             // library has it, whatever it shows: at best a copy to look at.
-            let clean = |k: usize| pairs[k].clean && !pairs[k].inverted && !pairs[k].mirrored;
+            let clean = |k: usize| pairs[k].clean && !pairs[k].ev.inverted && !pairs[k].ev.mirrored;
             let best = to_library
                 .iter()
                 .copied()
-                .max_by(|&x, &y| clean(x).cmp(&clean(y)).then(pairs[x].pixel_correlation.total_cmp(&pairs[y].pixel_correlation)));
+                .max_by(|&x, &y| clean(x).cmp(&clean(y)).then(pairs[x].ev.pixel_correlation.total_cmp(&pairs[y].ev.pixel_correlation)));
             let verdict = match best {
                 Some(k) if clean(k) => Verdict::Better,
-                Some(k) if pairs[k].pixel_correlation >= suggest::REVIEW => Verdict::Review,
+                Some(k) if pairs[k].ev.pixel_correlation >= suggest::REVIEW => Verdict::Review,
                 _ => Verdict::New,
             };
             let best = best.filter(|_| verdict != Verdict::New);
@@ -190,7 +185,7 @@ fn rows<'a>(answers: &'a [Answer], pairs: &'a [Pair], library: &'a [bool], files
     let mut rows: Vec<Row> = answers
         .iter()
         .map(|a| {
-            let p = a.pair.map(|k| &pairs[k]);
+            let p = a.pair.map(|k| &pairs[k].ev);
             Row {
                 verdict: a.verdict.as_str(),
                 path: files[a.file].display().to_string(),
@@ -206,7 +201,7 @@ fn rows<'a>(answers: &'a [Answer], pairs: &'a [Pair], library: &'a [bool], files
                 match_width: a.by.and_then(dims).map(|d| d.0),
                 match_height: a.by.and_then(dims).map(|d| d.1),
                 match_size_bytes: a.by.map(|g| facts.sizes[g]),
-                relation: p.map(|p| p.relation),
+                relation: p.map(|p| p.relation.as_str()),
                 aligned_points: p.and_then(|p| p.aligned_points),
                 frame_overlap: p.map(|p| p.frame_overlap),
                 pixel_correlation: p.map(|p| p.pixel_correlation),
@@ -424,19 +419,11 @@ fn write_json(w: &mut dyn Write, h: &Header, rows: &[Row], out_pairs: &[report::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outcome::Relation;
 
     fn pair(a: usize, b: usize, corr: f32, clean: bool) -> Pair {
-        Pair {
-            a,
-            b,
-            relation: "direct",
-            aligned_points: Some(40),
-            frame_overlap: 1.0,
-            pixel_correlation: corr,
-            mirrored: false,
-            inverted: false,
-            clean,
-        }
+        let ev = Evidence { relation: Relation::Direct, aligned_points: Some(40), frame_overlap: 1.0, pixel_correlation: corr, mirrored: false, inverted: false };
+        Pair { a, b, ev, clean }
     }
 
     #[test]

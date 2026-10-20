@@ -4,13 +4,14 @@
 //! One scan only, shared by both: a scan from the command line and a scan
 //! from the window each replace it, so a scan run in a terminal can be marked
 //! in the window, and a window's scan written out as CSV by `--last`. What is
-//! kept is the report without its `pairs` (the groups, one row a file, which
-//! is what the text, the CSV and the window read; on 27,000 pictures 15 MB of
-//! a 303 MB report) and what the window says beside it (`Notes`).
+//! kept is the scan's `Outcome` (the groups by number, without the pairs
+//! between files no group puts side by side) and what the window says beside
+//! it (`Notes`). A scan kept by a version before the `Outcome` is not read.
 //!
 //! The suggestions kept are always the content rule's, whatever `--suggest`
 //! the scan was given: the other two rules read nothing but the groups and
-//! are worked out again here, and the content rule could not be.
+//! are worked out again (`Outcome::actions`), and the content rule could not
+//! be.
 //!
 //! `last-scan/` in the folder of the cache file the run used, so a sweep
 //! handing itself a `--cache` of its own keeps its scans out of the default
@@ -21,14 +22,14 @@
 //! a scan read back is never one scan's report with another's notes.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::report::{self, OutGroup, OutPair, Output};
-use crate::suggest::{self, Action, Lapse};
+use crate::outcome::Outcome;
+use crate::report;
+use crate::suggest::{self, Lapse};
 
-pub const REPORT: &str = "result.json";
+/// The kept `Outcome`. A scan kept as a report, before it, was `result.json`.
+pub const REPORT: &str = "found.json";
 pub const NOTES: &str = "scan.json";
 pub const MARKS: &str = "marks.json";
 
@@ -41,20 +42,14 @@ pub struct Notes {
     pub finished: u64,
     /// Nanoseconds since 1970 when it started, before anything was read: a
     /// file changed since then may have changed after the scan read it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_ns: Option<u64>,
-    /// The same to the second, as a scan kept by 0.48 to 0.51 says it; `None`
-    /// in one kept by an earlier version, which said only when it finished.
-    #[serde(default, skip_serializing)]
-    pub started: Option<u64>,
+    pub started_ns: u64,
     /// Which scan this is, for its marks: nanoseconds since 1970 when it
     /// finished, which two scans do not share.
-    #[serde(default)]
     pub id: u64,
     pub log: String,
     /// The folders the scan was given, which the window's tree view starts
     /// from.
-    #[serde(default, with = "paths")]
+    #[serde(with = "paths")]
     pub roots: Vec<PathBuf>,
 }
 
@@ -67,8 +62,7 @@ impl Notes {
             problems,
             took: format!("{}:{:02}", secs / 60, secs % 60),
             finished: now.as_secs(),
-            started_ns: Some(started_ns),
-            started: None,
+            started_ns,
             id: now.as_nanos() as u64,
             log,
             roots,
@@ -84,8 +78,7 @@ impl Notes {
     /// end it passed for the file the scan judged, and its length alone could
     /// tell it apart.
     pub fn changed_after(&self) -> u64 {
-        const NS: u64 = 1_000_000_000;
-        self.started_ns.or(self.started.map(|s| s * NS)).unwrap_or(self.finished * NS)
+        self.started_ns
     }
 }
 
@@ -154,108 +147,63 @@ pub fn save_with(dir: &Path, write: impl FnOnce(&Path) -> std::io::Result<()>, n
     })
 }
 
-/// A path list in JSON: a name as text, or as its bytes when it is not UTF-8.
+/// A path in JSON: a name as text, or as its bytes when it is not UTF-8.
 /// serde writes a `PathBuf` as a string and refuses one that is not UTF-8, and
 /// one such folder made a whole save fail, silently.
-pub mod paths {
+pub mod path {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::ffi::OsString;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[derive(Serialize, Deserialize)]
     #[serde(untagged)]
-    enum Stored {
+    pub(super) enum Stored {
         Text(String),
         Bytes(Vec<u8>),
     }
 
-    pub fn serialize<S: Serializer>(v: &[PathBuf], s: S) -> Result<S::Ok, S::Error> {
-        let stored: Vec<Stored> = v
-            .iter()
-            .map(|p| match p.to_str() {
+    impl Stored {
+        pub(super) fn of(p: &Path) -> Stored {
+            match p.to_str() {
                 Some(t) => Stored::Text(t.to_string()),
                 None => Stored::Bytes(p.as_os_str().as_bytes().to_vec()),
-            })
-            .collect();
-        stored.serialize(s)
+            }
+        }
+
+        pub(super) fn path(self) -> PathBuf {
+            match self {
+                Stored::Text(t) => PathBuf::from(t),
+                Stored::Bytes(b) => PathBuf::from(OsString::from_vec(b)),
+            }
+        }
+    }
+
+    pub fn serialize<S: Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+        Stored::of(p).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+        Ok(Stored::deserialize(d)?.path())
+    }
+}
+
+/// A list of paths, each as `path` writes one.
+pub mod paths {
+    use super::path::Stored;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::path::PathBuf;
+
+    pub fn serialize<S: Serializer>(v: &[PathBuf], s: S) -> Result<S::Ok, S::Error> {
+        v.iter().map(|p| Stored::of(p)).collect::<Vec<_>>().serialize(s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<PathBuf>, D::Error> {
-        let stored: Vec<Stored> = Vec::deserialize(d)?;
-        Ok(stored
-            .into_iter()
-            .map(|x| match x {
-                Stored::Text(t) => PathBuf::from(t),
-                Stored::Bytes(b) => PathBuf::from(OsString::from_vec(b)),
-            })
-            .collect())
+        Ok(Vec::<Stored>::deserialize(d)?.into_iter().map(Stored::path).collect())
     }
 }
 
 // ---------------------------------------------------------------- --last
-
-/// The kept report as written (`report::write_json` without pairs).
-#[derive(Deserialize)]
-struct Kept {
-    config: serde_json::Value,
-    #[serde(default)]
-    files_enumerated: usize,
-    #[serde(default)]
-    files_analysed: usize,
-    #[serde(default)]
-    failures: Vec<serde_json::Value>,
-    #[serde(default)]
-    runtime_seconds: f64,
-    groups: Vec<KeptGroup>,
-}
-
-#[derive(Deserialize)]
-struct KeptGroup {
-    files: Vec<KeptRow>,
-}
-
-/// One row as `report::Row` writes it.
-#[derive(Deserialize)]
-struct KeptRow {
-    path: String,
-    path_bytes: Option<Vec<u8>>,
-    role: String,
-    action: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-    size_bytes: Option<u64>,
-    relation: Option<String>,
-    aligned_points: Option<u32>,
-    frame_overlap: Option<f32>,
-    pixel_correlation: Option<f32>,
-    mirrored: Option<bool>,
-    inverted: Option<bool>,
-    #[serde(default)]
-    damaged: bool,
-    kept_copy: Option<String>,
-    kept_copy_bytes: Option<Vec<u8>>,
-}
-
-impl KeptRow {
-    fn path(&self) -> PathBuf {
-        use std::os::unix::ffi::OsStringExt;
-        match &self.path_bytes {
-            Some(b) => PathBuf::from(std::ffi::OsString::from_vec(b.clone())),
-            None => PathBuf::from(&self.path),
-        }
-    }
-
-    /// The kept file a DELETE rests on, if the row names one.
-    fn kept_copy(&self) -> Option<PathBuf> {
-        use std::os::unix::ffi::OsStringExt;
-        match (&self.kept_copy_bytes, &self.kept_copy) {
-            (Some(b), _) => Some(PathBuf::from(std::ffi::OsString::from_vec(b.clone()))),
-            (None, Some(p)) => Some(PathBuf::from(p)),
-            (None, None) => None,
-        }
-    }
-}
 
 /// What `--last` was asked for.
 pub struct Rewrite<'a> {
@@ -266,36 +214,43 @@ pub struct Rewrite<'a> {
 }
 
 /// `--last`: write the kept scan's report again, where `-o` says, in the
-/// layout `--format` says, with `--suggest`'s rule. Files gone since the scan
-/// are left out, as the window leaves them out: out of their groups, and a
-/// group left with one file gone. Returns the lines to say about it.
+/// layout `--format` says, with `--suggest`'s rule. Files gone or changed
+/// since the scan are taken in as the window takes them in
+/// (`Outcome::lapse`); a file gone is left out of its groups
+/// (`Outcome::shown`). Returns the lines to say about it.
 pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
     let dir = dir(asked.cache);
+    let unread = || format!("could not read the kept scan in {}", dir.display());
     let notes: Notes = match std::fs::read(dir.join(NOTES)) {
-        Ok(b) => serde_json::from_slice(&b).with_context(|| format!("could not read the kept scan in {}", dir.display()))?,
+        Ok(b) => serde_json::from_slice(&b).with_context(unread)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             anyhow::bail!("no scan is kept in {}: run a scan first (one run with --no-cache or --no-last is not kept)", dir.display())
         }
-        Err(e) => return Err(e).with_context(|| format!("could not read the kept scan in {}", dir.display())),
+        Err(e) => return Err(e).with_context(unread),
     };
-    let bytes = std::fs::read(dir.join(REPORT)).with_context(|| format!("could not read the kept scan in {}", dir.display()))?;
-    let kept: Kept = serde_json::from_slice(&bytes).with_context(|| format!("could not read the kept scan in {}", dir.display()))?;
-    let made_by = kept.config.get("suggest").and_then(|v| v.as_str()).unwrap_or("content");
-    if asked.suggest == suggest::Mode::Content && made_by != "content" {
-        anyhow::bail!("the kept scan's suggestions are the {made_by} rule's; --suggest content needs a new scan");
+    if !dir.join(REPORT).exists() {
+        anyhow::bail!("the scan kept in {} was kept by an earlier version of img-fp: run a scan", dir.display());
     }
-    let min_correlation = kept.config.get("min_pixel_correlation").and_then(|v| v.as_f64()).map_or(0.6, |v| v as f32);
-    let (mut out, files, facts, Rebuilt { gone, unheld, changed }) = rebuild(kept, asked.suggest, min_correlation, Some(notes.changed_after()));
-    out.config["suggest"] = format!("{:?}", asked.suggest).to_lowercase().into();
+    let mut scan = Outcome::load(&dir.join(REPORT)).with_context(unread)?;
+    if asked.suggest == suggest::Mode::Content && !scan.has_content() {
+        anyhow::bail!("the kept scan has no suggestions by content; --suggest content needs a new scan");
+    }
+    let (gone, changed) = scan.look(Some(notes.changed_after()));
+    scan.lapse(gone.iter().copied(), Lapse::Gone);
+    scan.lapse(changed.iter().copied(), Lapse::Changed);
+    // The content rule's deletions taken back; the group rules name no kept
+    // copy.
+    let unheld = if asked.suggest == suggest::Mode::Content { (0..scan.files.len()).filter(|&i| scan.unheld(i) == Some(Lapse::Gone)).count() } else { 0 };
+    let (gone, changed) = (gone.len(), changed.len());
 
-    let mut target = report::Target::of(asked.output, asked.format);
-    target.pairs = false;
-    report::write_with(&target, &out, &files, &facts)?;
+    let target = report::Target::of(asked.output, asked.format);
+    report::write_with(&target, &scan, asked.suggest, None)?;
 
     let when = ago(notes.finished);
+    let groups = scan.shown().count();
     let mut lines = vec![match &target.sink {
-        report::Sink::File(p) => format!("{} from the scan {when} -> {}", groups_said(out.groups.len()), p.display()),
-        report::Sink::Stdout => format!("{} from the scan {when}", groups_said(out.groups.len())),
+        report::Sink::File(p) => format!("{} from the scan {when} -> {}", groups_said(groups), p.display()),
+        report::Sink::Stdout => format!("{} from the scan {when}", groups_said(groups)),
     }];
     if gone > 0 {
         lines.push(format!("{gone} {} gone since the scan {} left out", if gone == 1 { "file" } else { "files" }, if gone == 1 { "is" } else { "are" }));
@@ -340,445 +295,145 @@ fn ago(secs: u64) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// What `rebuild` left out or changed: files gone since the scan, the
-/// deletions whose kept copy was among them, which are now REVIEW, and files
-/// changed since the scan (`changed_since`).
-struct Rebuilt {
-    gone: usize,
-    unheld: usize,
-    changed: usize,
-}
-
-/// The kept report as the run held it: the files numbered as they first
-/// appear, each group's members with their pair with the representative, the
-/// facts the rows stated, and the actions `mode` gives. The actions are
-/// worked out over every file, and only then are the gone ones left out, so
-/// that what a rule said of the rest is what it said with them (as in the
-/// window) — except a deletion resting on a file that has gone, which no
-/// longer has anything to rest on: the content rule's is REVIEW, and the
-/// group rules judge only by representatives still there.
-///
-/// **A file changed since the scan read it (`after`, `Notes::changed_after`)
-/// is treated as the window's Trash treats it**: it is not the file the scan
-/// judged, so it is
-/// not suggested for deletion, nor is a file whose deletion rests on it, and
-/// the group rules do not judge by it. `--last` used to check only whether a
-/// file was still there, and wrote DELETE beside a file since replaced by
-/// another picture, which a script deleting the DELETEs would have deleted.
-fn rebuild(kept: Kept, mode: suggest::Mode, min_correlation: f32, after: Option<u64>) -> (Output, Vec<PathBuf>, report::FileFacts, Rebuilt) {
-    let mut index: HashMap<PathBuf, usize> = HashMap::new();
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut stated: Vec<(usize, Option<(u32, u32)>, Option<u64>, bool)> = Vec::new();
-    let mut content: Vec<Option<Action>> = Vec::new();
-    let mut pairs: HashMap<(usize, usize), OutPair> = HashMap::new();
-    let mut groups: Vec<OutGroup> = Vec::new();
-    // Each file's place in each group, beside the group's representative.
-    let mut seats: Vec<(usize, suggest::Seat)> = Vec::new();
-    // Each DELETE's kept file, by path: it is numbered once every row is.
-    let mut rests_on: Vec<(usize, PathBuf)> = Vec::new();
-    for g in &kept.groups {
-        let members: Vec<usize> = g
-            .files
-            .iter()
-            .map(|r| {
-                let p = r.path();
-                *index.entry(p.clone()).or_insert_with(|| {
-                    files.push(p);
-                    stated.push((files.len() - 1, r.width.zip(r.height), r.size_bytes, r.damaged));
-                    content.push(r.action.as_deref().and_then(action_of));
-                    files.len() - 1
-                })
-            })
-            .collect();
-        let Some(rk) = g.files.iter().position(|r| r.role == "representative") else { continue };
-        let rep = members[rk];
-        for (r, &i) in g.files.iter().zip(&members) {
-            if let Some(k) = r.kept_copy() {
-                rests_on.push((i, k));
-            }
-            let correlation = match r.relation.as_deref() {
-                Some("identical" | "same_pixels") => 1.0,
-                _ => r.pixel_correlation.unwrap_or(0.0),
-            };
-            seats.push((rep, suggest::Seat { file: i, representative: i == rep, correlation }));
-            if i == rep {
-                continue;
-            }
-            let how = r.relation.as_deref().unwrap_or("direct");
-            pairs.entry((i.min(rep), i.max(rep))).or_insert_with(|| OutPair {
-                a: files[rep].display().to_string().into(),
-                b: files[i].display().to_string().into(),
-                a_bytes: None,
-                b_bytes: None,
-                aligned_points: r.aligned_points.unwrap_or(0),
-                frame_overlap: r.frame_overlap.unwrap_or(0.0),
-                pixel_correlation: r.pixel_correlation.unwrap_or(0.0),
-                scale: 0.0,
-                mirrored: r.mirrored.unwrap_or(false),
-                inverted: r.inverted.unwrap_or(false),
-                identical: how == "identical",
-                same_pixels: how == "same_pixels",
-                propagated: how == "propagated",
-                corroborated: how == "corroborated",
-                ia: rep,
-                ib: i,
-            });
-        }
-        groups.push(OutGroup {
-            representative: files[rep].display().to_string(),
-            files: members.iter().map(|&i| files[i].display().to_string()).collect(),
-            rep,
-            members,
-        });
-    }
-    let gone: HashSet<usize> = (0..files.len())
-        .filter(|&i| std::fs::symlink_metadata(&files[i]).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))
-        .collect();
-    let changed: HashSet<usize> = (0..files.len())
-        .filter(|&i| std::fs::metadata(&files[i]).is_ok_and(|md| changed_since(&md, stated[i].2.unwrap_or(0), after)))
-        .collect();
-    let lapsed = |i: usize| {
-        if gone.contains(&i) {
-            Some(Lapse::Gone)
-        } else {
-            changed.contains(&i).then_some(Lapse::Changed)
-        }
-    };
-    let mut unheld = 0;
-    let (actions, kept_by) = match mode {
-        suggest::Mode::Content => {
-            // A kept file is in a group with what it holds, so it has a number.
-            let mut kept_by = vec![None; files.len()];
-            for (i, k) in rests_on {
-                kept_by[i] = index.get(&k).copied();
-            }
-            // To the end of each chain: a scan kept by an earlier version names the
-            // nearest holder, which may be a deletion too.
-            let mut kept_by = suggest::kept_at_end(&content, &kept_by);
-            // A deletion whose kept copy has gone or changed since the scan
-            // rests on nothing, and one changed since is not of the file the
-            // scan judged: each is left for a person to look at.
-            let taken = suggest::revoke(&mut content, &mut kept_by, lapsed);
-            unheld = taken.iter().filter(|(_, why)| *why == Lapse::Gone).count();
-            (content, kept_by)
-        }
-        // The other two rules judge a file by the representatives it was
-        // matched to, so a group whose representative has gone says nothing:
-        // its files were never compared with each other, and judged by it, a
-        // group's every remaining file was DELETE, resting on a file no
-        // longer there. A file it alone held has no suggestion.
-        _ => {
-            let seats = seats.into_iter().filter(|(rep, _)| !gone.contains(rep) && !changed.contains(rep)).map(|(_, s)| s);
-            let mut actions = suggest::by_group(mode, files.len(), seats, min_correlation);
-            suggest::revoke(&mut actions, &mut [], |i| changed.contains(&i).then_some(Lapse::Changed));
-            (actions, Vec::new())
-        }
-    };
-    // A group keeps its files that are still there, and is left out once it
-    // holds fewer than two, or no longer holds the file every other was
-    // compared with: its rows would claim nothing about each other.
-    groups.retain_mut(|g| {
-        let kept: Vec<usize> = (0..g.members.len()).filter(|&k| !gone.contains(&g.members[k])).collect();
-        g.files = kept.iter().map(|&k| g.files[k].clone()).collect();
-        g.members = kept.iter().map(|&k| g.members[k]).collect();
-        g.members.len() >= 2 && !gone.contains(&g.rep)
-    });
-    let out = Output {
-        tool: "img-fp",
-        config: kept.config,
-        files_enumerated: kept.files_enumerated,
-        files_analysed: kept.files_analysed,
-        failures: kept.failures,
-        runtime_seconds: kept.runtime_seconds,
-        groups,
-        pairs: pairs.into_values().collect(),
-        actions,
-        kept: kept_by,
-    };
-    (out, files, report::stated_facts(stated), Rebuilt { gone: gone.len(), unheld, changed: changed.len() })
-}
-
-fn action_of(s: &str) -> Option<Action> {
-    match s {
-        "KEEP" => Some(Action::Keep),
-        "DELETE" => Some(Action::Delete),
-        "REVIEW" => Some(Action::Review),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outcome::{Evidence, File, Group, Head, Member, Relation};
+    use crate::suggest::Action;
     use std::os::unix::ffi::OsStringExt;
 
-    fn pair(ia: usize, ib: usize, files: &[PathBuf]) -> OutPair {
-        OutPair {
-            a: files[ia].display().to_string().into(),
-            b: files[ib].display().to_string().into(),
-            a_bytes: None,
-            b_bytes: None,
-            aligned_points: 42,
-            frame_overlap: 0.987,
-            pixel_correlation: 0.912,
-            scale: 0.5,
-            mirrored: false,
-            inverted: false,
-            identical: false,
-            same_pixels: false,
-            propagated: false,
-            corroborated: false,
-            ia,
-            ib,
-        }
+    fn ev(relation: Relation, corr: f32) -> Option<Evidence> {
+        let aligned_points = matches!(relation, Relation::Direct | Relation::Corroborated).then_some(42);
+        Some(Evidence { relation, aligned_points, frame_overlap: 0.987, pixel_correlation: corr, mirrored: false, inverted: false })
     }
 
-    /// The kept report, read back, writes the text and the CSV the scan
-    /// wrote, byte for byte, with every relation, a name that is not UTF-8,
-    /// a damaged file and a file in two groups; and a file deleted since is
-    /// left out, and with it a group it left with one file.
-    #[test]
-    fn a_kept_scan_writes_the_reports_the_scan_wrote() {
-        let root = std::env::temp_dir().join(format!("img-fp-keep-{}", std::process::id()));
+    /// A scan of files under `root`, kept beside a cache there, and `--last`
+    /// asked to write it as `name`.
+    fn last(root: &Path, name: &str, suggest: suggest::Mode) -> (Vec<String>, Vec<u8>) {
+        let out = root.join(name);
+        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: Some(&out), format: None, suggest };
+        let said = rewrite(&asked).unwrap();
+        (said, std::fs::read(out).unwrap())
+    }
+
+    fn keep(root: &Path, scan: &Outcome, started_ns: u64) {
+        let notes = Notes::now(false, started_ns, 1, String::new(), vec![]);
+        save_with(&dir(Some(&root.join("c.bin"))), |p| scan.save(p).map_err(std::io::Error::other), &notes).unwrap();
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("img-fp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let mut files: Vec<PathBuf> = ["a.jpg", "b;x.jpg", "c.png", "d.png", "e.png"].iter().map(|n| root.join(n)).collect();
-        files.push(root.join(std::ffi::OsString::from_vec(b"f\xff.jpg".to_vec())));
-        // Each as long as the scan below says it is, so that none reads as
-        // changed since.
-        for (k, f) in files.iter().enumerate() {
+        root
+    }
+
+    /// The kept scan writes the text, the CSV and the JSON the scan wrote,
+    /// byte for byte, with every relation, a name that is not UTF-8, a
+    /// damaged file and a file in two groups; and a file deleted since is
+    /// left out, and with it a group it left with one file, and what rested
+    /// on it is left for a person to look at.
+    #[test]
+    fn a_kept_scan_writes_the_reports_the_scan_wrote() {
+        let root = scratch("keep");
+        let mut paths: Vec<PathBuf> = ["a.jpg", "b;x.jpg", "c.png", "d.png", "e.png"].iter().map(|n| root.join(n)).collect();
+        paths.push(root.join(std::ffi::OsString::from_vec(b"f\xff.jpg".to_vec())));
+        // Each as long as the scan says it is, so that none reads as changed
+        // since.
+        for (k, f) in paths.iter().enumerate() {
             std::fs::write(f, vec![b'x'; k + 1]).unwrap();
         }
-        let mut pairs = vec![pair(0, 1, &files), pair(0, 2, &files), pair(0, 3, &files), pair(4, 3, &files), pair(4, 5, &files)];
-        pairs[0].identical = true;
-        pairs[1].propagated = true;
-        pairs[1].mirrored = true;
-        pairs[2].corroborated = true;
-        pairs[2].inverted = true;
-        pairs[3].same_pixels = true;
-        let group = |rep: usize, members: Vec<usize>| OutGroup {
-            representative: files[rep].display().to_string(),
-            files: members.iter().map(|&i| files[i].display().to_string()).collect(),
-            rep,
-            members,
-        };
-        let out = Output {
-            tool: "img-fp",
-            config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.6}),
-            files_enumerated: 6,
-            files_analysed: 6,
-            failures: vec![],
-            runtime_seconds: 1.5,
-            groups: vec![group(0, vec![0, 1, 2, 3]), group(4, vec![3, 4, 5])],
-            pairs,
-            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review), Some(Action::Delete), Some(Action::Keep), None],
-            kept: vec![None, Some(0), None, Some(4), None, None],
-        };
-        let dims = [(640, 480), (640, 480), (320, 240), (0, 0), (10, 10), (8, 8)];
-        let facts = report::read_facts(&out, &files, &dims, &[false, false, true, false, false, false], &[1, 2, 3, 4, 5, 6]);
-        let write = |out: &Output, files: &[PathBuf], facts: &report::FileFacts, name: &str, format| {
-            let p = root.join(name);
-            report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format, pairs: false }, out, files, facts).unwrap();
-            std::fs::read(p).unwrap()
-        };
-        let kept_json = write(&out, &files, &facts, "kept.json", report::Format::Json);
-        let kept: Kept = serde_json::from_slice(&kept_json).unwrap();
-        let (again, again_files, again_facts, done) = rebuild(kept, suggest::Mode::Content, 0.6, None);
-        assert_eq!((done.gone, done.unheld), (0, 0));
+        let dims = [Some((640, 480)), Some((640, 480)), Some((320, 240)), None, Some((10, 10)), Some((8, 8))];
+        let files: Vec<File> = paths.iter().enumerate().map(|(k, p)| File { path: p.clone(), dims: dims[k], bytes: Some(k as u64 + 1), damaged: k == 2 }).collect();
+        let m = |file, with| Member { file, with };
+        let mirrored = Some(Evidence { mirrored: true, ..ev(Relation::Propagated, 0.9).unwrap() });
+        let inverted = Some(Evidence { inverted: true, ..ev(Relation::Corroborated, 0.6).unwrap() });
+        let groups = vec![
+            Group { members: vec![m(0, None), m(1, ev(Relation::Identical, 1.0)), m(2, mirrored), m(3, inverted)] },
+            Group { members: vec![m(4, None), m(3, ev(Relation::SamePixels, 1.0)), m(5, ev(Relation::Direct, 0.95))] },
+        ];
+        let (k, d, r) = (Some(Action::Keep), Some(Action::Delete), Some(Action::Review));
+        let head = Head { config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.7}), files_enumerated: 6, files_analysed: 6, failures: vec![], runtime_seconds: 1.5 };
+        let scan = Outcome::new(head, 0.7, files, groups, vec![k, d, r, d, k, None], vec![None, Some(0), None, Some(4), None, None]);
+        keep(&root, &scan, now_nanos() + 60_000_000_000);
         for (name, format) in [("txt", report::Format::Txt), ("csv", report::Format::Csv), ("json", report::Format::Json)] {
-            assert_eq!(
-                write(&again, &again_files, &again_facts, &format!("again.{name}"), format),
-                write(&out, &files, &facts, &format!("first.{name}"), format),
-                "{name}"
-            );
+            for mode in [suggest::Mode::Content, suggest::Mode::Correlation, suggest::Mode::Representative] {
+                let first = root.join(format!("first.{name}"));
+                report::write_with(&report::Target { sink: report::Sink::File(first.clone()), format }, &scan, mode, None).unwrap();
+                let (said, again) = last(&root, &format!("again.{name}"), mode);
+                assert_eq!(again, std::fs::read(first).unwrap(), "{name} {mode:?}");
+                assert_eq!(said.len(), 1 + (format == report::Format::Json) as usize, "{said:?}");
+            }
         }
-
-        // The other rules, from the groups alone.
-        let kept: Kept = serde_json::from_slice(&kept_json).unwrap();
-        let (again, again_files, _, _) = rebuild(kept, suggest::Mode::Representative, 0.6, None);
-        let of = |p: &PathBuf| again.actions[again_files.iter().position(|f| f == p).unwrap()];
-        assert_eq!(of(&files[0]), Some(Action::Keep));
-        assert_eq!(of(&files[2]), Some(Action::Delete));
-        assert_eq!(of(&files[5]), Some(Action::Delete));
 
         // `e.png` deleted: its group is left with two files, but not the one
         // they were compared with, so it goes; `d.png` stays in the first.
-        std::fs::remove_file(&files[4]).unwrap();
-        let kept: Kept = serde_json::from_slice(&kept_json).unwrap();
-        let (again, again_files, _, done) = rebuild(kept, suggest::Mode::Content, 0.6, None);
-        assert_eq!(done.gone, 1);
-        assert_eq!(again.groups.len(), 1);
-        assert_eq!(again.groups[0].members.len(), 4);
-        // `d.png` was deleted on `e.png`'s strength, and `e.png` is gone: it
-        // rests on nothing now, and is for a person to look at.
-        assert_eq!(done.unheld, 1);
-        let d = again_files.iter().position(|f| f == &files[3]).unwrap();
-        assert_eq!((again.actions[d], again.kept[d]), (Some(Action::Review), None));
-        // `b;x.jpg` rests on `a.jpg`, which is still there.
-        let b = again_files.iter().position(|f| f == &files[1]).unwrap();
-        assert_eq!(again.actions[b], Some(Action::Delete));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A kept scan from before the kept copy was the end of its chain names
-    /// the nearest holder: read back, the end is found, and a deletion whose
-    /// end has gone is REVIEW even though the nearest holder is still there.
-    #[test]
-    fn a_deletion_whose_kept_copy_is_gone_is_left_for_review() {
-        let root = std::env::temp_dir().join(format!("img-fp-unheld-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let files: Vec<PathBuf> = ["keep.jpg", "mid.jpg", "far.jpg"].iter().map(|n| root.join(n)).collect();
-        for f in &files {
-            std::fs::write(f, b"x").unwrap();
-        }
-        let out = Output {
-            tool: "img-fp",
-            config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.6}),
-            files_enumerated: 3,
-            files_analysed: 3,
-            failures: vec![],
-            runtime_seconds: 1.0,
-            groups: vec![OutGroup {
-                representative: files[0].display().to_string(),
-                files: files.iter().map(|f| f.display().to_string()).collect(),
-                rep: 0,
-                members: vec![0, 1, 2],
-            }],
-            pairs: vec![pair(0, 1, &files), pair(0, 2, &files)],
-            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Delete)],
-            // `far` rests on `mid`, which rests on `keep`.
-            kept: vec![None, Some(0), Some(1)],
-        };
-        let facts = report::read_facts(&out, &files, &[(8, 8); 3], &[false; 3], &[1; 3]);
-        let p = root.join("kept.json");
-        report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
-        let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
-
-        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, None);
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(done.unheld, 0);
-        assert_eq!(again.kept[at(&files[2])], Some(at(&files[0])), "the end of the chain, not the nearest holder");
-
-        std::fs::remove_file(&files[0]).unwrap();
-        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, None);
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(done.unheld, 2);
-        for f in &files[1..] {
-            assert_eq!(again.actions[at(f)], Some(Action::Review), "{}", f.display());
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The group rules judge a file only by representatives still there: a
-    /// file that agreed closely with one now gone and loosely with another
-    /// is judged by the other, and one only a gone representative held has
-    /// no suggestion.
-    #[test]
-    fn the_group_rules_judge_by_representatives_still_there() {
-        let root = std::env::temp_dir().join(format!("img-fp-groupgone-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let files: Vec<PathBuf> = ["gone.jpg", "both.jpg", "only.jpg", "stays.jpg"].iter().map(|n| root.join(n)).collect();
-        for f in &files {
-            std::fs::write(f, b"x").unwrap();
-        }
-        let corr = |ia, ib, c| OutPair { pixel_correlation: c, ..pair(ia, ib, &files) };
-        let group = |rep: usize, members: Vec<usize>| OutGroup {
-            representative: files[rep].display().to_string(),
-            files: members.iter().map(|&i| files[i].display().to_string()).collect(),
-            rep,
-            members,
-        };
-        let out = Output {
-            tool: "img-fp",
-            config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.6}),
-            files_enumerated: 4,
-            files_analysed: 4,
-            failures: vec![],
-            runtime_seconds: 1.0,
-            groups: vec![group(0, vec![0, 1, 2]), group(3, vec![1, 3])],
-            pairs: vec![corr(0, 1, 0.99), corr(0, 2, 0.99), corr(1, 3, 0.7)],
-            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Delete), Some(Action::Keep)],
-            kept: vec![None, Some(0), Some(0), None],
-        };
-        let facts = report::read_facts(&out, &files, &[(8, 8); 4], &[false; 4], &[1; 4]);
-        let p = root.join("kept.json");
-        report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
-        let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
-        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Correlation, 0.6, None);
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(again.actions[at(&files[1])], Some(Action::Delete), "with its representative, by its best agreement");
-
-        std::fs::remove_file(&files[0]).unwrap();
-        for mode in [suggest::Mode::Correlation, suggest::Mode::Representative] {
-            let (again, again_files, _, _) = rebuild(read(), mode, 0.6, None);
-            let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-            let want = if mode == suggest::Mode::Correlation { Some(Action::Keep) } else { Some(Action::Delete) };
-            assert_eq!(again.actions[at(&files[1])], want, "{mode:?}: judged by the representative still there");
-            assert_eq!(again.actions[at(&files[2])], None, "{mode:?}: only the gone one held it");
-        }
+        // `d.png` was deleted on `e.png`'s strength: it rests on nothing now.
+        std::fs::remove_file(&paths[4]).unwrap();
+        let (said, txt) = last(&root, "gone.txt", suggest::Mode::Content);
+        assert_eq!(&said[1..], ["1 file gone since the scan is left out", "1 deletion whose kept copy is gone is REVIEW instead"]);
+        let txt = String::from_utf8_lossy(&txt);
+        assert_eq!(txt.lines().filter(|l| l.starts_with("group_")).collect::<Vec<_>>(), ["group_1: 4 files"]);
+        assert!(txt.contains("\tMATCH, REVIEW, -, 4B, corroborated, 42 points"), "{txt}");
+        assert!(txt.contains("\tMATCH, DELETE, 640x480, 2B, identical, "), "`b;x.jpg` rests on `a.jpg`, still there");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A file changed since the scan — another length, or touched after it
-    /// finished — is not suggested for deletion, nor is a file whose deletion
+    /// started — is not suggested for deletion, nor is a file whose deletion
     /// rests on it; a file that has not changed is as the scan left it.
     #[test]
     fn a_file_changed_since_the_scan_is_not_deleted_nor_relied_on() {
-        let root = std::env::temp_dir().join(format!("img-fp-changed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let files: Vec<PathBuf> = ["keep.jpg", "copy.jpg", "other.jpg"].iter().map(|n| root.join(n)).collect();
-        for f in &files {
+        let root = scratch("changed");
+        let paths: Vec<PathBuf> = ["keep.jpg", "copy.jpg", "other.jpg"].iter().map(|n| root.join(n)).collect();
+        for f in &paths {
             std::fs::write(f, b"x").unwrap();
         }
-        let out = Output {
-            tool: "img-fp",
-            config: serde_json::json!({"suggest": "content", "min_pixel_correlation": 0.6}),
-            files_enumerated: 3,
-            files_analysed: 3,
-            failures: vec![],
-            runtime_seconds: 1.0,
-            groups: vec![OutGroup {
-                representative: files[0].display().to_string(),
-                files: files.iter().map(|f| f.display().to_string()).collect(),
-                rep: 0,
-                members: vec![0, 1, 2],
-            }],
-            pairs: vec![pair(0, 1, &files), pair(0, 2, &files)],
-            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Delete)],
-            kept: vec![None, Some(0), Some(0)],
+        let files = paths.iter().map(|p| File { path: p.clone(), dims: Some((8, 8)), bytes: Some(1), damaged: false }).collect();
+        let m = |file, with| Member { file, with };
+        let groups = vec![Group { members: vec![m(0, None), m(1, ev(Relation::Direct, 0.99)), m(2, ev(Relation::Direct, 0.99))] }];
+        let d = Some(Action::Delete);
+        let scan = Outcome::new(Head::default(), 0.7, files, groups, vec![Some(Action::Keep), d, d], vec![None, Some(0), Some(0)]);
+        let later = now_nanos() + 60_000_000_000;
+        let action_of = |name: &str| {
+            let csv = String::from_utf8(std::fs::read(root.join("r.csv")).unwrap()).unwrap();
+            csv.lines().find(|l| l.contains(name)).unwrap().split(';').nth(2).unwrap().to_string()
         };
-        let facts = report::read_facts(&out, &files, &[(8, 8); 3], &[false; 3], &[1; 3]);
-        let p = root.join("kept.json");
-        report::write_with(&report::Target { sink: report::Sink::File(p.clone()), format: report::Format::Json, pairs: false }, &out, &files, &facts).unwrap();
-        let read = || serde_json::from_slice::<Kept>(&std::fs::read(&p).unwrap()).unwrap();
-        let later = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 + 60_000_000_000;
 
         // Unchanged: as the scan said.
-        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, Some(later));
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(done.changed, 0);
-        assert_eq!(again.actions[at(&files[1])], Some(Action::Delete));
+        keep(&root, &scan, later);
+        let (said, _) = last(&root, "r.csv", suggest::Mode::Content);
+        assert_eq!(said.len(), 1);
+        assert_eq!(action_of("copy.jpg"), "DELETE");
 
         // `copy.jpg` replaced by another picture of another length.
-        std::fs::write(&files[1], b"another picture").unwrap();
-        let (again, again_files, _, done) = rebuild(read(), suggest::Mode::Content, 0.6, Some(later));
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(done.changed, 1);
-        assert_eq!(again.actions[at(&files[1])], Some(Action::Review));
-        assert_eq!(again.actions[at(&files[2])], Some(Action::Delete), "an unchanged file is as it was");
+        std::fs::write(&paths[1], b"another picture").unwrap();
+        let (said, _) = last(&root, "r.csv", suggest::Mode::Content);
+        assert!(said[1].starts_with("1 file has changed since the scan"), "{said:?}");
+        assert_eq!(action_of("copy.jpg"), "REVIEW");
+        assert_eq!(action_of("other.jpg"), "DELETE", "an unchanged file is as it was");
 
-        // `keep.jpg` touched after the scan finished, at the same length:
+        // `keep.jpg` touched after the scan started, at the same length:
         // what rested on it rests on nothing, by every rule.
-        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 - 60_000_000_000;
-        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Content, 0.6, Some(before));
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(again.actions[at(&files[2])], Some(Action::Review));
-        let (again, again_files, _, _) = rebuild(read(), suggest::Mode::Representative, 0.6, Some(before));
-        let at = |f: &PathBuf| again_files.iter().position(|g| g == f).unwrap();
-        assert_eq!(again.actions[at(&files[2])], None, "judged by its representative, which changed");
+        keep(&root, &scan, now_nanos() - 60_000_000_000);
+        last(&root, "r.csv", suggest::Mode::Content);
+        assert_eq!(action_of("other.jpg"), "REVIEW");
+        last(&root, "r.csv", suggest::Mode::Representative);
+        assert_eq!(action_of("other.jpg"), "", "judged by its representative, which changed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A scan kept by a version before the `Outcome` is not read.
+    #[test]
+    fn a_scan_kept_by_an_earlier_version_asks_for_a_scan() {
+        let root = scratch("earlier");
+        let dir = dir(Some(&root.join("c.bin")));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(NOTES), serde_json::to_vec(&Notes::now(false, 0, 1, String::new(), vec![])).unwrap()).unwrap();
+        std::fs::write(dir.join("result.json"), b"{}").unwrap();
+        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: None, format: None, suggest: suggest::Mode::Content };
+        let e = rewrite(&asked).unwrap_err().to_string();
+        assert!(e.contains("earlier version"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -797,22 +452,9 @@ mod tests {
         let md = std::fs::metadata(&f).unwrap();
         let now = ctime_ns(&md);
         let ns = 1_000_000_000;
-        let notes = |started_ns: Option<u64>, started: Option<u64>| Notes {
-            problems: false,
-            took: "1:00".into(),
-            finished: now / ns + 30,
-            started_ns,
-            started,
-            id: 1,
-            log: String::new(),
-            roots: vec![],
-        };
-        assert!(changed_since(&md, md.len(), Some(notes(Some(now - 1), None).changed_after())), "written during the scan");
-        assert!(!changed_since(&md, md.len(), Some(notes(Some(now + 1), None).changed_after())), "written before it, if only just");
-        // A scan kept by 0.48 to 0.51 says when it started to the second, and
-        // one kept before that only when it finished.
-        assert!(changed_since(&md, md.len(), Some(notes(None, Some(now / ns - 1)).changed_after())));
-        assert!(!changed_since(&md, md.len(), Some(notes(None, None).changed_after())));
+        let notes = |started_ns: u64| Notes { problems: false, took: "1:00".into(), finished: now / ns + 30, started_ns, id: 1, log: String::new(), roots: vec![] };
+        assert!(changed_since(&md, md.len(), Some(notes(now - 1).changed_after())), "written during the scan");
+        assert!(!changed_since(&md, md.len(), Some(notes(now + 1).changed_after())), "written before it, if only just");
         let _ = std::fs::remove_file(&f);
     }
 

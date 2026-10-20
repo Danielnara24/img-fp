@@ -67,16 +67,6 @@ pub(crate) enum How {
     Corroborated,
 }
 
-impl How {
-    pub(crate) fn relation(self) -> &'static str {
-        match self {
-            How::Direct => "direct",
-            How::Propagated => "propagated",
-            How::Corroborated => "corroborated",
-        }
-    }
-}
-
 /// A pair the run states, and how it came to.
 #[derive(Clone, Copy)]
 pub(crate) struct Claim {

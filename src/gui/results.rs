@@ -51,11 +51,11 @@ use crate::folders::{self, Tree};
 use crate::labels as l;
 use crate::last;
 use crate::mosaic::Mosaic;
-use crate::scan::{Found, Group, Member};
+
 use crate::still::Still;
 use crate::thumbs::{show_on, Key, Latest, Shown, Size, Thumbs};
 use crate::App;
-use img_fp::{Action, Lapse, SuggestMode};
+use img_fp::{Action, Evidence, Lapse, Outcome, Relation, SuggestMode};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
@@ -112,6 +112,28 @@ label.suggest.delete { background-color: alpha(@error_color, 0.18); color: mix(@
 label.suggest.review { background-color: alpha(@warning_color, 0.25); color: mix(@warning_color, @theme_fg_color, 0.5); }
 ";
 
+/// One file of one group, as the page shows it: the file, and its pair with
+/// the group's reference image (`None` for the reference itself).
+#[derive(Clone, Debug)]
+pub struct Member {
+    /// The file's number, the same in every group it is in.
+    pub id: u32,
+    pub path: PathBuf,
+    pub dims: Option<(u32, u32)>,
+    pub bytes: Option<u64>,
+    pub damaged: bool,
+    pub with: Option<Evidence>,
+    /// What the scan suggested for it, by the content rule.
+    pub suggested: Option<Action>,
+}
+
+impl Member {
+    /// The file every other member of its group was matched against.
+    pub fn is_representative(&self) -> bool {
+        self.with.is_none()
+    }
+}
+
 struct GroupState {
     files: Vec<Member>,
     /// Its reference image has been moved to the Trash.
@@ -123,39 +145,22 @@ struct GroupState {
 /// hashing their paths was most of what that cost once it was one pass.
 #[derive(Default)]
 struct State {
+    /// The groups as the page shows them: less the files gone to the Trash.
     groups: Vec<GroupState>,
-    /// Each file's path, by number.
-    paths: Vec<PathBuf>,
+    /// The scan, which says what each rule suggests as files go or change
+    /// (`Outcome::lapse`).
+    scan: Outcome,
     marked: Vec<bool>,
     /// How many are marked, and their bytes.
     marked_n: usize,
     marked_bytes: u64,
     /// For each file, the groups it is in.
     member_of: Vec<Vec<usize>>,
-    sizes: Vec<u64>,
-    /// Gone to the Trash.
-    gone: Vec<bool>,
-    /// What each rule suggests for each file, in `MODES`' order, worked out
-    /// when the results arrive: once a reference image is in the Trash, its
-    /// group no longer says what was kept for its files.
+    /// What each rule suggests for each file, in `MODES`' order: the scan's
+    /// `actions`, asked again whenever a file goes or changes.
     by_mode: Vec<Vec<Option<Action>>>,
-    /// For each file the content rule deletes, the file that stays and holds
-    /// it, at the end of its chain of holders (`img_fp::kept_at_end`).
-    kept_of: Vec<Option<usize>>,
-    /// Files the content rule deleted and now leaves for a look because the
-    /// file that held them has gone (`drop_gone`) or changed since the scan
-    /// (`note_changed`): a REVIEW that is not one of the scan's own
-    /// (`img_fp::revoke`).
-    unheld: Vec<Option<Lapse>>,
-    /// Files changed since the scan (`last::changed_since`): not the files it
-    /// judged, so no rule suggests deleting them, nor anything resting on
-    /// them, as `--last` does not.
-    changed: Vec<bool>,
     /// The rule chosen: an index into `MODES`.
     mode: usize,
-    /// The correlation bar the scan ran at, which the correlation rule cuts
-    /// from.
-    min_correlation: f32,
     /// The time, in nanoseconds since 1970, a file changed after is not the file
     /// the scan judged (`last::Notes::changed_after`): what the Trash and the
     /// suggestions check each file against.
@@ -172,6 +177,32 @@ struct State {
 }
 
 impl State {
+    /// How many files the scan numbered.
+    fn n(&self) -> usize {
+        self.scan.files.len()
+    }
+
+    /// File `id`'s path.
+    fn path(&self, id: usize) -> &Path {
+        &self.scan.files[id].path
+    }
+
+    /// File `id`'s length, as the scan found it.
+    fn bytes(&self, id: usize) -> u64 {
+        self.scan.files[id].bytes.unwrap_or(0)
+    }
+
+    /// Gone to the Trash.
+    fn gone(&self, id: usize) -> bool {
+        self.scan.lapsed(id) == Some(Lapse::Gone)
+    }
+
+    /// Changed since the scan (`last::changed_since`): not the file it
+    /// judged, so no rule suggests deleting it, nor anything resting on it.
+    fn changed(&self, id: u32) -> bool {
+        self.scan.lapsed(id as usize) == Some(Lapse::Changed)
+    }
+
     /// What the chosen rule suggests for file `id`.
     fn action(&self, id: u32) -> Option<Action> {
         self.by_mode.get(self.mode).and_then(|m| m.get(id as usize).copied().flatten())
@@ -180,7 +211,7 @@ impl State {
     /// What the chosen rule suggests for file `id`, in a few words.
     fn said(&self, id: u32) -> &'static str {
         match self.action(id) {
-            Some(Action::Review) if self.changed.get(id as usize).copied().unwrap_or(false) => "review: changed since the scan",
+            Some(Action::Review) if self.changed(id) => "review: changed since the scan",
             Some(Action::Review) if MODES[self.mode] == SuggestMode::Content => match self.unheld_of(id) {
                 Some(Lapse::Gone) => "review: its kept copy is gone",
                 Some(Lapse::Changed) => "review: its kept copy has changed",
@@ -190,77 +221,39 @@ impl State {
         }
     }
 
+    /// Why the content rule no longer deletes file `id`, when the file that
+    /// held it has gone (`drop_gone`) or changed since the scan
+    /// (`note_changed`): a REVIEW that is not one of the scan's own.
     fn unheld_of(&self, id: u32) -> Option<Lapse> {
-        self.unheld.get(id as usize).copied().flatten()
+        self.scan.unheld(id as usize)
     }
 
     /// Whether file `id` is for a person to look at, as the scan said: a
     /// REVIEW, except one that is only there because it or its kept copy has
     /// gone or changed since.
     fn to_look_at(&self, id: u32) -> bool {
-        self.action(id) == Some(Action::Review)
-            && !self.changed.get(id as usize).copied().unwrap_or(false)
-            && !(MODES[self.mode] == SuggestMode::Content && self.unheld_of(id).is_some())
+        self.action(id) == Some(Action::Review) && !self.changed(id) && !(MODES[self.mode] == SuggestMode::Content && self.unheld_of(id).is_some())
     }
 
-    /// The rules that read the groups, worked out again from the groups
-    /// whose reference image is still there as the scan saw it, and no rule
-    /// deleting a file changed since the scan.
-    ///
-    /// They judge a file by the reference images it was matched to, so a
-    /// group whose reference has gone or changed says nothing: its files were
-    /// never compared with each other, and judged by it every one of them
-    /// stayed DELETE, so *Mark suggested deletions* marked the last copies.
-    /// A file only such a group held has no suggestion. Every other file's is
-    /// what it was.
-    fn regroup(&mut self) {
-        let changed = &self.changed;
-        let reference_changed = |g: &GroupState| g.files.iter().any(|f| f.is_representative() && changed.get(f.id as usize).copied().unwrap_or(false));
-        for (k, &mode) in MODES.iter().enumerate() {
-            if mode != SuggestMode::Content {
-                let again = suggestions(self.groups.iter().filter(|g| !g.reference_gone && !reference_changed(g)), self.paths.len(), mode, self.min_correlation);
-                self.by_mode[k] = again;
-            }
-        }
-        let changed = &self.changed;
-        for m in self.by_mode.iter_mut() {
-            img_fp::revoke(m, &mut [], |i| changed[i].then_some(Lapse::Changed));
-        }
+    /// What each rule suggests, asked of the scan again.
+    fn suggest(&mut self) {
+        self.by_mode = MODES.iter().map(|&m| self.scan.actions(m)).collect();
     }
 
     /// The files, of those not already known to have, that have changed since
     /// the scan: another length, or a change time after it started
     /// (`last::changed_since`). A `stat` each, on every thread.
-    fn changed_now(&self) -> Vec<u32> {
-        use rayon::prelude::*;
-        (0..self.paths.len() as u32)
-            .into_par_iter()
-            .filter(|&id| {
-                let i = id as usize;
-                !self.gone[i]
-                    && !self.changed[i]
-                    && std::fs::metadata(&self.paths[i]).is_ok_and(|md| img_fp::last::changed_since(&md, self.sizes[i], self.changed_after))
-            })
-            .collect()
+    fn changed_now(&self) -> Vec<usize> {
+        self.scan.look(self.changed_after).1
     }
 
-    /// Take in that `ids` have changed since the scan, as `--last` does: none
-    /// is suggested for deletion, nor is a file the content rule deleted on
-    /// the strength of one, which it may no longer hold; and the group rules
-    /// do not judge by one. Whether any suggestion moved.
-    fn note_changed(&mut self, ids: &[u32]) -> bool {
-        if ids.is_empty() {
+    /// Take in that `ids` have changed since the scan, as `--last` does
+    /// (`Outcome::lapse`). Whether any suggestion moved.
+    fn note_changed(&mut self, ids: &[usize]) -> bool {
+        if !self.scan.lapse(ids.iter().copied(), Lapse::Changed) {
             return false;
         }
-        for &id in ids {
-            self.changed[id as usize] = true;
-        }
-        let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-        let changed = &self.changed;
-        for (id, why) in img_fp::revoke(&mut self.by_mode[content], &mut self.kept_of, |i| changed[i].then_some(Lapse::Changed)) {
-            self.unheld[id] = Some(why);
-        }
-        self.regroup();
+        self.suggest();
         true
     }
 
@@ -275,7 +268,7 @@ impl State {
             return false;
         }
         self.marked[i] = on;
-        let b = self.sizes[i];
+        let b = self.bytes(i);
         if on {
             self.marked_n += 1;
             self.marked_bytes += b;
@@ -296,13 +289,7 @@ impl State {
     /// hold what they show. Asked whichever rule is shown, since it is the
     /// content rule that knows which file holds which.
     fn marked_with_their_copy(&self) -> usize {
-        let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-        self.marked_ids()
-            .filter(|&id| {
-                self.by_mode[content].get(id as usize).copied().flatten() == Some(Action::Delete)
-                    && self.kept_of.get(id as usize).copied().flatten().is_some_and(|k| self.is_marked(k as u32))
-            })
-            .count()
+        self.marked_ids().filter(|&id| self.scan.kept_copy(id as usize).is_some_and(|k| self.is_marked(k as u32))).count()
     }
 
     /// File `id` as its first group has it, and that group.
@@ -1172,29 +1159,23 @@ impl Results {
 
     /// A finished scan's groups, replacing whatever was shown.
     pub fn show(self: &Rc<Self>, prepared: Prepared, problems: bool) {
-        let Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots, min_correlation, changed_after } = prepared;
+        let Prepared { groups, scan, by_mode, kept, roots, changed_after } = prepared;
         {
             let mut s = self.state.borrow_mut();
             // The rule chosen stays chosen from one scan to the next.
             let mode = s.mode;
-            let n = paths.len();
+            let n = scan.files.len();
             *s = State {
                 groups,
-                paths,
-                sizes,
+                analysed: scan.head.files_analysed,
+                scan,
                 by_mode,
-                kept_of,
                 marked: vec![false; n],
-                gone: vec![false; n],
-                unheld: vec![None; n],
-                changed: vec![false; n],
                 problems,
-                analysed,
                 has_results: true,
                 mode,
                 kept,
                 roots,
-                min_correlation,
                 changed_after,
                 ..State::default()
             };
@@ -1276,7 +1257,7 @@ impl Results {
         }
         let s = self.state.borrow();
         let Some(kept) = s.kept else { return };
-        let paths = s.marked_ids().filter(|&id| !s.gone[id as usize]).map(|id| s.paths[id as usize].clone()).collect();
+        let paths = s.marked_ids().filter(|&id| !s.gone(id as usize)).map(|id| s.path(id as usize).to_path_buf()).collect();
         last::save_marks(kept, paths);
     }
 
@@ -1305,7 +1286,7 @@ impl Results {
     fn rebuild(self: &Rc<Self>, select: usize) {
         {
             let mut s = self.state.borrow_mut();
-            let mut member_of: Vec<Vec<usize>> = vec![Vec::new(); s.paths.len()];
+            let mut member_of: Vec<Vec<usize>> = vec![Vec::new(); s.n()];
             for (gi, g) in s.groups.iter().enumerate() {
                 for f in &g.files {
                     member_of[f.id as usize].push(gi);
@@ -1368,7 +1349,7 @@ impl Results {
         let tree = {
             let s = self.state.borrow();
             let files: Vec<(u32, &Path)> =
-                (0..s.paths.len()).filter(|&i| !s.member_of[i].is_empty()).map(|i| (i as u32, s.paths[i].as_path())).collect();
+                (0..s.n()).filter(|&i| !s.member_of[i].is_empty()).map(|i| (i as u32, s.path(i))).collect();
             folders::build(&s.roots, &files)
         };
         let after = before.and_then(|p| tree.find(&p));
@@ -1542,7 +1523,7 @@ impl Results {
         match (self.tree_view.get(), self.folder.get()) {
             (true, Some(f)) => {
                 let s = self.state.borrow();
-                self.tree.borrow().folders.get(f).map_or_else(Vec::new, |f| f.all.iter().copied().filter(|&id| !s.gone[id as usize]).collect())
+                self.tree.borrow().folders.get(f).map_or_else(Vec::new, |f| f.all.iter().copied().filter(|&id| !s.gone(id as usize)).collect())
             }
             (true, None) => Vec::new(),
             (false, _) => self.cards.borrow().iter().map(|c| c.id).collect(),
@@ -1667,7 +1648,7 @@ impl Results {
         let files: Vec<Member> = shown.iter().map(|(m, _)| m.clone()).collect();
         *self.shown.borrow_mut() = shown;
 
-        let dims = |files: &[Member]| files.iter().map(|m| (m.width.unwrap_or(0), m.height.unwrap_or(0))).collect::<Vec<_>>();
+        let dims = |files: &[Member]| files.iter().map(|m| m.dims.unwrap_or((0, 0))).collect::<Vec<_>>();
         *self.cards.borrow_mut() = files.iter().map(|m| Card { path: m.path.clone(), id: m.id, request: None }).collect();
         // From the top, and the images there on tiles: the rest are given
         // theirs as the page is scrolled to them.
@@ -2019,7 +2000,7 @@ impl Results {
         d.dir.set_text(&m.path.parent().map(|p| p.display().to_string()).unwrap_or_default());
         d.facts.set_text(&facts(&m));
         let reference = s.groups.get(gi).and_then(|g| g.files.iter().find(|f| f.is_representative()));
-        let mut note = match (m.is_representative(), reference.and_then(|r| Some((r.width?, r.height?)))) {
+        let mut note = match (m.is_representative(), reference.and_then(|r| r.dims)) {
             (false, Some((w, h))) => format!("the reference is {w} × {h}"),
             _ => String::new(),
         };
@@ -2032,11 +2013,11 @@ impl Results {
         d.facts_note.set_text(&note);
         d.why.set_text(&evidence(&m));
         let action = s.action(m.id);
-        let kept = match (action, s.kept_of.get(m.id as usize).copied().flatten()) {
-            (Some(Action::Delete), Some(k)) if s.mode == 0 => held_by(&m.path, &s.paths[k]),
+        let kept = match s.scan.kept_copy(m.id as usize) {
+            Some(k) if s.mode == 0 => held_by(&m.path, s.path(k)),
             _ => String::new(),
         };
-        let kept = match (kept.is_empty(), s.changed.get(m.id as usize).copied().unwrap_or(false), s.mode == 0, s.unheld_of(m.id)) {
+        let kept = match (kept.is_empty(), s.changed(m.id), s.mode == 0, s.unheld_of(m.id)) {
             (true, true, _, _) => "It has changed since the scan".to_string(),
             (true, _, true, Some(Lapse::Gone)) => "The file that held everything in it has gone".to_string(),
             (true, _, true, Some(Lapse::Changed)) => "The file that held everything in it has changed since the scan".to_string(),
@@ -2186,7 +2167,7 @@ impl Results {
         let (off, on): (Vec<u32>, Vec<u32>) = {
             let s = self.state.borrow();
             let delete = |id: u32| s.action(id) == Some(Action::Delete);
-            let all = (0..s.paths.len() as u32).filter(|&id| !s.gone[id as usize]);
+            let all = (0..s.n() as u32).filter(|&id| !s.gone(id as usize));
             all.filter(|&id| s.is_marked(id) != delete(id)).partition(|&id| s.is_marked(id))
         };
         self.mark_ids(&off, false);
@@ -2263,7 +2244,7 @@ impl Results {
         let s = self.state.borrow();
         let (n, bytes) = (s.marked_n, s.marked_bytes);
         let groups = s.groups.len();
-        let live = || (0..s.paths.len() as u32).filter(|&id| !s.gone[id as usize]);
+        let live = || (0..s.n() as u32).filter(|&id| !s.gone(id as usize));
         let suggested = live().filter(|&id| s.action(id) == Some(Action::Delete)).count();
         let text = if n == 0 && suggested > 0 {
             format!("{groups} group{}. {suggested} suggested for deletion.", if groups == 1 { "" } else { "s" })
@@ -2455,7 +2436,7 @@ impl Results {
         let (paths, bytes, whole, changed_after, with_copy, kept_changed) = {
             let s = self.state.borrow();
             // With the length the scan found, which the move checks first.
-            let mut paths: Vec<(PathBuf, u64)> = s.marked_ids().map(|id| (s.paths[id as usize].clone(), s.sizes[id as usize])).collect();
+            let mut paths: Vec<(PathBuf, u64)> = s.marked_ids().map(|id| (s.path(id as usize).to_path_buf(), s.bytes(id as usize))).collect();
             let changed_after = s.changed_after;
             paths.sort();
             let bytes = s.marked_bytes;
@@ -2609,29 +2590,20 @@ impl Results {
         let mut unmarked = false;
         let select = {
             let mut s = self.state.borrow_mut();
-            let ids: Vec<u32> = (0..s.paths.len() as u32).filter(|&id| gone.contains(&s.paths[id as usize])).collect();
-            for id in ids {
+            let ids: Vec<u32> = (0..s.n() as u32).filter(|&id| gone.contains(s.path(id as usize))).collect();
+            for &id in &ids {
                 if s.set_mark(id, false) {
                     unmarked = true;
                 }
-                s.gone[id as usize] = true;
-                for m in s.by_mode.iter_mut() {
-                    m[id as usize] = None;
-                }
             }
-            let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-            let s = &mut *s;
-            let trashed = &s.gone;
-            for (id, why) in img_fp::revoke(&mut s.by_mode[content], &mut s.kept_of, |i| trashed[i].then_some(Lapse::Gone)) {
-                s.unheld[id] = Some(why);
-            }
+            s.scan.lapse(ids.iter().map(|&id| id as usize), Lapse::Gone);
+            s.suggest();
             for g in s.groups.iter_mut() {
                 if g.files.iter().any(|f| f.is_representative() && gone.contains(&f.path)) {
                     g.reference_gone = true;
                 }
                 g.files.retain(|f| !gone.contains(&f.path));
             }
-            s.regroup();
             let current = s.current;
             // Where the shown group lands once the emptied ones before it go.
             let before = s.groups[..current.min(s.groups.len())].iter().filter(|g| g.files.len() < 2).count();
@@ -2670,17 +2642,17 @@ fn set_class(w: &impl IsA<gtk::Widget>, class: &str, on: bool) {
 fn face(files: &[Member]) -> Option<&Member> {
     let mut sizes: HashMap<(u32, u32), usize> = HashMap::new();
     for f in files {
-        if let (Some(w), Some(h)) = (f.width, f.height) {
-            *sizes.entry((w, h)).or_default() += 1;
+        if let Some(d) = f.dims {
+            *sizes.entry(d).or_default() += 1;
         }
     }
     let Some((&size, _)) = sizes.iter().max_by_key(|&(&(w, h), &n)| (n, w as u64 * h as u64)) else { return files.first() };
-    let same = || files.iter().filter(move |f| (f.width, f.height) == (Some(size.0), Some(size.1)));
+    let same = || files.iter().filter(move |f| f.dims == Some(size));
     // An inverted or mirrored copy is the same size and the wrong picture.
-    let upright = |f: &&Member| f.inverted != Some(true) && f.mirrored != Some(true);
+    let upright = |f: &&Member| f.with.is_none_or(|e| !e.inverted && !e.mirrored);
     same()
         .filter(upright)
-        .find(|f| f.suggested() == Some(Action::Keep))
+        .find(|f| f.suggested == Some(Action::Keep))
         .or_else(|| same().find(upright))
         .or_else(|| same().next())
 }
@@ -2733,27 +2705,23 @@ fn size(bytes: u64) -> String {
 /// What a member's match with the reference image rests on: how much of one
 /// lies inside the other, and how closely their pixels agree there.
 fn evidence(m: &Member) -> String {
-    if m.is_representative() {
+    let Some(e) = m.with else {
         return "reference image".into();
-    }
-    if m.relation.as_deref() == Some("identical") {
-        return "identical copy of the reference".into();
-    }
-    if m.relation.as_deref() == Some("same_pixels") {
-        return "same picture as the reference, saved differently".into();
-    }
-    let (Some(ov), Some(corr)) = (m.frame_overlap, m.pixel_correlation) else {
-        return String::new();
     };
+    match e.relation {
+        Relation::Identical => return "identical copy of the reference".into(),
+        Relation::SamePixels => return "same picture as the reference, saved differently".into(),
+        _ => {}
+    }
     // A corroborated match cleared only the lower bar a pair inside an
     // existing group faces, so its correlation can sit below the one the scan
     // asked for; the text report says so, and so does the card.
-    let mut s = if m.relation.as_deref() == Some("corroborated") { "corroborated · ".to_string() } else { String::new() };
-    s.push_str(&format!("overlap {ov:.2} · correlation {corr:.2}"));
-    if m.mirrored == Some(true) {
+    let mut s = if e.relation == Relation::Corroborated { "corroborated · ".to_string() } else { String::new() };
+    s.push_str(&format!("overlap {:.2} · correlation {:.2}", e.frame_overlap, e.pixel_correlation));
+    if e.mirrored {
         s.push_str(" · mirrored");
     }
-    if m.inverted == Some(true) {
+    if e.inverted {
         s.push_str(" · inverted");
     }
     s
@@ -2796,38 +2764,14 @@ fn fill_menu(menu: &gio::Menu, tree: bool) {
 const RULES: &[&str] = &["Keep all content", "By correlation", "Reference images only"];
 const MODES: [SuggestMode; 3] = [SuggestMode::Content, SuggestMode::Correlation, SuggestMode::Representative];
 
-/// What `mode` suggests for each of `n` files of `groups`, by number. The
-/// scan's own rule came with the report; the other two read the groups, as
-/// the command line's do (`img_fp::by_group`). A file is numbered in the
-/// order the groups first name it, which is the order `by_group` asks for.
-fn suggestions<'g>(groups: impl Iterator<Item = &'g GroupState> + Clone, n: usize, mode: SuggestMode, min_correlation: f32) -> Vec<Option<Action>> {
-    let files = || groups.clone().flat_map(|g| g.files.iter());
-    if mode == SuggestMode::Content {
-        let mut v = vec![None; n];
-        for m in files() {
-            if let Some(a) = m.suggested() {
-                v[m.id as usize] = Some(a);
-            }
-        }
-        return v;
-    }
-    let seats = files().map(|m| img_fp::Seat { file: m.id as usize, representative: m.is_representative(), correlation: m.correlation() });
-    img_fp::by_group(mode, n, seats, min_correlation)
-}
-
-/// A scan's report made ready for the page, off the main thread: every
-/// file numbered, and what each rule suggests for it. On IMGS-ALL's report
-/// that is a fifth of a second the window used to spend frozen.
+/// A scan made ready for the page, off the main thread: its groups as the
+/// page shows them, and what each rule suggests for each file.
 pub struct Prepared {
     groups: Vec<GroupState>,
-    paths: Vec<PathBuf>,
-    sizes: Vec<u64>,
+    scan: Outcome,
     by_mode: Vec<Vec<Option<Action>>>,
-    kept_of: Vec<Option<usize>>,
-    analysed: usize,
     kept: Option<u64>,
     roots: Vec<PathBuf>,
-    min_correlation: f32,
     changed_after: Option<u64>,
 }
 
@@ -2837,9 +2781,8 @@ impl Prepared {
         self.roots = roots;
     }
 
-    /// Each file's path, by number.
-    pub fn paths(&self) -> &[PathBuf] {
-        &self.paths
+    pub fn scan(&self) -> &Outcome {
+        &self.scan
     }
 
     pub fn groups(&self) -> usize {
@@ -2847,7 +2790,7 @@ impl Prepared {
     }
 
     pub fn analysed(&self) -> usize {
-        self.analysed
+        self.scan.head.files_analysed
     }
 
     /// A file changed after `ns` (nanoseconds since 1970) is not the file the scan
@@ -2862,36 +2805,25 @@ impl Prepared {
     }
 }
 
-pub fn prepare(found: Found) -> Prepared {
-    let Found { groups: report, analysed, min_correlation, kept, .. } = found;
-    let mut paths: Vec<PathBuf> = Vec::new();
-    let mut sizes: Vec<u64> = Vec::new();
-    let mut ids: HashMap<PathBuf, u32> = HashMap::new();
-    let mut groups = Vec::with_capacity(report.len());
-    for Group { mut files } in report {
-        for f in files.iter_mut() {
-            f.id = *ids.entry(f.path.clone()).or_insert_with(|| {
-                paths.push(f.path.clone());
-                sizes.push(f.size_bytes.unwrap_or(0));
-                (paths.len() - 1) as u32
-            });
-        }
-        groups.push(GroupState { files, reference_gone: false });
-    }
-    let n = paths.len();
-    let by_mode: Vec<Vec<Option<Action>>> = MODES.iter().map(|&m| suggestions(groups.iter(), n, m, min_correlation)).collect();
-    // What each deletion rests on, by number, to the end of its chain: a
-    // scan kept by an earlier version names the nearest holder, which may itself be
-    // a deletion.
-    let mut rests_on: Vec<Option<usize>> = vec![None; n];
-    for m in groups.iter().flat_map(|g| g.files.iter()) {
-        if let Some(k) = m.kept_copy.as_ref().and_then(|k| ids.get(k)) {
-            rests_on[m.id as usize] = Some(*k as usize);
-        }
-    }
-    let content = MODES.iter().position(|&m| m == SuggestMode::Content).expect("the content rule is offered");
-    let kept_of = img_fp::kept_at_end(&by_mode[content], &rests_on);
-    Prepared { groups, paths, sizes, by_mode, kept_of, analysed, kept, roots: Vec::new(), min_correlation, changed_after: None }
+pub fn prepare(scan: Outcome) -> Prepared {
+    let suggested = scan.actions(SuggestMode::Content);
+    let groups = scan
+        .groups
+        .iter()
+        .map(|g| {
+            let files = g
+                .members
+                .iter()
+                .map(|m| {
+                    let f = &scan.files[m.file];
+                    Member { id: m.file as u32, path: f.path.clone(), dims: f.dims, bytes: f.bytes, damaged: f.damaged, with: m.with, suggested: suggested[m.file] }
+                })
+                .collect();
+            GroupState { files, reference_gone: false }
+        })
+        .collect();
+    let by_mode = MODES.iter().map(|&m| scan.actions(m)).collect();
+    Prepared { groups, scan, by_mode, kept: None, roots: Vec::new(), changed_after: None }
 }
 
 /// What a REVIEW is, for the yellow corner: either of the two reasons the
@@ -2914,10 +2846,10 @@ fn suggestion(action: Option<Action>) -> &'static str {
 /// Dimensions and size, as far as the report knows them.
 fn facts(m: &Member) -> String {
     let mut parts = Vec::new();
-    if let (Some(w), Some(h)) = (m.width, m.height) {
+    if let Some((w, h)) = m.dims {
         parts.push(format!("{w} × {h}"));
     }
-    if let Some(b) = m.size_bytes {
+    if let Some(b) = m.bytes {
         parts.push(size(b));
     }
     // The one copy not to keep, and nothing else on the card says so.
@@ -2932,21 +2864,25 @@ fn facts(m: &Member) -> String {
 mod tests {
     use super::*;
 
+    /// 0 the reference and kept original, 1 and 2 copies; the content rule
+    /// says `content`, and deletes each DELETE for 0.
+    fn state(content: [Option<Action>; 3]) -> State {
+        use img_fp::outcome::{File, Group, Head, Member};
+        let ev = Evidence { relation: Relation::Direct, aligned_points: Some(40), frame_overlap: 1.0, pixel_correlation: 0.99, mirrored: false, inverted: false };
+        let files = (0..3).map(|i| File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false }).collect();
+        let members = (0..3).map(|i| Member { file: i, with: (i > 0).then_some(ev) }).collect();
+        let kept = content.iter().map(|a| (*a == Some(Action::Delete)).then_some(0)).collect();
+        let p = prepare(Outcome::new(Head::default(), 0.7, files, vec![Group { members }], content.to_vec(), kept));
+        State { groups: p.groups, scan: p.scan, by_mode: p.by_mode, marked: vec![false; 3], ..Default::default() }
+    }
+
     /// The Trash warns of a marked file whose kept copy is marked too,
     /// whichever rule is shown and whether or not a group is all marked.
     #[test]
     fn a_marked_deletion_whose_kept_copy_is_marked_is_counted() {
-        // 0 the original, 1 a re-encode it holds, 2 a crop of it.
-        let d = Some(Action::Delete);
-        let content = vec![Some(Action::Keep), d, Some(Action::Keep)];
-        let mut s = State {
-            by_mode: vec![content, vec![d; 3], vec![d; 3]],
-            kept_of: vec![None, Some(0), None],
-            marked: vec![false; 3],
-            sizes: vec![1; 3],
-            mode: 1,
-            ..Default::default()
-        };
+        // 1 a re-encode 0 holds, 2 a crop of it.
+        let mut s = state([Some(Action::Keep), Some(Action::Delete), Some(Action::Keep)]);
+        s.mode = 1;
         s.set_mark(1, true);
         assert_eq!(s.marked_with_their_copy(), 0, "the original stays");
         s.set_mark(0, true);
@@ -2958,32 +2894,12 @@ mod tests {
     /// the group rules do not judge by it, and it is not deleted itself.
     #[test]
     fn a_kept_copy_changed_since_the_scan_is_not_relied_on() {
-        // 0 the reference and kept original, 1 and 2 copies it holds.
-        let member = |id: u32, role: &str, action: &str, corr: f32| -> Member {
-            let mut m: Member = serde_json::from_value(serde_json::json!({
-                "path": format!("/p/{id}.jpg"), "role": role, "width": 8, "height": 8, "size_bytes": 1,
-                "relation": if role == "match" { Some("direct") } else { None }, "pixel_correlation": corr, "action": action,
-            }))
-            .unwrap();
-            m.id = id;
-            m
-        };
-        let files = vec![member(0, "representative", "KEEP", 1.0), member(1, "match", "DELETE", 0.99), member(2, "match", "DELETE", 0.99)];
         let d = Some(Action::Delete);
-        let mut s = State {
-            groups: vec![GroupState { files, reference_gone: false }],
-            paths: (0..3).map(|i| PathBuf::from(format!("/p/{i}.jpg"))).collect(),
-            by_mode: vec![vec![Some(Action::Keep), d, d], vec![Some(Action::Keep), d, d], vec![Some(Action::Keep), d, d]],
-            kept_of: vec![None, Some(0), Some(0)],
-            unheld: vec![None; 3],
-            changed: vec![false; 3],
-            min_correlation: 0.6,
-            ..Default::default()
-        };
+        let mut s = state([Some(Action::Keep), d, d]);
         assert!(!s.note_changed(&[]), "nothing changed, nothing moves");
         assert!(s.note_changed(&[0]));
         assert_eq!(s.by_mode[0], vec![Some(Action::Keep), Some(Action::Review), Some(Action::Review)]);
-        assert_eq!((s.kept_of[1], s.unheld[1]), (None, Some(Lapse::Changed)));
+        assert_eq!((s.scan.kept_copy(1), s.unheld_of(1)), (None, Some(Lapse::Changed)));
         s.mode = 0;
         assert_eq!(s.said(1), "review: its kept copy has changed");
         assert!(!s.to_look_at(1), "not one the scan left to look at");
@@ -2992,16 +2908,7 @@ mod tests {
         }
 
         // A copy itself changed is not deleted by any rule, and says why.
-        let mut t = State {
-            groups: s.groups.drain(..).collect(),
-            paths: s.paths.clone(),
-            by_mode: vec![vec![Some(Action::Keep), d, d]; 3],
-            kept_of: vec![None, Some(0), Some(0)],
-            unheld: vec![None; 3],
-            changed: vec![false; 3],
-            min_correlation: 0.6,
-            ..Default::default()
-        };
+        let mut t = state([Some(Action::Keep), d, d]);
         t.note_changed(&[1]);
         for mode in 0..3 {
             assert_eq!(t.by_mode[mode][1], Some(Action::Review), "{:?}", MODES[mode]);

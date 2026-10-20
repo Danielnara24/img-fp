@@ -12,8 +12,6 @@
 //! default cache's folder, whatever cache a scan from the window used.
 
 use crate::results::{self, Prepared};
-use crate::scan;
-use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -34,11 +32,10 @@ pub struct Last {
     /// The report, made ready for the page here, off the main thread.
     pub prepared: Prepared,
     pub notes: Notes,
-    /// Files the report names that are no longer there: moved to the Trash
+    /// Files the scan names that are no longer there: moved to the Trash
     /// before the window was closed, or since.
     pub gone: HashSet<PathBuf>,
-    /// The images that were marked for the Trash, by number
-    /// (`Prepared::paths`).
+    /// The images that were marked for the Trash, by number.
     pub marks: Vec<u32>,
 }
 
@@ -46,7 +43,7 @@ fn dir() -> Option<PathBuf> {
     Some(img_fp::last::dir(None))
 }
 
-/// Keep `report`, a finished scan's report, with `notes`, in place of the
+/// Keep `report`, a finished scan's result, with `notes`, in place of the
 /// scan kept before, and say whether it was. Failing to is not worth
 /// interrupting anyone over: the results are on screen either way.
 pub fn save(report: &Path, notes: &Notes) -> bool {
@@ -85,8 +82,8 @@ pub fn exists() -> bool {
 }
 
 /// The scan kept last time, if there is one that can still be read. One that
-/// cannot — a report from a build that wrote another shape — is deleted, so
-/// that it is not tried on every start.
+/// cannot — kept by a build that wrote another shape — is deleted, so that it
+/// is not tried on every start.
 pub fn load() -> Option<Last> {
     load_in(&dir()?)
 }
@@ -94,12 +91,9 @@ pub fn load() -> Option<Last> {
 fn load_in(dir: &Path) -> Option<Last> {
     let notes = std::fs::read(dir.join(NOTES)).ok()?;
     let read = serde_json::from_slice::<Notes>(&notes).ok().and_then(|notes| {
-        let report = dir.join(REPORT);
-        // `read_report` takes a missing report for a scan that found nothing.
-        if !report.exists() {
-            return None;
-        }
-        scan::read_report(&report).ok().map(|found| (found, notes))
+        // Not `read_result`, which takes a missing file for a scan that found
+        // nothing.
+        img_fp::Outcome::load(&dir.join(REPORT)).ok().map(|found| (found, notes))
     });
     let Some((found, notes)) = read else {
         let _ = std::fs::remove_dir_all(dir);
@@ -110,19 +104,15 @@ fn load_in(dir: &Path) -> Option<Last> {
     // Gone as the Trash counts it: not found. A file that cannot be looked at
     // for another reason is still shown, as the scan left it. Once a file,
     // not once a group it is in, and on every thread: a `stat` each.
-    let gone = prepared
-        .paths()
-        .par_iter()
-        .filter(|p| std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))
-        .cloned()
-        .collect();
+    let files = &prepared.scan().files;
+    let gone = prepared.scan().look(None).0.into_iter().map(|i| files[i].path.clone()).collect();
     let marks = std::fs::read(dir.join(MARKS))
         .ok()
         .and_then(|b| serde_json::from_slice::<Marks>(&b).ok())
         .filter(|m| m.scan == notes.id)
         .map_or_else(Vec::new, |m| {
             let marked: HashSet<PathBuf> = m.paths.into_iter().collect();
-            (0..prepared.paths().len() as u32).filter(|&id| marked.contains(&prepared.paths()[id as usize])).collect()
+            (0..files.len() as u32).filter(|&id| marked.contains(&files[id as usize].path)).collect()
         });
     Some(Last { prepared, notes, gone, marks })
 }
@@ -139,22 +129,23 @@ mod tests {
         let (a, b) = (root.join("a.png"), root.join("b.png"));
         std::fs::write(&a, b"x").unwrap();
         let report = |name: &str, files: &[&Path]| {
-            let files: Vec<serde_json::Value> = files
-                .iter()
-                .enumerate()
-                .map(|(i, p)| serde_json::json!({"path": p, "role": if i == 0 { "representative" } else { "match" }}))
-                .collect();
+            use img_fp::outcome::{File, Group, Head, Member};
+            let ev = img_fp::Evidence { relation: img_fp::Relation::Identical, aligned_points: None, frame_overlap: 1.0, pixel_correlation: 1.0, mirrored: false, inverted: false };
+            let files: Vec<File> = files.iter().map(|p| File { path: p.to_path_buf(), dims: None, bytes: None, damaged: false }).collect();
+            let members = (0..files.len()).map(|i| Member { file: i, with: (i > 0).then_some(ev) }).collect();
+            let head = Head { files_analysed: 7, ..Default::default() };
             let p = root.join(name);
-            std::fs::write(&p, serde_json::json!({"groups": [{"files": files}], "files_analysed": 7}).to_string()).unwrap();
+            img_fp::Outcome::new(head, 0.7, files, vec![Group { members }], Vec::new(), Vec::new()).save(&p).unwrap();
             p
         };
+        let paths = |l: &Last| l.prepared.scan().files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
         let dir = root.join("cache").join("img-fp").join("last-scan");
-        let notes = |id: u64, log: &str| Notes { problems: true, took: "1:02".into(), finished: 5, started_ns: None, started: None, id, log: log.into(), roots: vec![root.clone()] };
+        let notes = |id: u64, log: &str| Notes { problems: true, took: "1:02".into(), finished: 5, started_ns: 0, id, log: log.into(), roots: vec![root.clone()] };
 
         save_in(&dir, &report("one.json", &[&a, &b]), &notes(5, "first")).unwrap();
         let last = load_in(&dir).unwrap();
         assert_eq!(last.prepared.analysed(), 7);
-        assert_eq!(last.prepared.paths().len(), 2);
+        assert_eq!(paths(&last).len(), 2);
         assert!(last.notes.problems);
         assert_eq!(last.notes.log, "first");
         assert_eq!(last.notes.roots, [root.clone()]);
@@ -168,9 +159,9 @@ mod tests {
         save_marks_in(&dir, 6, vec![b.clone()]).unwrap();
         assert_eq!(load_in(&dir).unwrap().marks, vec![0]);
 
-        save_in(&dir, &report("two.json", &[&b, &a, &a]), &notes(7, "second")).unwrap();
+        save_in(&dir, &report("two.json", &[&b, &a]), &notes(7, "second")).unwrap();
         let last = load_in(&dir).unwrap();
-        assert_eq!(last.prepared.paths(), [b.clone(), a.clone()]);
+        assert_eq!(paths(&last), [b.clone(), a.clone()]);
         assert_eq!(last.notes.log, "second");
         // The next scan starts with none.
         assert!(last.marks.is_empty());

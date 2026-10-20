@@ -16,13 +16,12 @@
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::decode;
-use crate::suggest::Action;
+use crate::outcome::{Evidence, Member, Outcome, Relation};
+use crate::suggest::{Action, Mode};
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -41,11 +40,6 @@ pub enum Sink {
 pub struct Target {
     pub sink: Sink,
     pub format: Format,
-    /// Whether the JSON lists every pair as well as the groups. Only the
-    /// window's own copy goes without: it reads the groups and nothing else,
-    /// and the pairs were 289 MB of a 303 MB report on 27,000 pictures —
-    /// written into a folder that lives in memory, and parsed by the window.
-    pub pairs: bool,
 }
 
 impl Target {
@@ -60,10 +54,10 @@ impl Target {
     /// `--output` and `--format` read together, in the one place either is.
     pub fn of(output: Option<&Path>, format: Option<Format>) -> Target {
         match output {
-            None => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt), pairs: true },
-            Some(p) if p == Path::new("-") => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt), pairs: true },
+            None => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt) },
+            Some(p) if p == Path::new("-") => Target { sink: Sink::Stdout, format: format.unwrap_or(Format::Txt) },
             Some(p) => {
-                Target { sink: Sink::File(p.to_path_buf()), format: format.unwrap_or_else(|| from_extension(p)), pairs: true }
+                Target { sink: Sink::File(p.to_path_buf()), format: format.unwrap_or_else(|| from_extension(p)) }
             }
         }
     }
@@ -268,7 +262,7 @@ pub fn raw_bytes(p: &Path) -> Option<Vec<u8>> {
     }
 }
 
-#[derive(Serialize)]
+/// One stated pair, as the JSON's `pairs` list writes it.
 pub struct OutPair {
     /// Shared with every other pair naming the same file, and written as the
     /// string it is: a copy of both names per pair was 2.3 million strings on
@@ -276,91 +270,84 @@ pub struct OutPair {
     pub a: std::sync::Arc<str>,
     pub b: std::sync::Arc<str>,
     /// `a` and `b` as bytes, for a name that is not UTF-8; see `raw_bytes`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub a_bytes: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub b_bytes: Option<Vec<u8>>,
-    pub aligned_points: u32,
-    pub frame_overlap: f32,
-    pub pixel_correlation: f32,
+    pub ev: Evidence,
     /// How many pixels of `b` one pixel of `a` spans, in the files' own
     /// pixels: 0.5 when `b` is `a` at half the size. See `lib::file_scale`.
     pub scale: f32,
-    /// A left-right flip, folded into the transform as a negative
-    /// determinant — so a composed pair carries it too.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub mirrored: bool,
-    /// Tones inverted: a negative of the other.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub inverted: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub identical: bool,
-    /// Not the same bytes, but decoded to the same picture: a lossless
-    /// re-save, a JPEG with its metadata stripped. See `same::same_analysis`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub same_pixels: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub propagated: bool,
-    /// A direct match admitted only because an anchor had already put both
-    /// files in one cluster, and so held to `CLUSTER_SLACK_CORRELATION` less
-    /// than an anchor: its correlation can sit below `--min-pixel-correlation`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub corroborated: bool,
-    /// Indices into the run's file list, for finding a member's pair with its
-    /// representative. Not written: `a` and `b` say the same thing.
-    #[serde(skip)]
+    /// Indices into the run's file list. Not written: `a` and `b` say the
+    /// same thing.
     pub ia: usize,
-    #[serde(skip)]
     pub ib: usize,
 }
 
-/// One group: the file everything in it was verified against, and the files.
-/// `files` includes the representative. The JSON writes each file as a row
-/// object rather than a bare path (see `JsonGroup`); `score.py` reads both.
-pub struct OutGroup {
-    pub representative: String,
-    pub files: Vec<String>,
-    /// `representative` and `files` as indices into the run's file list.
-    pub rep: usize,
-    pub members: Vec<usize>,
+/// A pair as the JSON writes it: `aligned_points` 0 where no keypoint was
+/// matched, and the relation as a flag, set only for what is not `direct`.
+#[derive(Serialize)]
+struct Written<'a> {
+    a: &'a str,
+    b: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    a_bytes: &'a Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    b_bytes: &'a Option<Vec<u8>>,
+    aligned_points: u32,
+    frame_overlap: f32,
+    pixel_correlation: f32,
+    scale: f32,
+    /// A left-right flip, folded into the transform as a negative
+    /// determinant — so a composed pair carries it too.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    mirrored: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    inverted: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    identical: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    same_pixels: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    propagated: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    corroborated: bool,
 }
 
-pub struct Output {
-    pub tool: &'static str,
-    pub config: serde_json::Value,
-    pub files_enumerated: usize,
-    pub files_analysed: usize,
-    pub failures: Vec<serde_json::Value>,
-    pub runtime_seconds: f64,
-    /// Largest first. Each is a representative and the files that matched it
-    /// directly. These overlap: a file that is a duplicate of two files that
-    /// are not duplicates of each other appears under both.
-    pub groups: Vec<OutGroup>,
-    pub pairs: Vec<OutPair>,
-    /// What to do with each file, by index: see `suggest.rs`. `None` for a
-    /// file in no pair, which no group holds.
-    pub actions: Vec<Option<Action>>,
-    /// For a file the content rule deletes, the kept file that shows all of
-    /// it, by index: the end of its chain of holders (`suggest::kept_at_end`),
-    /// which stays. Empty under another rule.
-    pub kept: Vec<Option<usize>>,
+impl Serialize for OutPair {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        let r = self.ev.relation;
+        Written {
+            a: &self.a,
+            b: &self.b,
+            a_bytes: &self.a_bytes,
+            b_bytes: &self.b_bytes,
+            aligned_points: self.ev.aligned_points.unwrap_or(0),
+            frame_overlap: self.ev.frame_overlap,
+            pixel_correlation: self.ev.pixel_correlation,
+            scale: self.scale,
+            mirrored: self.ev.mirrored,
+            inverted: self.ev.inverted,
+            identical: r == Relation::Identical,
+            same_pixels: r == Relation::SamePixels,
+            propagated: r == Relation::Propagated,
+            corroborated: r == Relation::Corroborated,
+        }
+        .serialize(s)
+    }
 }
 
-/// Write the report where `target` says, in the layout it says.
+/// Write the report of `scan` where `target` says, in the layout it says,
+/// with `mode`'s suggestions; the JSON lists `pairs` when there are any to
+/// list, which only a scan has.
 ///
 /// A reader that goes away early — `img-fp DIR | head` — is how a pipeline
 /// ends, not a failed run, so a broken pipe on stdout is not an error.
-///
-/// The files' facts are read by the caller (`read_facts`), so that a run
-/// writing two reports — the window's copy and a `-o` — reads each header
-/// once, not once a report.
-pub fn write_with(target: &Target, out: &Output, files: &[PathBuf], facts: &FileFacts) -> Result<()> {
-    let facts = &facts.0;
+pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<&[OutPair]>) -> Result<()> {
+    let said = Said::of(scan, mode);
     let body = |w: &mut dyn Write| -> std::io::Result<()> {
         match target.format {
-            Format::Json => write_json(w, out, files, &facts, target.pairs),
-            Format::Txt => write_txt(w, out, files, &facts),
-            Format::Csv => write_csv(w, out, files, &facts),
+            Format::Json => write_json(w, &said, pairs),
+            Format::Txt => write_txt(w, &said),
+            Format::Csv => write_csv(w, &said),
         }
     };
     match &target.sink {
@@ -378,12 +365,61 @@ pub fn write_with(target: &Target, out: &Output, files: &[PathBuf], facts: &File
     }
 }
 
+/// A scan and what one rule says of each of its files: what every layout
+/// writes.
+struct Said<'a> {
+    scan: &'a Outcome,
+    mode: Mode,
+    actions: Vec<Option<Action>>,
+    groups: Vec<Vec<Member>>,
+}
+
+impl<'a> Said<'a> {
+    fn of(scan: &'a Outcome, mode: Mode) -> Said<'a> {
+        Said { scan, mode, actions: scan.actions(mode), groups: scan.shown().collect() }
+    }
+
+    /// A group's rows, representative first. A file in two groups has a row
+    /// in each, because its evidence differs: each row is its pair with
+    /// *that* group's representative.
+    fn rows(&self, g: &'a [Member]) -> impl Iterator<Item = Row<'a>> + '_ {
+        let files = &self.scan.files;
+        g.iter().map(move |m| {
+            let f = &files[m.file];
+            let action = self.actions[m.file];
+            let kept = if self.mode == Mode::Content { self.scan.kept_copy(m.file) } else { None };
+            let kept = kept.filter(|_| action == Some(Action::Delete)).map(|k| &files[k].path);
+            let p = m.with;
+            Row {
+                path: f.path.display().to_string(),
+                path_bytes: raw_bytes(&f.path),
+                raw: &f.path,
+                role: if p.is_none() { "representative" } else { "match" },
+                action: action.map(Action::as_str),
+                width: f.dims.map(|d| d.0),
+                height: f.dims.map(|d| d.1),
+                size: f.bytes.map(format_size),
+                size_bytes: f.bytes,
+                relation: p.map(|p| p.relation.as_str()),
+                aligned_points: p.and_then(|p| p.aligned_points),
+                frame_overlap: p.map(|p| p.frame_overlap),
+                pixel_correlation: p.map(|p| p.pixel_correlation),
+                mirrored: p.map(|p| p.mirrored),
+                inverted: p.map(|p| p.inverted),
+                damaged: f.damaged,
+                kept_copy: kept.map(|k| k.display().to_string()),
+                kept_copy_bytes: kept.and_then(|k| raw_bytes(k)),
+            }
+        })
+    }
+}
+
 /// One group as the JSON states it: the text report's block, with each row
 /// an object whose keys are the CSV's columns.
 #[derive(Serialize)]
 struct JsonGroup<'a> {
     group: String,
-    representative: &'a str,
+    representative: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     representative_bytes: Option<Vec<u8>>,
     files: Vec<Row<'a>>,
@@ -395,29 +431,29 @@ struct JsonGroup<'a> {
 /// was a megabyte-long line on a found corpus and fifty on the benchmark one,
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
-fn write_json(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>, with_pairs: bool) -> std::io::Result<()> {
-    let pairs = pair_index(out);
-    let groups: Vec<JsonGroup> = out
+fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<&[OutPair]>) -> std::io::Result<()> {
+    let head = &said.scan.head;
+    let groups: Vec<JsonGroup> = said
         .groups
         .iter()
         .enumerate()
-        .map(|(gi, g)| JsonGroup {
-            group: group_name(gi),
-            representative: &g.representative,
-            representative_bytes: raw_bytes(&files[g.rep]),
-            files: rows(g, out, files, &pairs, facts).collect(),
+        .map(|(gi, g)| {
+            let rep = &said.scan.files[g[0].file].path;
+            JsonGroup { group: group_name(gi), representative: rep.display().to_string(), representative_bytes: raw_bytes(rep), files: said.rows(g).collect() }
         })
         .collect();
+    let mut config = head.config.clone();
+    config["suggest"] = format!("{:?}", said.mode).to_lowercase().into();
     writeln!(w, "{{")?;
-    writeln!(w, "  \"tool\": {},", serde_json::to_string(out.tool)?)?;
-    writeln!(w, "  \"config\": {},", serde_json::to_string(&out.config)?)?;
-    writeln!(w, "  \"files_enumerated\": {},", out.files_enumerated)?;
-    writeln!(w, "  \"files_analysed\": {},", out.files_analysed)?;
-    list(w, "failures", &out.failures, false)?;
-    writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&out.runtime_seconds)?)?;
-    list(w, "groups", &groups, !with_pairs)?;
-    if with_pairs {
-        list_par(w, "pairs", &out.pairs, true)?;
+    writeln!(w, "  \"tool\": \"img-fp\",")?;
+    writeln!(w, "  \"config\": {},", serde_json::to_string(&config)?)?;
+    writeln!(w, "  \"files_enumerated\": {},", head.files_enumerated)?;
+    writeln!(w, "  \"files_analysed\": {},", head.files_analysed)?;
+    list(w, "failures", &head.failures, false)?;
+    writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&head.runtime_seconds)?)?;
+    list(w, "groups", &groups, pairs.is_none())?;
+    if let Some(pairs) = pairs {
+        list_par(w, "pairs", pairs, true)?;
     }
     writeln!(w, "}}")
 }
@@ -463,83 +499,6 @@ pub(crate) fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[
     writeln!(w, "{}]{}", if xs.is_empty() { "" } else { "\n  " }, if last { "" } else { "," })
 }
 
-/// What the per-file rows say about a file beyond its path: its size as
-/// shown, and its length.
-///
-/// The size is the analysis's own (`dims`, indexed like `files`): the picture
-/// decoded, with its orientation applied, which the cache has carried since
-/// it began stating the report's `scale` in the files' pixels. The report used
-/// to open every grouped file again and parse its header for the same figure
-/// — 624 opens on a cached run over 636 files, a seek apiece on a disk that
-/// has to seek. The header is still asked of a file the analysis has no size
-/// for, which is a file that would not decode: a byte-identical pair of broken
-/// pictures is reported, and its header may still say how large it claims to
-/// be. The length is the walk's own (`sizes`), which asks nothing again.
-#[derive(Clone, Copy, Default)]
-struct Facts {
-    dims: Option<(u32, u32)>,
-    bytes: Option<u64>,
-    /// Decoded only in part; see `problems::Problems::damaged`.
-    damaged: bool,
-}
-
-/// What `facts` read, for `write_with`.
-pub struct FileFacts(HashMap<usize, Facts>);
-
-/// Read the facts every report states about its grouped files.
-pub fn read_facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool], sizes: &[u64]) -> FileFacts {
-    FileFacts(facts(out, files, dims, damaged, sizes))
-}
-
-/// Facts already stated, by file: a kept report's own rows, which say each
-/// file's size and length as the scan found them (`last::rewrite`).
-pub(crate) fn stated_facts(known: impl IntoIterator<Item = (usize, Option<(u32, u32)>, Option<u64>, bool)>) -> FileFacts {
-    FileFacts(known.into_iter().map(|(i, dims, bytes, damaged)| (i, Facts { dims, bytes, damaged })).collect())
-}
-
-fn facts(out: &Output, files: &[PathBuf], dims: &[(u32, u32)], damaged: &[bool], sizes: &[u64]) -> HashMap<usize, Facts> {
-    let mut wanted: Vec<usize> = out.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
-    wanted.sort_unstable();
-    wanted.dedup();
-    wanted
-        .into_par_iter()
-        .map(|i| {
-            let p = &files[i];
-            let dims = match dims.get(i) {
-                Some(&(w, h)) if w > 0 && h > 0 => Some((w, h)),
-                _ => decode::probe(p).map(|pr| (pr.w, pr.h)),
-            };
-            let bytes = sizes.get(i).copied();
-            (i, Facts { dims, bytes, damaged: damaged.get(i).copied().unwrap_or(false) })
-        })
-        .collect()
-}
-
-/// How a member came to be in its group: the pair it has with the
-/// representative, from whichever side it was recorded.
-fn pair_index(out: &Output) -> HashMap<(usize, usize), &OutPair> {
-    out.pairs.iter().map(|p| ((p.ia.min(p.ib), p.ia.max(p.ib)), p)).collect()
-}
-
-/// `identical` for the same bytes, `same_pixels` for files that decode to the
-/// same picture, `propagated` for a transform composed along
-/// a path and then checked against the pixels, `direct` for one fitted to
-/// keypoints the two files share, and `corroborated` for a direct one that
-/// cleared only the lower bar a pair inside an existing cluster faces.
-fn relation(p: &OutPair) -> &'static str {
-    if p.identical {
-        "identical"
-    } else if p.same_pixels {
-        "same_pixels"
-    } else if p.propagated {
-        "propagated"
-    } else if p.corroborated {
-        "corroborated"
-    } else {
-        "direct"
-    }
-}
-
 pub(crate) fn format_size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1_073_741_824.0 {
@@ -566,7 +525,7 @@ fn group_name(gi: usize) -> String {
 /// for, `width` on a header the probe cannot read.
 #[derive(Serialize)]
 struct Row<'a> {
-    path: &'a str,
+    path: String,
     /// `path` as bytes, for a name that is not UTF-8; see `raw_bytes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     path_bytes: Option<Vec<u8>>,
@@ -598,46 +557,6 @@ struct Row<'a> {
     kept_copy_bytes: Option<Vec<u8>>,
 }
 
-/// A group's rows, representative first. A file in two groups has a row in
-/// each, because its evidence differs: each row is its pair with *that*
-/// group's representative.
-fn rows<'a>(
-    g: &'a OutGroup,
-    out: &'a Output,
-    files: &'a [PathBuf],
-    pairs: &'a HashMap<(usize, usize), &'a OutPair>,
-    facts: &'a HashMap<usize, Facts>,
-) -> impl Iterator<Item = Row<'a>> + 'a {
-    let rep = g.members.iter().position(|&m| m == g.rep).expect("a representative is a member of its group");
-    std::iter::once(rep).chain((0..g.members.len()).filter(move |&k| k != rep)).map(move |k| {
-        let i = g.members[k];
-        let f = facts.get(&i).copied().unwrap_or_default();
-        let p = if i == g.rep { None } else { pairs.get(&(i.min(g.rep), i.max(g.rep))).copied() };
-        let action = out.actions.get(i).copied().flatten();
-        let kept = out.kept.get(i).copied().flatten().filter(|_| action == Some(Action::Delete));
-        Row {
-            path: &g.files[k],
-            path_bytes: raw_bytes(&files[i]),
-            raw: &files[i],
-            role: if i == g.rep { "representative" } else { "match" },
-            action: action.map(Action::as_str),
-            width: f.dims.map(|d| d.0),
-            height: f.dims.map(|d| d.1),
-            size: f.bytes.map(format_size),
-            size_bytes: f.bytes,
-            relation: p.map(relation),
-            aligned_points: p.filter(|p| matches!(relation(p), "direct" | "corroborated")).map(|p| p.aligned_points),
-            frame_overlap: p.map(|p| p.frame_overlap),
-            pixel_correlation: p.map(|p| p.pixel_correlation),
-            mirrored: p.map(|p| p.mirrored),
-            inverted: p.map(|p| p.inverted),
-            damaged: f.damaged,
-            kept_copy: kept.map(|k| files[k].display().to_string()),
-            kept_copy_bytes: kept.and_then(|k| raw_bytes(&files[k])),
-        }
-    })
-}
-
 /// Width of the role column, comma included: `MATCH,`.
 const ROLE_COLUMN: usize = 6;
 /// Width of the action column, comma included: `DELETE,`.
@@ -647,11 +566,10 @@ const ACTION_COLUMN: usize = 7;
 /// report has: the role leads at a fixed width so it forms a column, and the
 /// path trails because it is the one field with no bounded length. Every
 /// figure carries its name, since there is no header to say which is which.
-fn write_txt(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
-    let pairs = pair_index(out);
-    for (gi, g) in out.groups.iter().enumerate() {
-        writeln!(w, "{}: {} files", group_name(gi), g.members.len())?;
-        for r in rows(g, out, files, &pairs, facts) {
+fn write_txt(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
+    for (gi, g) in said.groups.iter().enumerate() {
+        writeln!(w, "{}: {} files", group_name(gi), g.len())?;
+        for r in said.rows(g) {
             let role = if r.role == "representative" { "REP," } else { "MATCH," };
             let action = format!("{},", r.action.unwrap_or("-"));
             let dims = match (r.width, r.height) {
@@ -715,15 +633,14 @@ const CSV_HEADER: [&str; 15] = [
 
 /// One row per file per group, `;`-separated as `vid-fp`'s is, an unmeasured
 /// figure an empty cell.
-fn write_csv(w: &mut dyn Write, out: &Output, files: &[PathBuf], facts: &HashMap<usize, Facts>) -> std::io::Result<()> {
+fn write_csv(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
     fn cell<T: ToString>(x: Option<T>) -> String {
         x.map(|x| x.to_string()).unwrap_or_default()
     }
-    let pairs = pair_index(out);
     csv_row(w, &CSV_HEADER.map(str::as_bytes))?;
-    for (gi, g) in out.groups.iter().enumerate() {
+    for (gi, g) in said.groups.iter().enumerate() {
         let group = group_name(gi);
-        for r in rows(g, out, files, &pairs, facts) {
+        for r in said.rows(g) {
             csv_row(
                 w,
                 &[
@@ -783,54 +700,56 @@ pub fn csv_row_with(w: &mut dyn Write, fields: &[&[u8]], sep: u8) -> std::io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outcome::{File, Group, Head};
+
+    fn ev(relation: Relation) -> Evidence {
+        let points = (!relation.one_file()).then_some(42);
+        Evidence { relation, aligned_points: points, frame_overlap: 0.987, pixel_correlation: 0.912, mirrored: false, inverted: false }
+    }
 
     fn pair(ia: usize, ib: usize) -> OutPair {
-        OutPair {
-            a: format!("/{ia}.jpg").into(),
-            b: format!("/{ib}.jpg").into(),
-            a_bytes: None,
-            b_bytes: None,
-            aligned_points: 42,
-            frame_overlap: 0.987,
-            pixel_correlation: 0.912,
-            scale: 0.5,
-            mirrored: false,
-            inverted: false,
-            identical: false,
-            same_pixels: false,
-            propagated: false,
-            corroborated: false,
-            ia,
-            ib,
-        }
+        OutPair { a: format!("/{ia}.jpg").into(), b: format!("/{ib}.jpg").into(), a_bytes: None, b_bytes: None, ev: ev(Relation::Direct), scale: 0.5, ia, ib }
     }
 
-    fn files() -> Vec<PathBuf> {
-        ["/0.jpg", "/1.jpg", "/2;x.jpg"].map(PathBuf::from).to_vec()
+    fn file(p: &str) -> File {
+        File { path: PathBuf::from(p), dims: None, bytes: None, damaged: false }
     }
 
-    fn output() -> Output {
+    /// One group: `/0.jpg`, which holds an identical `/1.jpg` and a mirrored
+    /// `/2;x.jpg`.
+    fn scan() -> Outcome {
+        let mut files = vec![file("/0.jpg"), file("/1.jpg"), file("/2;x.jpg")];
+        (files[0].dims, files[0].bytes) = (Some((4032, 3024)), Some(3_250_000));
+        let mirrored = Evidence { mirrored: true, ..ev(Relation::Direct) };
+        let members = vec![Member { file: 0, with: None }, Member { file: 1, with: Some(ev(Relation::Identical)) }, Member { file: 2, with: Some(mirrored) }];
+        let head = Head { config: serde_json::json!({}), files_enumerated: 3, files_analysed: 3, failures: vec![], runtime_seconds: 1.0 };
+        Outcome::new(head, 0.7, files, vec![Group { members }], vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review)], vec![None, Some(0), None])
+    }
+
+    fn pairs() -> Vec<OutPair> {
         let mut mirrored = pair(0, 2);
-        mirrored.mirrored = true;
+        mirrored.ev.mirrored = true;
         let mut identical = pair(1, 0);
-        identical.identical = true;
-        Output {
-            tool: "img-fp",
-            config: serde_json::json!({}),
-            files_enumerated: 3,
-            files_analysed: 3,
-            failures: vec![],
-            runtime_seconds: 1.0,
-            groups: vec![OutGroup {
-                representative: "/0.jpg".into(),
-                files: vec!["/0.jpg".into(), "/1.jpg".into(), "/2;x.jpg".into()],
-                rep: 0,
-                members: vec![0, 1, 2],
-            }],
-            pairs: vec![identical, mirrored],
-            actions: vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review)],
-            kept: vec![None, Some(0), Some(0)],
-        }
+        identical.ev = ev(Relation::Identical);
+        vec![identical, mirrored]
+    }
+
+    fn txt(o: &Outcome) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_txt(&mut buf, &Said::of(o, Mode::Content)).unwrap();
+        buf
+    }
+
+    fn csv(o: &Outcome) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_csv(&mut buf, &Said::of(o, Mode::Content)).unwrap();
+        buf
+    }
+
+    fn json(o: &Outcome, pairs: Option<&[OutPair]>) -> serde_json::Value {
+        let mut buf = Vec::new();
+        write_json(&mut buf, &Said::of(o, Mode::Content), pairs).unwrap();
+        serde_json::from_slice(&buf).unwrap()
     }
 
     #[test]
@@ -849,13 +768,8 @@ mod tests {
 
     #[test]
     fn a_text_row_is_the_members_pair_with_its_representative() {
-        let out = output();
-        let facts: HashMap<usize, Facts> =
-            [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000), damaged: false })].into_iter().collect();
-        let mut buf = Vec::new();
-        write_txt(&mut buf, &out, &files(), &facts).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
+            String::from_utf8(txt(&scan())).unwrap(),
             "group_1: 3 files\n\
              \tREP,   KEEP,   4032x3024, 3.1MB, /0.jpg\n\
              \tMATCH, DELETE, -, -, identical, /1.jpg\n\
@@ -865,10 +779,9 @@ mod tests {
 
     #[test]
     fn a_csv_row_quotes_only_what_needs_it() {
-        let out = output();
-        let mut buf = Vec::new();
-        write_csv(&mut buf, &out, &files(), &HashMap::new()).unwrap();
-        let text = String::from_utf8(buf).unwrap();
+        let mut o = scan();
+        (o.files[0].dims, o.files[0].bytes) = (None, None);
+        let text = String::from_utf8(csv(&o)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], CSV_HEADER.join(";"));
         assert_eq!(lines[1], "group_1;representative;KEEP;/0.jpg;;;;;;;;;;;");
@@ -878,12 +791,7 @@ mod tests {
 
     #[test]
     fn the_json_is_one_document() {
-        let out = output();
-        let mut buf = Vec::new();
-        let facts: HashMap<usize, Facts> =
-            [(0, Facts { dims: Some((4032, 3024)), bytes: Some(3_250_000), damaged: false })].into_iter().collect();
-        write_json(&mut buf, &out, &files(), &facts, true).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let v = json(&scan(), Some(&pairs()));
         let g = &v["groups"][0];
         assert_eq!(g["group"], "group_1");
         assert_eq!(g["representative"], "/0.jpg");
@@ -919,36 +827,27 @@ mod tests {
         }
     }
 
-    /// The window's copy is the same document without the pairs, and still
-    /// one document.
+    /// `--last`'s JSON is the same document without the pairs, and still one
+    /// document.
     #[test]
-    fn the_windows_copy_leaves_out_the_pairs() {
-        let out = output();
-        let mut buf = Vec::new();
-        write_json(&mut buf, &out, &files(), &HashMap::new(), false).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+    fn a_report_without_pairs_is_still_one_document() {
+        let v = json(&scan(), None);
         assert!(v.get("pairs").is_none());
         assert_eq!(v["groups"][0]["files"][2]["relation"], "direct", "a row's evidence is still its pair's");
     }
 
     #[test]
     fn a_corroborated_pair_says_so_in_every_format() {
-        let mut out = output();
-        out.pairs[1].corroborated = true;
-        out.pairs[1].aligned_points = 9;
-        out.pairs[1].pixel_correlation = 0.54;
-        let facts = HashMap::new();
-        let mut txt = Vec::new();
-        write_txt(&mut txt, &out, &files(), &facts).unwrap();
-        assert!(String::from_utf8(txt)
+        let mut o = scan();
+        let mut pairs = pairs();
+        let corroborated = Evidence { relation: Relation::Corroborated, aligned_points: Some(9), pixel_correlation: 0.54, mirrored: true, ..ev(Relation::Direct) };
+        o.groups[0].members[2].with = Some(corroborated);
+        pairs[1].ev = corroborated;
+        assert!(String::from_utf8(txt(&o))
             .unwrap()
             .contains("\tMATCH, REVIEW, -, -, corroborated, 9 points, overlap 0.99, correlation 0.54, mirrored, /2;x.jpg\n"));
-        let mut csv = Vec::new();
-        write_csv(&mut csv, &out, &files(), &facts).unwrap();
-        assert!(String::from_utf8(csv).unwrap().contains(";corroborated;9;0.987;0.54;true;false"));
-        let mut json = Vec::new();
-        write_json(&mut json, &out, &files(), &facts, true).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(String::from_utf8(csv(&o)).unwrap().contains(";corroborated;9;0.987;0.54;true;false"));
+        let v = json(&o, Some(&pairs));
         assert_eq!(v["groups"][0]["files"][2]["relation"], "corroborated");
         assert_eq!(v["pairs"][1]["corroborated"], true);
         assert!(v["pairs"][0].get("corroborated").is_none());
@@ -962,26 +861,20 @@ mod tests {
     fn a_name_that_is_not_utf8_reaches_every_format_intact() {
         use std::os::unix::ffi::OsStringExt;
         let odd = b"/2;\xffx.jpg".to_vec();
-        let mut files = files();
-        files[2] = PathBuf::from(std::ffi::OsString::from_vec(odd.clone()));
-        let mut out = output();
-        out.groups[0].files[2] = files[2].display().to_string();
-        out.pairs[1].b = files[2].display().to_string().into();
-        out.pairs[1].b_bytes = raw_bytes(&files[2]);
-        let facts = HashMap::new();
+        let mut o = scan();
+        o.files[2].path = PathBuf::from(std::ffi::OsString::from_vec(odd.clone()));
+        let mut pairs = pairs();
+        pairs[1].b = o.files[2].path.display().to_string().into();
+        pairs[1].b_bytes = raw_bytes(&o.files[2].path);
 
-        let mut txt = Vec::new();
-        write_txt(&mut txt, &out, &files, &facts).unwrap();
+        let txt = txt(&o);
         assert!(txt.windows(odd.len()).any(|w| w == odd), "the text names the file itself");
 
-        let mut csv = Vec::new();
-        write_csv(&mut csv, &out, &files, &facts).unwrap();
+        let csv = csv(&o);
         let quoted = [b"\"".as_slice(), &odd, b"\""].concat();
         assert!(csv.windows(quoted.len()).any(|w| w == quoted), "and so does the CSV, quoted for its ';'");
 
-        let mut json = Vec::new();
-        write_json(&mut json, &out, &files, &facts, true).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let v = json(&o, Some(&pairs));
         let bytes = |x: &serde_json::Value| x.as_array().unwrap().iter().map(|b| b.as_u64().unwrap() as u8).collect::<Vec<u8>>();
         assert_eq!(bytes(&v["groups"][0]["files"][2]["path_bytes"]), odd);
         assert_eq!(bytes(&v["pairs"][1]["b_bytes"]), odd);

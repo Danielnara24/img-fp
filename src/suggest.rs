@@ -88,7 +88,8 @@ use crate::decode::Traits;
 use crate::verify::{Affine, Thumb, Verdict};
 
 /// What the reports say to do with a file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Action {
     Keep,
     Delete,

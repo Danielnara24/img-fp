@@ -16,7 +16,7 @@
 //! `progress::speak_json` in the library): where the progress bar stands, and
 //! each line the run would have printed. stderr is what it always is — the
 //! problem summary, and the error of a run that failed. The groups come back
-//! as img-fp's own JSON report, in a file the window names and removes.
+//! as the scan's `Outcome`, in a file the window names and removes.
 //!
 //! **If the window dies first**, the kernel sends the worker SIGTERM
 //! (`PR_SET_PDEATHSIG`), which img-fp treats as Ctrl-C.
@@ -38,6 +38,8 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use img_fp::Outcome;
 
 /// The first argument that makes the binary a scan rather than a window.
 pub const WORKER_FLAG: &str = "--worker";
@@ -298,7 +300,7 @@ impl Drop for Scan {
     }
 }
 
-/// Where the worker writes its report: a file in a folder only this user can
+/// Where the worker writes its result: a file in a folder only this user can
 /// open.
 ///
 /// The folder is made by this process, mode 0700, and a name already taken is
@@ -333,155 +335,25 @@ fn parse(line: &str) -> Option<Event> {
     Some(Event::Progress(p, m))
 }
 
-// ---------------------------------------------------------------- the report
+// ---------------------------------------------------------------- the result
 
-/// One file of one group, as img-fp's JSON report states it.
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct Member {
-    pub path: PathBuf,
-    /// The path's own bytes, which the report carries beside `path` when the
-    /// name is not UTF-8 and `path` is only its readable form; see
-    /// `read_report`.
-    #[serde(default)]
-    path_bytes: Option<Vec<u8>>,
-    pub role: String,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub size_bytes: Option<u64>,
-    /// How this file came to be in its group: `identical`, `same_pixels`, `direct`,
-    /// `corroborated` or `propagated`; `None` for the representative.
-    #[serde(default)]
-    pub relation: Option<String>,
-    /// How much of one of this file and the representative lies inside the
-    /// other: the larger of the two ways round.
-    #[serde(default)]
-    pub frame_overlap: Option<f32>,
-    #[serde(default)]
-    pub pixel_correlation: Option<f32>,
-    #[serde(default)]
-    pub mirrored: Option<bool>,
-    #[serde(default)]
-    pub inverted: Option<bool>,
-    /// The file decoded only in part: it is cut off.
-    #[serde(default)]
-    pub damaged: bool,
-    /// What the scan suggests doing with the file: `KEEP`, `DELETE` or
-    /// `REVIEW`. The same in every group the file is in.
-    #[serde(default)]
-    pub action: Option<String>,
-    /// The kept file that holds everything this one shows, when the scan
-    /// suggests deleting it.
-    #[serde(default)]
-    pub kept_copy: Option<PathBuf>,
-    /// `kept_copy`'s bytes, when its name is not UTF-8, as for `path_bytes`.
-    #[serde(default)]
-    kept_copy_bytes: Option<Vec<u8>>,
-    /// The window's number for the file, the same in every group it is in;
-    /// given when the results arrive, not read from the report.
-    #[serde(skip)]
-    pub id: u32,
-}
-
-impl Member {
-    /// The file every other member of its group was matched against.
-    pub fn is_representative(&self) -> bool {
-        self.role == "representative"
-    }
-
-    /// What the scan suggested for the file, by its own rule.
-    pub fn suggested(&self) -> Option<img_fp::Action> {
-        match self.action.as_deref()? {
-            "KEEP" => Some(img_fp::Action::Keep),
-            "DELETE" => Some(img_fp::Action::Delete),
-            "REVIEW" => Some(img_fp::Action::Review),
-            _ => None,
-        }
-    }
-
-    /// How well it agrees with its group's representative: 1 for the
-    /// representative itself and for the same bytes or pixels.
-    pub fn correlation(&self) -> f32 {
-        match self.relation.as_deref() {
-            None | Some("identical") | Some("same_pixels") => 1.0,
-            _ => self.pixel_correlation.unwrap_or(0.0),
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct Group {
-    pub files: Vec<Member>,
-}
-
-#[derive(serde::Deserialize)]
-struct Report {
-    groups: Vec<Group>,
-    #[serde(default)]
-    files_enumerated: usize,
-    files_analysed: usize,
-    #[serde(default)]
-    config: Config,
-    // `pairs` and the rest are not read.
-}
-
-#[derive(Default, serde::Deserialize)]
-struct Config {
-    #[serde(default)]
-    min_pixel_correlation: Option<f32>,
-}
-
-pub struct Found {
-    pub groups: Vec<Group>,
-    /// Pictures the scan found, whether or not they opened.
-    pub enumerated: usize,
-    pub analysed: usize,
-    /// The correlation bar the scan ran at, which the correlation rule cuts
-    /// from.
-    pub min_correlation: f32,
-    /// Which scan this is (`last::Notes::id`), if it is the one kept on disk
-    /// for the next window; its marks are kept with it under that.
-    pub kept: Option<u64>,
-}
-
-/// The groups from a finished scan's report.
+/// A finished scan's result (`Outcome::save`).
 ///
 /// No file is treated as a scan that found no images at all. img-fp writes a
-/// report for that case too, so this is for a worker that ended before
+/// result for that case too, so this is for a worker that ended before
 /// writing one.
-///
-/// A member whose name is not UTF-8 takes its path from its bytes. The
-/// readable form names no file, and the Trash, asked to move a file that is
-/// not there, answers "not found" — which the results page counts as already
-/// gone. So the window reported the file moved and left it where it was.
-pub fn read_report(path: &Path) -> Result<Found, String> {
-    // Read whole and parsed from memory: serde_json reading through a
-    // reader takes each byte through a call of its own, which was most of
-    // the time on a large report.
-    let f = match std::fs::read(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found { groups: Vec::new(), enumerated: 0, analysed: 0, min_correlation: img_fp::defaults().min_pixel_correlation, kept: None }),
-        Err(e) => return Err(format!("could not read the scan's results: {e}")),
-    };
-    let r: Report = serde_json::from_slice(&f).map_err(|e| format!("could not read the scan's results: {e}"))?;
-    let mut groups = r.groups;
-    for m in groups.iter_mut().flat_map(|g| g.files.iter_mut()) {
-        use std::os::unix::ffi::OsStringExt;
-        if let Some(bytes) = m.path_bytes.take() {
-            m.path = PathBuf::from(OsString::from_vec(bytes));
-        }
-        if let Some(bytes) = m.kept_copy_bytes.take() {
-            m.kept_copy = Some(PathBuf::from(OsString::from_vec(bytes)));
-        }
+pub fn read_result(path: &Path) -> Result<Outcome, String> {
+    if !path.exists() {
+        return Ok(Outcome::default());
     }
-    let min_correlation = r.config.min_pixel_correlation.unwrap_or_else(|| img_fp::defaults().min_pixel_correlation);
-    Ok(Found { groups, enumerated: r.files_enumerated, analysed: r.files_analysed, min_correlation, kept: None })
+    Outcome::load(path).map_err(|e| format!("could not read the scan's results: {e:#}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Each scan's report goes in a folder of its own that only this user can
+    /// Each scan's result goes in a folder of its own that only this user can
     /// open, never straight into a shared one under a name known in advance.
     #[test]
     fn a_result_is_written_in_a_private_folder_of_its_own() {
@@ -494,33 +366,5 @@ mod tests {
             assert!(!r.exists());
             std::fs::remove_dir(dir).unwrap();
         }
-    }
-
-    /// The window reads the report img-fp writes, and a name that is not
-    /// UTF-8 comes back as the file's own name rather than its readable form.
-    #[test]
-    fn a_member_is_the_file_itself_whatever_its_name() {
-        use std::os::unix::ffi::OsStrExt;
-        let dir = std::env::temp_dir().join(format!("img-fp-gui-report-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let report = dir.join("r.json");
-        std::fs::write(
-            &report,
-            r#"{"files_analysed": 2, "groups": [{"files": [
-                {"path": "/p/a.jpg", "role": "representative", "action": "DELETE", "width": 4, "height": 3, "size_bytes": 10,
-                 "kept_copy": "/p/b\ufffd.jpg", "kept_copy_bytes": [47,112,47,98,255,46,106,112,103]},
-                {"path": "/p/b\ufffd.jpg", "path_bytes": [47,112,47,98,255,46,106,112,103], "role": "match"}]}]}"#,
-        )
-        .unwrap();
-        let found = read_report(&report).unwrap();
-        let files = &found.groups[0].files;
-        assert_eq!(files[0].path, PathBuf::from("/p/a.jpg"));
-        assert_eq!(files[1].path.as_os_str().as_bytes(), b"/p/b\xff.jpg");
-        assert_eq!(files[0].kept_copy.as_deref(), Some(files[1].path.as_path()), "and so is the file a deletion rests on");
-        assert_eq!(found.analysed, 2);
-        assert_eq!(files[0].suggested(), Some(img_fp::Action::Delete));
-        assert_eq!(files[1].relation, None, "a field the report leaves out is not needed");
-        assert_eq!(files[1].suggested(), None, "a report without suggestions suggests nothing");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

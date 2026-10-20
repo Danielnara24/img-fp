@@ -1489,16 +1489,8 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
             b: names[b].clone(),
             a_bytes: report::raw_bytes(&files[a]),
             b_bytes: report::raw_bytes(&files[b]),
-            aligned_points: s.aligned_points().unwrap_or(0),
-            frame_overlap: s.frame_overlap(),
-            pixel_correlation: s.pixel_correlation(),
+            ev: s.evidence(),
             scale: round3(file_scale(s.verdict().map_or(1.0, |v| v.scale), &items[a], &items[b])),
-            mirrored: s.mirrored(),
-            inverted: s.inverted(),
-            identical: matches!(s, Stated::Identical),
-            same_pixels: matches!(s, Stated::SamePixels),
-            propagated: s.how() == Some(How::Propagated),
-            corroborated: s.how() == Some(How::Corroborated),
             ia: a,
             ib: b,
         })
@@ -1506,7 +1498,7 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     // The same pairs as the report reads them: `group::find`'s graph, or as
     // the verdicts against a library read them (`against.rs`).
     let (graph, against_pairs): (Vec<(usize, usize)>, Vec<against::Pair>) = if scope.against {
-        (Vec::new(), stated.iter().map(|&(a, b, s)| s.against_pair(a, b)).collect())
+        (Vec::new(), stated.iter().map(|&(a, b, s)| against::Pair { a, b, ev: s.evidence(), clean: s.clean() }).collect())
     } else {
         (stated.iter().map(|&(a, b, _)| (a, b)).collect(), Vec::new())
     };
@@ -1697,13 +1689,8 @@ fn write_answers(cx: &Ctx, scope: &Scope, files: &[PathBuf], found: Found) -> Re
 /// run's summary line, and the file the report went to.
 fn write_groups(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], found: Found, problems: &Problems, started: u64) -> Result<(String, Option<PathBuf>)> {
     let args = cx.args;
-    let Found { pairs, graph, actions, keeper, failures, dims, damaged, sizes, not_asked, ok, .. } = found;
-    let n_ok = ok.iter().filter(|&&ok| ok).count();
-    // Each deletion names the file that stays and holds it, at the end of
-    // its chain of holders, not the nearest one, which may be deleted too.
-    // (`--against` follows the chain itself, and says both.)
-    let keeper = suggest::kept_at_end(&actions, &keeper);
-    let grouping = timed!(28, group::find(files.len(), &graph));
+    let n_ok = found.ok.iter().filter(|&&ok| ok).count();
+    let grouping = timed!(28, group::find(files.len(), &found.graph));
     let membership = group::membership(&grouping);
     stage!(
         cx,
@@ -1712,43 +1699,22 @@ fn write_groups(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], 
         membership.len(),
         membership.values().filter(|gs| gs.len() > 1).count()
     );
-    // Largest first, ties by comparing member paths in order. Paths are
-    // unique and no two representatives can hold the same members — the
-    // second would have had nothing left to account for — so the order is
-    // total and the output is reproducible.
-    let mut groups: Vec<OutGroup> = grouping
-        .iter()
-        .map(|g| OutGroup {
-            representative: files[g.representative].display().to_string(),
-            files: g.members.iter().map(|&i| files[i].display().to_string()).collect(),
-            rep: g.representative,
-            members: g.members.clone(),
-        })
-        .collect();
-    groups.sort_by(|a, b| {
-        b.files.len().cmp(&a.files.len()).then_with(|| a.files.cmp(&b.files))
-    });
-
+    drop(membership);
     // Cleared before anything is written to stdout, which shares the terminal.
     cx.progress.finish();
     let runtime = cx.t.elapsed().as_secs_f64();
-    let (actions, kept, content) = if args.suggest == suggest::Mode::Content {
-        (actions, keeper, None)
-    } else {
-        let corr: HashMap<(usize, usize), f32> = pairs
-            .iter()
-            .map(|p| ((p.ia.min(p.ib), p.ia.max(p.ib)), if p.identical || p.same_pixels { 1.0 } else { p.pixel_correlation }))
-            .collect();
-        let seats = groups.iter().flat_map(|g| {
-            let corr = &corr;
-            g.members.iter().map(move |&i| suggest::Seat {
-                file: i,
-                representative: i == g.rep,
-                correlation: corr.get(&(i.min(g.rep), i.max(g.rep))).copied().unwrap_or(0.0),
-            })
-        });
-        (suggest::by_group(args.suggest, files.len(), seats, args.min_pixel_correlation), Vec::new(), Some((actions, keeper)))
+    let head = Head {
+        config: run_config(args),
+        // A file a wildcard walk reached and that turned out not to be a
+        // picture is a skip, like one the extension list turned away, and is
+        // not counted by either.
+        files_enumerated: files.len() - found.not_asked.iter().filter(|&&x| x).count(),
+        files_analysed: n_ok,
+        failures: Vec::new(),
+        runtime_seconds: (runtime * 1000.0).round() / 1000.0,
     };
+    let (scan, pairs) = timed!(36, outcome(args, files, grouping, head, found));
+    let actions = scan.actions(args.suggest);
     stage!(
         cx,
         "suggested: {} to keep, {} to delete, {} to review",
@@ -1756,36 +1722,19 @@ fn write_groups(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], 
         actions.iter().filter(|a| **a == Some(suggest::Action::Delete)).count(),
         actions.iter().filter(|a| **a == Some(suggest::Action::Review)).count()
     );
-    let mut out = Output {
-        tool: "img-fp",
-        config: run_config(args),
-        // A file a wildcard walk reached and that turned out not to be a
-        // picture is a skip, like one the extension list turned away, and is
-        // not counted by either.
-        files_enumerated: files.len() - not_asked.iter().filter(|&&x| x).count(),
-        files_analysed: n_ok,
-        failures,
-        runtime_seconds: (runtime * 1000.0).round() / 1000.0,
-        groups,
-        pairs,
-        actions,
-        kept,
-    };
-
     let summary = format!(
         "{}, {} over {} in {:.1}s",
-        count(out.groups.len(), "group", "groups"),
-        count(out.pairs.len(), "pair", "pairs"),
+        count(scan.groups.len(), "group", "groups"),
+        count(pairs.len(), "pair", "pairs"),
         count(n_ok, "image", "images"),
         runtime
     );
-    let facts = report::read_facts(&out, files, &dims, &damaged, &sizes);
     // Kept before `-o` is written: a report that could not be written is
     // one case `--last` is for. Not a walk that found no picture at all,
     // such as a wildcard walk of a folder of documents, nor a scan of
     // nothing, a mistyped folder say: either would replace a scan worth
     // writing out again. The window keeps by the same rule.
-    if keeps_last(args, gui, scope) && out.files_enumerated > 0 {
+    if keeps_last(args, gui, scope) && scan.head.files_enumerated > 0 {
         let roots = if args.from_file.is_some() || args.roots.iter().any(|r| r == stdout_path()) {
             // Read from a list, they are files rather than the folders the
             // window's tree starts from, and it finds those itself.
@@ -1796,7 +1745,8 @@ fn write_groups(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], 
         let mut lines = vec![summary.clone()];
         lines.extend(problems.summary());
         let notes = last::Notes::now(problems.any(), started, runtime as u64, lines.join("\n"), roots);
-        if let Err(e) = timed!(36, keep_scan(args, &mut out, content, files, &facts, &notes)) {
+        let save = |path: &Path| scan.save(path).map_err(std::io::Error::other);
+        if let Err(e) = timed!(36, last::save_with(&last::dir(args.cache.as_deref()), save, &notes)) {
             say!(cx, "This scan could not be kept for --last: {e}");
         }
     }
@@ -1807,65 +1757,106 @@ fn write_groups(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], 
     // progress channel and the report goes there only if one was asked for
     // by name.
     if let Some(path) = gui {
-        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
-        timed!(36, report::write_with(&target, &out, files, &facts))?;
+        timed!(36, scan.save(path))?;
     }
     let target = report::Target::of(args.output.as_deref(), args.format);
     let mut went = None;
     if gui.is_none() || args.output.as_deref().is_some_and(|p| p != stdout_path()) {
-        timed!(36, report::write_with(&target, &out, files, &facts))?;
+        timed!(36, report::write_with(&target, &scan, args.suggest, Some(&pairs)))?;
         went = target.file();
     }
     Ok((summary, went))
 }
 
-/// Keep the scan for `--last` and the window (`last`): the report without
-/// its pairs, with the content rule's suggestions whichever the run shows.
-/// `content` is those suggestions, and the file each deletion rests on, when
-/// `out` holds another rule's.
-fn keep_scan(
-    args: &Args,
-    out: &mut Output,
-    content: Option<(Vec<Option<suggest::Action>>, Vec<Option<usize>>)>,
-    files: &[PathBuf],
-    facts: &report::FileFacts,
-    notes: &last::Notes,
-) -> std::io::Result<()> {
-    let mut held = None;
-    if let Some((content, kept)) = content {
-        held = Some((std::mem::replace(&mut out.actions, content), std::mem::replace(&mut out.kept, kept), out.config["suggest"].take()));
-        out.config["suggest"] = "content".into();
+/// What the run found, as everything after it reads it (`Outcome`), and its
+/// stated pairs, which only the JSON lists.
+///
+/// The groups are sorted largest first, ties by comparing member paths in
+/// order. Paths are unique and no two representatives can hold the same
+/// members — the second would have had nothing left to account for — so the
+/// order is total and the output is reproducible. The files are numbered as
+/// the groups first name them, representative first, and each member carries
+/// its pair with its representative.
+fn outcome(args: &Args, files: &[PathBuf], grouping: Vec<group::Group>, mut head: Head, found: Found) -> (Outcome, Vec<OutPair>) {
+    let Found { pairs, actions, keeper, failures, dims, damaged, sizes, .. } = found;
+    head.failures = failures;
+    let names: Vec<Vec<String>> = grouping.iter().map(|g| g.members.iter().map(|&i| files[i].display().to_string()).collect()).collect();
+    let mut order: Vec<usize> = (0..grouping.len()).collect();
+    order.sort_by(|&a, &b| names[b].len().cmp(&names[a].len()).then_with(|| names[a].cmp(&names[b])));
+    drop(names);
+    // Each deletion names the file that stays and holds it, at the end of
+    // its chain of holders, not the nearest one, which may be deleted too.
+    // (`--against` follows the chain itself, and says both.)
+    let keeper = suggest::kept_at_end(&actions, &keeper);
+
+    // Each file's number, and the file each number is.
+    let mut number: HashMap<usize, usize> = HashMap::new();
+    let mut run_of: Vec<usize> = Vec::new();
+    fn numbered(i: usize, number: &mut HashMap<usize, usize>, run_of: &mut Vec<usize>) {
+        number.entry(i).or_insert_with(|| {
+            run_of.push(i);
+            run_of.len() - 1
+        });
     }
-    // Every path absolute. The report names files as the run spelled them,
-    // and a scan of `photos` kept as `photos/a.jpg` was read back against
-    // whatever folder the reader started in: `--last` from another folder,
-    // or the window from the home folder, named the files of another
-    // `photos` — and the window's Trash would have moved them.
-    let files: Vec<PathBuf> = files.iter().map(|f| std::path::absolute(f).unwrap_or_else(|_| f.clone())).collect();
-    let spelled: Vec<(String, Vec<String>)> = out
-        .groups
-        .iter_mut()
-        .map(|g| {
-            let rep = files[g.rep].display().to_string();
-            let members = g.members.iter().map(|&i| files[i].display().to_string()).collect();
-            (std::mem::replace(&mut g.representative, rep), std::mem::replace(&mut g.files, members))
+    let mut want: HashMap<(usize, usize), Option<Evidence>> = HashMap::new();
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::with_capacity(order.len());
+    for &k in &order {
+        let g = &grouping[k];
+        let rep = g.representative;
+        let members: Vec<usize> = std::iter::once(rep).chain(g.members.iter().copied().filter(|&i| i != rep)).collect();
+        for &i in &members[1..] {
+            want.insert((i.min(rep), i.max(rep)), None);
+        }
+        for &i in &members {
+            numbered(i, &mut number, &mut run_of);
+        }
+        groups.push((rep, members));
+    }
+    // A kept file is in a group with what it holds, so this numbers nothing
+    // new; it is here so that a kept copy always has a number.
+    let held: Vec<usize> = run_of.iter().filter_map(|&i| keeper.get(i).copied().flatten()).collect();
+    for k in held {
+        numbered(k, &mut number, &mut run_of);
+    }
+    for p in &pairs {
+        if let Some(e) = want.get_mut(&(p.ia.min(p.ib), p.ia.max(p.ib))) {
+            *e = Some(p.ev);
+        }
+    }
+    let groups: Vec<Group> = groups
+        .into_iter()
+        .map(|(rep, members)| Group {
+            members: members
+                .into_iter()
+                .map(|i| Member {
+                    file: number[&i],
+                    with: (i != rep).then(|| want[&(i.min(rep), i.max(rep))].expect("a member's pair with its representative is stated")),
+                })
+                .collect(),
         })
         .collect();
-    let write = |path: &Path| {
-        let target = report::Target { sink: report::Sink::File(path.to_path_buf()), format: report::Format::Json, pairs: false };
-        report::write_with(&target, out, &files, facts).map_err(std::io::Error::other)
+    // The size as shown is the analysis's own (`dims`): the picture decoded,
+    // with its orientation applied. The header is still asked of a file the
+    // analysis has no size for, which is a file that would not decode: a
+    // byte-identical pair of broken pictures is reported, and its header may
+    // still say how large it claims to be. The length is the walk's own.
+    let scan_files: Vec<outcome::File> = run_of
+        .par_iter()
+        .map(|&i| {
+            let p = &files[i];
+            let dims = match dims.get(i) {
+                Some(&(w, h)) if w > 0 && h > 0 => Some((w, h)),
+                _ => decode::probe(p).map(|pr| (pr.w, pr.h)),
+            };
+            outcome::File { path: p.clone(), dims, bytes: sizes.get(i).copied(), damaged: damaged.get(i).copied().unwrap_or(false) }
+        })
+        .collect();
+    let (content, kept) = if actions.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        (run_of.iter().map(|&i| actions[i]).collect(), run_of.iter().map(|&i| keeper[i].map(|k| number[&k])).collect())
     };
-    let kept = last::save_with(&last::dir(args.cache.as_deref()), write, notes);
-    for (g, (rep, members)) in out.groups.iter_mut().zip(spelled) {
-        g.representative = rep;
-        g.files = members;
-    }
-    if let Some((actions, kept, rule)) = held {
-        out.actions = actions;
-        out.kept = kept;
-        out.config["suggest"] = rule;
-    }
-    kept
+    (Outcome::new(head, args.min_pixel_correlation, scan_files, groups, content, kept), pairs)
 }
 
 /// The settings a report records, which are the ones that decide its pairs.

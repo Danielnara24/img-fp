@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.54.1)
+## Status (0.55.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -210,6 +210,31 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   between runs (`gui.json` `options`, `settings::Kept`); untouched ones
   are not written, so they follow a moved default. Checked in the window
   under Xvfb: changed, scanned, reopened, restored defaults.
+- 0.55.0 (a finished scan rebuilt, `outcome.rs`; see *A finished scan*):
+  the report, `--last` and the window read one `Outcome` (groups by number,
+  each member's `Evidence`, the content rule's suggestions); the group rules
+  and gone / changed files are its methods (`actions`, `lapse`, `look`,
+  `shown`). Before: the JSON report was also the storage, parsed back by
+  `last::Kept` and `gui::scan::Member`, each applying the group rules and
+  lapses its own way (`last::rebuild`; the window's `prepare`, `regroup`,
+  `note_changed`, `drop_gone`), the 1.0-for-one-file agreement written
+  three times, `keep_scan` swapping suggestions into the report and back,
+  `OutPair` a relation as four `bool`s. Drift found: `--last` fell back to
+  correlation 0.6 (default 0.7); the window forgot a reference once its
+  group was down to it and the Trash was used again (`--last` kept it a
+  reference; now both do). Kept scans of 0.54 and before are not read
+  (`last-scan/found.json`, was `result.json`): run a scan. Proved: a random
+  differential test (20,000 scans, three rules, random gone / changed sets
+  and window Trash / change sequences) against 0.54.1's `rebuild` and window
+  code, identical but the case above; `ref.sh` battery (104 outputs) and a
+  `--last` battery on a Desktop copy before and after deleting and touching
+  files (every format x scan rule x `--suggest`), identical to 0.54.1. The
+  window under Xvfb: restored a CLI scan with a file gone, marked 309 (=
+  `--last`), trashed, switched rule (68 = `--last --suggest correlation`),
+  reopened with marks, scanned (7 = `--last`). Kept file on IMGS-ALL 19.0
+  -> 11.1 MB. Cached IMGS-ALL (ABBA): CPU 467.0 / 481.3 base, 454.9 / 476.8
+  new; peak RssAnon+swap 610 / 609 MB base, 605 / 612 new. Code lines (no
+  comments or blanks, tests included) in the files touched 9,741 -> 9,398.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -298,10 +323,12 @@ src/
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
   cache.rs      on-disk analysis cache
-  report.rs     text / CSV / JSON reports
+  outcome.rs    a finished scan (groups by number, evidence, content rule's
+                suggestions), as the report, --last and the window read it
+  report.rs     text / CSV / JSON reports, written from an Outcome
   suggest.rs    KEEP / DELETE / REVIEW per file
   against.rs    --against
-  last.rs       --last (last scan kept beside the cache)
+  last.rs       --last (the last scan's Outcome, kept beside the cache)
   problems.rs   skips, problems, exit codes, --log-file
   progress.rs   progress bar
   simd.rs       x86-64-v3 vs portable kernels (`dispatched!`, `v3()`)
@@ -432,6 +459,27 @@ flags or the `Clusters`, between two others in `cluster`. Not a new edge
 list, a second partition of the files, or a relation read off a verdict's
 fields. Verify a refactor with a cached IMGS-ALL run *and* its `--dump`
 against the base build, then the `ref.sh` battery and `pairs.py`.
+
+## A finished scan (`outcome.rs`)
+
+What a scan found is one `Outcome`: the grouped files by number (path,
+size as shown, length, damaged), the groups (representative first, each
+member with its pair's `Evidence`: one `Relation`, points, overlap,
+correlation, mirrored, inverted) and the content rule's suggestions with
+each deletion's kept copy. The pipeline builds it (`pipeline::outcome`),
+`report.rs` writes text / CSV / JSON from it, and `--last` and the window
+read it back (`Outcome::save` / `load`, its own JSON, paths absolute and as
+bytes when not UTF-8). The rules on it are its methods: `actions(mode)`
+(the group rules over groups whose representative has not lapsed; nothing
+deletes a lapsed file), `lapse(ids, Gone | Changed)` (takes back what rests
+on a lapsed file, `suggest::revoke`), `look` (which files are gone or
+changed now), `shown` (the groups a report writes: no gone file, no group
+without its representative or with one file). `--against` reads the same
+`Evidence` off each pair.
+
+**Adding a question about a finished scan**: an `Outcome` method, asked by
+the report, `--last` and the window alike. No reader parses the report: it
+is for people and scripts, not for img-fp.
 
 ## How it works: the load-bearing pieces
 
@@ -604,7 +652,7 @@ end of its chain of holders (`suggest::kept_at_end`), which stays. Deletion
 spreads one holder at a time, and the nearest holder was itself a DELETE for
 15% of deletions. A deletion whose kept copy is gone (`--last`, or the
 window after the Trash or on restore) becomes REVIEW: carried out, it would
-take the last copy (`suggest::revoke`, shared by `--last` and the window). The window labels it "review: its kept copy is gone", not
+take the last copy (`Outcome::lapse`, shared by `--last` and the window). The window labels it "review: its kept copy is gone", not
 a weak match. The two group rules judge only by representatives still there
 (`--last` and the window): a group whose representative has gone suggests
 nothing for its files.
@@ -628,11 +676,14 @@ and cold runs agree.
 
 ### `--last` (`last.rs`)
 
-Every finished scan is kept in `last-scan/` beside the cache file (shared
-with the window); `--last` re-writes text/CSV byte-for-byte, JSON without
-`pairs`. Not kept under `--no-cache`, `--no-last`, `--against`, or a walk
-that found no picture; the window keeps by the same rule. Paths are kept absolute (`keep_scan`): read back from another folder,
-or by the window from `$HOME`, relative ones named other files. The window's
+Every finished scan's `Outcome` is kept in `last-scan/found.json` beside
+the cache file, `Notes` in `scan.json` (shared with the window); `--last`
+re-writes text/CSV byte-for-byte, JSON without `pairs`. A scan kept before
+0.55.0 (`result.json`, the report) is not read: run a scan. Not kept under
+`--no-cache`, `--no-last`, `--against`, or a walk that found no picture;
+the window keeps by the same rule. Paths are kept absolute
+(`Outcome::save`): read back from another folder, or by the window from
+`$HOME`, relative ones named other files. The window's
 Trash leaves a file whose length differs from the scan's, or whose ctime is
 from the second the scan *started* on (`Notes::changed_after`; it was the
 end, so an edit saved mid-scan passed); `--last` and the window
@@ -826,13 +877,15 @@ Do not retry without new evidence:
 
 ## The window (`img-fp-gui`, feature `gui`)
 
-- The scan is a **child process** (`img-fp-gui --worker RESULT <argv>`),
+- The scan is a **child process** (`img-fp-gui --worker RESULT <argv>`, which
+  saves its `Outcome` to RESULT),
   so Cancel is SIGINT. Spawned from the GTK main thread (PDEATHSIG is
   per-thread) by our own fork + `execv` of `/proc/self/exe` (`scan::spawn`;
   `std::process::Command` pulls in GLIBC_2.39 weak symbols, `current_exe()`
   breaks after a package upgrade).
-- Report copy for the window has no `pairs`, written to `$XDG_RUNTIME_DIR`,
-  parsed off the main thread; read on exit 1 too.
+- The worker's `Outcome` is written to `$XDG_RUNTIME_DIR`, read off the main
+  thread (`results::prepare`); read on exit 1 too. The page keeps the
+  `Outcome` and asks it for each rule's actions as files go or change.
 - The Trash leaves a file whose length differs from the scan's, or whose
   ctime is from the scan's start on (`Notes::changed_after`): written,
   replaced, renamed or chmod'ed since. Suggestions resting on such a file

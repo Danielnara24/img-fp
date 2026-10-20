@@ -40,6 +40,7 @@ mod group;
 mod heif;
 mod index;
 pub mod last;
+pub mod outcome;
 mod pipeline;
 mod problems;
 mod prof;
@@ -51,7 +52,8 @@ mod simd;
 mod spill;
 mod same;
 mod suggest;
-pub use suggest::{by_group, kept_at_end, revoke, Action, Lapse, Mode as SuggestMode, Seat};
+pub use outcome::{Evidence, Outcome, Relation};
+pub use suggest::{Action, Lapse, Mode as SuggestMode};
 pub use cache::file_name as cache_file_name;
 mod verify;
 mod walk;
@@ -876,7 +878,8 @@ fn compose_perm(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> [u8; DESC_LEN] {
 
 // ---------------------------------------------------------------- output
 
-use report::{OutGroup, OutPair, Output};
+use outcome::{Group, Head, Member};
+use report::OutPair;
 use same::Same;
 
 // ---------------------------------------------------------------- main
@@ -1111,7 +1114,7 @@ mod cpu {
 
 /// The scan `img-fp-gui` runs: the command line's own, in a child process, with
 /// the progress line spoken as JSON on stdout (`progress::speak_json`) and the
-/// report also written as JSON to `result`, which is what the window reads.
+/// scan's `Outcome` saved to `result`, which is what the window reads.
 ///
 /// `argv` is an ordinary img-fp command line, program name first, so that a
 /// scan from the window is exactly the scan the same flags would run from a
@@ -1563,44 +1566,32 @@ impl<'a> Stated<'a> {
         }
     }
 
-    fn how(&self) -> Option<How> {
-        match self {
-            Stated::Claim(c) => Some(c.how),
-            _ => None,
+    /// What the pair says, as the report, `--last`, the window and
+    /// `--against` read it.
+    fn evidence(&self) -> Evidence {
+        let relation = match self {
+            Stated::Identical => Relation::Identical,
+            Stated::SamePixels => Relation::SamePixels,
+            Stated::Claim(c) => match c.how {
+                How::Direct => Relation::Direct,
+                How::Propagated => Relation::Propagated,
+                How::Corroborated => Relation::Corroborated,
+            },
+        };
+        let v = self.verdict();
+        Evidence {
+            relation,
+            // None for a pair no keypoint was matched for: the same file, or
+            // a composed transform.
+            aligned_points: match self {
+                Stated::Claim(c) if c.how != How::Propagated => Some(c.e.v.n_in),
+                _ => None,
+            },
+            frame_overlap: v.map_or(1.0, |v| round3(v.ov_a.max(v.ov_b))),
+            pixel_correlation: v.map_or(1.0, |v| round3(v.blk)),
+            mirrored: v.is_some_and(|v| v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0),
+            inverted: matches!(self, Stated::Claim(c) if c.e.inverted()),
         }
-    }
-
-    fn relation(&self) -> &'static str {
-        match self {
-            Stated::Identical => "identical",
-            Stated::SamePixels => "same_pixels",
-            Stated::Claim(c) => c.how.relation(),
-        }
-    }
-
-    /// None for a pair no keypoint was matched for: the same file, or a
-    /// composed transform.
-    fn aligned_points(&self) -> Option<u32> {
-        match self {
-            Stated::Claim(c) if c.how != How::Propagated => Some(c.e.v.n_in),
-            _ => None,
-        }
-    }
-
-    fn frame_overlap(&self) -> f32 {
-        self.verdict().map_or(1.0, |v| round3(v.ov_a.max(v.ov_b)))
-    }
-
-    fn pixel_correlation(&self) -> f32 {
-        self.verdict().map_or(1.0, |v| round3(v.blk))
-    }
-
-    fn mirrored(&self) -> bool {
-        self.verdict().is_some_and(|v| v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0)
-    }
-
-    fn inverted(&self) -> bool {
-        matches!(self, Stated::Claim(c) if c.e.inverted())
     }
 
     /// No block of the overlap disagrees (`suggest::CLEAN`); the same file
@@ -1613,21 +1604,6 @@ impl<'a> Stated<'a> {
         match self {
             Stated::Claim(c) => suggest::Link::Edge(&c.e.v, c.e.v.m, c.e.inverted()),
             _ => suggest::Link::Exact,
-        }
-    }
-
-    /// The pair between `a` and `b` as `--against`'s verdicts read it.
-    fn against_pair(&self, a: usize, b: usize) -> against::Pair {
-        against::Pair {
-            a,
-            b,
-            relation: self.relation(),
-            aligned_points: self.aligned_points(),
-            frame_overlap: self.frame_overlap(),
-            pixel_correlation: self.pixel_correlation(),
-            mirrored: self.mirrored(),
-            inverted: self.inverted(),
-            clean: self.clean(),
         }
     }
 }
