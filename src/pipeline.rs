@@ -1,6 +1,8 @@
 //! One scan, from the paths asked for to the report: `run` and its stages.
 
 use super::*;
+use analysis::{Item, Planes, Read};
+use decode::Refused;
 use claims::{Claim, Clusters, How, Propagation};
 use verify::Standing;
 
@@ -240,8 +242,8 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
     // no file was ever re-asked mirrored or inverted: eight photographs and
     // their mirror images, each saved three ways, found 9 of the 72 pairs
     // between a photograph and its mirror image, and 15 groups for 8.
-    let matched: Vec<bool> = (0..n).map(|i| items[i].ok && same.answers_for(i) == i).collect();
-    let n_same = (0..n).filter(|&i| items[i].ok && !same.is_copy(i) && same.answers_for(i) != i).count();
+    let matched: Vec<bool> = (0..n).map(|i| items[i].read.ok() && same.answers_for(i) == i).collect();
+    let n_same = (0..n).filter(|&i| items[i].read.ok() && !same.is_copy(i) && same.answers_for(i) != i).count();
     if n_same > 0 {
         stage!(cx, "same pixels: {n_same} files decode to a picture another file already holds");
     }
@@ -297,9 +299,6 @@ struct Analysed {
     items: Vec<Item>,
     same: Same,
     store: Option<cache::Store>,
-    /// Each file's name in the cache, and where its record sits there.
-    names: Vec<PathBuf>,
-    span_of: Vec<Option<cache::Span>>,
     /// Files the run was not asked about after all; see `analyse_all`.
     not_asked: Vec<bool>,
     /// Each file's keypoints, for the grey twins' stated pairs once the
@@ -361,19 +360,14 @@ fn analyse_all(
     // form: two names that are not UTF-8 can print the same and be two files.
     // And on each file's canonical path, not the one this run spells; see
     // `cache_names`.
-    let names: Vec<PathBuf> = if cache_path.is_some() { cache_names(files, canonical) } else { Vec::new() };
-    let (mut cached, mut store) = match &cache_path {
-        Some(p) => {
-            progress.begin(Stage::CacheRead);
-            // Only this run's paths are unpacked; the rest of the machine's
-            // cache is read for where it is, not for what it says. See
-            // `cache::open`.
-            let walked: std::collections::HashSet<&Path> = names.iter().map(|p| p.as_path()).collect();
-            let (cached, store) = cache::open(p, settings, &|path| walked.contains(path), problems);
-            (cached, Some(store))
-        }
-        None => Default::default(),
-    };
+    let mut store = cache_path.as_ref().map(|p| {
+        let names = cache_names(files, canonical);
+        progress.begin(Stage::CacheRead);
+        // Only this run's paths are unpacked; the rest of the machine's
+        // cache is read for where it is, not for what it says. See
+        // `cache::open`.
+        cache::open(p, settings, names.into_iter().zip(stats.iter().map(|s| s.key)).collect(), problems)
+    });
     // A cache another version of img-fp wrote is that version's, and this run
     // leaves it as it is; see `cache::MAGIC`.
     if let (Some(p), Some(v)) = (&cache_path, store.as_ref().and_then(|s| s.other_version())) {
@@ -386,44 +380,17 @@ fn analyse_all(
             cache::FORMAT
         );
     }
-    // Records in the file that the map does not hold, and that are not this
-    // file's records at other settings: each superseded by a later one for
-    // the same path. Something to compact away, if nothing else is.
-    let superseded = store.as_ref().map_or(0, |s| s.records() - cached.len() - s.other_settings().len());
-    if !cached.is_empty() {
-        stage!(cx, "cache: {} usable records", cached.len());
+    if let Some(s) = store.as_ref().filter(|s| s.usable() > 0) {
+        stage!(cx, "cache: {} usable records", s.usable());
     }
-    // Every walked file's record comes *out* of the map rather than being
+    // Every walked file's record comes *out* of the store rather than being
     // copied from it. The analysis is the largest thing the run holds, and
-    // cloning it here made it exist twice over — once in the map and once in
-    // `items` — for the length of the phase that already sets the peak, and
-    // then charged a second bill to free the originals. On the found corpus
-    // that was 1.9 s of dropping a nine-thousand-record map, about as much
-    // again cloning into it, and 164 MB of peak.
+    // cloning it here made it exist twice over — once in the cache's map and
+    // once in `items` — for the length of the phase that already sets the
+    // peak, and then charged a second bill to free the originals. On the
+    // found corpus that was 1.9 s of dropping a nine-thousand-record map,
+    // about as much again cloning into it, and 164 MB of peak.
     //
-    // What is left in the map afterwards is exactly the records for files this
-    // run did not walk, which is what `carry_over` wants; the two counts taken
-    // here are what tells the save below whether it has anything to write.
-    let (mut in_cache, mut same_key) = (0usize, 0usize);
-    let mut mine: Vec<Option<(cache::Record, cache::Span)>> = files
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            let got = cached.remove(names.get(i)?)?;
-            in_cache += 1;
-            let k = stats[i].key?;
-            if got.0 != k {
-                return None;
-            }
-            same_key += 1;
-            // A walked path's record is always unpacked.
-            Some((got.1?, got.2))
-        })
-        .collect();
-    // Where each file's record sits in the cache file, for the ones that have
-    // one. A cached record's is known now; a new one's, when its worker has
-    // appended it.
-    let mut span_of: Vec<Option<cache::Span>> = mine.iter().map(|m| m.as_ref().map(|r| r.1)).collect();
     // The exact pass has already grouped the files whose bytes hash the same,
     // and the analysis depends on nothing but those bytes. Describing the
     // second copy of a file is not a cheaper way to reach the same answer, it
@@ -432,32 +399,24 @@ fn analyse_all(
     // claimed as duplicates in the output, so sharing one analysis between
     // them asserts nothing the run does not assert anyway.
     //
-    // The bytes are the same, so the analysis is: a copy's record serves its
-    // original, and stays under the copy's name in the file, where the next
-    // run finds it again. Any other copy keeps no record of its own: it is
-    // answered by its original on every run, cached or not, so a record under
-    // its name is the same analysis stored twice and never read. One written
-    // by an earlier build is left out of the file at the next compaction.
-    for g in same.byte_groups() {
-        let holder = g.iter().copied().find(|&i| mine[i].is_some());
-        if let Some(k) = holder.filter(|&k| k != g[0]) {
-            mine[g[0]] = mine[k].take();
-        }
-        for &i in &g[1..] {
-            if holder != Some(i) {
-                span_of[i] = None;
-            }
-        }
-    }
+    // The bytes are the same, so the analysis is: the first record any of
+    // them has serves the original, and stays in the file under the name of
+    // the copy it was made for, where the next run finds it again. Any other
+    // copy's is not taken, and so not kept (`cache::Store::take`).
+    let mine: Vec<Option<cache::Record>> = (0..n)
+        .map(|i| {
+            let s = store.as_mut().filter(|_| !same.is_copy(i))?;
+            same.identical_to(i).iter().find_map(|&k| s.take(k))
+        })
+        .collect();
     // What each file still to be analysed is expected to cost, for the bar
     // and nothing else. Read from headers, in parallel, and only for files the
     // cache and the exact pass have not already answered, so a cached run
     // opens nothing here.
     let todo = (0..n).filter(|&i| !same.is_copy(i) && mine[i].is_none()).count();
-    // Whether the save below will have anything to write, as far as it can be
-    // told yet: something new to describe, or a record that no longer fitted.
-    let rewrite = cache_path.is_some()
-        && (superseded > 0 || same_key != in_cache || args.prune_cache || (0..n).any(|i| same.is_copy(i) && mine[i].is_some()));
+    // Whether the cache will have anything to write, as far as it can be
+    // told yet.
+    let rewrite = store.as_ref().is_some_and(|s| args.prune_cache || s.stale());
     progress.forecast(|f| {
         f.to_describe = Some(todo);
         f.cache_write = rewrite;
@@ -497,70 +456,43 @@ fn analyse_all(
     let total_weight: u64 = weight.iter().sum();
     progress.forecast(|f| f.describe = Some(total_weight));
     let bar = progress.begin_counted(Stage::Describe, total_weight, todo, "images");
-    // Each record goes into the cache file as soon as it is made, which is
-    // what lets an interrupt keep the analysis without writing anything; see
-    // `cache::Store`.
-    let keep = |i: usize, key: Option<cache::Key>, it: &Item| -> Option<cache::Span> {
-        let (s, key) = (store.as_ref()?, key?);
-        // A damaged file is analysed again on every run rather than kept, so
-        // that every run says it is damaged: the record has nowhere to say it.
-        if !it.ok || it.damaged.is_some() {
-            return None;
-        }
-        s.append(&names[i], key, it.dims, &it.traits, &it.feats, &it.thumb)
-    };
     let planes = Planes::default();
-    let (mut items, appended): (Vec<Item>, Vec<Option<cache::Span>>) = mine
+    let made: Vec<Option<Item>> = mine
         .into_par_iter()
         .enumerate()
         .map(|(i, rec)| {
             if same.is_copy(i) {
-                return (Item::default(), None);
+                return None;
             }
-            if let Some((rec, _)) = rec {
-                let it = Item {
-                    feats: rec.feats.into(),
-                    thumb: rec.thumb.into(),
-                    dims: rec.dims,
-                    ok: true,
-                    err: None,
-                    damaged: None,
-                    traits: rec.traits,
-                };
-                return (it, None);
+            if let Some(rec) = rec {
+                return Some(Item::from(rec));
             }
-            let f = &files[i];
-            // Keyed before it is read — by the walk, before anything was —
-            // so that a file changing under the analysis is described again
-            // next time rather than trusted.
-            let key = store.as_ref().and_then(|_| stats[i].key);
-            let it = analyse(f, args.work_size, &sp, header[i].as_ref(), &planes);
-            let span = keep(i, key, &it);
+            let it = analysis::analyse(&files[i], args.work_size, &sp, header[i].as_ref(), &planes);
+            // Each record goes into the cache file as soon as it is made,
+            // which is what lets an interrupt keep the analysis without
+            // writing anything; see `cache::Store`.
+            if let (Some(s), Read::Whole) = (&store, &it.read) {
+                s.append(i, it.dims, &it.traits, &it.feats, &it.thumb);
+            }
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             bar.add(weight[i]);
             if d % 250 == 0 {
                 stage!(cx, "  described {d}");
             }
-            (it, span)
+            Some(it)
         })
-        .unzip();
+        .collect();
     drop(weight);
     drop(header);
     drop(planes);
-    for (s, a) in span_of.iter_mut().zip(appended) {
-        if a.is_some() {
-            *s = a;
-        }
-    }
     // A copy of a file that would not decode fails as its original did, and
-    // is reported under its own path by the loop over `items` below. It used
-    // to be decoded again, here, on one thread, one copy after another — the
-    // same bytes through the same decoder, for the same error. (Both were read
+    // is reported under its own path by `tell_problems`. It used to be
+    // decoded again, here, on one thread, one copy after another — the same
+    // bytes through the same decoder, for the same error. (Both were read
     // whole by the exact pass, so an original that could not be *opened* is
     // never in a group to begin with.)
-    for i in (0..n).filter(|&i| same.is_copy(i)) {
-        items[i] = items[same.original(i)].clone();
-    }
+    let items: Vec<Item> = (0..n).map(|i| made[same.original(i)].clone().expect("every original is analysed")).collect();
+    drop(made);
     // Which files share an analysis, and which of those a colour too: from
     // here to the assembly, each such set is matched as its first file.
     timed!(37, same.analysed(files, &items));
@@ -579,26 +511,22 @@ fn analyse_all(
         });
     progress.forecast(|f| {
         // What the matching stages will be handed: originals, not copies.
-        f.images = Some((0..n).filter(|&i| items[i].ok && same.answers_for(i) == i).count());
+        f.images = Some((0..n).filter(|&i| items[i].read.ok() && same.answers_for(i) == i).count());
         f.descriptors = Some((0..n).filter(|&i| same.answers_for(i) == i).map(|i| items[i].feats.len()).sum());
     });
     if let (Some(p), Some(store)) = (cache_path, store.as_mut()) {
-        save_cache(cx, p, store, &items, &names, &span_of, &cached, prune, problems);
+        finish_cache(cx, p, store, prune, problems);
     }
     // The store stays open until the suggestion, which keeps in it the colour
     // of each JPEG it has to decode to learn it (`cache::Store::keep_colour`).
     // Nothing more is analysed or read from the cache. What was written stays
     // readable for as long as it is held.
     spill::end();
-    // What is left in the map is the analyses of files this run did not walk,
-    // which the save above has just finished borrowing. Nothing reads them
-    // again and they are megabytes apiece.
-    drop(cached);
     stage!(
         cx,
         "cpu: decode {:.0}s, features {:.0}s",
-        T_DECODE.load(Ordering::Relaxed) as f64 / 1e6,
-        T_SIFT.load(Ordering::Relaxed) as f64 / 1e6
+        analysis::T_DECODE.load(Ordering::Relaxed) as f64 / 1e6,
+        analysis::T_SIFT.load(Ordering::Relaxed) as f64 / 1e6
     );
     // Nothing after this point extracts features, so the workers' blur scratch
     // is dead weight from here on.
@@ -614,83 +542,36 @@ fn analyse_all(
     // budget holding that down, what is left is the plateau this releases.)
     timed!(37, release_memory());
     let not_asked = tell_problems(files, &items, wanted, problems);
-    let n_ok = items.iter().filter(|i| i.ok).count();
+    let n_ok = items.iter().filter(|i| i.read.ok()).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(cx, "described {n_ok}/{n} images, {n_desc} descriptors");
-    Analysed { items, same, store, names, span_of, not_asked, n_kps, n_ok }
+    Analysed { items, same, store, not_asked, n_kps, n_ok }
 }
 
-/// Keep in the cache file what this run made and what it should carry over,
-/// and compact it when what else it holds is worth a copy of the rest.
-#[allow(clippy::too_many_arguments)]
-fn save_cache(
-    cx: &Ctx,
-    p: &Path,
-    store: &mut cache::Store,
-    items: &[Item],
-    names: &[PathBuf],
-    span_of: &[Option<cache::Span>],
-    cached: &HashMap<PathBuf, cache::Entry>,
-    prune: bool,
-    problems: &mut Problems,
-) {
-    let n = items.len();
+/// Settle the cache file (`cache::Store::finish`), and say what it kept.
+fn finish_cache(cx: &Ctx, p: &Path, store: &mut cache::Store, prune: bool, problems: &mut Problems) {
     cx.progress.begin(Stage::CacheWrite);
-    if let Some(e) = store.failure() {
+    let kept = store.finish(prune);
+    if let Some(e) = kept.failure {
         // Not fatal — the pairs this run reports are the same pairs — but
         // the next run will pay for this one's analysis all over again,
         // which is exactly what a problem is here.
         problems.cache(format!("could not write {}: {e}", p.display()));
     }
-    let mut entries: Vec<(&Path, cache::Span)> =
-        (0..n).filter(|&i| items[i].ok).filter_map(|i| Some((names[i].as_path(), span_of[i]?))).collect();
-    // What the cache already knew about images this run never walked —
-    // which, every walked file's record having been taken out of the map
-    // above, is everything still in it. The cache is one file for the
-    // machine rather than one per corpus, so scanning a second directory
-    // must not cost the first one its analysis; see `cache::carry_over`.
-    let kept = if prune { Vec::new() } else { cache::carry_over(&cached) };
-    if !kept.is_empty() {
-        stage!(cx, "cache: {} records kept from other scans", kept.len());
+    if kept.carried > 0 {
+        stage!(cx, "cache: {} records kept from other scans", kept.carried);
     }
-    entries.extend_from_slice(&kept);
-    // And the analyses made at other settings, which this run did not
-    // read: kept while their file is there, and dropped by `--prune-cache`,
-    // which keeps only what this scan used. They used to be kept under it
-    // too, for the files this scan found, so one run at another
-    // `--work-size` doubled the cache for good: nothing short of
-    // `--clear-cache`, which takes every record with it, could give the
-    // copy back.
-    let others: Vec<(PathBuf, cache::Span)> = if prune {
-        Vec::new()
-    } else {
-        let gone = cache::gone(store.other_settings().iter().map(|(p, _)| p.as_path()));
-        store.other_settings().iter().filter(|(p, _)| !gone.contains(p.as_path())).cloned().collect()
-    };
-    if !others.is_empty() {
-        stage!(cx, "cache: {} records kept from other working sizes", others.len());
+    if kept.other_sizes > 0 {
+        stage!(cx, "cache: {} records kept from other working sizes", kept.other_sizes);
     }
-    let others_dropped = store.other_settings().len() - others.len();
-    entries.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
-    let dropped = cached.len() - kept.len() + others_dropped;
-    if prune && dropped > 0 {
-        say!(cx, "pruned {dropped} cached record(s) this scan did not use");
+    if prune && kept.dropped > 0 {
+        say!(cx, "pruned {} cached record(s) this scan did not use", kept.dropped);
     }
-    // Every record worth keeping is already in the file, since each went
-    // in as it was made. The file is rewritten only when what else it
-    // holds — records superseded, for files that have gone, or pruned —
-    // is worth a copy of the rest; see `cache::Store::worth_compacting`.
-    // A threshold sweep, a dozen runs over one unchanged corpus, finds the
-    // file already says what it would write and writes nothing.
-    if !store.worth_compacting(&entries, prune) {
-        let dead = store.records().saturating_sub(entries.len());
-        stage!(cx, "cache: {} records, {dead} of them unused, not compacted", store.records());
-    } else {
-        match store.compact(&mut entries) {
-            Ok(true) => {}
-            Ok(false) => stage!(cx, "cache: not compacted, another run has it open"),
-            Err(e) => problems.cache(format!("could not write {}: {e}", p.display())),
-        }
+    match kept.compacted {
+        cache::Compacted::Unneeded { records, unused } => stage!(cx, "cache: {records} records, {unused} of them unused, not compacted"),
+        cache::Compacted::Busy => stage!(cx, "cache: not compacted, another run has it open"),
+        cache::Compacted::Done => {}
+        cache::Compacted::Failed(e) => problems.cache(format!("could not write {}: {e}", p.display())),
     }
 }
 
@@ -704,34 +585,37 @@ fn save_cache(
 /// has been through, and a fatal error further down should not lose the
 /// account of what would not open.
 fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted, problems: &mut Problems) -> Vec<bool> {
-    let n = files.len();
-    let not_asked: Vec<bool> = (0..n)
-        .map(|i| {
-            let err = items[i].err.as_deref();
-            err == Some(decode::MAC_METADATA)
-                || (!wanted.is_a_guess_at_images() && !extensions::names_an_image(&files[i]) && err == Some(decode::NOT_AN_IMAGE))
+    let not_asked: Vec<bool> = files
+        .iter()
+        .zip(items)
+        .map(|(f, it)| match it.read {
+            Read::Refused(Refused::MacMetadata) => true,
+            Read::Refused(Refused::NotAnImage) => !wanted.is_a_guess_at_images() && !extensions::names_an_image(f),
+            _ => false,
         })
         .collect();
-    for (i, it) in items.iter().enumerate() {
-        match &it.err {
-            Some(e) if e == decode::MAC_METADATA => problems.mac_metadata(&files[i].display().to_string()),
+    for ((f, it), &not_asked) in files.iter().zip(items).zip(&not_asked) {
+        let f = f.display().to_string();
+        match &it.read {
+            Read::Refused(Refused::MacMetadata) => problems.mac_metadata(&f),
             // A raw file is a picture, not read: a skip, and still in its
             // exact group, since a copy of its bytes is a copy of it.
-            Some(e) if e == decode::CAMERA_RAW => problems.camera_raw(&files[i].display().to_string()),
+            Read::Refused(Refused::CameraRaw) => problems.camera_raw(&f),
             // A file a wildcard walk reached that is no picture at all never
             // claimed to be one; see `extensions.rs`.
-            Some(_) if not_asked[i] => problems.not_image_content(&files[i].display().to_string()),
-            Some(e) => problems.unreadable(&files[i].display().to_string(), e),
+            Read::Refused(_) if not_asked => problems.not_image_content(&f),
+            Read::Refused(r) => problems.unreadable(&f, &r.to_string()),
+            Read::Failed(e) => problems.unreadable(&f, e),
             // Decoded, described, and described to nothing. Nothing failed —
             // a blank picture really has no local features — but the file is
             // in the corpus and the matcher has nothing to say about it, and
             // that is worth a line for the same reason a refusal is: the run
             // did not answer the question it was asked about this file.
-            None if it.feats.len() == 0 => problems.featureless(&files[i].display().to_string()),
-            None => {}
+            Read::Whole | Read::Damaged(_) if it.feats.len() == 0 => problems.featureless(&f),
+            Read::Whole | Read::Damaged(_) => {}
         }
-        if let Some(why) = &it.damaged {
-            problems.damaged(&files[i].display().to_string(), why);
+        if let Some(why) = it.read.damaged() {
+            problems.damaged(&f, why);
         }
     }
     not_asked
@@ -1418,7 +1302,7 @@ fn write_dump(cx: &Ctx, path: &Path, files: &[PathBuf], items: &[Item], direct: 
 /// suggestion, read off the same pairs.
 fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stats: &[walk::Stat], analysed: Analysed, claims: Vec<Claim>) -> Found {
     let args = cx.args;
-    let Analysed { items, same, store, names, span_of, not_asked, n_kps, .. } = analysed;
+    let Analysed { items, same, store, not_asked, n_kps, .. } = analysed;
     // The pairs are the claim. `stated` collects every one of them, and
     // `group::find` reduces it to representatives — a representative plus the
     // files that matched it directly, which is neither the closure nor the
@@ -1475,8 +1359,7 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     let (actions, keeper) = if args.suggest != suggest::Mode::Content && !keeps_last(args, gui, scope) {
         (Vec::new(), Vec::new())
     } else {
-        let cached = Cached { store: store.as_ref(), names: &names, span_of: &span_of };
-        timed!(44, suggest_content(args, scope, files, &items, stats, &same, &stated, cached))
+        timed!(44, suggest_content(args, scope, files, &items, stats, &same, &stated, store.as_ref()))
     };
     // Every colour the suggestion measured is in the cache.
     drop(store);
@@ -1510,7 +1393,7 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
         .iter()
         .enumerate()
         .filter_map(|(i, it)| {
-            let e = it.err.as_ref().filter(|e| !not_asked[i] && *e != decode::CAMERA_RAW)?;
+            let e = it.read.error().filter(|_| !not_asked[i] && it.read != Read::Refused(Refused::CameraRaw))?;
             let mut f = serde_json::json!({"path": files[i].display().to_string(), "error": e});
             if let Some(b) = report::raw_bytes(&files[i]) {
                 f["path_bytes"] = b.into();
@@ -1526,10 +1409,10 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
         keeper,
         failures,
         dims: items.iter().map(|it| it.dims).collect(),
-        damaged: items.iter().map(|it| it.damaged.is_some()).collect(),
+        damaged: items.iter().map(|it| it.read.damaged().is_some()).collect(),
         sizes: stats.iter().map(|s| s.len).collect(),
         not_asked,
-        ok: items.iter().map(|it| it.ok).collect(),
+        ok: items.iter().map(|it| it.read.ok()).collect(),
     }
 }
 
@@ -1540,16 +1423,9 @@ fn keeps_last(args: &Args, gui: Option<&Path>, scope: &Scope) -> bool {
     gui.is_none() && !scope.against && !args.no_cache && !args.no_last
 }
 
-/// The cache, still open after the analysis, and where each file's record
-/// sits in it: the suggestion keeps there the colours it measures.
-struct Cached<'a> {
-    store: Option<&'a cache::Store>,
-    names: &'a [PathBuf],
-    span_of: &'a [Option<cache::Span>],
-}
-
 /// The content rule's suggestion for every file, read off the stated pairs,
-/// and the file each deletion rests on.
+/// and the file each deletion rests on. `store` is the cache, still open
+/// after the analysis: the suggestion keeps there the colours it measures.
 #[allow(clippy::too_many_arguments)]
 fn suggest_content(
     args: &Args,
@@ -1559,7 +1435,7 @@ fn suggest_content(
     stats: &[walk::Stat],
     same: &Same,
     stated: &[(usize, usize, Stated)],
-    cached: Cached,
+    store: Option<&cache::Store>,
 ) -> (Vec<Option<suggest::Action>>, Vec<Option<usize>>) {
     let pics: Vec<suggest::Picture> = items
         .iter()
@@ -1587,12 +1463,10 @@ fn suggest_content(
             return c;
         }
         let c = decode::colour_of(&files[i]).map(cache::kept_colour);
-        if let (Some(c), Some(store)) = (c, cached.store) {
+        if let (Some(c), Some(store)) = (c, store) {
             // In every record its bytes are held under.
             for &k in same.identical_to(i) {
-                if let Some(span) = cached.span_of[k] {
-                    store.keep_colour(span, &cached.names[k], c);
-                }
+                store.keep_colour(k, c);
             }
         }
         let c = c.unwrap_or(0.0);
@@ -1892,6 +1766,7 @@ fn as_typed(v: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verify::Thumb;
 
     #[test]
     fn a_plain_scan_is_the_scope_with_no_library() {
@@ -1926,7 +1801,6 @@ mod tests {
                 feats: std::sync::Arc::new(sift::extract(g, &p)),
                 thumb: std::sync::Arc::new(Thumb::build(g, THUMB_LONG)),
                 dims: (g.w as u32, g.h as u32),
-                ok: true,
                 ..Default::default()
             })
             .collect();

@@ -118,7 +118,7 @@ pub(super) fn working_bytes(w: usize, h: usize, work: usize) -> u64 {
 /// its aspect ratio as well as its size: a 1080x11520 page at 512 is 48x512,
 /// and each photograph in it 48x64. A 4:3 or squarer picture is untouched,
 /// and no picture costs more than a 4:3 one does. The pixel check's
-/// thumbnail is scaled by the same factor (`lib::analyse`).
+/// thumbnail is scaled by the same factor (`analysis::analyse`).
 pub fn area_factor(w: usize, h: usize) -> f64 {
     if w == 0 || h == 0 {
         return 1.0;

@@ -32,6 +32,7 @@
 compile_error!("img-fp builds for Unix-like systems only (Linux, the BSDs, macOS)");
 
 mod against;
+mod analysis;
 mod cache;
 mod claims;
 mod decode;
@@ -70,8 +71,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use analysis::Item;
 use claims::{Claim, Edge, How};
-use verify::{Thumb, Variant, Verdict};
+use verify::{Variant, Verdict};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -406,7 +408,7 @@ fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
 /// keyed on that spelling. So one folder scanned as `photos`, as `./photos`
 /// and as its absolute path was analysed three times and held three records
 /// an image, and a relative record was carried or dropped according to
-/// whatever folder the next run happened to start in — `carry_over` asks
+/// whatever folder the next run happened to start in — `cache::carried` asks
 /// whether the path exists, and a relative path exists relative to the
 /// current directory. The window always names folders absolutely, so it and
 /// `img-fp .` never shared a record either. A canonical path is one name per
@@ -558,27 +560,6 @@ fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usiz
 
 // ---------------------------------------------------------------- per image
 
-/// One image's analysis.
-///
-/// The features and the thumbnail are shared rather than owned, because
-/// byte-identical files share an analysis: the exact pass has already found
-/// them, one member of each group is described and the rest point at it.
-/// Copying instead meant a second megabyte-scale buffer per duplicate — three
-/// hundred of them on this corpus — for bytes that are the same bytes.
-#[derive(Clone, Default)]
-struct Item {
-    feats: std::sync::Arc<Features>,
-    thumb: std::sync::Arc<Thumb>,
-    /// The picture's own size, as shown; `feats` holds the working image's.
-    dims: (u32, u32),
-    ok: bool,
-    err: Option<String>,
-    /// Decoded only in part; see `decode::Decoded::damaged`.
-    damaged: Option<String>,
-    /// What the keep/delete suggestion reads beyond the analysis.
-    traits: decode::Traits,
-}
-
 /// Exit code for a run that finished and reported everything it found, but
 /// could not do all of it. `0` is a clean run, `1` is the fatal path — an
 /// error that stopped the run, printed by `main` — and `130` is the shell's
@@ -626,109 +607,6 @@ const PROPAGATE_MAX_ROUNDS: usize = 8;
 /// costs nothing measurable, and a few megabytes of verdicts, so a slice's
 /// own collect is no transient worth the name.
 const VERIFY_SLICE: usize = 1 << 16;
-
-static T_DECODE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static T_SIFT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How far a small picture may be enlarged: up to `upsample_below`, but never
-/// past the working size, so that nothing is analysed above `--work-size` and
-/// the option bounds what every picture costs. It used to enlarge anything
-/// under 256 pixels to between 257 and 512 whatever the working size said,
-/// which made a 120-pixel thumbnail cost what a 480-pixel photograph costs at
-/// `--work-size 140`, and made a picture the working size had just shrunk —
-/// at `--work-size 128`, every photograph — cost what 512 costs from a
-/// sixteenth of the detail. A picture shrunk to the working size is never
-/// enlarged under this limit, since one doubling would take it past it. `0`,
-/// which shrinks nothing, keeps the whole of `upsample_below`.
-fn enlarge_below(work: usize, upsample_below: usize) -> usize {
-    if work == 0 { upsample_below } else { upsample_below.min(work) }
-}
-
-fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> Item {
-    let t0 = Instant::now();
-    let r = decode::decode_guarded(|| decode::decode_with(path, work, header));
-    T_DECODE.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
-    match r {
-        Ok(d) => {
-            let t1 = Instant::now();
-            let (feats, thumb) = planes.analysis(&d.work, || {
-                let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
-                let feats = sift::extract(&d.work, &p).spilled();
-                let thumb = timed!(4, Thumb::build(&d.work, ((THUMB_LONG as f64 * decode::area_factor(d.work.w, d.work.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
-                (feats.into(), thumb.spilled().into())
-            });
-            T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
-            let traits = decode::Traits { grid: grey_grid(&d.work), ..d.traits };
-            Item { feats, thumb, dims: d.size, ok: true, err: None, damaged: d.damaged, traits }
-        }
-        Err(e) => Item { err: Some(e.to_string()), ..Default::default() },
-    }
-}
-
-/// The mean grey (0..=255) of each cell of a 4x4 grid over a working plane,
-/// row by row: `Traits::grid`.
-fn grey_grid(g: &decode::Gray) -> [f32; 16] {
-    let mut sum = [0f64; 16];
-    let mut n = [0u32; 16];
-    for y in 0..g.h {
-        let cy = (y * 4 / g.h.max(1)).min(3);
-        for (x, &v) in g.px[y * g.w..(y + 1) * g.w].iter().enumerate() {
-            let c = cy * 4 + (x * 4 / g.w.max(1)).min(3);
-            sum[c] += v as f64;
-            n[c] += 1;
-        }
-    }
-    std::array::from_fn(|c| if n[c] > 0 { (sum[c] / n[c] as f64 * 255.0) as f32 } else { 0.0 })
-}
-
-/// The analyses this run has made, by the working plane they were made from,
-/// so that files whose bytes differ and whose pictures do not are described
-/// once.
-///
-/// The analysis — features and thumbnail — is a function of the working plane
-/// and nothing else, so two files that decode to the same plane have the same
-/// analysis, and the second can take the first's. They are common, and the
-/// exact pass cannot see them: a photograph saved again losslessly as PNG,
-/// TIFF or lossless WebP, or a JPEG whose metadata was stripped or edited.
-/// On the four benchmark corpora together 1,113 of 26,886 files are one, 4.1%
-/// of the analysis. Everything after the analysis treats them as the separate
-/// files they are, so the output is the output without this, to the byte.
-///
-/// **The key is a hash of the plane, keyed at random for each run**
-/// (SipHash-1-3 through `RandomState`), with the plane's size beside it, and
-/// keeping every plane to compare it whole is not an option: they are most of
-/// a megabyte each. A shared hash is not a comparison, and the exact pass
-/// compares bytes for that reason — its hash was FNV, which has collisions
-/// built in. This one is a keyed pseudo-random function: no file can be made
-/// to collide with another without the key, which exists only inside the run,
-/// and two planes collide by chance with probability 2^-64, which over a
-/// million files is a pair in some fifty million runs. Hashing costs about
-/// 0.2 ms a plane on one core, against some 60 ms of analysis saved per twin.
-#[derive(Default)]
-struct Planes {
-    keys: std::collections::hash_map::RandomState,
-    made: std::sync::Mutex<HashMap<(usize, usize, u64), Made>>,
-}
-
-type Analysis = (std::sync::Arc<Features>, std::sync::Arc<Thumb>);
-/// An analysis that one file is making and its twins may wait for.
-type Made = std::sync::Arc<std::sync::OnceLock<Analysis>>;
-
-impl Planes {
-    /// The analysis of `g`: one already made from the same plane, or `make`'s.
-    /// A twin that arrives while the first is still being described waits for
-    /// it rather than describing it again; `make` takes no lock and no part of
-    /// the decode budget, so nothing it waits on can be waiting on it.
-    fn analysis(&self, g: &decode::Gray, make: impl FnOnce() -> Analysis) -> Analysis {
-        use std::hash::BuildHasher;
-        // SAFETY: an `f32` is four bytes with no padding, and every bit
-        // pattern of them is a `u8`.
-        let bytes = unsafe { std::slice::from_raw_parts(g.px.as_ptr() as *const u8, std::mem::size_of_val(&g.px[..])) };
-        let key = (g.w, g.h, self.keys.hash_one(bytes));
-        let cell = self.made.lock().unwrap().entry(key).or_default().clone();
-        cell.get_or_init(make).clone()
-    }
-}
 
 /// A query's scores read both ways round: for each candidate, the larger of
 /// how much of the query it holds and how much of it the query holds.
@@ -1668,6 +1546,7 @@ mod tests {
     }
 
     use super::*;
+    use verify::Thumb;
 
     /// The mirrored-descriptor permutation must agree with actually mirroring
     /// the image and extracting again. If it does not, mirrored matches are

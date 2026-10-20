@@ -49,7 +49,7 @@ pub use jpeg::same_jpeg_coding;
 pub use measure::{chroma_distance, Chroma, Traits};
 pub use reduce::{area_factor, resize_area};
 pub use shown::fit_preview;
-pub use sniff::{is_a_picture, may_be_image, Kind, EXTENSIONS, MAC_METADATA, NOT_AN_IMAGE};
+pub use sniff::{is_a_picture, may_be_image, Kind, EXTENSIONS};
 
 use measure::CellColour;
 use picture::{orient, Facts, Orientation, Picture};
@@ -83,8 +83,41 @@ pub struct Decoded {
     pub traits: Traits,
 }
 
-/// The error a camera's raw file is refused with (`tiff::open`).
-pub const CAMERA_RAW: &str = "a camera raw file, which img-fp does not read";
+/// A file `decode` turns away for what it is, not for failing to decode:
+/// the error it gives, which `refused` reads back. What each is to a run (a
+/// skip or a problem) is `analysis::Read`'s to say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Bytes that are no picture format at all, as opposed to a picture that
+    /// would not decode. Under a wildcard walk that is a file that never
+    /// claimed to be an image, and is a skip, not a problem.
+    NotAnImage,
+    /// A macOS metadata file (AppleDouble or AppleSingle, by its first four
+    /// bytes): the `._` twin a Mac leaves beside a file it copies, which
+    /// carries the picture's name and none of its pixels. A skip whatever it
+    /// is called; see `problems::Problems::mac_metadata`.
+    MacMetadata,
+    /// A camera's raw file in a TIFF container (`tiff::open`).
+    CameraRaw,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Refused::NotAnImage => "not an image",
+            Refused::MacMetadata => "a macOS metadata file, not a picture",
+            Refused::CameraRaw => "a camera raw file, which img-fp does not read",
+        })
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// What `e`, an error of `decode`, turned the file away as, if it was turned
+/// away for what it is.
+pub fn refused(e: &anyhow::Error) -> Option<Refused> {
+    e.downcast_ref::<Refused>().copied()
+}
 
 /// A file's bytes, opened by the module of its format: what the file says
 /// of itself, and how to read its pixels. The one place a format is chosen.
@@ -116,7 +149,7 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     let (f, head, len) = timed!(0, sniff::open_if_image(path)?);
     let _claim = budget::Claim::new(len + header.map_or(0, |p| budget::decode_estimate(p, work_size)));
     let bytes = timed!(0, sniff::read_rest(f, head, len, path)?);
-    let kind = sniff::identify(&bytes, path).context(NOT_AN_IMAGE)?;
+    let kind = sniff::identify(&bytes, path).ok_or(Refused::NotAnImage)?;
     let picture = open(kind, &bytes)?;
     let mut sink = reduce::Reduce::new(work_size);
     let read = picture.read;
@@ -316,7 +349,7 @@ fn read(path: &Path) -> Result<Vec<u8>> {
 /// The picture in `bytes`, the right way up: whole, or, made for `place`, as
 /// reduced while it is read as the place allows.
 fn shown(bytes: &[u8], path: &Path, place: Option<(u32, u32, bool)>) -> Result<DynamicImage> {
-    let kind = sniff::identify(bytes, path).context(NOT_AN_IMAGE)?;
+    let kind = sniff::identify(bytes, path).ok_or(Refused::NotAnImage)?;
     let mut sink = shown::Shown::new(place);
     (open(kind, bytes)?.read)(&mut sink)?;
     sink.finish()

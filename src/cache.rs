@@ -101,7 +101,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 ///
 /// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
 /// 05: a small picture is enlarged no further than the working size
-/// (`lib::enlarge_below`), which changes every record below 512.
+/// (`analysis::enlarge_below`), which changes every record below 512.
 /// 06: a keypoint is four fields, not five: the extractor's `response`, which
 /// nothing after extraction reads, is no longer kept on it.
 /// 07: a record's key carries the file's change time (see `Key`), and its path
@@ -164,13 +164,13 @@ pub struct Record {
     pub traits: Traits,
 }
 
-/// What the loaded cache says about one path: its key, its analysis — only
-/// for a path this run walks, see `open` — and where its record sits in the
-/// file.
-pub type Entry = (Key, Option<Record>, Span);
+/// What the file says about one path at this run's settings: its key, its
+/// analysis — only for a path this run walks, see `read` — and where its
+/// record sits in the file.
+type Entry = (Key, Option<Record>, Span);
 
 /// Which paths this run walks, asked of every record as it is read.
-pub type Walked<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
+type Walked<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
 
 /// What says a file is still the file a record describes: its size, its
 /// modification time and its change time, in nanoseconds.
@@ -506,7 +506,7 @@ pub fn kept_colour(c: f32) -> f32 {
 /// Where one record sits in the cache file, from its path's length to the end
 /// of its packed half. What a compaction copies, without unpacking it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Span {
+struct Span {
     at: u64,
     len: u64,
 }
@@ -678,6 +678,12 @@ struct Tail {
 /// pay — it used to be paid in one pass after the analysis — and the file
 /// holds every record from that point on, so a rewrite is a copy.
 ///
+/// **It answers for this run's files by number**: `take` hands a walked
+/// file's record over, `append` keeps one made for it, `keep_colour` writes
+/// in the record kept for it, and `finish` keeps what the run took and made
+/// and what it was not asked about while its file is there. Which records a
+/// run keeps is decided there and nowhere else.
+///
 /// The file is rewritten only when it holds something the run would not keep:
 /// a record superseded by a newer one for the same path, a file that has
 /// gone, a `--prune-cache`. Then `compact` copies the records worth keeping
@@ -686,9 +692,20 @@ pub struct Store {
     path: PathBuf,
     /// The settings this run's records are made at.
     settings: Settings,
-    /// Records made at other settings, the latest for each path and settings:
-    /// never unpacked, and carried into a compaction while their file exists.
-    others: Vec<(PathBuf, Span)>,
+    /// The files this run walked, by number: what the file holds for each.
+    asked: Vec<Asked>,
+    /// Where the record each walked file's analysis is kept in sits: one
+    /// taken (`take`) or appended (`append`) by this run. The records the
+    /// run keeps for its own files are these and no others.
+    live: Mutex<Vec<Option<Span>>>,
+    /// The records this run was not asked about: the latest for each path
+    /// and settings, at this run's settings for a path it does not walk, or
+    /// at any other's. Never unpacked; carried while their file is there
+    /// (`carried`).
+    unasked: Vec<Unasked>,
+    /// Records at this run's settings the file holds, the latest for each
+    /// path, walked or not.
+    usable: usize,
     /// `None` when the cache could not be opened for writing, and the run
     /// keeps nothing.
     file: Option<File>,
@@ -716,6 +733,52 @@ pub struct Store {
     /// on a descriptor opened to append writes at the end on Linux, whatever
     /// offset it is given.
     in_place: std::sync::OnceLock<Option<File>>,
+}
+
+/// One walked file, as the cache knows it.
+struct Asked {
+    /// Its name in the file (`lib::cache_names`).
+    name: PathBuf,
+    /// What the walk read of it, which a record must carry to answer for it;
+    /// `None`, nothing does, and nothing is kept for it.
+    key: Option<Key>,
+    /// The latest record at this run's settings under its name, whatever
+    /// key it carries.
+    found: Option<Span>,
+    /// That record's analysis, when its key is the file's and it has not
+    /// been taken.
+    record: Option<Record>,
+}
+
+/// A record this run was not asked about; see `Store::unasked`.
+struct Unasked {
+    path: PathBuf,
+    span: Span,
+    /// Made at this run's settings, for a file it did not walk.
+    here: bool,
+}
+
+/// What `Store::finish` kept and did, for the run to say.
+pub struct Kept {
+    /// The first append that failed, if one did.
+    pub failure: Option<String>,
+    /// Records carried for files this run did not walk, at its settings and
+    /// at others.
+    pub carried: usize,
+    pub other_sizes: usize,
+    /// Records this run was not asked about and did not carry.
+    pub dropped: usize,
+    pub compacted: Compacted,
+}
+
+/// Whether `Store::finish` rewrote the file.
+pub enum Compacted {
+    /// Not worth it: the file's records, and how many nothing keeps.
+    Unneeded { records: usize, unused: usize },
+    /// Put off: another run has the file open.
+    Busy,
+    Done,
+    Failed(String),
 }
 
 /// Open the cache at `path`, read what is usable out of it, and keep it open
@@ -747,12 +810,41 @@ pub struct Store {
 /// nothing (see the note on `MAGIC`). A damaged one is replaced by an empty one straight away,
 /// rather than at the end of the run, since this run's records go into
 /// whatever file it holds from here on.
-pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<PathBuf, Entry>, Store) {
+///
+/// `files` are this run's, each by the name the cache knows it by and what
+/// the walk read of it: what the store answers for by number from here on.
+pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, problems: &mut Problems) -> Store {
+    let (mut got, mut store) = {
+        let walked: std::collections::HashSet<&Path> = files.iter().map(|f| f.0.as_path()).collect();
+        read(path, want, &|p| walked.contains(p), problems)
+    };
+    store.usable = got.len();
+    store.asked = files
+        .into_iter()
+        .map(|(name, key)| match got.remove(&name) {
+            Some((k, record, span)) => Asked { record: record.filter(|_| key == Some(k)), name, key, found: Some(span) },
+            None => Asked { name, key, found: None, record: None },
+        })
+        .collect();
+    store.live = Mutex::new(vec![None; store.asked.len()]);
+    // What is left is every record at this run's settings for a path it did
+    // not walk.
+    store.unasked.extend(got.into_iter().map(|(path, e)| Unasked { path, span: e.2, here: true }));
+    store
+}
+
+/// The file at `path`, read: the latest record at `want` for each path,
+/// unpacked for the paths `walked` says this run walks, and the store with
+/// what else it holds (`Store::unasked`).
+fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<PathBuf, Entry>, Store) {
     let mut out = HashMap::new();
     let mut store = Store {
         path: path.to_path_buf(),
         settings: want,
-        others: Vec::new(),
+        asked: Vec::new(),
+        live: Default::default(),
+        unasked: Vec::new(),
+        usable: 0,
         file: None,
         records: AtomicUsize::new(0),
         failed: Mutex::new(None),
@@ -793,10 +885,10 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
                 // run. It just keeps nothing new, and that is worth saying.
                 problems.cache(format!("could not open {} for writing: {e}", path.display()));
                 // What it holds is still counted, although nothing will be
-                // appended: the caller measures how many records a later one
+                // appended: `stale` measures how many records a later one
                 // superseded against this, and a count of zero beside a full map
                 // was an underflow.
-                match File::open(path).map(|f| read_file(&f, path, want, walked, &mut out, &mut store.others, problems)) {
+                match File::open(path).map(|f| read_file(&f, path, want, walked, &mut out, &mut store.unasked, problems)) {
                     Ok(Found::Usable(tail)) => {
                         store.records = AtomicUsize::new(tail.count);
                         store.damaged = tail.damaged;
@@ -826,7 +918,7 @@ pub fn open(path: &Path, want: Settings, walked: Walked, problems: &mut Problems
             }
             return (out, store);
         }
-        match read_file(&f, path, want, walked, &mut out, &mut store.others, problems) {
+        match read_file(&f, path, want, walked, &mut out, &mut store.unasked, problems) {
             Found::Usable(tail) => {
                 store.records = AtomicUsize::new(tail.count);
                 store.damaged = tail.damaged;
@@ -940,7 +1032,7 @@ fn read_file(
     want: Settings,
     walked: Walked,
     out: &mut HashMap<PathBuf, Entry>,
-    others: &mut Vec<(PathBuf, Span)>,
+    others: &mut Vec<Unasked>,
     problems: &mut Problems,
 ) -> Found {
     let size = f.metadata().map_or(u64::MAX, |m| m.len());
@@ -986,10 +1078,102 @@ fn read_file(
 }
 
 impl Store {
-    /// Put one analysis into the file, and say where it went. Called by the
-    /// workers as they finish; the packing runs outside the lock, and only
-    /// the write is inside it.
-    pub fn append(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) -> Option<Span> {
+    /// The record of walked file `i`, taken out of the store: there only if
+    /// it is still that file's, by the key the walk read, and only once.
+    /// What the run takes is what it keeps (`finish`): a record of a file
+    /// whose bytes another file answers for, never taken, is the same
+    /// analysis stored twice and is left out at the next compaction.
+    pub fn take(&mut self, i: usize) -> Option<Record> {
+        let a = &mut self.asked[i];
+        let record = a.record.take()?;
+        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = a.found;
+        Some(record)
+    }
+
+    /// Put walked file `i`'s analysis into the file, as soon as it is made,
+    /// keyed by what the walk read before anything was: a file changing
+    /// under the analysis is described again next time rather than trusted.
+    /// Called by the workers as they finish.
+    pub fn append(&self, i: usize, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) {
+        let a = &self.asked[i];
+        let Some(key) = a.key else { return };
+        if let Some(span) = self.put(&a.name, key, dims, traits, f, t) {
+            lock_any(&self.live)[i] = Some(span);
+        }
+    }
+
+    /// Keep `colour` in walked file `i`'s record, if this run keeps one for
+    /// it; see `write_colour`.
+    pub fn keep_colour(&self, i: usize, colour: f32) {
+        let span = lock_any(&self.live)[i];
+        if let Some(span) = span {
+            self.write_colour(span, &self.asked[i].name, colour);
+        }
+    }
+
+    /// Records at this run's settings the file holds, the latest for each
+    /// path.
+    pub fn usable(&self) -> usize {
+        self.usable
+    }
+
+    /// Whether the file holds records this run will not keep, as far as can
+    /// be told before the analysis and without asking which files have gone:
+    /// one superseded or damaged, or a walked file's not taken. What the
+    /// progress bar expects of `finish`, and nothing else.
+    pub fn stale(&self) -> bool {
+        let found = self.asked.iter().filter(|a| a.found.is_some()).count();
+        let live = lock_any(&self.live);
+        self.records().saturating_sub(found + self.unasked.len()) > 0
+            || self.asked.iter().zip(live.iter()).any(|(a, l)| a.found.is_some() && l.is_none())
+    }
+
+    /// Settle the file at the end of the analysis: it keeps this run's
+    /// records (`take`, `append`), every record it was not asked about whose
+    /// file is still there (`carried`), and what another run appended
+    /// meanwhile; and it is rewritten to hold just that when what else it
+    /// holds is worth a copy of the rest (`worth_compacting`).
+    ///
+    /// `--prune-cache` (`prune`) keeps only this run's.
+    pub fn finish(&mut self, prune: bool) -> Kept {
+        let failure = self.failure();
+        // Every record worth keeping is already in the file, since each went
+        // in as it was made. The file is rewritten only when what else it
+        // holds — records superseded, for files that have gone, or pruned —
+        // is worth a copy of the rest. A threshold sweep, a dozen runs over
+        // one unchanged corpus, finds the file already says what it would
+        // write and writes nothing.
+        //
+        // The names are lent to the compaction and handed back: the colours
+        // the suggestion measures later are kept by them.
+        let (asked, unasked) = (std::mem::take(&mut self.asked), std::mem::take(&mut self.unasked));
+        let live = lock_any(&self.live).clone();
+        let carried = if prune { Vec::new() } else { carried(&unasked) };
+        let entries: Vec<(&Path, Span)> = asked
+            .iter()
+            .zip(live)
+            .filter_map(|(a, s)| Some((a.name.as_path(), s?)))
+            .chain(carried.iter().map(|u| (u.path.as_path(), u.span)))
+            .collect();
+        let compacted = if !self.worth_compacting(&entries, prune) {
+            Compacted::Unneeded { records: self.records(), unused: self.records().saturating_sub(entries.len()) }
+        } else {
+            match self.compact(&entries) {
+                Ok(true) => Compacted::Done,
+                Ok(false) => Compacted::Busy,
+                Err(e) => Compacted::Failed(e.to_string()),
+            }
+        };
+        let other_sizes = carried.iter().filter(|u| !u.here).count();
+        let kept = Kept { failure, carried: carried.len() - other_sizes, other_sizes, dropped: unasked.len() - carried.len(), compacted };
+        drop((entries, carried));
+        (self.asked, self.unasked) = (asked, unasked);
+        kept
+    }
+
+    /// Put one analysis into the file, and say where it went. The packing
+    /// runs outside the lock, and only the write is inside it.
+    fn put(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) -> Option<Span> {
         let file = self.file.as_ref()?;
         if self.broken.load(Ordering::Relaxed) {
             return None;
@@ -1027,24 +1211,18 @@ impl Store {
     }
 
     /// Records the file holds, whether or not anything will keep them.
-    pub fn records(&self) -> usize {
+    fn records(&self) -> usize {
         self.records.load(Ordering::Relaxed)
     }
 
     /// The first append that failed, if one did.
-    pub fn failure(&self) -> Option<String> {
+    fn failure(&self) -> Option<String> {
         self.failed.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 
     #[cfg(test)]
     pub fn writable(&self) -> bool {
         self.file.is_some() && !self.broken.load(Ordering::Relaxed)
-    }
-
-    /// The records made at other settings, as `open` found them: the latest
-    /// for each path and settings.
-    pub fn other_settings(&self) -> &[(PathBuf, Span)] {
-        &self.others
     }
 
     /// Whether rewriting the file to hold `entries` is worth what it costs.
@@ -1066,7 +1244,7 @@ impl Store {
     /// gone is passed over as it was. Two things compact whatever the share:
     /// `--prune-cache`, which asks for it, and a damaged record, which is
     /// otherwise reported on every run.
-    pub fn worth_compacting(&self, entries: &[(&Path, Span)], prune: bool) -> bool {
+    fn worth_compacting(&self, entries: &[(&Path, Span)], prune: bool) -> bool {
         let Some(f) = &self.file else { return false };
         if self.records() == entries.len() || self.broken.load(Ordering::Relaxed) {
             return false;
@@ -1100,7 +1278,7 @@ impl Store {
     /// in the window lost the analysis of a folder a terminal had scanned
     /// meanwhile, and its bytes, counted as dead, were what made the copy
     /// look worth making.
-    pub fn compact(&mut self, entries: &[(&Path, Span)]) -> Result<bool> {
+    fn compact(&mut self, entries: &[(&Path, Span)]) -> Result<bool> {
         let Some(src) = &self.file else { return Ok(false) };
         if !exclusive(src, &self.path) {
             return Ok(false);
@@ -1155,7 +1333,7 @@ impl Store {
     /// and costs no more than a decode next time. A record a compaction by
     /// this run left out is not written at all. Under the append lock, so an
     /// interrupt finds nothing half written after it.
-    pub fn keep_colour(&self, span: Span, path: &Path, colour: f32) {
+    fn write_colour(&self, span: Span, path: &Path, colour: f32) {
         let Some(src) = &self.file else { return };
         if self.broken.load(Ordering::Relaxed) {
             return;
@@ -1417,7 +1595,7 @@ fn read_stream<R: Read + Skip>(
     want: Settings,
     walked: Walked,
     out: &mut HashMap<PathBuf, Entry>,
-    others: &mut Vec<(PathBuf, Span)>,
+    others: &mut Vec<Unasked>,
 ) -> Result<Tail, Reject> {
     let mut r = Rd { r, pos: 0, size, ended: false };
     let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
@@ -1460,9 +1638,9 @@ fn read_stream<R: Read + Skip>(
                 if s != want {
                     let span = Span { at, len: r.pos - at };
                     match other_at.entry((head.path, s)) {
-                        std::collections::hash_map::Entry::Occupied(e) => others[*e.get()].1 = span,
+                        std::collections::hash_map::Entry::Occupied(e) => others[*e.get()].span = span,
                         std::collections::hash_map::Entry::Vacant(e) => {
-                            others.push((e.key().0.clone(), span));
+                            others.push(Unasked { path: e.key().0.clone(), span, here: false });
                             e.insert(others.len() - 1);
                         }
                     }
@@ -1538,43 +1716,37 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
     damaged
 }
 
-/// What the loaded cache holds about files this run never looked at, and that
-/// are still on disk.
-///
-/// Every walked file's record has already been taken out of the map by the
-/// time this is called, so what is left *is* the untouched set.
+/// Which of `unasked`, the records a run was not asked about, it carries:
+/// those whose file is still there, or lies on a drive that is not plugged
+/// in. One rule, for a file this run did not walk and for a record made at
+/// other settings alike.
 ///
 /// The cache is one file per machine rather than one per corpus, so a run over
 /// `~/Pictures` must not throw away what the last run over `~/Downloads` paid
 /// for: what the file keeps is this run's analysis *plus* this. Without it a
 /// default cache would be worse than none, silently, for anyone who scans two
-/// directories in turn.
+/// directories in turn. Nor a run at another `--work-size` what this one made,
+/// and the other way round.
 ///
 /// The existence check (`gone`) is what keeps the file from growing forever. A record
 /// is worth keeping while the file it describes is there to be matched again;
-/// once the file is gone the record can never be used, only carried. It is one
-/// `stat` per record not seen this run, and it is why `--prune-cache` is a
-/// flag rather than the default.
+/// once the file is gone the record can never be used, only carried, and it
+/// is why `--prune-cache` is a flag rather than the default.
 ///
 /// **A file on a drive that is not plugged in is not gone.** Its records
 /// used to count as dead like any other, and once they were a quarter of the
 /// file the next scan of anything else compacted them away: a photo library
 /// on an external disk, scanned and then unplugged, was analysed from scratch
 /// the next time it was plugged in. So a record whose file is missing is kept
-/// when the file lies on a volume that is not mounted (`unmounted`).
-pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
-    type Kept<'a> = Vec<(&'a Path, Span)>;
-    let gone = gone(cached.keys().map(PathBuf::as_path));
-    let (mut kept, missing): (Kept, Kept) = cached.iter().map(|(path, e)| (path.as_path(), e.2)).partition(|(path, _)| !gone.contains(path));
+/// when the file lies on a volume that is not mounted (`unmounted`). Records
+/// made at other settings were asked `gone` alone, and lost there what the
+/// rest kept.
+fn carried(unasked: &[Unasked]) -> Vec<&Unasked> {
+    let gone = gone(unasked.iter().map(|u| u.path.as_path()));
     // Each volume asked once, however many of its records are missing.
     let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
-    for (path, span) in missing {
-        let Some(root) = volume_root(path) else { continue };
-        if *volumes.entry(root).or_insert_with_key(|r| unmounted(r)) {
-            kept.push((path, span));
-        }
-    }
-    kept
+    let mut away = |path: &Path| volume_root(path).is_some_and(|root| *volumes.entry(root).or_insert_with_key(|r| unmounted(r)));
+    unasked.iter().filter(|u| !gone.contains(u.path.as_path()) || away(&u.path)).collect()
 }
 
 /// Which of `paths`, the files records name, are no longer there: the
@@ -1593,7 +1765,7 @@ pub fn carry_over(cached: &HashMap<PathBuf, Entry>) -> Vec<(&Path, Span)> {
 /// file: a round trip apiece on a network share, for a library there of
 /// thousands of photographs on every scan of anything else. A listing of
 /// each folder is one or a few, whatever it holds.
-pub fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> std::collections::HashSet<&'a Path> {
+fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> std::collections::HashSet<&'a Path> {
     let mut by_folder: HashMap<&Path, Vec<&Path>> = HashMap::new();
     for p in paths {
         by_folder.entry(p.parent().unwrap_or(Path::new("/"))).or_default().push(p);
@@ -1747,31 +1919,20 @@ mod tests {
 
     /// The cache serves every directory the machine scans, so a run writes
     /// back what it did not look at — but only while the file is still there
-    /// to be matched again.
+    /// to be matched again; at this run's settings or another's alike.
     #[test]
-    fn carry_over_keeps_what_is_still_on_disk_and_not_this_run() {
+    fn what_a_run_was_not_asked_about_is_carried_while_it_is_there() {
         let dir = scratch("carry");
         let here = dir.join("here.jpg");
         std::fs::write(&here, b"x").unwrap();
         let gone = dir.join("gone.jpg");
-
-        let record = || (
-            Key { len: 1, mtime: 2, ctime: 2 },
-            None,
-            Span { at: 0, len: 0 },
-        );
-        let mut cached = HashMap::new();
-        cached.insert(here.clone(), record());
-        cached.insert(gone.clone(), record());
-        cached.insert(PathBuf::from("scanned-this-run.jpg"), record());
-
-        // The walked file's record is gone from the map before this is
-        // called, so what is left is the untouched set.
-        cached.remove(Path::new("scanned-this-run.jpg"));
-        let kept = carry_over(&cached);
-        assert_eq!(kept.len(), 1, "only the untouched file that still exists");
-        assert_eq!(kept[0].0, here);
-
+        let unasked = |path: &Path, here: bool| Unasked { path: path.to_path_buf(), span: Span { at: 0, len: 0 }, here };
+        // And a drive that is not plugged in, which `volume_root` reads off
+        // where systems mount them; nothing is mounted at this one.
+        let away = Path::new("/media/img-fp-test-nobody/Photos/a.jpg");
+        let all = [unasked(&here, true), unasked(&gone, true), unasked(&here, false), unasked(&gone, false), unasked(away, true), unasked(away, false)];
+        let kept: Vec<(&Path, bool)> = carried(&all).into_iter().map(|u| (u.path.as_path(), u.here)).collect();
+        assert_eq!(kept, [(here.as_path(), true), (here.as_path(), false), (away, true), (away, false)], "the files that are still there");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1801,9 +1962,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The magic, and nothing else: the settings are each record's.
-    const HEADER_LEN: u64 = MAGIC.len() as u64;
-
     const SETTINGS: Settings = Settings { work_size: 384, features: 600, thumb: 128 };
 
     fn analysis(n: usize, seed: u8) -> (Features, Thumb) {
@@ -1814,10 +1972,15 @@ mod tests {
         (Features { w: 64, h: 48, kps, desc }, Thumb::new(8, 6, 0.125, vec![seed; 48]))
     }
 
+    /// Records the file holds at other settings, as `read` found them.
+    fn others(store: &Store) -> usize {
+        store.unasked.iter().filter(|u| !u.here).count()
+    }
+
     fn reopen(path: &Path) -> (HashMap<PathBuf, Entry>, Store, bool) {
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = open(path, SETTINGS, &|_| true, &mut problems);
+        let (got, store) = read(path, SETTINGS, &|_| true, &mut problems);
         (got, store, problems.any())
     }
 
@@ -1830,15 +1993,15 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
         let (all, _, _) = reopen(&path);
 
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = open(&path, SETTINGS, &|p| p == Path::new("a.jpg"), &mut problems);
+        let (got, store) = read(&path, SETTINGS, &|p| p == Path::new("a.jpg"), &mut problems);
         assert!(!problems.any() && store.records() == 3 && got.len() == 2);
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f1.desc);
         let b = &got[Path::new("b.jpg")];
@@ -1857,9 +2020,9 @@ mod tests {
         assert!(got.is_empty() && !bad);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         assert_eq!(store.records(), 3);
         drop(store);
 
@@ -1885,14 +2048,14 @@ mod tests {
         let (f, t) = analysis(3, 1);
         let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
         let png = Traits { colour: 7.5, ..Default::default() };
-        let a = store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &jpeg, &f, &t).unwrap();
-        let b = store.append("b.png", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &png, &f, &t).unwrap();
-        let c = store.append("c.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &jpeg, &f, &t).unwrap();
+        let a = store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &jpeg, &f, &t).unwrap();
+        let b = store.put("b.png", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &png, &f, &t).unwrap();
+        let c = store.put("c.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &jpeg, &f, &t).unwrap();
         let measured = kept_colour(12.345);
         assert_eq!(kept_colour(measured), measured, "the same value through any number of rounds");
-        store.keep_colour(a, Path::new("a.jpg"), measured);
-        store.keep_colour(b, Path::new("b.png"), 3.0);
-        store.keep_colour(c, Path::new("not-c.jpg"), 3.0);
+        store.write_colour(a, Path::new("a.jpg"), measured);
+        store.write_colour(b, Path::new("b.png"), 3.0);
+        store.write_colour(c, Path::new("not-c.jpg"), 3.0);
         drop(store);
         let (got, mut store, bad) = reopen(&path);
         assert!(!bad);
@@ -1905,8 +2068,8 @@ mod tests {
         // the front, and is written where it went; `b.png`, left out, is not.
         let entries: Vec<(&Path, Span)> = ["c.jpg", "a.jpg"].iter().map(|p| (Path::new(*p), got[Path::new(*p)].2)).collect();
         assert_eq!(store.compact(&entries).unwrap(), true);
-        store.keep_colour(got[Path::new("c.jpg")].2, Path::new("c.jpg"), 2.0);
-        store.keep_colour(got[Path::new("b.png")].2, Path::new("b.png"), 2.0);
+        store.write_colour(got[Path::new("c.jpg")].2, Path::new("c.jpg"), 2.0);
+        store.write_colour(got[Path::new("b.png")].2, Path::new("b.png"), 2.0);
         drop(store);
         let (again, _, bad) = reopen(&path);
         assert!(!bad && again.len() == 2);
@@ -1916,7 +2079,7 @@ mod tests {
     }
 
     /// A cache that can be read and not written still answers the run, and
-    /// still counts what it holds: the run takes the records it superseded as
+    /// still counts what it holds: `stale` takes the records it superseded as
     /// the difference between that count and the map, which was an underflow
     /// when the count came back as zero.
     #[test]
@@ -1926,9 +2089,9 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
         drop(store);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         let (got, store, bad) = reopen(&path);
@@ -1949,8 +2112,8 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         for cut in [1, 9, b.len / 2, b.len - 1] {
             let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -1960,7 +2123,7 @@ mod tests {
             assert!(!bad, "a torn tail is not a damaged cache");
             assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
-            store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+            store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
             drop(store);
             let (got, _, bad) = reopen(&path);
             assert!(!bad && got.len() == 2);
@@ -1987,9 +2150,9 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
@@ -2009,8 +2172,8 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         // A path length past `MAX_PATH` but inside the file's size.
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -2031,10 +2194,10 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(40, 3);
-        store.append("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.append("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.append("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let shape = store.append("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let shape = store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         // b's first stream: its length is intact, its deflate is not.
@@ -2045,7 +2208,7 @@ mod tests {
         drop(file);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = open(&path, SETTINGS, &|p| !p.starts_with("other"), &mut problems);
+        let (got, store) = read(&path, SETTINGS, &|p| !p.starts_with("other"), &mut problems);
         assert!(problems.any(), "a damaged record is worth saying");
         let mut names: Vec<_> = got.keys().cloned().collect();
         names.sort();
@@ -2068,7 +2231,7 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f, _) = analysis(10, 2);
         let t = Thumb::new(400, 30, 0.125, vec![2; 400 * 30]);
-        store.append("wide.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (3200, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("wide.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (3200, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad, "a wide thumbnail is not damage");
@@ -2086,7 +2249,7 @@ mod tests {
         let (f, t) = analysis(20, 5);
         let names: Vec<String> = (0..8).map(|i| format!("{i}.jpg")).collect();
         let spans: Vec<Span> =
-            names.iter().map(|p| store.append(p, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap()).collect();
+            names.iter().map(|p| store.put(p, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap()).collect();
         let keeping = |k: usize| -> Vec<(&Path, Span)> { (0..k).map(|i| (Path::new(names[i].as_str()), spans[i])).collect() };
         assert!(!store.worth_compacting(&keeping(8), false), "nothing unused");
         assert!(!store.worth_compacting(&keeping(7), false), "one record of eight is not a quarter");
@@ -2107,10 +2270,10 @@ mod tests {
         let key = Key { len: 1, mtime: 1, ctime: 1 };
         let (_, mut a, _) = reopen(&path);
         let (_, b, _) = reopen(&path);
-        a.append("old.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        a.put("old.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
         // `a` drops `old.jpg` while `b` has the file: it is left as it is.
         assert!(!a.compact(&mut []).unwrap(), "put off");
-        b.append("b.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        b.put("b.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop((a, b));
         let (got, mut store, _) = reopen(&path);
         assert!(got.contains_key(Path::new("b.jpg")), "b's record is in the file the name leads to");
@@ -2136,13 +2299,13 @@ mod tests {
         let key = Key { len: 1, mtime: 1, ctime: 1 };
         let newer = Key { len: 2, mtime: 2, ctime: 2 };
         let (_, mut a, _) = reopen(&path);
-        let mine = a.append("mine.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        a.append("dead.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let shared = a.append("shared.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let mine = a.put("mine.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        a.put("dead.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let shared = a.put("shared.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
         let (_, b, _) = reopen(&path);
-        b.append("other.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        b.put("other.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
         // The other run described a file this one has a record for, after it.
-        b.append("shared.jpg", newer, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        b.put("shared.jpg", newer, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(b);
         let keep = [(Path::new("mine.jpg"), mine), (Path::new("shared.jpg"), shared)];
         // Only `dead.jpg` is dead: the other run's two records are live.
@@ -2155,6 +2318,68 @@ mod tests {
         let s = &got[Path::new("shared.jpg")];
         assert_eq!((s.0.len, &s.1.as_ref().unwrap().feats.desc), (2, &f2.desc), "the later record still wins");
         assert_eq!(store.records(), 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What a run keeps is what it took and what it made, and what it was
+    /// not asked about while its file is there: a walked file's record that
+    /// no longer fits it, or that the run left untaken (a copy whose bytes
+    /// another file answers for), is not kept, nor one for a file that has
+    /// gone. A colour kept afterwards goes into the record where it went.
+    #[test]
+    fn a_run_keeps_what_it_took_and_made() {
+        let dir = scratch("run");
+        let path = dir.join(file_name());
+        let [a, b, c, other, gone] = ["a.jpg", "b.jpg", "c.jpg", "other.jpg", "gone.jpg"].map(|n| dir.join(n));
+        for f in [&a, &b, &c, &other] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let (f, t) = analysis(6, 4);
+        let (f2, t2) = analysis(3, 9);
+        let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
+        let (old, new) = (Key { len: 1, mtime: 1, ctime: 1 }, Key { len: 2, mtime: 2, ctime: 2 });
+        let (_, store, _) = reopen(&path);
+        for p in [&a, &b, &c, &other, &gone] {
+            store.put(p, old, (320, 240), &jpeg, &f, &t).unwrap();
+        }
+        drop(store);
+
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let files = vec![(a.clone(), Some(old)), (b.clone(), Some(old)), (c.clone(), Some(new))];
+        let mut store = open(&path, SETTINGS, files, &mut problems);
+        assert_eq!(store.usable(), 5);
+        assert!(store.take(0).is_some_and(|r| r.feats.desc == f.desc));
+        assert!(store.take(0).is_none(), "taken once");
+        assert!(store.take(2).is_none(), "c has changed since its record");
+        assert!(store.stale(), "b's record is not taken and c's no longer fits");
+        store.append(2, (320, 240), &jpeg, &f2, &t2);
+        let kept = store.finish(false);
+        assert_eq!((kept.carried, kept.other_sizes, kept.dropped), (1, 0, 1), "other.jpg carried, gone.jpg not");
+        assert!(matches!(kept.compacted, Compacted::Done), "three of six records are dead");
+        store.keep_colour(0, 5.0);
+        store.keep_colour(1, 5.0);
+        drop(store);
+
+        let (got, store, bad) = reopen(&path);
+        assert!(!bad && store.records() == 3);
+        let mut names: Vec<&Path> = got.keys().map(PathBuf::as_path).collect();
+        names.sort();
+        assert_eq!(names, [a.as_path(), c.as_path(), other.as_path()]);
+        assert_eq!(got[&c].0, new);
+        assert_eq!(got[&c].1.as_ref().unwrap().feats.desc, f2.desc);
+        assert_eq!(got[&a].1.as_ref().unwrap().traits.colour_kept, Some(5.0), "written where the compaction put it");
+        drop(store);
+
+        // Pruned: only what the run took or made.
+        let mut store = open(&path, SETTINGS, vec![(a.clone(), Some(old))], &mut problems);
+        assert!(store.take(0).is_some() && !store.stale());
+        let kept = store.finish(true);
+        assert_eq!((kept.carried, kept.dropped), (0, 2));
+        drop(store);
+        let (got, _, _) = reopen(&path);
+        assert_eq!(got.keys().collect::<Vec<_>>(), [&a]);
+        assert!(!problems.any());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2187,12 +2412,13 @@ mod tests {
         std::fs::create_dir_all(&locked).unwrap();
         let f = locked.join("a.jpg");
         std::fs::write(&f, b"x").unwrap();
-        let mut m: HashMap<PathBuf, Entry> = HashMap::new();
-        m.insert(f.clone(), (Key { len: 1, mtime: 1, ctime: 1 }, None, Span { at: 8, len: 10 }));
-        m.insert(dir.join("deleted.jpg"), (Key { len: 1, mtime: 1, ctime: 1 }, None, Span { at: 18, len: 10 }));
+        let m = [
+            Unasked { path: f.clone(), span: Span { at: 8, len: 10 }, here: true },
+            Unasked { path: dir.join("deleted.jpg"), span: Span { at: 18, len: 10 }, here: false },
+        ];
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let reachable = std::fs::metadata(&f).is_ok();
-        let kept: Vec<PathBuf> = carry_over(&m).into_iter().map(|(p, _)| p.to_path_buf()).collect();
+        let kept: Vec<PathBuf> = carried(&m).into_iter().map(|u| u.path.clone()).collect();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
         // Root reads through any mode, and then the file is simply there.
@@ -2221,7 +2447,7 @@ mod tests {
         let (f, t) = analysis(6, 4);
         let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
             .iter()
-            .map(|p| store.append(p, Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap())
+            .map(|p| store.put(p, Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap())
             .collect();
         let mut store = store;
         let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
@@ -2244,7 +2470,7 @@ mod tests {
             assert!(got.is_empty() && !bad && store.records() == 0);
             assert_eq!(store.other_version(), Some(std::str::from_utf8(other).unwrap()));
             let (f, t) = analysis(6, 4);
-            assert!(store.append("d.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).is_none());
+            assert!(store.put("d.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).is_none());
             assert!(!store.worth_compacting(&[], true));
             drop(store);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "the file is not touched");
@@ -2263,36 +2489,36 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(6, 4);
-        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.append("b.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("b.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
 
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
         let other = Settings { work_size: 640, ..SETTINGS };
-        let (got, store) = open(&path, other, &|_| true, &mut problems);
+        let (got, store) = read(&path, other, &|_| true, &mut problems);
         assert!(got.is_empty() && !problems.any());
-        assert_eq!((store.records(), store.other_settings().len()), (2, 2));
+        assert_eq!((store.records(), others(&store)), (2, 2));
         let (f2, t2) = analysis(3, 9);
-        store.append("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
 
         // Back at the first size: its two records, and the 640 one carried.
         let (got, store, bad) = reopen(&path);
         assert!(!bad);
-        assert_eq!((got.len(), store.records(), store.other_settings().len()), (2, 3, 1));
+        assert_eq!((got.len(), store.records(), others(&store)), (2, 3, 1));
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f.desc);
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().dims, (320, 240));
         // A compaction that keeps both kinds keeps both.
         let mut store = store;
         let mut keep: Vec<(&Path, Span)> = got.iter().map(|(p, e)| (p.as_path(), e.2)).collect();
-        let others = store.other_settings().to_vec();
+        let others: Vec<(PathBuf, Span)> = store.unasked.iter().map(|u| (u.path.clone(), u.span)).collect();
         keep.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
         assert!(store.compact(&mut keep).unwrap());
         drop(store);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = open(&path, other, &|_| true, &mut problems);
+        let (got, store) = read(&path, other, &|_| true, &mut problems);
         assert_eq!((got.len(), store.records()), (1, 3));
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
         std::fs::remove_dir_all(&dir).ok();
@@ -2312,8 +2538,8 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.append(&fe, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.append(&ff, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put(&fe, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put(&ff, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad);

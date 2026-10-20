@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.55.0)
+## Status (0.56.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -72,7 +72,7 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     a PNG of page 1.
   - **C**: TIFF-container camera raw (`DNGVersion`, `CR` at byte 8, a
     reduced-resolution first directory, or `Make` + `SubIFDs`) is refused
-    as a skip (`decode::CAMERA_RAW`), still in the exact pass. Before: read
+    as a skip (`decode::Refused::CameraRaw`), still in the exact pass. Before: read
     as its 256-px preview and DELETE beside its JPEG under `-x '*'`.
   - **D**: a 16-bit master next to two JPEGs of its 8-bit export was
     outside `TAU` (7.96 summed, 0.5/cell: one requantisation) and was
@@ -235,6 +235,42 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   -> 11.1 MB. Cached IMGS-ALL (ABBA): CPU 467.0 / 481.3 base, 454.9 / 476.8
   new; peak RssAnon+swap 610 / 609 MB base, 605 / 612 new. Code lines (no
   comments or blanks, tests included) in the files touched 9,741 -> 9,398.
+- 0.56.0 (a file's analysis and the cache rebuilt; see *The analysis and
+  the cache*): before, `pipeline::analyse_all` did the cache's bookkeeping:
+  it held the cache's map, took each walked file's record out and compared
+  keys by hand (`in_cache`, `same_key`), moved a byte copy's record to its
+  original, worked out `superseded` and the bar's `rewrite`, and carried
+  `names` and `span_of` through `Analysed` into the suggestion for
+  `keep_colour`; what survives was assembled in `save_cache` from four
+  lists (this run's spans, `carry_over` over what was left in the map,
+  `other_settings` filtered by `gone`, the store's own `foreign`). `Item`
+  was `ok` / `err` / `damaged` (a copy's placeholder: not ok, no error), and
+  skips were told from problems by comparing error strings. Now
+  `cache::open` takes the run's files and the store answers by number
+  (`take`, `append`, `keep_colour`); `Store::finish` is the one keep rule;
+  `Item::read` is an `analysis::Read`; `decode::Refused` is a typed error.
+  Drift fixed: a record made at another `--work-size` for a file on an
+  unplugged drive was dropped (it was asked `gone` alone; only this run's
+  settings were asked `unmounted`): one rule now, `cache::carried`.
+  Proved: 200 random histories (4,836 scans at `-t 1` over subsets of a
+  scratch tree, with deletions, chmods, byte copies, rewrites, added files,
+  moved folders, two working sizes, `--prune-cache`, all three rules), base
+  and new on the same tree: cache file bytes, reports, logs, stdout,
+  stderr and exit codes identical (one seed's logs differed in timestamp
+  width only); the `ref.sh` battery identical, and its three caches
+  identical record for record (compared as multisets: at `-t 8` the append
+  order varies run to run); all 90 `pairs.py` reports and the cache they
+  leave identical; the `--last` battery identical. Interrupted runs keep
+  their records and the next run reads them; two runs started at once on a
+  new cache file kept both runs' records in 12 full trials and 80 small ones
+  per build (one early base trial lost the second run's records, not
+  reproduced; the open/lock code is unchanged). Window under Xvfb: its
+  worker fills a cache the CLI then reads whole (635 / 635), and a scan from
+  the window shows the CLI's 64 groups. Cached IMGS-ALL (ABBA): CPU 530.4 / 517.4 base (the first at 2,010 MHz, idle 83 C), 494.0 / 517.2 new; peak RssAnon+swap 626 / 604 MB base, 603 / 601 new; reports identical. Code lines (no comments or
+  blanks, tests included) in the files touched 5,997 -> 6,106 (cache.rs
+  +138, of which tests +47; pipeline.rs -84; lib.rs -61; analysis.rs +104
+  new): the cache's API is wider (`Asked`, `Unasked`, `Kept`, `Compacted`)
+  and the pipeline narrower.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -303,6 +339,8 @@ src/
   pipeline.rs   one scan as stages: run -> analyse_all -> retrieve_and_verify
                 -> second_look -> cluster -> assemble -> finish
   main.rs       img-fp: calls cli_main
+  analysis.rs   one file's analysis (`Item`) and what reading it came to
+                (`Read`); `analyse`, `Planes`
   gui/          img-fp-gui (feature `gui`, GTK 4.10+)
   decode/       a file to a grey working plane, its traits, or a preview
     mod.rs      public API; `open` (the one choice of format), probe, previews
@@ -322,7 +360,8 @@ src/
   same.rs       which files are one file (bytes, analysis, colour), and their pairs
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
-  cache.rs      on-disk analysis cache
+  cache.rs      on-disk analysis cache: answers for a run's files by number,
+                and decides what the file keeps (`Store::finish`)
   outcome.rs    a finished scan (groups by number, evidence, content rule's
                 suggestions), as the report, --last and the window read it
   report.rs     text / CSV / JSON reports, written from an Outcome
@@ -434,10 +473,36 @@ else through `preview(256)`; `probe` reads headers with each module's
 `decode::tests::fingerprints` on IMGS-ALL + the found corpus, base build
 against new.
 
+A file `decode` turns away for what it is is a typed error,
+`decode::Refused` (`NotAnImage`, `MacMetadata`, `CameraRaw`), read back with
+`decode::refused`; what it is to a run is `analysis::Read`'s.
+
 **Adding a format or a question**: a format is a module with `open` (its
 `Facts` and its reader) and `size`, and one arm in `decode::open` and
 `probe_header`; a question of the pixels is a `Sink`. Not an `if` on the
 format inside a sink, nor on the sink inside a reader.
+
+## The analysis and the cache (`analysis.rs`, `cache.rs`)
+
+A file's analysis is an `Item` whose `read` says what reading the file came
+to: `Whole`, `Damaged(why)` (analysed, never cached), `Refused(decode::Refused)`
+or `Failed(why)`. Skips, problems, the report's `failures`, what may be
+cached and what is matched all read that one field (`tell_problems`,
+`Read::ok`, `damaged`, `error`); nothing compares error strings.
+
+The cache is opened with the run's files (canonical name, key) and answers
+for them by number: `take(i)` hands over a record whose key is the file's
+(once; the pipeline takes a byte group's first record for its original),
+`append(i, ..)` keeps one made for it, `keep_colour(i, c)` writes a JPEG's
+colour where its record now is. `finish(prune)` is the one keep rule:
+this run's taken and made records, plus every record it was not asked
+about whose file is there (`carried`), plus what another run appended
+meanwhile; compacted when the rest is a quarter. `stale()` is only the
+progress bar's guess at whether it will write.
+
+**Adding a record kind or a reason to keep one**: a field of `Asked` or
+`Unasked` and a condition in `finish` / `carried`. Not bookkeeping in the
+pipeline (names, spans, counts of the cache's map).
 
 ## The claim graph (`claims.rs`, `verify::Policy`)
 
@@ -569,7 +634,7 @@ Each was measured; changing one needs a re-measure.
 - **Area rule** (`decode::area_factor`, 0.44.0): a picture wider than 4:3
   gets the pixels a 4:3 one gets (factor `sqrt(3/4 * long/short)`, thumbnail
   too, capped by `THUMB_MAX_SIDES`). 4:3 or squarer is untouched.
-- **Enlargement** (`upsample_below`, `lib::enlarge_below`): small pictures
+- **Enlargement** (`upsample_below`, `analysis::enlarge_below`): small pictures
   doubled up to `min(work, 512)`, never past the working size. 512 is the low
   edge of a plateau; no cap on the factor.
 - **EXIF orientation** is applied to the working plane, not the decoded
@@ -964,10 +1029,11 @@ Do not retry without new evidence:
   `--clear-cache`.
 - **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC15.bin`
   (named for its format, so upgrades start a new file). Records keyed by
-  canonical path + size + mtime + ctime, settings per record. Records for
-  paths a run did not walk are carried over while the file exists, or
-  while its volume (`/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) is
-  unmounted (`cache::volume_root`). Appended as made; compacted only when
+  canonical path + size + mtime + ctime, settings per record. A run keeps
+  what it took and made, and every record it was not asked about (a path it
+  did not walk, or other settings) while the file exists or its volume
+  (`/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) is unmounted
+  (`cache::carried`, `volume_root`). Appended as made; compacted only when
   dead bytes reach a quarter. Runs sharing the file hold it with `flock`
   shared; compaction, header writing and torn-tail repair need it alone
   (`exclusive`, never waited for) and are skipped otherwise: a compaction

@@ -78,11 +78,6 @@ impl Same {
         Same { analysis: bytes.clone(), colour: bytes.clone(), bytes, groups, at, classes }
     }
 
-    /// The sets of identical bytes.
-    pub(crate) fn byte_groups(&self) -> &[Vec<usize>] {
-        &self.groups
-    }
-
     /// The file whose bytes `i` is: the one described for it.
     pub(crate) fn original(&self, i: usize) -> usize {
         self.bytes[i]
@@ -124,7 +119,7 @@ impl Same {
     fn settle(&mut self, items: &[Item], same_colour: impl Fn(usize, usize) -> bool + Sync) {
         let n = self.bytes.len();
         let pixel_of =
-            same_analysis(items, |i| !self.is_copy(i) && items[i].ok && items[i].feats.len() > 0 && !items[i].traits.frames);
+            same_analysis(items, |i| !self.is_copy(i) && items[i].read.ok() && items[i].feats.len() > 0 && !items[i].traits.frames);
         let head = colour_heads(&pixel_of, same_colour);
         self.analysis = (0..n).map(|i| pixel_of[self.bytes[i]]).collect();
         self.colour = (0..n).map(|i| head[self.bytes[i]]).collect();
@@ -218,7 +213,7 @@ impl Same {
 /// working size — a photograph saved again as PNG, TIFF or lossless WebP, a
 /// JPEG with its metadata stripped — and matching them separately compares a
 /// picture with itself. It is decided from the analysis rather than from the
-/// plane (as `Planes` does), so that a cached run, which decodes nothing,
+/// plane (as `analysis::Planes` does), so that a cached run, which decodes nothing,
 /// decides it alike. A hash of the keypoints and the thumbnail finds the
 /// candidates, and every one is then compared whole, descriptors included: a
 /// shared hash is a reason to compare, as in the exact pass.
@@ -391,9 +386,7 @@ mod tests {
             feats: Arc::new(f),
             thumb: Arc::new(Thumb::new(4, 3, 0.0625, vec![t; 12])),
             dims: (640, 480),
-            ok: true,
-            err: None,
-            damaged: None,
+            read: Default::default(),
             traits: Default::default(),
         }
     }

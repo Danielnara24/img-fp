@@ -245,7 +245,7 @@ impl<'a> Problems<'a> {
         record(self.log, &mut self.mac_metadata, "skip/mac-metadata", path.into());
     }
 
-    /// A camera's raw file in a TIFF container (`decode::CAMERA_RAW`). Its
+    /// A camera's raw file in a TIFF container (`decode::Refused::CameraRaw`). Its
     /// first picture is the camera's preview, a few hundred pixels across,
     /// and read as the photograph it was judged at that size and suggested
     /// for deletion beside the camera's own JPEG of it. Not read, so a skip:
@@ -348,8 +348,9 @@ impl<'a> Problems<'a> {
     /// one of its roots would throw away good records for files that are
     /// still there, and the cache is the one thing a run keeps. Every other
     /// problem leaves the walk's own account complete — an image that would
-    /// not decode was still *found*, and its record is dropped for the reason
-    /// `carry_over` gives rather than for this one.
+    /// not decode was still *found*, and its record is dropped because the
+    /// run neither took nor made one for it (`cache::Store::finish`), not for
+    /// this reason.
     pub fn walk_was_complete(&self) -> bool {
         self.unscannable.count == 0
     }

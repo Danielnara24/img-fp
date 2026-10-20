@@ -1,6 +1,7 @@
 //! What format a file's bytes are, and whether they are a picture at all:
 //! asked of a file's head before the rest of it is read.
 
+use super::Refused;
 use anyhow::{bail, Context, Result};
 use image::ImageFormat;
 use std::path::Path;
@@ -34,25 +35,14 @@ pub const EXTENSIONS: [&str; 37] = [
     "hdr", "ff",
 ];
 
-/// The error `decode` gives for a macOS metadata file (AppleDouble or
-/// AppleSingle, by its first four bytes): the `._` twin a Mac leaves beside a
-/// file it copies, which carries the picture's name and none of its pixels.
-/// A skip whatever it is called; see `problems::Problems::mac_metadata`.
-pub const MAC_METADATA: &str = "a macOS metadata file, not a picture";
-
 /// Whether a file's head is AppleDouble's or AppleSingle's magic number.
 fn mac_metadata(head: &[u8]) -> bool {
     matches!(head.get(..4), Some([0x00, 0x05, 0x16, 0x07] | [0x00, 0x05, 0x16, 0x00]))
 }
 
-/// The error `decode` gives for bytes that are no picture format at all, as
-/// opposed to a picture that would not decode. Under a wildcard walk the first
-/// is a file that never claimed to be an image, and is a skip, not a problem.
-pub const NOT_AN_IMAGE: &str = "not an image";
-
 /// The format of a file whose head is `head`: by its signature (`sniff`),
 /// and failing that by `unmarked_format`. `None` is a file that is no
-/// picture this can read, which `decode` refuses with `NOT_AN_IMAGE`.
+/// picture this can read, which `decode` refuses with `Refused::NotAnImage`.
 pub(super) fn identify(head: &[u8], path: &Path) -> Option<Kind> {
     sniff(head).or_else(|| unmarked_format(head, path).map(Kind::Image))
 }
@@ -218,7 +208,7 @@ fn pnm_header_starts(b: &[u8]) -> bool {
 /// reads twelve bytes and `image::guess_format` no more than that.
 const HEAD: usize = 64;
 
-/// A file's bytes, if its first few say it is a picture; `NOT_AN_IMAGE`
+/// A file's bytes, if its first few say it is a picture; `Refused::NotAnImage`
 /// without reading the rest if they say it is not.
 ///
 /// Whole files used to be read first and asked second. Under `-x '*'` a walk
@@ -241,22 +231,22 @@ pub(super) fn open_if_image(path: &Path) -> Result<(std::fs::File, Vec<u8>, u64)
     let mut bytes = Vec::with_capacity(HEAD);
     (&mut f).take(HEAD as u64).read_to_end(&mut bytes).with_context(ctx)?;
     if mac_metadata(&bytes) {
-        bail!(MAC_METADATA);
+        bail!(Refused::MacMetadata);
     }
     if !head_is_image(&bytes, path) {
-        bail!(NOT_AN_IMAGE);
+        bail!(Refused::NotAnImage);
     }
     let len = f.metadata().map_or(bytes.len() as u64, |m| m.len());
     Ok((f, bytes, len))
 }
 
 /// Whether a file's head says it may be a picture: the test `decode` makes
-/// before it reads any more of the file, and refuses with `NOT_AN_IMAGE`.
+/// before it reads any more of the file, and refuses with `Refused::NotAnImage`.
 fn head_is_image(head: &[u8], path: &Path) -> bool {
     identify(head, path).is_some()
 }
 
-/// `false` when `decode` would turn this file away as `NOT_AN_IMAGE` on its
+/// `false` when `decode` would turn this file away as `Refused::NotAnImage` on its
 /// head alone; `true` when it may be a picture, and when the file cannot be
 /// read, which is the decode's to report.
 ///

@@ -350,7 +350,7 @@ fn a_mac_metadata_file_is_not_a_broken_picture() {
     b.extend_from_slice(b"Mac OS X        ");
     b.resize(4096, 0);
     std::fs::write(&path, &b).unwrap();
-    assert_eq!(decode(&path, 512).err().map(|e| e.to_string()).as_deref(), Some(MAC_METADATA));
+    assert_eq!(decode(&path, 512).err().as_ref().and_then(refused), Some(Refused::MacMetadata));
     assert!(!may_be_image(&path));
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -835,11 +835,11 @@ fn a_file_that_is_no_picture_is_refused_from_its_head() {
     let big = dir.join("video.bin");
     std::fs::File::create(&big).unwrap().set_len(1 << 30).unwrap();
     let e = decode(&big, 384).err().unwrap();
-    assert_eq!(e.to_string(), NOT_AN_IMAGE);
+    assert_eq!(refused(&e), Some(Refused::NotAnImage));
     // Short files, and a picture's head followed by a body.
     let tiny = dir.join("tiny");
     std::fs::write(&tiny, b"P").unwrap();
-    assert_eq!(decode(&tiny, 384).err().unwrap().to_string(), NOT_AN_IMAGE);
+    assert_eq!(refused(&decode(&tiny, 384).err().unwrap()), Some(Refused::NotAnImage));
     let mut png = Vec::new();
     image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(40, 30, |x, y| image::Luma([(x * 5 + y * 3) as u8])))
         .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
@@ -1028,7 +1028,7 @@ fn a_tga_is_decoded_by_its_name() {
     assert!(preview(&named, 64).is_ok());
     let other = dir.join("pic.bin");
     std::fs::write(&other, &tga).unwrap();
-    assert_eq!(decode(&other, 384).err().unwrap().to_string(), NOT_AN_IMAGE);
+    assert_eq!(refused(&decode(&other, 384).err().unwrap()), Some(Refused::NotAnImage));
     std::fs::remove_dir_all(&dir).ok();
 }
 

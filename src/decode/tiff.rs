@@ -16,7 +16,7 @@ use std::io::Cursor;
 pub(super) fn open(bytes: &[u8]) -> Result<Picture<'_>> {
     let head = Head::of(bytes);
     if head.raw {
-        bail!(super::CAMERA_RAW);
+        bail!(super::Refused::CameraRaw);
     }
     Ok(Picture::new(
         move || Facts {

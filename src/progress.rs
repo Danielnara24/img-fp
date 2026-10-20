@@ -604,7 +604,7 @@ pub fn analysis_cost(probe: Option<&Probe>, bytes: u64, work: usize, upsample_be
     let long = w.max(h).max(1.0);
     let s = if work > 0 && long > work as f64 { work as f64 / long } else { 1.0 };
     let (bw, bh) = ((w * s).round().max(1.0), (h * s).round().max(1.0));
-    // Enlarged no further than the working size (`lib::enlarge_below`).
+    // Enlarged no further than the working size (`analysis::enlarge_below`).
     let below = if work > 0 { upsample_below.min(work) } else { upsample_below };
     let mut factor = 1.0;
     while bw.max(bh) * factor * 2.0 <= below.max(2) as f64 {

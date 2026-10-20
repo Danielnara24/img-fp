@@ -49,7 +49,7 @@ pub struct Params {
     pub edge: f32,
     pub max_features: usize,
     /// Images are doubled while twice their long side still fits in this, and
-    /// never past the working size (`lib::enlarge_below`).
+    /// never past the working size (`analysis::enlarge_below`).
     ///
     /// Swept on the three generated corpora at work sizes 384 and 640, and on
     /// the found corpus (`out/v15-enlargement`): no enlargement at all costs
