@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.54.0)
+## Status (0.54.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -206,6 +206,10 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   RssAnon+swap 617 / 623 MB base, 614 / 612 new (no copy of the anchors
   held through propagation). Code lines flat (4,784 -> 4,778 in the files
   touched).
+- 0.54.1 (window only): options set away from their default are kept
+  between runs (`gui.json` `options`, `settings::Kept`); untouched ones
+  are not written, so they follow a moved default. Checked in the window
+  under Xvfb: changed, scanned, reopened, restored defaults.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -858,8 +862,10 @@ Do not retry without new evidence:
   (`Results::least_row`; an overlay measures as its main child only), no
   step down while all is on screen. `flow` ends each row where its height is
   nearest the target (stretch or shrink), not always after the overflow.
-- Only paths persist (`$XDG_CONFIG_HOME/img-fp/gui.json`); options open at
-  CLI defaults; `recursive` on. Folders on the command line replace the
+- Paths persist (`$XDG_CONFIG_HOME/img-fp/gui.json`), and options only
+  where set away from their default, under `options` (`settings::Kept`), so
+  an untouched one follows a moved default; clear/prune cache never kept;
+  `recursive` on by default. Folders on the command line replace the
   remembered ones. Last scan and its marks (`marks.json`, keyed by scan id)
   kept in `$XDG_CACHE_HOME/img-fp/last-scan/`.
 - Testing: Xvfb + `xdotool windowfocus --sync` + `import -window root`;

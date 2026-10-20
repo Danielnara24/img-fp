@@ -10,8 +10,8 @@
 //! The window itself is plain GTK 4, with no libadwaita and no builder files:
 //!
 //! - `setup.rs`   what to scan and how, on two tabs, and the scan's progress
-//! - `settings.rs` those choices as a value: the paths kept between runs, the
-//!   options starting at img-fp's defaults, and all of it turned into an
+//! - `settings.rs` those choices as a value: what is kept between runs (the
+//!   paths, and options set away from img-fp's defaults), and all of it turned into an
 //!   img-fp command line
 //! - `scan.rs`    the child process and what it says
 //! - `results.rs` the groups, for choosing what to move to the Trash
