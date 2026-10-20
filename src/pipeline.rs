@@ -1,6 +1,8 @@
 //! One scan, from the paths asked for to the report: `run` and its stages.
 
 use super::*;
+use claims::{Claim, Clusters, How, Propagation};
+use verify::Standing;
 
 /// What every stage of a run reads: what it was asked, and where it says
 /// what it is doing.
@@ -247,15 +249,16 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
     say!(cx, "Analysis complete. Matching {}...", count(analysed.n_ok, "image", "images"));
     let policy = verify::Policy::new(aligned_points(args), args.min_frame_overlap, args.min_pixel_correlation);
     // What a verdict must already have before its pixels are worth reading:
-    // the weakest bar any tier applies, or everything a dump would record.
+    // what the lowest standing asks (`Policy::gate`), or everything a dump
+    // would record.
     //
     // A dump widens the gate and never narrows it: the bars the run's own
     // tiers use still decide, so a run with `--dump` finds the pairs the same
     // run without it finds. (It used to *set* the gate to (3, 0.2), which is
     // tighter than a `--min-frame-overlap` below 0.2 and so lost pairs.)
     let mut dump = args.dump.is_some().then(Dump::default);
-    let tier_gate = (policy.corroborated.min_aligned_points, policy.corroborated.min_frame_overlap);
-    let gate = if dump.is_some() { (tier_gate.0.min(3), tier_gate.1.min(0.2)) } else { tier_gate };
+    let gate = policy.gate();
+    let gate = if dump.is_some() { (gate.0.min(3), gate.1.min(0.2)) } else { gate };
     let pass = Pass { items, matched: &matched, policy: &policy, gate, dumping: dump.is_some() };
     let (index, all_direct, verified) = retrieve_and_verify(&cx, &scope, &pass);
     let variant_edges = second_look(&cx, &scope, &pass, index, &all_direct, dump.as_mut());
@@ -735,7 +738,7 @@ fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted,
 }
 
 /// What both verification passes read: the files, which of them are
-/// matched (`run`), the acceptance tiers, and the gate a verdict must clear
+/// matched (`run`), the acceptance bars, and the gate a verdict must clear
 /// before its pixels are read.
 struct Pass<'a> {
     items: &'a [Item],
@@ -754,9 +757,10 @@ impl Pass<'_> {
     /// Candidate `j` put to the geometry and the pixels against file `i`,
     /// whose features under `variant` are `fi` and their words `wi` (its own
     /// for the direct pass). The edge, from the lower index to the higher,
-    /// when `tier` accepts it or `--dump` records it, and whether `tier` did.
+    /// when it stands at least `least` or `--dump` records it, and whether it
+    /// does.
     #[allow(clippy::too_many_arguments)]
-    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, tier: &verify::Rules, (cands, matches, scratch): &mut Work) -> Option<(Edge, bool)> {
+    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, least: Standing, (cands, matches, scratch): &mut Work) -> Option<(Edge, bool)> {
         timed!(15, index::shared(wi, &lists[j], cands, 60_000));
         if cands.len() < 3 {
             return None;
@@ -769,7 +773,7 @@ impl Pass<'_> {
             tb: &items[j].thumb,
         };
         let v = verify::verify(&p, cands, variant, self.gate, matches, scratch);
-        let accepted = v.accepted(tier);
+        let accepted = self.policy.standing(&v) >= least;
         if !accepted && !(self.dumping && v.n_in >= 3) {
             return None;
         }
@@ -787,7 +791,7 @@ impl Pass<'_> {
 /// and a copy was another hundred-odd megabytes held through the second look,
 /// which is where a large corpus's run peaks.
 fn anchors<'a>(direct: &'a [Edge], policy: &'a verify::Policy) -> impl Iterator<Item = Edge> + 'a {
-    direct.iter().filter(|e| e.v.accepted(&policy.anchor)).copied()
+    direct.iter().filter(|e| policy.standing(&e.v) >= Standing::Anchor).copied()
 }
 
 /// The vocabulary and every matched file's words, which the second look asks
@@ -950,8 +954,7 @@ fn retrieve_and_verify<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> (Index<'
                     b.tick();
                 }
                 let (i, j) = (i as usize, j as usize);
-                let tier = &pass.policy.corroborated;
-                pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::default(), tier, work).map(|(e, _)| e)
+                pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::default(), Standing::Corroborating, work).map(|(e, _)| e)
             }))
             .flatten()
             .collect();
@@ -964,7 +967,7 @@ fn retrieve_and_verify<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> (Index<'
     let mut next = vec![false; n];
     for e in &all_direct[from..] {
         let (i, j) = e.ends();
-        if e.v.accepted(&pass.policy.anchor) {
+        if pass.policy.standing(&e.v) >= Standing::Anchor {
             for (x, y) in [(i, j), (j, i)] {
                 if asked[x] && scope.library[y] && !asked[y] {
                     next[y] = true;
@@ -1052,17 +1055,12 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: Index, direct: &[Edg
         // matches; see above.
         let mut rep = vec![false; n];
         if scope.against {
-            let mut d = Dsu::new(n);
-            for e in anchors(direct, policy) {
-                if e.v.accepted(&policy.clean) {
-                    d.union(e.a(), e.b());
-                }
-            }
+            let d = Clusters::joined(n, anchors(direct, policy).filter(|e| policy.standing(&e.v) == Standing::Clean));
             // Per component: whether a scanned file is in it, and its best-
             // connected member, ties to the lowest index.
             let mut best: HashMap<usize, (bool, usize)> = HashMap::new();
             for i in (0..n).filter(|&i| degree[i] > 0) {
-                let e = best.entry(d.find(i)).or_insert((false, i));
+                let e = best.entry(d.id(i)).or_insert((false, i));
                 e.0 |= !scope.library[i];
                 if degree[i] > degree[e.1] {
                     e.1 = i;
@@ -1172,7 +1170,7 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: Index, direct: &[Edg
                     // An anchor, or — for `--dump`, which records every
                     // verdict the geometry could fit, as the direct pass's
                     // does — anything with three aligned points.
-                    out.extend(pass.verify(&lists, i, &vf[v], &wl[v], j, variants[v], &policy.anchor, work));
+                    out.extend(pass.verify(&lists, i, &vf[v], &wl[v], j, variants[v], Standing::Anchor, work));
                 }
                 bar.add(w);
                 out
@@ -1196,8 +1194,8 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: Index, direct: &[Edg
 
 /// From anchors to the run's claims: drop weak bridges, admit weak anchors
 /// into the clusters the clean ones make, propagate transforms inside each
-/// cluster, and corroborate the weaker direct matches inside them. The
-/// anchors, the propagated pairs and the corroborated ones.
+/// cluster, and corroborate the weaker direct matches inside them: the
+/// run's claims, in that order.
 fn cluster(
     cx: &Ctx,
     items: &[Item],
@@ -1206,7 +1204,7 @@ fn cluster(
     variant_edges: &[Edge],
     prop_budget: usize,
     dump: Option<&mut Dump>,
-) -> (Vec<Edge>, Vec<Edge>, Vec<Edge>) {
+) -> Vec<Claim> {
     let progress = &cx.progress;
     let n = items.len();
     let dumping = dump.is_some();
@@ -1215,7 +1213,7 @@ fn cluster(
     // find the other — and a pair counted twice is two links to the bridge
     // test, so a lone match between two clusters stopped being a bridge by
     // being found twice. The direct verdict is kept where there are two.
-    let all: Vec<Edge> = unique_pairs(anchors(direct, policy).chain(variant_edges.iter().copied()));
+    let all: Vec<Edge> = claims::unique_pairs(anchors(direct, policy).chain(variant_edges.iter().copied()));
 
     // Every anchor faces the bridge test, whichever pass produced it: a
     // mirrored match joining two clusters is exactly as consequential as a
@@ -1225,26 +1223,22 @@ fn cluster(
     progress.forecast(|f| f.edges = Some(all.len()));
     progress.begin(Stage::Propagate);
     // Clusters are made from clean anchors, and an anchor that is only an
-    // anchor may add a file to one but never join two; see `admit_anchors`.
-    let (clean, weak): (Vec<Edge>, Vec<Edge>) = all.into_iter().partition(|e| e.v.accepted(&policy.clean));
-    let n_before = clean.len();
-    // A clean anchor the bridge test drops is not thrown away but kept as a
-    // weak one: it may still add a file to a cluster and counts in the cover
-    // test, and joins no two clusters of its own.
-    let (clean, dropped) = drop_weak_bridges(clean, n);
-    let mut weak = weak;
-    weak.extend(dropped);
-    stage!(cx, "bridges: dropped {} lone links between clusters", n_before - clean.len());
-    let n_weak = weak.len();
-    let (all, refused) = admit_anchors(clean, weak, n);
+    // anchor may add a file to one but never join two; see `claims::admit`.
+    let mut clean: Vec<bool> = all.iter().map(|e| policy.standing(&e.v) == Standing::Clean).collect();
+    let demoted = claims::demote_bridges(&all, &mut clean, n);
+    stage!(cx, "bridges: dropped {demoted} lone links between clusters");
+    let n_weak = clean.iter().filter(|&&c| !c).count();
+    let (clusters, mut claimed, refused) = claims::admit(all, &clean, n);
+    drop(clean);
     stage!(cx, "weak anchors: {} admitted, {refused} refused between clusters", n_weak - refused);
 
-    // ---- propagate transforms inside each component
+    // ---- propagate transforms inside each cluster
     // Propagation is iterated: each round's accepted pairs become edges the
     // next round's tree can route through, which shortens the path to files
     // that were only reachable the long way round. It converges in two or
-    // three rounds.
-    let mut propagated: Vec<Edge> = Vec::new();
+    // three rounds. What is claimed so far is the anchors, then each round's
+    // composed pairs.
+    let n_anchors = claimed.len();
     // Every hypothesis a round considered, kept only for `--dump`. A round
     // proposes every unmatched pair inside each component, which is quadratic
     // in the component and an order of magnitude more than it accepts, so the
@@ -1258,42 +1252,33 @@ fn cluster(
     let mut all_propagated: Vec<Edge> = Vec::new();
     let mut row_of: HashMap<(usize, usize), usize> = HashMap::new();
     let mut hypotheses: std::collections::HashSet<(usize, usize)> = Default::default();
-    // A composed pair is kept only if it clears the propagated tier's own
-    // overlap floor; a dump wants every hypothesis the round considered.
-    let prop_min_ov = if dumping { policy.propagated.min_frame_overlap.min(0.2) } else { policy.propagated.min_frame_overlap };
-    let mut pool: Vec<Edge> = all.clone();
-    // Which files' components a round has to propose again: all of them in
+    // A composed pair is kept only if it clears the overlap floor; a dump
+    // wants every hypothesis the round considered.
+    let prop_min_ov = if dumping { policy.min_frame_overlap().min(0.2) } else { policy.min_frame_overlap() };
+    // Which files' clusters a round has to propose again: all of them in
     // the first round, and after that only those holding a pair the round
-    // before accepted. A component that gained nothing has the same edges, so
+    // before accepted. A cluster that gained nothing has the same edges, so
     // the same tree and the same poses, and proposes exactly the hypotheses it
     // proposed last time — the accepted ones now known, the rest rejected
-    // again. Components never merge here, since a composed pair joins two
-    // files already in one.
+    // again.
     let mut dirty: Option<Vec<bool>> = None;
     let mut proposed_total = 0usize;
     // The clusters whose last proposal was a star, by lowest file, with their
     // sizes. A cluster starred in one round is the only one left to propose in
     // the next as often as not, and then fits the budget alone and is compared
     // pair by pair after all — so what to say is decided once the rounds are
-    // done, from each cluster's last round, and not from its first. (A cluster
-    // keeps its lowest file from round to round: components never merge here.)
+    // done, from each cluster's last round, and not from its first.
     let mut still_starred: std::collections::BTreeMap<usize, usize> = Default::default();
     for round in 0..PROPAGATE_MAX_ROUNDS {
         let Propagation { found: round_all, starred, full, proposed } =
-            timed!(21, propagate(items, &pool, n, prop_min_ov, dirty.as_deref(), prop_budget));
+            timed!(21, claims::propagate(items, &claimed, &clusters, prop_min_ov, dirty.as_deref(), prop_budget));
         proposed_total += proposed;
         for first in full {
             still_starred.remove(&first);
         }
         still_starred.extend(starred);
-        let before = propagated.len();
-        let seen: std::collections::HashSet<(usize, usize)> =
-            pool.iter().map(Edge::ends).collect();
-        let fresh: Vec<Edge> = round_all
-            .iter()
-            .filter(|e| !seen.contains(&e.ends()) && e.v.accepted(&policy.propagated))
-            .copied()
-            .collect();
+        // `propagate` proposes no pair already claimed.
+        let fresh: Vec<Edge> = round_all.iter().filter(|e| policy.composed(&e.v)).copied().collect();
         hypotheses.extend(round_all.iter().map(Edge::ends));
         if dumping {
             for e in round_all {
@@ -1314,18 +1299,17 @@ fn cluster(
             next[e.b()] = true;
         }
         dirty = Some(next);
-        propagated.extend(fresh.iter().copied());
-        pool.extend(fresh);
-        stage!(cx, "  propagation round {}: +{} pairs", round + 1, propagated.len() - before);
-        if propagated.len() == before {
+        stage!(cx, "  propagation round {}: +{} pairs", round + 1, fresh.len());
+        if fresh.is_empty() {
             break;
         }
+        claimed.extend(fresh);
     }
 
     stage!(
         cx,
         "propagated: {} of {} composed hypotheses ({proposed_total} put to the pixels, budget {prop_budget} a round)",
-        propagated.len(),
+        claimed.len() - n_anchors,
         hypotheses.len()
     );
     // Said on the console: pairs between two members of such a cluster that
@@ -1346,23 +1330,23 @@ fn cluster(
     // Weaker matches, admitted only between files an anchor already put in the
     // same cluster. They cannot merge anything, so they cost recall to refuse
     // and risk nothing to accept.
-    let corroborated: Vec<Edge> = {
-        let mut dsu = Dsu::new(n);
-        for e in all.iter().chain(propagated.iter()) {
-            dsu.union(e.a(), e.b());
-        }
-        let anchored: std::collections::HashSet<(usize, usize)> = all.iter().chain(propagated.iter()).map(Edge::ends).collect();
-        direct
-            .iter()
-            .filter(|e| !anchored.contains(&e.ends()) && e.v.accepted(&policy.corroborated) && dsu.find(e.a()) == dsu.find(e.b()))
-            .copied()
-            .collect()
-    };
-    stage!(cx, "corroborated: {} more pairs inside existing clusters", corroborated.len());
+    let anchored: std::collections::HashSet<(usize, usize)> = claimed.iter().map(Edge::ends).collect();
+    let corroborated = direct
+        .iter()
+        .filter(|e| !anchored.contains(&e.ends()) && policy.standing(&e.v) >= Standing::Corroborating && clusters.same(e.a(), e.b()));
+    let how = |k: usize| if k < n_anchors { How::Direct } else { How::Propagated };
+    let n_claimed = claimed.len();
+    let claims: Vec<Claim> = claimed
+        .into_iter()
+        .enumerate()
+        .map(|(k, e)| Claim { e, how: how(k) })
+        .chain(corroborated.map(|&e| Claim { e, how: How::Corroborated }))
+        .collect();
+    stage!(cx, "corroborated: {} more pairs inside existing clusters", claims.len() - n_claimed);
     if let Some(dump) = dump {
         dump.propagated = all_propagated;
     }
-    (all, propagated, corroborated)
+    claims
 }
 
 /// Every verdict the matching made, for `--dump`: the direct pass's are the
@@ -1432,10 +1416,9 @@ fn write_dump(cx: &Ctx, path: &Path, files: &[PathBuf], items: &[Item], direct: 
 /// From the run's claims to what its report states: every pair, stated once
 /// for every file either end answers for, and the content rule's
 /// suggestion, read off the same pairs.
-fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stats: &[walk::Stat], analysed: Analysed, claims: (Vec<Edge>, Vec<Edge>, Vec<Edge>)) -> Found {
+fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stats: &[walk::Stat], analysed: Analysed, claims: Vec<Claim>) -> Found {
     let args = cx.args;
     let Analysed { items, same, store, names, span_of, not_asked, n_kps, .. } = analysed;
-    let (all, propagated, corroborated) = claims;
     // The pairs are the claim. `stated` collects every one of them, and
     // `group::find` reduces it to representatives — a representative plus the
     // files that matched it directly, which is neither the closure nor the
@@ -1448,7 +1431,7 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     // Every pair so far is between the files matched. Each is now stated for
     // every file either end answers for, with the verdict its pair was found
     // on; see `Same::expand`.
-    let (all, propagated, corroborated) = (same.expand(all), same.expand(propagated), same.expand(corroborated));
+    let claims = same.expand(claims);
     // Which pairs are stated, and from what, in the order they are first
     // met — the order `group::find` and every tie in the sort below keep. The
     // records themselves are a million strings on a large corpus, so they are
@@ -1462,24 +1445,23 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     // those did claim to be images. Two alike only in grey are the match they
     // are, made here since no pass verified one.
     let one_file = same.pairs(|i| !not_asked[i]);
-    let grey: Vec<Edge> = one_file
+    let grey: Vec<Claim> = one_file
         .iter()
         .filter(|p| p.2 == same::Kind::SameGrey)
-        .map(|&(a, b, _)| Edge::new(a, b, Verdict::perfect(n_kps[a])))
+        .map(|&(a, b, _)| Claim { e: Edge::new(a, b, Verdict::perfect(n_kps[a])), how: How::Direct })
         .collect();
-    let mut grey_edges = grey.iter();
+    let mut grey = grey.iter();
     let ones = one_file.iter().map(|&(a, b, kind)| {
         let s = match kind {
             same::Kind::Identical => Stated::Identical,
             same::Kind::SamePixels => Stated::SamePixels,
-            same::Kind::SameGrey => Stated::Match(grey_edges.next().expect("one edge per grey pair"), false),
+            same::Kind::SameGrey => Stated::Claim(grey.next().expect("one claim per grey pair")),
         };
         (a, b, s)
     });
-    let tiers = all.iter().map(|e| (e, false)).chain(propagated.iter().map(|e| (e, false))).chain(corroborated.iter().map(|e| (e, true)));
     let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
     let stated: Vec<(usize, usize, Stated)> = ones
-        .chain(tiers.map(|(e, corroborated)| (e.a(), e.b(), Stated::Match(e, corroborated))))
+        .chain(claims.iter().map(|c| (c.e.a(), c.e.b(), Stated::Claim(c))))
         .filter(|&(a, b, _)| seen.insert((a, b)) && scope.speaks_of(a, b))
         .collect();
     drop(seen);
@@ -1515,8 +1497,8 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
             inverted: s.inverted(),
             identical: matches!(s, Stated::Identical),
             same_pixels: matches!(s, Stated::SamePixels),
-            propagated: s.relation() == "propagated",
-            corroborated: s.relation() == "corroborated",
+            propagated: s.how() == Some(How::Propagated),
+            corroborated: s.how() == Some(How::Corroborated),
             ia: a,
             ib: b,
         })
@@ -1962,7 +1944,7 @@ mod tests {
         let lists: Vec<WordList> = items.iter().map(|it| quantise(&vocab, &it.feats)).collect();
         let policy = verify::Policy::new(MIN_ALIGNED_POINTS, 0.5, 0.6);
         let pass = Pass { items: &items, matched: &[true, true], policy: &policy, gate: (3, 0.2), dumping: false };
-        let ask = |i: usize, j: usize| pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::default(), &policy.anchor, &mut Work::default());
+        let ask = |i: usize, j: usize| pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::default(), Standing::Anchor, &mut Work::default());
         let (low, a) = ask(0, 1).expect("a picture and its downscale are an anchor");
         let (high, b) = ask(1, 0).expect("asked from the other end too");
         assert!(a && b);

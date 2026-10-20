@@ -302,8 +302,8 @@ pub struct OutPair {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub propagated: bool,
     /// A direct match admitted only because an anchor had already put both
-    /// files in one cluster, and so held to `CLUSTER_SLACK_*` less than an
-    /// anchor: its correlation can sit below `--min-pixel-correlation`.
+    /// files in one cluster, and so held to `CLUSTER_SLACK_CORRELATION` less
+    /// than an anchor: its correlation can sit below `--min-pixel-correlation`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub corroborated: bool,
     /// Indices into the run's file list, for finding a member's pair with its

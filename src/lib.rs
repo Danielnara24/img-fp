@@ -33,6 +33,7 @@ compile_error!("img-fp builds for Unix-like systems only (Linux, the BSDs, macOS
 
 mod against;
 mod cache;
+mod claims;
 mod decode;
 mod extensions;
 mod group;
@@ -67,7 +68,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use verify::{Affine, Thumb, Variant, Verdict};
+use claims::{Claim, Edge, How};
+use verify::{Thumb, Variant, Verdict};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -205,9 +207,9 @@ struct Args {
     /// How closely the pixels of that shared area must agree, from 0 to 1.
     ///
     /// Higher is stricter.
-    // 0.6 is set for what a user wants grouped rather than for F1; see
+    // 0.7 is set for what a user wants grouped rather than for F1; see
     // CLAUDE.md for the sweep and the cliff.
-    #[arg(long, value_name = "F", default_value_t = 0.6, value_parser = parse_fraction)]
+    #[arg(long, value_name = "F", default_value_t = 0.7, value_parser = parse_fraction)]
     min_pixel_correlation: f32,
 
     /// Don't search again for mirrored or inverted (negative) copies.
@@ -617,44 +619,6 @@ const FEATURES: usize = 600;
 /// constant only exists so a pathological graph cannot spin forever.
 const PROPAGATE_MAX_ROUNDS: usize = 8;
 
-/// A verdict between the files at two indices, from the first file's working
-/// image to the second's: what every pass finds and every later stage reads.
-///
-/// The verdict is all of it. Its transform is the edge's (a mirror folded in
-/// as a negative determinant), and its variant's inversion is the edge's.
-/// Edges used to be `(usize, usize, Affine, bool, Verdict)`, the transform
-/// and the inversion kept a second time beside the verdict holding them, at
-/// 112 bytes against 76 for each edge of the lists held through the peak.
-#[derive(Clone, Copy)]
-struct Edge {
-    i: u32,
-    j: u32,
-    v: Verdict,
-}
-
-impl Edge {
-    fn new(a: usize, b: usize, v: Verdict) -> Edge {
-        Edge { i: a as u32, j: b as u32, v }
-    }
-
-    fn a(&self) -> usize {
-        self.i as usize
-    }
-
-    fn b(&self) -> usize {
-        self.j as usize
-    }
-
-    fn ends(&self) -> (usize, usize) {
-        (self.a(), self.b())
-    }
-
-    /// Whether one file is the other's negative.
-    fn inverted(&self) -> bool {
-        self.v.variant.invert
-    }
-}
-
 /// Candidate pairs verified per slice; see `pipeline::retrieve_and_verify`.
 /// A few seconds of work across the workers, so the barrier between slices
 /// costs nothing measurable, and a few megabytes of verdicts, so a slice's
@@ -908,28 +872,6 @@ fn variant_features(f: &Features, var: Variant) -> Features {
 
 fn compose_perm(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> [u8; DESC_LEN] {
     std::array::from_fn(|i| a[b[i] as usize])
-}
-
-// ---------------------------------------------------------------- union-find
-
-struct Dsu(Vec<usize>);
-impl Dsu {
-    fn new(n: usize) -> Dsu {
-        Dsu((0..n).collect())
-    }
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.0[x] != x {
-            self.0[x] = self.0[self.0[x]];
-            x = self.0[x];
-        }
-        x
-    }
-    fn union(&mut self, a: usize, b: usize) {
-        let (a, b) = (self.find(a), self.find(b));
-        if a != b {
-            self.0[a] = b;
-        }
-    }
 }
 
 // ---------------------------------------------------------------- output
@@ -1609,14 +1551,21 @@ enum Stated<'a> {
     Identical,
     /// Not the same bytes, the same picture; see `same::Kind`.
     SamePixels,
-    /// A verified edge, and whether it was corroborated.
-    Match(&'a Edge, bool),
+    /// A verified pair.
+    Claim(&'a Claim),
 }
 
 impl<'a> Stated<'a> {
     fn verdict(&self) -> Option<&'a Verdict> {
         match self {
-            Stated::Match(e, _) => Some(&e.v),
+            Stated::Claim(c) => Some(&c.e.v),
+            _ => None,
+        }
+    }
+
+    fn how(&self) -> Option<How> {
+        match self {
+            Stated::Claim(c) => Some(c.how),
             _ => None,
         }
     }
@@ -1625,16 +1574,17 @@ impl<'a> Stated<'a> {
         match self {
             Stated::Identical => "identical",
             Stated::SamePixels => "same_pixels",
-            Stated::Match(e, _) if e.v.n_match == 0 => "propagated",
-            Stated::Match(_, true) => "corroborated",
-            Stated::Match(_, false) => "direct",
+            Stated::Claim(c) => c.how.relation(),
         }
     }
 
     /// None for a pair no keypoint was matched for: the same file, or a
     /// composed transform.
     fn aligned_points(&self) -> Option<u32> {
-        self.verdict().filter(|v| v.n_match > 0).map(|v| v.n_in)
+        match self {
+            Stated::Claim(c) if c.how != How::Propagated => Some(c.e.v.n_in),
+            _ => None,
+        }
     }
 
     fn frame_overlap(&self) -> f32 {
@@ -1650,7 +1600,7 @@ impl<'a> Stated<'a> {
     }
 
     fn inverted(&self) -> bool {
-        matches!(self, Stated::Match(e, _) if e.inverted())
+        matches!(self, Stated::Claim(c) if c.e.inverted())
     }
 
     /// No block of the overlap disagrees (`suggest::CLEAN`); the same file
@@ -1661,7 +1611,7 @@ impl<'a> Stated<'a> {
 
     fn link(&self) -> suggest::Link<'a> {
         match self {
-            Stated::Match(e, _) => suggest::Link::Edge(&e.v, e.v.m, e.inverted()),
+            Stated::Claim(c) => suggest::Link::Edge(&c.e.v, c.e.v.m, c.e.inverted()),
             _ => suggest::Link::Exact,
         }
     }
@@ -1680,438 +1630,6 @@ impl<'a> Stated<'a> {
             clean: self.clean(),
         }
     }
-}
-
-/// The first edge for each pair of files, in the order given.
-fn unique_pairs(edges: impl IntoIterator<Item = Edge>) -> Vec<Edge> {
-    let mut seen = std::collections::HashSet::new();
-    edges.into_iter().filter(|e| seen.insert((e.a().min(e.b()), e.a().max(e.b())))).collect()
-}
-
-/// Add the anchors that are not clean to the clusters the clean ones make.
-/// Two clusters join on weak anchors only when **every file of the smaller one
-/// has a weak anchor into the larger**; the weak anchors kept are the ones
-/// inside a cluster once no more joins are possible. The edges kept, and how
-/// many weak ones were refused.
-///
-/// **This is the bridge test's argument, carried from one edge to several.**
-/// A family is held together by many clean matches — the re-encodes, the
-/// resizes, the crops of one photograph agree with each other everywhere —
-/// and two families of photographs of one scene, taken a moment or a step
-/// apart, touch only through weak ones: a dozen aligned points and a patch of
-/// the overlap that does not agree, where someone moved or the background
-/// shifted with the viewpoint. Each such match is one of hundreds between the
-/// two families' copies, so there are always several, none is a bridge, and
-/// the bridge test kept them all. On IMGS2 four families merged that way at
-/// the shipped settings, for 21,458 false pairs.
-///
-/// **Why every file, and not "never join two clusters".** The stricter rule
-/// was tried first and cut families apart: two variants of one photograph
-/// that match each other cleanly and the family only weakly — a perspective
-/// warp and a photo of a screen, a tiny embed and a contact sheet — make a
-/// cluster of two, and a low-contrast family breaks into many. It cost IMGS
-/// four points of recall and 43 of 45 perfect transformations. A fragment of
-/// a family is matched, file by file, by the family it came from; a family of
-/// ninety files is not matched file by file by the photograph taken a moment
-/// later. And a lone file is the case of one: its one file has an anchor, so
-/// it joins, strongest first, the cluster it matches best — after which a
-/// weak anchor into a second cluster is a join of two clusters like any other.
-///
-/// **And never two clusters that each close a cycle of clean anchors.** That
-/// a family is not matched file by file by its sibling was an expectation,
-/// and two photographs of one scene in Segovia broke it: eighty files
-/// of one, every one with a weak anchor into the other's eighty-five, and
-/// sixty-six of those pointing back. Coverage cannot tell that from a
-/// fragment joining its family; what can is the fragment's own evidence. A
-/// fragment's clean anchors are a pair, a chain or a star, each link the only
-/// one; a family's reach a file by two paths, which is the corroboration the
-/// bridge test asks of a single link. Two clusters that each have it are two
-/// families, whatever the weak anchors between them say — unless **one file of
-/// the larger has a weak anchor to every file of the smaller**. A greyscale, a
-/// duotone and a halftone of one photograph agree with each other cleanly and
-/// close a triangle, and the original matches all three; no photograph of
-/// Segovia was matched by all eighty of the other's. It is the cover test
-/// once more, asked of a single file: the smaller cluster is then renderings
-/// of something the larger holds.
-fn admit_anchors(
-    clean: Vec<Edge>,
-    mut weak: Vec<Edge>,
-    n: usize,
-) -> (Vec<Edge>, usize) {
-    let mut dsu = Dsu::new(n);
-    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    // Whether a cluster's clean anchors close a cycle, by root.
-    let mut cycle = vec![false; n];
-    fn join(dsu: &mut Dsu, members: &mut [Vec<usize>], cycle: &mut [bool], a: usize, b: usize) {
-        let (mut ra, mut rb) = (dsu.find(a), dsu.find(b));
-        if ra == rb {
-            return;
-        }
-        if members[ra].len() > members[rb].len() {
-            std::mem::swap(&mut ra, &mut rb);
-        }
-        dsu.0[ra] = rb;
-        let moved = std::mem::take(&mut members[ra]);
-        members[rb].extend(moved);
-        cycle[rb] |= cycle[ra];
-    }
-    for e in clean.iter() {
-        let (ra, rb) = (dsu.find(e.a()), dsu.find(e.b()));
-        if ra == rb {
-            cycle[ra] = true;
-        }
-        join(&mut dsu, &mut members, &mut cycle, e.a(), e.b());
-    }
-    weak.sort_by(|x, y| y.v.n_in.cmp(&x.v.n_in).then(y.v.blk.total_cmp(&x.v.blk)).then(x.ends().cmp(&y.ends())));
-    let mut near: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for e in weak.iter() {
-        near[e.a()].push(e.b());
-        near[e.b()].push(e.a());
-    }
-    // Clusters only grow, so a join refused now can be granted after another
-    // has made one side larger; the pass repeats until nothing joins.
-    // Cluster pairs already found wanting, forgotten at every join since a
-    // join is what can change the answer.
-    let mut refused_pairs: std::collections::HashSet<(usize, usize)> = Default::default();
-    loop {
-        let mut joined = false;
-        for e in weak.iter() {
-            let (ra, rb) = (dsu.find(e.a()), dsu.find(e.b()));
-            if ra == rb {
-                continue;
-            }
-            let (small, big) = if members[ra].len() <= members[rb].len() { (ra, rb) } else { (rb, ra) };
-            if refused_pairs.contains(&(small, big)) {
-                continue;
-            }
-            let covered = members[small].iter().all(|&x| near[x].iter().any(|&y| dsu.find(y) == big));
-            // Two clusters with clean cycles join only when one file of the
-            // larger has a weak anchor to every file of the smaller: the
-            // smaller is then renderings of a photograph the larger holds.
-            // A weak edge is listed once, so a count is a cover.
-            let admitted = covered
-                && (!(cycle[ra] && cycle[rb]) || {
-                    let k = members[small].len();
-                    members[big].iter().any(|&y| near[y].iter().filter(|&&z| dsu.find(z) == small).count() == k)
-                });
-            if admitted {
-                join(&mut dsu, &mut members, &mut cycle, small, big);
-                refused_pairs.clear();
-                joined = true;
-            } else {
-                refused_pairs.insert((small, big));
-            }
-        }
-        if !joined {
-            break;
-        }
-    }
-    let mut out = clean;
-    let mut refused = 0;
-    for e in weak {
-        if dsu.find(e.a()) == dsu.find(e.b()) {
-            out.push(e);
-        } else {
-            refused += 1;
-        }
-    }
-    (out, refused)
-}
-
-/// Remove single matches that are the only thing joining two large clusters.
-///
-/// A wrong pair does not cost one pair. If it is the *only* edge between two
-/// groups of files, everything on one side becomes a claimed duplicate of
-/// everything on the other, and propagation will dutifully manufacture the
-/// evidence: on this corpus one weak match between a dark galaxy photograph
-/// and a beach photograph produced 62 false pairs downstream, and an earlier
-/// one produced 354.
-///
-/// So an edge that is a *bridge* in the graph theory sense — its removal
-/// disconnects the component — and which separates two non-trivial groups is
-/// held to a much higher standard than an ordinary match, because it is
-/// carrying all of them. A bridge to a single isolated file is left alone:
-/// that is the ordinary case of a file matched exactly once, and it claims
-/// nothing beyond itself.
-fn drop_weak_bridges(
-    edges: Vec<Edge>,
-    n: usize,
-) -> (Vec<Edge>, Vec<Edge>) {
-    let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbour, edge index)
-    for (k, e) in edges.iter().enumerate() {
-        adj[e.a()].push((e.b(), k));
-        adj[e.b()].push((e.a(), k));
-    }
-    // Iterative Tarjan: discovery time, low-link, and the subtree size needed
-    // to know how much sits on the far side of a bridge.
-    let mut disc = vec![usize::MAX; n];
-    let mut low = vec![0usize; n];
-    let mut size = vec![1usize; n];
-    let mut timer = 0usize;
-    let mut bridges: Vec<(usize, usize)> = Vec::new(); // (edge index, far-side size)
-    let mut stack: Vec<(usize, usize, usize)> = Vec::new(); // (node, parent edge, next neighbour)
-    for s in 0..n {
-        if disc[s] != usize::MAX || adj[s].is_empty() {
-            continue;
-        }
-        let total = {
-            // Component size, for deciding what counts as non-trivial.
-            let mut seen = vec![s];
-            let mut mark = std::collections::HashSet::from([s]);
-            let mut i = 0;
-            while i < seen.len() {
-                let u = seen[i];
-                i += 1;
-                for &(v, _) in adj[u].iter() {
-                    if mark.insert(v) {
-                        seen.push(v);
-                    }
-                }
-            }
-            seen.len()
-        };
-        disc[s] = timer;
-        low[s] = timer;
-        timer += 1;
-        stack.push((s, usize::MAX, 0));
-        while let Some(&mut (u, pe, ref mut k)) = stack.last_mut() {
-            if *k < adj[u].len() {
-                let (v, e) = adj[u][*k];
-                *k += 1;
-                if e == pe {
-                    continue;
-                }
-                if disc[v] == usize::MAX {
-                    disc[v] = timer;
-                    low[v] = timer;
-                    timer += 1;
-                    stack.push((v, e, 0));
-                } else {
-                    low[u] = low[u].min(disc[v]);
-                }
-            } else {
-                stack.pop();
-                if let Some(&mut (p, _, _)) = stack.last_mut() {
-                    low[p] = low[p].min(low[u]);
-                    size[p] += size[u];
-                    if low[u] > disc[p] {
-                        bridges.push((pe, size[u].min(total - size[u])));
-                    }
-                }
-            }
-        }
-    }
-    // A bridge whose far side is a *group* rather than a lone file is the sole
-    // evidence for every pair the two sides imply, and no single match is
-    // worth that much. It is dropped — not held to a higher bar, because
-    // "higher" was three more numbers fitted to one corpus (three times the
-    // inliers, fifteen points more agreement, under two octaves of gap) and a
-    // match strong enough to pass them is still one match. The pairs are not
-    // lost if the two sides really are one family: any second link between
-    // them stops the edge being a bridge at all.
-    let mut drop = vec![false; edges.len()];
-    for (e, far) in bridges {
-        if e != usize::MAX && far >= 2 {
-            drop[e] = true;
-        }
-    }
-    // What is dropped is handed back: the caller keeps it as a weak anchor.
-    let (kept, dropped): (Vec<_>, Vec<_>) = edges.into_iter().enumerate().partition(|(e, _)| !drop[*e]);
-    (kept.into_iter().map(|(_, x)| x).collect(), dropped.into_iter().map(|(_, x)| x).collect())
-}
-
-/// What a round of propagation proposed, and how.
-struct Propagation {
-    /// Every composed hypothesis that cleared the overlap floor, verdict and all.
-    found: Vec<Edge>,
-    /// The components the round could not afford to compare pair by pair,
-    /// and compared with their root alone, each as its lowest file and its
-    /// size; see `propagate`.
-    starred: Vec<(usize, usize)>,
-    /// The lowest file of each component the round compared pair by pair.
-    full: Vec<usize>,
-    /// Composed hypotheses put to the pixels.
-    proposed: usize,
-}
-
-/// Within each connected component, test the pairs direct matching missed by
-/// composing transforms along the edges that were found.
-///
-/// This is not closure expansion. A composed transform is a *hypothesis* about
-/// a pair nobody matched, and it is put through the same pixel test as any
-/// other, at a stricter threshold because no features vouch for it. When A is
-/// a crop of B and B is a crop of C, the A-C transform is known exactly and
-/// the only question is whether the pixels agree — which is cheap to answer
-/// and wrong to assume.
-///
-/// **What a round may spend is `budget` hypotheses**, and the caller makes that
-/// the number of candidate pairs the direct pass verified. Every pair inside a
-/// component is quadratic in it, and everything else in a run is linear in
-/// files times `-k`; a budget in those units keeps propagation the same order
-/// of cost as the matching it extends, whatever one family's size. Components
-/// are taken cheapest first, so small families — nearly all of them — are
-/// never touched by it, and one that does not fit is not skipped but
-/// **starred**: each of its files is compared with the root alone, which is
-/// linear in the component. That is what a group is anyway — a
-/// representative and what matched it, and the root is the best-connected
-/// file, which is what `group::find` elects — so a starred family still comes
-/// out as one group; what it gives up is the pairs between two non-root
-/// members that direct matching missed.
-///
-/// It replaces a cap of two thousand files, in the first commit and never
-/// derived, past which a component was not propagated at all. A family of
-/// 2,100 variants of one photograph came out at a tenth of its pairs and as 26
-/// overlapping groups, where 2,000 would have had every pair.
-///
-/// **The work is spread by row, not by component.** A component used to be one
-/// task, so one large family ran on one thread while the rest sat idle — the
-/// same 2,100 files took 76 CPU-seconds in 70 seconds of wall. A unit of work
-/// is now one row of a component's pair triangle, or one pair of a star, and
-/// the units come back in component order and row order, which is the order
-/// the per-component loop produced them in.
-///
-/// `dirty`, when given, limits the work to the components holding a file it
-/// marks; see the round loop in `pipeline::cluster`.
-fn propagate(
-    items: &[Item],
-    edges: &[Edge],
-    n: usize,
-    min_ov: f32,
-    dirty: Option<&[bool]>,
-    budget: usize,
-) -> Propagation {
-    let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); n];
-    for e in edges.iter() {
-        adj[e.a()].push((e.b(), e.v.m, e.inverted(), e.v.n_in));
-        if let Some(mi) = verify::invert_affine(&e.v.m) {
-            adj[e.b()].push((e.a(), mi, e.inverted(), e.v.n_in));
-        }
-    }
-    let mut dsu = Dsu::new(n);
-    for e in edges.iter() {
-        dsu.union(e.a(), e.b());
-    }
-    let mut comps: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..n {
-        if !adj[i].is_empty() {
-            comps.entry(dsu.find(i)).or_default().push(i);
-        }
-    }
-    let known: std::collections::HashSet<(usize, usize)> = edges.iter().map(Edge::ends).collect();
-    // Pairs each component already holds, so that what a component would cost
-    // is the pairs it would actually propose.
-    let mut inside: HashMap<usize, usize> = HashMap::new();
-    for &(a, _) in known.iter() {
-        *inside.entry(dsu.find(a)).or_default() += 1;
-    }
-
-    // Cheapest first, ties to the lowest file, so the plan does not depend on
-    // the order a hash map hands the components over in.
-    let mut costed: Vec<(usize, Vec<usize>)> = comps
-        .into_iter()
-        .filter(|(_, c)| c.len() > 2)
-        .filter(|(_, c)| dirty.is_none_or(|d| c.iter().any(|&i| d[i])))
-        .map(|(r, mut c)| {
-            c.sort_unstable();
-            let k = c.len();
-            (k * (k - 1) / 2 - inside.get(&r).copied().unwrap_or(0).min(k * (k - 1) / 2), c)
-        })
-        .collect();
-    costed.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1[0].cmp(&y.1[0])));
-    let mut spent = 0usize;
-    let (mut starred, mut full) = (Vec::new(), Vec::new());
-    let plan: Vec<(Vec<usize>, bool)> = costed
-        .into_iter()
-        .map(|(cost, c)| {
-            let every_pair = spent + cost <= budget;
-            if every_pair {
-                spent += cost;
-                full.push(c[0]);
-            } else {
-                starred.push((c[0], c.len()));
-            }
-            (c, every_pair)
-        })
-        .collect();
-
-    // Pose of every member relative to its component's root, by position in
-    // the component.
-    //
-    // Breadth-first, from the best-connected member. Every hop composes
-    // another transform and carries its error into the result, so the thing
-    // to minimise is the number of hops, not the quality of each one: growing
-    // the tree best-edge-first was tried and is measurably worse, because it
-    // trades short paths for slightly better links and ends up composing more
-    // of them. The root is the file most others matched, which is usually the
-    // original or a clean re-encode of it.
-    let posed: Vec<(usize, Vec<Option<(Affine, bool)>>)> = plan
-        .par_iter()
-        .map(|(comp, _)| {
-            let root = *comp.iter().max_by_key(|&&i| (adj[i].len(), std::cmp::Reverse(i))).unwrap();
-            let at = |v: usize| comp.binary_search(&v).ok();
-            let mut pose: Vec<Option<(Affine, bool)>> = vec![None; comp.len()];
-            pose[at(root).unwrap()] = Some(([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], false));
-            let mut queue = std::collections::VecDeque::from([root]);
-            while let Some(u) = queue.pop_front() {
-                let (mu, iu) = pose[at(u).unwrap()].unwrap();
-                for &(v, m, inv, _) in adj[u].iter() {
-                    let Some(pv) = at(v) else { continue };
-                    if pose[pv].is_some() {
-                        continue;
-                    }
-                    pose[pv] = Some((verify::compose(&mu, &m), iu ^ inv));
-                    queue.push_back(v);
-                }
-            }
-            (root, pose)
-        })
-        .collect();
-
-    // One unit per row of a component pair by pair, one per member of a star.
-    let units: Vec<(u32, u32)> =
-        plan.iter().enumerate().flat_map(|(ci, (c, _))| (0..c.len() as u32).map(move |ai| (ci as u32, ai))).collect();
-    // `a -> root -> b`, put to the pixels, and kept against the floor the
-    // caller asked for — the propagated tier's own, or a dump's lower one —
-    // and no other. This used to be a fixed 0.5, which quietly overruled a
-    // `--min-frame-overlap` below it for every composed pair, and threw away
-    // the dump's hypotheses between 0.2 and 0.5.
-    let test = |comp: &[usize], pose: &[Option<(Affine, bool)>], x: usize, y: usize| {
-        let (a, b) = (comp[x], comp[y]);
-        let ((ma, ia), (mb, ib)) = (pose[x]?, pose[y]?);
-        let m = verify::compose(&verify::invert_affine(&ma)?, &mb);
-        let var = Variant { mirror: false, invert: ia ^ ib };
-        let p = verify::Pair { fa: &items[a].feats, fb: &items[b].feats, ta: &items[a].thumb, tb: &items[b].thumb };
-        let v = verify::verify_transform(&p, &m, var, min_ov);
-        (v.ov_a.max(v.ov_b) >= min_ov).then_some(Edge::new(a, b, v))
-    };
-    let proposed = AtomicUsize::new(0);
-    let found = units
-        .par_iter()
-        .flat_map_iter(|&(ci, x)| {
-            let ((comp, every_pair), (root, pose)) = (&plan[ci as usize], &posed[ci as usize]);
-            let x = x as usize;
-            let mut out = Vec::new();
-            let mut asked = 0;
-            if *every_pair {
-                for y in x + 1..comp.len() {
-                    if !known.contains(&(comp[x], comp[y])) {
-                        asked += 1;
-                        out.extend(test(comp, pose, x, y));
-                    }
-                }
-            } else if comp[x] != *root {
-                let r = comp.binary_search(root).unwrap();
-                let (lo, hi) = (x.min(r), x.max(r));
-                if !known.contains(&(comp[lo], comp[hi])) {
-                    asked += 1;
-                    out.extend(test(comp, pose, lo, hi));
-                }
-            }
-            proposed.fetch_add(asked, Ordering::Relaxed);
-            out
-        })
-        .collect();
-    Propagation { found, starred, full, proposed: proposed.into_inner() }
 }
 
 #[cfg(test)]
@@ -2222,7 +1740,7 @@ mod tests {
     /// because every propagated hypothesis is built that way.
     #[test]
     fn affine_round_trip() {
-        let m: Affine = [0.8, -0.3, 12.0, 0.25, 0.9, -4.0];
+        let m: verify::Affine = [0.8, -0.3, 12.0, 0.25, 0.9, -4.0];
         let mi = verify::invert_affine(&m).unwrap();
         let id = verify::compose(&m, &mi);
         for (a, b) in id.iter().zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]) {
@@ -2438,122 +1956,6 @@ mod tests {
         assert!(outputs_are_distinct(&args(&["-o", r, "--cache", l])).is_ok());
         assert!(outputs_are_distinct(&args(&["-o", r, "--cache", r, "--no-cache", "--clear-cache"])).is_ok());
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A lone link between two clusters is a bridge however many times the
-    /// run found it. Two passes verifying the same pair used to be two links,
-    /// and the bridge test then kept a match it exists to drop.
-    #[test]
-    fn a_pair_found_twice_is_still_one_bridge() {
-        let direct = Verdict { n_in: 40, ..Default::default() };
-        let mirrored = Verdict { n_in: 12, ..Default::default() };
-        // Two triangles {0,1,2} and {3,4,5}, joined only by 2-3: once from
-        // the direct pass and once more, the other way round, from the second
-        // look.
-        let mut edges: Vec<Edge> =
-            [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5), (2, 3)].iter().map(|&(a, b)| Edge::new(a, b, direct)).collect();
-        edges.push(Edge::new(3, 2, mirrored));
-        let unique = unique_pairs(edges);
-        assert_eq!(unique.len(), 7);
-        assert_eq!(unique[6].v.n_in, 40, "the first verdict for a pair is the one kept");
-        let kept = drop_weak_bridges(unique, 6).0;
-        assert!(!kept.iter().any(|e| e.ends() == (2, 3)), "the lone link is dropped");
-        assert_eq!(kept.len(), 6);
-    }
-
-    /// Weak anchors join a cluster only when every file of the smaller side has
-    /// one into the larger: a lone file and a family's fragment join, a group
-    /// with a file that does not vouch for the join does not.
-    #[test]
-    fn weak_anchors_join_clusters_only_when_every_file_vouches() {
-        let e = |a: usize, b: usize, n_in: u32| Edge::new(a, b, Verdict { n_in, ..Default::default() });
-        // Two clean clusters, {0,1,2,7} and {3,4,5}.
-        let clean = vec![e(0, 1, 50), e(1, 2, 50), e(2, 7, 50), e(3, 4, 50), e(4, 5, 50)];
-        // Weak links between them from three files of each, a lone file 6
-        // matching both (the stronger into the second), a weak link inside
-        // the first, and a fragment {8,9} of the second family, clean between
-        // its two files and weakly matched by the family from both.
-        let weak = vec![e(2, 3, 12), e(1, 4, 11), e(0, 6, 11), e(3, 6, 15), e(0, 2, 10), e(3, 8, 11), e(4, 9, 11)];
-        let clean = [clean, vec![e(8, 9, 50)]].concat();
-        let (kept, refused) = admit_anchors(clean, weak, 10);
-        let mut pairs: Vec<(usize, usize)> = kept.iter().map(Edge::ends).collect();
-        pairs.sort_unstable();
-        // 7 has no weak anchor into the second cluster, so the first cluster
-        // never joins it however many of its other files do.
-        assert_eq!(pairs, [(0, 1), (0, 2), (1, 2), (2, 7), (3, 4), (3, 6), (3, 8), (4, 5), (4, 9), (8, 9)]);
-        assert_eq!(refused, 3);
-    }
-
-    /// Two clusters whose clean anchors each close a cycle are two families,
-    /// and weak anchors do not join them even file for file in both
-    /// directions — unless one file vouches for the whole of the smaller; a
-    /// chain matched the same way still joins.
-    #[test]
-    fn weak_anchors_join_two_clusters_with_clean_cycles_only_through_one_file() {
-        let e = |a: usize, b: usize, n_in: u32| Edge::new(a, b, Verdict { n_in, ..Default::default() });
-        // Triangles {0,1,2} and {3,4,5}; a chain {6,7,8}.
-        let clean = vec![e(0, 1, 50), e(1, 2, 50), e(0, 2, 50), e(3, 4, 50), e(4, 5, 50), e(3, 5, 50), e(6, 7, 50), e(7, 8, 50)];
-        // Every file of each triangle has a weak anchor into the other, and
-        // every file of the chain one into the first triangle.
-        let weak = vec![e(0, 3, 12), e(1, 4, 12), e(2, 5, 12), e(6, 0, 11), e(7, 1, 11), e(8, 2, 11)];
-        let (kept, refused) = admit_anchors(clean, weak, 9);
-        let mut pairs: Vec<(usize, usize)> = kept.iter().map(Edge::ends).collect();
-        pairs.sort_unstable();
-        assert_eq!(pairs, [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5), (6, 0), (6, 7), (7, 1), (7, 8), (8, 2)]);
-        assert_eq!(refused, 3);
-        // One file of the first triangle matching every file of the second,
-        // as an original matches its renderings, does join them.
-        // The first is given a fourth file so that it is the larger.
-        let clean = vec![e(0, 1, 50), e(1, 2, 50), e(0, 2, 50), e(2, 6, 50), e(3, 4, 50), e(4, 5, 50), e(3, 5, 50)];
-        let weak = vec![e(0, 3, 12), e(0, 4, 12), e(0, 5, 12)];
-        let (kept, refused) = admit_anchors(clean, weak, 7);
-        assert_eq!((kept.len(), refused), (10, 0));
-    }
-
-    /// A round proposes every unmatched pair of a component it can afford,
-    /// cheapest component first, and compares the files of one it cannot with
-    /// the root alone — it never passes one over.
-    #[test]
-    fn a_component_over_the_budget_is_starred_not_skipped() {
-        // A chain over `files`, which leaves every pair but the links to ask.
-        let chain = |files: std::ops::Range<usize>| files.clone().skip(1).map(|b| Edge::new(b - 1, b, Verdict::default())).collect::<Vec<_>>();
-        let n = 30;
-        let items: Vec<Item> = (0..n).map(|_| Item::default()).collect();
-        // {0..10}: 45 pairs, 9 known, 36 to ask. {10..30}: 190 pairs, 19 known, 171.
-        let edges = [chain(0..10), chain(10..30)].concat();
-        let p = propagate(&items, &edges, n, 0.0, None, 1_000);
-        assert_eq!((p.proposed, p.found.len(), p.starred.len()), (36 + 171, 36 + 171, 0));
-        // A budget for the small one alone: the large one is starred — its
-        // root is the second file of the chain, the first of the best
-        // connected, and it is asked about the 18 files it has no link to.
-        let p = propagate(&items, &edges, n, 0.0, None, 100);
-        assert_eq!(p.starred, vec![(10, 20)]);
-        assert_eq!(p.full, vec![0]);
-        assert_eq!(p.proposed, 36 + 17);
-        assert!(p.found.iter().filter(|e| e.a() >= 10).all(|e| e.a() == 11 || e.b() == 11), "a star is all through its root");
-        // No budget at all: both are starred, and still asked.
-        let p = propagate(&items, &edges, n, 0.0, None, 0);
-        assert_eq!((p.starred.len(), p.proposed), (2, 7 + 17));
-        // Starred in one round, and alone in the next, it fits the budget and
-        // is compared pair by pair: which is why the run's note is decided by
-        // a cluster's last round and not its first.
-        let p1 = propagate(&items, &edges, n, 0.0, None, 180);
-        assert_eq!(p1.starred, vec![(10, 20)]);
-        let mut dirty = vec![false; n];
-        for e in &p1.found {
-            dirty[e.a()] = true;
-            dirty[e.b()] = true;
-        }
-        let pool = [edges.clone(), p1.found.clone()].concat();
-        let p2 = propagate(&items, &pool, n, 0.0, Some(&dirty), 180);
-        assert!(p2.starred.is_empty() && p2.full.contains(&10), "{:?} {:?}", p2.starred, p2.full);
-        // The order is the plan's, whatever order the work finished in.
-        let again = propagate(&items, &edges, n, 0.0, None, 1_000);
-        let pairs = |p: &Propagation| p.found.iter().map(Edge::ends).collect::<Vec<_>>();
-        assert_eq!(pairs(&again), pairs(&propagate(&items, &edges, n, 0.0, None, 1_000)));
-        let mut sorted = pairs(&again);
-        sorted.sort_unstable();
-        assert_eq!(pairs(&again), sorted, "component by component, row by row");
     }
 
     /// Values the thresholds are not measured on are refused by the parser,

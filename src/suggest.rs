@@ -15,7 +15,7 @@
 //! The pieces, in the order they are applied:
 //!
 //! - **A pair is clean** when no block of its overlap disagrees
-//!   (`Policy::clean`'s bar). A pair that is not may still delete when it
+//!   (`Standing::Clean`'s bar). A pair that is not may still delete when it
 //!   agrees at `WEAK_DELETES` overall; below that it decides nothing, and a
 //!   negative or a mirror image never does. A file left reached only through such pairs is
 //!   REVIEW when one of them agrees at `REVIEW` — a copy tinted or
@@ -121,7 +121,8 @@ pub enum Mode {
 }
 
 /// Where, between the run's correlation bar and 1, `Mode::Correlation` stops
-/// keeping and starts deleting: 0.9 at the default bar of 0.6. Swept on the
+/// keeping and starts deleting: 0.9 at the default bar of 0.7 (it was 0.75
+/// of the way when the bar was 0.6, and the cut is what was chosen). Swept on the
 /// found corpus by eye, since its ground truth is no help (below): of
 /// matches agreeing with their representative at 0.80-0.90, ten in sixteen
 /// were another specimen of the species; at 0.90-0.95 one in sixteen; above
@@ -129,7 +130,7 @@ pub enum Mode {
 /// a collage, a slide or a crop's original agrees with its representative
 /// over the part they share: 3,875 deletions lose some at 0.8, 3,183 at 0.9,
 /// 987 at 0.98, against 3 for `Mode::Content`.
-pub const CUT: f32 = 0.75;
+pub const CUT: f32 = 2.0 / 3.0;
 
 /// One file's place in one group: the file, whether it is the group's
 /// representative, and how well it agrees with it (1 for the same bytes or
@@ -192,7 +193,7 @@ pub enum Link<'a> {
 }
 
 /// The bar a strong pair's worst block must clear: the clean-anchor bar as
-/// it was (`Policy::clean`), not as it is. When that bar rose to 0.9 this was
+/// it was (`Standing::Clean`), not as it is. When that bar rose to 0.9 this was
 /// swept on IMGS-ALL beside it: at 0.85, 0.9 and 0.95 the same deletions
 /// lose content and the same families keep their original (276) and a
 /// faithful copy (304), and only the count of deletions moves (18,183,
@@ -1645,11 +1646,11 @@ mod tests {
         // Two groups: 0 heads one, 3 the other, and 1 is in both.
         let seats = || [seat(0, true, 1.0), seat(1, false, 0.7), seat(2, false, 0.95), seat(3, true, 1.0), seat(1, false, 0.92), seat(4, false, 0.5)];
         let (k, d, r) = (Some(Action::Keep), Some(Action::Delete), Some(Action::Review));
-        // The cut at 0.6 is 0.9: file 1 is judged by its better match.
-        assert_eq!(by_group(Mode::Correlation, 6, seats(), 0.6), [k, d, d, k, r, None]);
+        // The cut at 0.7 is 0.9: file 1 is judged by its better match.
+        assert_eq!(by_group(Mode::Correlation, 6, seats(), 0.7), [k, d, d, k, r, None]);
         assert_eq!(by_group(Mode::Representative, 6, seats(), 0.6), [k, d, d, k, d, None]);
         // A representative of one group is kept though it matched another.
-        assert_eq!(by_group(Mode::Correlation, 2, [seat(0, true, 1.0), seat(1, false, 0.99), seat(1, true, 1.0), seat(0, false, 0.99)], 0.6), [k, k]);
+        assert_eq!(by_group(Mode::Correlation, 2, [seat(0, true, 1.0), seat(1, false, 0.99), seat(1, true, 1.0), seat(0, false, 0.99)], 0.7), [k, k]);
     }
 
     #[test]

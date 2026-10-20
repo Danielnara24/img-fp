@@ -20,7 +20,7 @@
 //! back over the files in each place that needed them, by hand, each its own
 //! way, and the keep rule then rebuilt the sets from the pairs.
 
-use crate::{Edge, Item, decode, suggest};
+use crate::{Claim, Edge, Item, decode, suggest};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -142,9 +142,9 @@ impl Same {
         self.classes.get(o).map_or(std::slice::from_ref(o), Vec::as_slice)
     }
 
-    /// `edges`, which run between the files matched, stated for every file
-    /// either end answers for as well: an edge from `a` to `b` becomes one
-    /// from each file `a` answers for to each file `b` does.
+    /// `claims`, which run between the files matched, stated for every file
+    /// either end answers for as well: a claim from `a` to `b` becomes one
+    /// from each file `a` answers for to each file `b` does, made the same way.
     ///
     /// The verdict is the originals', which is the verdict the others would
     /// have been given, since their analysis is the originals' own. Every
@@ -156,23 +156,24 @@ impl Same {
     /// list of pairs, and a copy beside the original (or, with no copies at
     /// all, a duplicate of it) was held to the end of the run, some 110 MB on
     /// 27,000 pictures at the point where the run peaks.
-    pub(crate) fn expand(&self, edges: Vec<Edge>) -> Vec<Edge> {
+    pub(crate) fn expand(&self, claims: Vec<Claim>) -> Vec<Claim> {
         if self.classes.is_empty() {
-            return edges;
+            return claims;
         }
-        let mut out = Vec::with_capacity(edges.len());
-        for e in edges.iter() {
+        let mut out = Vec::with_capacity(claims.len());
+        for &Claim { e, how } in claims.iter() {
             let (a, b) = e.ends();
             for &x in self.class(&a) {
                 for &y in self.class(&b) {
-                    if (x < y) == (a < b) {
-                        out.push(Edge::new(x, y, e.v));
+                    let e = if (x < y) == (a < b) {
+                        Edge::new(x, y, e.v)
                     } else {
                         match e.v.reversed() {
-                            Some(r) => out.push(Edge::new(y, x, r)),
-                            None => out.push(Edge::new(x, y, e.v)),
+                            Some(r) => Edge::new(y, x, r),
+                            None => Edge::new(x, y, e.v),
                         }
-                    }
+                    };
+                    out.push(Claim { e, how });
                 }
             }
         }
@@ -371,6 +372,7 @@ fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<Hash
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::How;
     use crate::sift::{self, Features, DESC_LEN};
     use crate::verify::{Affine, Thumb, Verdict};
     use std::sync::Arc;
@@ -428,24 +430,25 @@ mod tests {
     fn a_pair_is_stated_for_every_copy_of_either_file() {
         let m: Affine = [2.0, 0.0, 5.0, 0.0, 2.0, 7.0];
         let v = Verdict { m, n_in: 30, ov_a: 0.25, ov_b: 1.0, scale: 2.0, ..Default::default() };
-        let edges = vec![Edge::new(0, 2, v)];
+        let claims = vec![Claim { e: Edge::new(0, 2, v), how: How::Corroborated }];
         // 1 and 4 are copies of 0; 3 is a copy of 2.
         let same = Same::of_bytes(5, vec![vec![0, 1, 4], vec![2, 3]]);
-        let out = same.expand(edges.clone());
-        let mut names: Vec<(usize, usize)> = out.iter().map(Edge::ends).collect();
+        let out = same.expand(claims.clone());
+        let mut names: Vec<(usize, usize)> = out.iter().map(|c| c.e.ends()).collect();
         names.sort_unstable();
         assert_eq!(names, [(0, 2), (0, 3), (1, 2), (1, 3), (2, 4), (3, 4)]);
-        for e in out.iter() {
-            let ((a, b), ev) = (e.ends(), &e.v);
+        assert!(out.iter().all(|c| c.how == How::Corroborated), "each made as the original pair was");
+        for c in out.iter() {
+            let ((a, b), ev) = (c.e.ends(), &c.e.v);
             assert!(a < b);
             // Files sharing 0's bytes are the small side: scale 2 from them.
             let from_zero = same.original(a) == 0;
             assert_eq!(ev.scale, if from_zero { 2.0 } else { 0.5 }, "{a}-{b}");
             assert_eq!((ev.ov_a, ev.ov_b), if from_zero { (0.25, 1.0) } else { (1.0, 0.25) });
         }
-        let alone = Same::of_bytes(5, Vec::new()).expand(edges);
+        let alone = Same::of_bytes(5, Vec::new()).expand(claims);
         assert_eq!(alone.len(), 1);
-        assert_eq!(alone[0].ends(), (0, 2));
+        assert_eq!(alone[0].e.ends(), (0, 2));
     }
 
     /// The three kinds of sameness, settled and stated: the same bytes, then
@@ -491,7 +494,7 @@ mod tests {
             ]
         );
         // A match of 0's is a match of every file it answers for.
-        let out = same.expand(vec![Edge::new(0, 5, Verdict::default())]);
-        assert_eq!(out.iter().map(Edge::ends).collect::<Vec<_>>(), [(0, 5), (1, 5), (2, 5), (3, 5), (4, 5)]);
+        let out = same.expand(vec![Claim { e: Edge::new(0, 5, Verdict::default()), how: How::Direct }]);
+        assert_eq!(out.iter().map(|c| c.e.ends()).collect::<Vec<_>>(), [(0, 5), (1, 5), (2, 5), (3, 5), (4, 5)]);
     }
 }

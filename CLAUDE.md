@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.53.0)
+## Status (0.54.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -172,6 +172,55 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   105-107 new; peak RssAnon+swap 410-437 MB base, 409-453 new. Code lines
   (no comments or blanks) 2,246 -> 2,256. Cache format IMGFPC15, for the
   lossless change (a record of 14 would keep calling those files lossy).
+- 0.54.0 (the claim graph rebuilt, `claims.rs`; see *The claim graph*): a
+  verdict's acceptance is one `verify::Standing` (`Rejected < Corroborating
+  < Anchor < Clean`, each clearing every bar below it), read once by
+  `Policy::standing`; a composed one is `Policy::composed`; the gate is
+  `Policy::gate` (were four `Rules` read by seven `accepted(&policy.X)`
+  calls). `Edge`, the bridge test (now a demotion of the clean flag),
+  admission and propagation moved to `claims.rs`, over one `Clusters` that
+  admission builds and propagation and corroboration read (were five
+  union-find / BFS passes over the same partition). The claims are one
+  `Vec<Claim>` with `How` it was made (were a three-list tuple, "`n_match ==
+  0` is propagated", a `bool` in `Stated::Match` and string compares).
+  Proved identical first: differential tests against the old code (2 M
+  random verdicts against the four tiers; 3,000 random graphs through bridge
+  test, admission, propagation and corroboration), then cached IMGS-ALL
+  report and `--dump`, the `ref.sh` battery (cold, cached and `--against`
+  IMGS-ALL with dumps, IMGS-PROVENANCE, the found corpus, Desktop edge runs:
+  84 outputs) and all 90 `pairs.py` reports, identical to 0.53.0. Then
+  each rule was switched off alone (IMGS-ALL at the default and its cliffs,
+  IMGS3 alone): all but one load-bearing somewhere (*Tried and rejected*).
+  The one: **`CLUSTER_SLACK_POINTS` (2) is gone**; a corroborated match needs
+  the anchor's aligned points or a whole frame. IMGS-ALL: F1 0.9823 ->
+  0.9822, recall 96.93 -> 96.90%, 425 pairs fewer (every one corroborated,
+  same-seed, 8-9 points: TP -393, traps -22), same 7 cross-family pairs,
+  perfect transforms 48 -> 47 (Henares1 `mirror_crop`, 8 points at 0.547),
+  halves 0.9802 / 0.9830 -> 0.9801 / 0.9828. Cliffs: IMGS-ALL identical but
+  overlap 0.6 (18 -> 16 cross-family) and overlap 0.5 (`docks`, 6,645 ->
+  6,644); IMGS3 identical or fewer (points 8/7/5: 8/9/11 -> 7/7/10, overlap
+  0.6: 8 -> 7). Keep rule: 16,767 DELETE, none lost, 297 / 304, 304 / 304,
+  two edits REVIEW -> KEEP; `pairs.py` unchanged. Verified pairs read by the
+  pixels 850,290 -> 829,142 (gate 8 -> 10 points). Cached IMGS-ALL (ABBA):
+  CPU 466.6 / 498.9 base, 467.4 / 507.6 new (the runs' own spread); peak
+  RssAnon+swap 617 / 623 MB base, 614 / 612 new (no copy of the anchors
+  held through propagation). Code lines flat (4,784 -> 4,778 in the files
+  touched).
+- **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
+  once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
+  alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
+  merged** (8 past 300 pairs: Mural, bird, Fountain3/5, Puerto3/4,
+  Floriana3/4, Macizo5/6, Floriana1/2, Tree1/2). Every one is joined by
+  *clean* cross-family anchors, which join clusters unasked. Judged by eye:
+  bird1/2 (a burst) and Floriana1/2, 3/4 (a portrait shot of the landscape
+  from the same spot; an original agrees with the other's crop at
+  `blk_min` 0.96, 358-389 clean links) are too near and may merge; Mural
+  (a person added), Puerto3/4, Macizo5/6, Tree1/2 and Parish Church are
+  real merges through 2-6 clean links, nearly all from `crop_micro`,
+  `embed_tiny`, `crop_strip_top` variants where the differing part is cut
+  away or too small to read; Fountain3/5 (a closer shot, 73 links) between.
+  The bridge test stops one such link, not two. **Open**, and IMGS5 is now
+  development data: the next rule needs fresh seeds again.
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
 - Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
@@ -185,8 +234,16 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   assumes, so the old check could never fire; it refuses with raw `write` +
   `_exit`, since formatting an error ran AVX-512 code.
 - Grey is BT.601 luma; a JPEG's grey is its Y plane.
-- Shipped `--min-pixel-correlation` is 0.6, chosen for what users want
-  grouped (0.5 grouped merely similar photos), not for F1.
+- Shipped `--min-pixel-correlation` is 0.7 (0.54.0; was 0.6), chosen for
+  what users want grouped, not for F1: 0.5 grouped merely similar photos,
+  and 0.6 paired five of IMGS5's sixty seeds with their near-miss sibling
+  (direct, 0.63-0.70: GanyutingStore, Kaper-12/13, Lizard, Los Gigantes,
+  Macizo1/2). Cost at 512: recall -1.3 to -1.7 points on every corpus
+  (IMGS-ALL 96.90 -> 95.45%, F1 0.9822 -> 0.9748; mostly `tiled_watermark`
+  286 -> 216 of 304, warps), precision 99.57 -> 99.60%, cross-family 7 -> 4,
+  keep rule unchanged (0 lost, 297 / 304, 304 / 304; `pairs.py` loss 24,
+  REVIEW +25). It does not stop IMGS5's merges (11 at 0.6-0.75, 10 at 0.8):
+  those go through clean anchors, which agree at 0.9 a block.
 - Default `--work-size` 512, one step below the knee at 640. 640 buys ~0.5
   points of IMGS-ALL recall (mostly containment: `embed_tiny`,
   `contact_sheet`) for ~22% more CPU on photographs. `--work-size` is the
@@ -212,8 +269,8 @@ the man page generated from `Args`. Hidden flags (`hide = true`, re-added in
 
 ```
 src/
-  lib.rs        Args, matching helpers (ranking, propagation, bridge pruning,
-                admit_anchors); cli_main, worker_main
+  lib.rs        Args, matching helpers (ranking, variants), what a report pair
+                is stated from (`Stated`); cli_main, worker_main
   pipeline.rs   one scan as stages: run -> analyse_all -> retrieve_and_verify
                 -> second_look -> cluster -> assemble -> finish
   main.rs       img-fp: calls cli_main
@@ -231,7 +288,8 @@ src/
   heif.rs       libheif loaded at run time (libloading), not linked
   sift.rs       local features
   index.rs      vocabulary tree, inverted file, containment scoring
-  verify.rs     correspondence, geometry, pixel check, acceptance Policy
+  verify.rs     correspondence, geometry, pixel check; `Policy` and `Standing`
+  claims.rs     Edge, Clusters, bridge test, admission, propagation, Claim/How
   same.rs       which files are one file (bytes, analysis, colour), and their pairs
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
@@ -271,6 +329,10 @@ vendor/         third-party tools and venvs (gitignored)
   sets (same scene a moment / step apart), so each set is a family of hard
   negatives. IMGS3 and IMGS4 were held out and are now **spent**; the next
   rule to defend needs fresh seeds.
+- **IMGS5**: 60 seeds in 25 near-miss sets, many a portrait or closer shot
+  from the landscape's own spot; not in IMGS-ALL. Held out until 0.54.0,
+  read once then (status above); now spent too. Score with
+  `analyse.py --corpus=/home/daniel/Documents/IMGS5`.
 - **IMGS-ELONG**: 33 elongated pages of 2-10 photos (68 positives), for the
   area rule.
 - **IMGS-AGAINST**: IMGS-ALL split into scan + library as symlinks; run with
@@ -346,6 +408,27 @@ against new.
 `probe_header`; a question of the pixels is a `Sink`. Not an `if` on the
 format inside a sink, nor on the sink inside a reader.
 
+## The claim graph (`claims.rs`, `verify::Policy`)
+
+What a direct verdict may do is its `Standing`, read once from the three
+bars a user sets (`Policy::standing`; `Policy::gate` is what the lowest asks,
+`Policy::composed` judges a propagated one). `pipeline::cluster` is then a
+list of rules over one edge list: `claims::unique_pairs`, the clean flags,
+`demote_bridges` (a lone clean link between two groups stops being clean),
+`admit` (clean anchors join clusters; the rest join two only under the cover
+test and the cycle rule), which hands back the `Clusters` that propagation
+rounds (`claims::propagate`) and corroboration then read without rebuilding
+them. The result is one `Vec<Claim>`, each an `Edge` and `How` it was made
+(`Direct`, `Propagated`, `Corroborated`), which `Same::expand` carries to
+copies and the report reads (`Stated::Claim`).
+
+**Adding a rule**: a bar on one verdict is a `Standing` (a new level, or a
+condition in `standing`); a rule about the graph is a pass over the clean
+flags or the `Clusters`, between two others in `cluster`. Not a new edge
+list, a second partition of the files, or a relation read off a verdict's
+fields. Verify a refactor with a cached IMGS-ALL run *and* its `--dump`
+against the base build, then the `ref.sh` battery and `pairs.py`.
+
 ## How it works: the load-bearing pieces
 
 Each was measured; changing one needs a re-measure.
@@ -379,10 +462,13 @@ Each was measured; changing one needs a re-measure.
   member. Later rounds only in components that gained a pair. Work per round
   is a budget (`prop_budget` = direct candidates verified); a component that
   does not fit is **starred** (each file vs. the root). Spread by row.
-- **Three acceptance tiers** (`verify::Policy`): `anchor`, `propagated`
-  (no inlier count, no enclosure), `corroborated` (anchor minus
-  `CLUSTER_SLACK_*`). Collapsing them costs recall or precision.
-- **Whole-frame matches** (`Rules::framed`, `verify::frame_onto_frame`):
+- **Acceptance is a `Standing`** (`verify::Policy::standing`, ordered
+  `Rejected < Corroborating < Anchor < Clean`, each clearing every bar below
+  it) for a direct verdict, and `Policy::composed` for a propagated one (no
+  inlier count, no enclosure). `Corroborating` is the anchor's rule without
+  enclosure and with the correlation bar `CLUSTER_SLACK_CORRELATION` (0.1)
+  lower. Collapsing them costs recall or precision.
+- **Whole-frame matches** (`Policy::standing`, `verify::frame_onto_frame`):
   a verdict whose transform puts each of A's corners on B's same corner
   (inlier tolerance; resize only: a half-turn let a `quadrant_rotate` and a
   `tile_shuffle` of one dark seed in on 3 points and delete the trap) clears
@@ -391,12 +477,13 @@ Each was measured; changing one needs a re-measure.
   and joins no clusters. For icons/logos: a 512 px icon vs its 128 px copy
   had 7 points at 0.997. Featureless files (no keypoints) still match only
   identical / same-pixel copies.
-- **Weak bridges are dropped** (`drop_weak_bridges`): any bridge whose far
-  side is more than one file, including mirrored/inverted anchors. Since
-  0.44.0 a dropped bridge is kept as a weak anchor (may add one file, counts
-  in the cover test). Without the bridge test: 4 merges.
-- **Clean-anchor clusters** (`admit_anchors`): an anchor is clean when no
-  detailed block correlates below 0.9 (`blk_min`, `Policy::clean`, the
+- **Weak bridges are demoted** (`claims::demote_bridges`): any clean bridge
+  whose far side is more than one file, including mirrored/inverted anchors,
+  stays an anchor and is no longer clean (may add one file, counts in the
+  cover test). Without the bridge test: 4 merges (0.53.0: none at the
+  default, `docks` at `--min-frame-overlap` 0.6, 1,545 false pairs).
+- **Clean-anchor clusters** (`claims::admit`): an anchor is clean when no
+  detailed block correlates below 0.9 (`blk_min`, `Standing::Clean`, the
   rule's one fitted number; 0.85 until the fit and pyramid fixes raised near
   misses ~0.04 and Segovia1/2 merged at 0.85. Swept 0.875-0.95: no merge,
   F1 0.9823/0.9821/0.9816/0.9806; 0.9 is the plateau's lower middle). Weak anchors may join two clusters only when
@@ -452,7 +539,7 @@ the pair regime**, where every majority the rule chooses by is missing.
 0.49.0: 2,241 of 27,355 pairs lost content; now 24.
 
 Rules (constants in `suggest.rs` with reasons): clean pair at 0.85 (its own
-bar now, not `Policy::clean`'s; 0.85/0.9/0.95 lose the same, delete ~the
+bar now, not `Standing::Clean`'s; 0.85/0.9/0.95 lose the same, delete ~the
 same); a mirrored pair, like a negative, deletes nothing either way (a flip at
 q95 was kept over its q92 original 14/19 times); weak pair
 deletes at >= 0.95 (`WEAK_DELETES`), REVIEW at >= 0.9 (`REVIEW`); two crops
@@ -520,7 +607,8 @@ nothing for its files.
 
 `--suggest correlation | representative` (`suggest::by_group`): simple
 group-only rules, by user request; `correlation` deletes at 0.9 at the
-default bar (`CUT` = 0.75 of the way from the bar to 1), the user's choice. Neither answers to the content requirement.
+default bar (`CUT` = 2/3 of the way from the bar 0.7 to 1; it was 0.75 of the
+way from 0.6, and the cut is what was chosen), the user's choice. Neither answers to the content requirement.
 
 ### `--against LIBRARY` (`against.rs`)
 
@@ -578,15 +666,20 @@ a parameter is the cheap experiment; run it before adding one.
 - Self-deriving the aligned-points bar from a null model was built and is
   worse (coincidence was never the binding constraint).
 
-Cliffs at 0.51.0, distance from shipped to nearest merge, on the four
-corpora and IMGS-ALL (`out/v36-cliffs/cliffs.txt`; 0.44.0's in
-`out/v31-cost-cliff`).
+Cliffs, distance from shipped to nearest merge, on the four corpora and
+IMGS-ALL: the 512 column at 0.54.0's default (correlation 0.7; session
+scratch, not in `out/`), the 640 column at 0.51.0 with correlation 0.6
+(`out/v36-cliffs/cliffs.txt`; 0.44.0's in `out/v31-cost-cliff`). At 0.7,
+512: points 3 is at most 66 cross-family pairs (IMGS3 `docks`, 62); overlap
+0.5 merges `docks` on IMGS-ALL (5,702), IMGS3 alone reaches 168
+(`Antoniego`) and IMGS, IMGS2, IMGS4 stay at 0-1 down to 0.4; correlation
+below 0.7 is the 0.51.0 sweep (no merge 0.2-0.6).
 
 | option | 512 (default) | 640 |
 |---|---|---|
 | `--min-aligned-points` 10 | none down to 3 | none down to 3 (0.44.0: `bust` at 7) |
 | `--min-frame-overlap` 0.85 | 0.35 (`docks` at 0.5) | 0.25 (`docks` at 0.6) |
-| `--min-pixel-correlation` 0.6 | none 0.2-0.8 | 0.2 below (`game` at 0.4, IMGS3) |
+| `--min-pixel-correlation` 0.7 | none 0.2-0.8 | 0.3 below (`game` at 0.4, IMGS3) |
 | `-k` 150 | none from 10 up | none |
 
 `bust` no longer merges at 640 on any corpus, and `Henares` no longer joins
@@ -599,8 +692,9 @@ photographs of one scene.
 Internal constants, measured (`out/v24-constants`, `out/v25-slack-budget`):
 thumbnail 128 is the low edge of a plateau; **`GRID / BLOCK` (48/8 = 6 blocks
 a side) is one step from a merge cliff** (4-5 blocks merge); flat-block bar 4
-sits on a 1-6 plateau (8 merges); `CLUSTER_SLACK_*` are points on a ramp, no
-cliff, kept for the 0.6 default's sake; decode budget `MemAvailable / 8` is
+sits on a 1-6 plateau (8 merges); `CLUSTER_SLACK_CORRELATION` is a point on
+a ramp, no cliff, ~0.5 recall (`tiled_watermark` and non-affine warps;
+`CLUSTER_SLACK_POINTS` = 2 beside it was 0.03 and went in 0.54.0); decode budget `MemAvailable / 8` is
 the knee; inlier tolerance 0.015 of the diagonal is on a plateau (0.03 is
 unsafe); `index::shared`'s texture cut removed, its 60,000 cap kept as a work
 bound. Lowe ratio test, `PROP_NCC`, `PROP_GAP`, per-block cut and coverage
@@ -717,6 +811,14 @@ Do not retry without new evidence:
   k-means update, mip pyramid instead of blur in `whole_worst`, one-file
   bridge test (`IMGFP_CUT`), cosine retrieval, best-edge-first propagation
   tree, k-truss / biconnected grouping, plain-tap pixel sampling.
+- Claim graph (0.54.0 survey, each rule off alone, cached IMGS-ALL at 512
+  and its cliffs, IMGS3 alone): one cover test for every join, clean
+  anchors included (recall -1.0, 17 perfect transforms, Segovia merges at
+  the default: 1,059 pairs); every anchor weak (Segovia + game merge, 14,176
+  cross-family) or every anchor clean (24 merges); no enclosure (`docks`
+  merges, 93); no bridge test (`docks` at overlap 0.6, 1,545); no cycle rule
+  (inert on IMGS-ALL at every cliff, Segovia merges on IMGS3 alone at
+  overlap 0.6, 7,528). Every one is load-bearing somewhere.
 
 ## The window (`img-fp-gui`, feature `gui`)
 

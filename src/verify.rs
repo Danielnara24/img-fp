@@ -71,7 +71,7 @@ pub struct Verdict {
     pub blk_n: u32,
     /// The lowest of those blocks' correlations: whether any part of the
     /// overlap disagrees, where `blk` says how much it agrees on the whole.
-    /// See `Policy::clean`.
+    /// See `Standing::Clean`.
     pub blk_min: f32,
     pub ncc: f32,
 }
@@ -97,259 +97,127 @@ impl Default for Verdict {
     }
 }
 
-/// One acceptance test. The tool applies three of these at different
-/// strengths rather than one threshold, because the cost of a mistake is not
-/// the same everywhere: see `Policy`.
-#[derive(Clone, Copy, Debug)]
-pub struct Rules {
-    pub min_aligned_points: u32,
-    pub min_frame_overlap: f32,
-    pub min_pixel_correlation: f32,
-    pub max_scale: f32,
-    /// Whether the match's own correspondences must enclose the centre of the
-    /// overlap it claims.
-    ///
-    /// Not a strength setting — a statement about what the evidence is being
-    /// asked to support. Only an anchor can put two files into one cluster,
-    /// and it does that by claiming a region; correspondences bunched outside
-    /// that region extrapolate into it rather than attest to it, however many
-    /// of them there are. A corroborated pair claims nothing new — the cluster
-    /// already exists — so it is judged on the evidence as found. A match that
-    /// fails here is therefore demoted rather than discarded: it cannot create
-    /// a cluster, but it can still join one.
-    pub centred_evidence: bool,
-    /// The lowest correlation any one detailed block of the overlap may have.
-    /// Zero everywhere but `Policy::clean`.
-    pub min_worst_block: f32,
-    /// Whether a verdict that takes one frame onto the other whole, resized
-    /// (`framed`),
-    /// may have fewer aligned points than `min_aligned_points` — as few as a
-    /// transform is fitted through — when every detailed block of it agrees
-    /// as a clean anchor's does (`CLEAN_WORST_BLOCK`).
-    ///
-    /// **The points are there to vouch for the geometry, and a frame landing
-    /// on a frame vouches for it instead.** A count of aligned points is a
-    /// defence against a transform that a few coincidental correspondences
-    /// happen to agree on; four corners landing on four corners, within the
-    /// tolerance an inlier is held to, is not something such a transform
-    /// does. What it cannot vouch for is the content, and that is the pixel
-    /// check's at the bar a cluster is built on. A picture with little
-    /// detail — an icon, a logo, a plain diagram — has a handful of features
-    /// and was matched to its own resized copy by none of them: a 512-pixel
-    /// icon and its 128-pixel copy had 7 aligned points and correlated at
-    /// 0.997 on every block. Not for `Policy::clean`: a match on this
-    /// evidence may add a file to a cluster and never join two.
-    pub framed: bool,
+/// What a direct verdict may do, by what a wrong answer would cost. Ordered:
+/// each standing clears every bar of the ones below it.
+///
+/// What differs between them is not the strength of the evidence, it is the
+/// cost of a mistake. A claim that can put two files into one cluster costs,
+/// when wrong, every pair the two clusters imply: on this corpus one bad
+/// anchor between two beach photographs made 354 false pairs downstream, and
+/// another 3,002. A claim inside a cluster that already exists costs one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Standing {
+    Rejected,
+    /// A direct match between two files an anchor has *already* placed in one
+    /// cluster. It cannot merge anything, so the question is no longer "are
+    /// these the same picture" but "does this pair hold up", and it faces the
+    /// anchor's rule with the correlation bar lowered
+    /// (`CLUSTER_SLACK_CORRELATION`) and without the demand that its evidence
+    /// enclose what it claims: that demand exists only to stop evidence from
+    /// one corner of a frame putting two files together on the strength of
+    /// the rest.
+    Corroborating,
+    /// Believed on its own: enough aligned points, enough of the frame, and
+    /// agreeing pixels, with the points enclosing the centre of the overlap
+    /// they claim (`Verdict::centred`; without it, 36 merges). It may add a
+    /// file to a cluster, and joins two only as `claims::admit` allows.
+    Anchor,
+    /// An anchor whose every detailed block agrees (`CLEAN_WORST_BLOCK`): the
+    /// only claim that joins two clusters on its own.
+    Clean,
 }
 
 /// The lowest correlation every detailed block of a clean anchor reaches
-/// (`Policy::clean`), and of a whole-frame match short of aligned points
-/// (`Rules::framed`).
+/// (`Standing::Clean`), and of a whole-frame match short of aligned points
+/// (`Policy::standing`).
+///
+/// **This number is fitted**, and it is the one number the near-miss rule
+/// has. It is the plateau's lower middle, as it was when it was 0.85: swept on
+/// IMGS-ALL, two photographs of one scene in Segovia merge at 0.85 (6,933
+/// false pairs) and no family merges from 0.875 to 0.95 (F1 0.9823, 0.9821,
+/// 0.9816, 0.9806). It moved up a step when the fit and the pyramid stopped
+/// costing exact copies agreement (`best_transform`, `Pyramid`): near misses
+/// rose by about 0.04 with them, and the bar was 0.04 above the old cliff. A
+/// count of aligned points was tried beside it and is worse: a dark or plain
+/// picture has few features and good pixels, and its family fell apart. See
+/// CLAUDE.md.
 pub const CLEAN_WORST_BLOCK: f32 = 0.9;
 
-/// The three tests, and why they differ.
-///
-/// **anchor** is what a pair must clear to be believed on its own. It is the
-/// only rule that can put two files into one cluster, so it is the only one
-/// whose mistakes can merge two unrelated families — and a wrong merge does
-/// not cost one pair, it costs every pair the two families imply. On this
-/// corpus a single bad anchor between two beach photographs produced 354
-/// false pairs downstream.
-///
-/// **propagated** judges a transform composed through other matches. No
-/// features vouch for it, so it is decided on pixels alone and has to get a
-/// clear answer from them.
-///
-/// **corroborated** applies to a direct match between two files an anchor has
-/// already placed in one cluster. Such a match cannot merge anything, so the
-/// question is no longer "are these the same picture" but "does this
-/// particular pair hold up". It is judged on the evidence as it was found,
-/// without the anchor's demand that the evidence enclose what it claims.
-#[derive(Clone, Copy, Debug)]
-pub struct Policy {
-    pub anchor: Rules,
-    pub propagated: Rules,
-    pub corroborated: Rules,
-    /// An anchor strong enough to join two clusters. See `admit_anchors` in
-    /// `lib.rs` for what an anchor that clears `anchor` but not this may do.
-    pub clean: Rules,
-}
+/// The largest scale between the working images a claim may span. A sanity
+/// bound, not a tuned one. Both working images are near `--work-size` on
+/// their long side whatever the files' sizes, so it does not limit how much
+/// smaller one file may be than another: it limits how small a part of one
+/// picture the other may be, and past sixteen-fold that part is some thirty
+/// pixels of a 512-pixel analysis.
+const MAX_SCALE: f32 = 16.0;
 
-const GRID: usize = 48;
-const BLOCK: usize = 8;
-
-
-/// How much easier it is to be believed *inside* a cluster than to create one.
+/// How much easier it is to be believed *inside* a cluster than to create one
+/// (`Standing::Corroborating`): the correlation bar, this much lower.
 ///
-/// A corroborated match cannot merge two families: the anchor that put its two
-/// files together already did, or did not. So its mistakes cost one pair where
-/// an anchor's cost every pair the two families imply. It gets the same rule
-/// with a margin taken off — and this is that margin, stated once, where the
-/// old policy spread the same idea over four unrelated-looking offsets.
-///
-/// These two are the only numbers left in the acceptance rule that were read
-/// off a corpus rather than derived, and unlike the rest they earned it: the
-/// held-out corpus prefers them too. Without the margin, corroborated pairs
-/// face the anchor bar and validation recall falls from 93.1% to 90.7%.
-const CLUSTER_SLACK_POINTS: u32 = 2;
+/// The one number in the acceptance rule read off a corpus rather than
+/// derived, and it earned it: the held-out corpus preferred the margin too
+/// (without it validation recall fell from 93.1% to 90.7%), and on IMGS-ALL it
+/// is half a point of recall and moves no merge cliff. What it admits is a
+/// pair whose pixels agree less than its fit accounts for: a whole-picture
+/// overlay (`tiled_watermark`, 39 of the 60 pairs it adds) and non-affine
+/// warps (barrel, wave, keystone, perspective). A margin of two aligned
+/// points stood beside it, carried 0.03 points of recall and no cliff, and
+/// is gone: a corroborated match has the anchor's points or a whole frame.
 const CLUSTER_SLACK_CORRELATION: f32 = 0.1;
 
-impl Default for Rules {
-    fn default() -> Self {
-        Rules {
-            min_aligned_points: 8,
-            min_frame_overlap: 0.85,
-            min_pixel_correlation: 0.6,
-            // A sanity bound, not a tuned one. It is a ratio between the
-            // *working* images, which are both near `--work-size` on their
-            // long side whatever the files' sizes, so it does not limit how
-            // much smaller one file may be than another: it limits how small
-            // a part of one picture the other may be, and past sixteen-fold
-            // that part is some thirty pixels of a 512-pixel analysis.
-            max_scale: 16.0,
-            centred_evidence: false,
-            min_worst_block: 0.0,
-            framed: false,
-        }
-    }
+/// The three bars a user sets, and what a verdict is worth against them: a
+/// direct one's `Standing`, or whether a composed one stands (`composed`).
+///
+/// The old policy had an anchor tier, a propagated tier and a corroborated
+/// tier, and they disagreed about six things: an inlier bonus of 2 for
+/// anchors, block minimums of 8, 6 and 4, an agreement bar ten points lower
+/// for corroboration, a scale surcharge of 6 per octave for two tiers and 4
+/// for the third, and an overlap floor of 0.9 for propagation alone. Every
+/// one of those numbers was read off one corpus. The last two went once the
+/// pixel check stopped aliasing: both existed to distrust a comparison across
+/// a large scale gap, and that distrust was earned by a sampling bug rather
+/// than by the geometry.
+///
+/// Corroboration survived an attempt to fold it in with propagation. Both
+/// are claims inside a cluster, and that is wrong, because a corroborated
+/// pair *does* have features vouching for it and a propagated one does not.
+/// Holding it to the pixels-only bar cost 1.8 points of recall on the tuning
+/// corpus and 4.2 on the held-out one.
+#[derive(Clone, Copy, Debug)]
+pub struct Policy {
+    min_aligned_points: u32,
+    min_frame_overlap: f32,
+    min_pixel_correlation: f32,
 }
 
 impl Policy {
-    /// Two rules, because there are two questions — not three, and not nine
-    /// numbers pretending to be three.
-    ///
-    /// The old policy had an anchor tier, a propagated tier and a corroborated
-    /// tier, and they disagreed about six things: an inlier bonus of 2 for
-    /// anchors, block minimums of 8, 6 and 4, an agreement bar ten points
-    /// lower for corroboration, a scale surcharge of 6 per octave for two
-    /// tiers and 4 for the third, and an overlap floor of 0.9 for propagation
-    /// alone. Every one of those numbers was read off one corpus. The last
-    /// two — a floor on comparable blocks, and the scale surcharge — went
-    /// later still, once the pixel check stopped aliasing: both existed to
-    /// distrust a comparison across a large scale gap, and that distrust was
-    /// earned by a sampling bug rather than by the geometry.
-    ///
-    /// What actually differs is simpler, and it is not the strength of the
-    /// evidence — it is **what a wrong answer costs**:
-    ///
-    ///   * An **anchor** is the only kind of claim that can put two files into
-    ///     one cluster. Its mistakes do not cost one pair, they cost every
-    ///     pair the two clusters imply; during development two bad anchors
-    ///     cost 354 and 3,002 false pairs apiece. So an anchor faces the whole
-    ///     rule: enough correspondences, enough overlap, and agreeing pixels.
-    ///
-    ///   * A **propagated** pair is a transform composed along a chain, and no
-    ///     features vouch for it at all. The inlier count is not evidence
-    ///     about it, so the pixels have to answer on their own: over the whole
-    ///     overlap, correlated, and without a large scale gap to hide a blur
-    ///     in.
-    ///
-    ///   * A **corroborated** pair is a direct match between two files an
-    ///     anchor has *already* placed in one cluster. It cannot merge
-    ///     anything, so its mistakes cost one pair rather than thousands, and
-    ///     it gets the same rule with a margin off: `CLUSTER_SLACK_*` off the
-    ///     two bars, and no demand that its correspondences enclose what they
-    ///     claim, since that demand exists only to stop evidence from one
-    ///     corner of a frame merging two families on the strength of the rest.
-    ///
-    /// The three tiers survived an attempt to make them two. Folding
-    /// corroboration in with propagation looks right — both are claims inside
-    /// a cluster — and is wrong, because a corroborated pair *does* have
-    /// features vouching for it and a propagated one does not. Holding it to
-    /// the pixels-only bar cost 1.8 points of recall on the tuning corpus and
-    /// 4.2 on the held-out one. Three tiers is a fact about the evidence, not
-    /// a number read off a corpus; the nine numbers were the problem, and they
-    /// are gone.
     pub fn new(min_aligned_points: u32, min_frame_overlap: f32, min_pixel_correlation: f32) -> Policy {
-        let anchor = Rules {
-            min_aligned_points,
-            min_frame_overlap,
-            min_pixel_correlation,
-            centred_evidence: true,
-            framed: true,
-            ..Default::default()
-        };
-        Policy {
-            anchor,
-            // An anchor whose every detailed block agrees: no block of the
-            // overlap below 0.9. **This number is fitted**, and it is the one
-            // number the near-miss rule has. It is the plateau's lower middle,
-            // as it was when it was 0.85: swept on IMGS-ALL, two photographs
-            // of one scene in Segovia merge at 0.85 (6,933 false pairs) and no
-            // family merges from 0.875 to 0.95 (F1 0.9823, 0.9821, 0.9816,
-            // 0.9806). It moved up a step when the fit and the pyramid stopped
-            // costing exact copies agreement (`best_transform`, `Pyramid`):
-            // near misses rose by about 0.04 with them, and the bar was 0.04
-            // above the old cliff. A count of aligned points was tried beside
-            // it and is worse: a dark or plain picture has few features and
-            // good pixels, and its family fell apart. See CLAUDE.md.
-            clean: Rules { min_worst_block: CLEAN_WORST_BLOCK, framed: false, ..anchor },
-            propagated: Rules {
-                min_aligned_points: 0,
-                centred_evidence: false,
-                ..anchor
-            },
-            corroborated: Rules {
-                min_aligned_points: min_aligned_points.saturating_sub(CLUSTER_SLACK_POINTS),
-                min_pixel_correlation: (min_pixel_correlation - CLUSTER_SLACK_CORRELATION).max(0.0),
-                centred_evidence: false,
-                ..anchor
-            },
-        }
+        Policy { min_aligned_points, min_frame_overlap, min_pixel_correlation }
     }
-}
 
-impl Verdict {
-    /// The same verdict read from B to A: the transform inverted and every
-    /// figure that has a direction turned round with it. `None` when the
-    /// transform has no inverse.
+    /// `--min-frame-overlap`, which every claim faces whatever vouches for it.
+    pub fn min_frame_overlap(&self) -> f32 {
+        self.min_frame_overlap
+    }
+
+    /// What a verdict must already have before its pixels are worth reading:
+    /// the aligned points and the overlap every standing asks (a whole frame
+    /// is read below the points; see `standing`).
+    pub fn gate(&self) -> (u32, f32) {
+        (self.min_aligned_points, self.min_frame_overlap)
+    }
+
+    /// The geometry every claim must have: a transform within `MAX_SCALE`
+    /// that puts enough of one frame on the other.
     ///
-    /// The counts, the correlations and `centred` — which passes on either
-    /// frame — say the same thing both ways.
-    /// What two files with one working image are stated with when no pass
-    /// verified them (`same::Kind::SameGrey`): the identity, every one of
-    /// the `n` keypoints aligned and every block agreeing.
-    pub fn perfect(n: u32) -> Verdict {
-        Verdict {
-            n_in: n,
-            n_match: n,
-            centred: true,
-            framed: true,
-            ov_a: 1.0,
-            ov_b: 1.0,
-            scale: 1.0,
-            blk: 1.0,
-            blk_n: 1,
-            blk_min: 1.0,
-            ncc: 1.0,
-            ..Default::default()
-        }
-    }
-
-    pub fn reversed(&self) -> Option<Verdict> {
-        let m = invert_affine(&self.m)?;
-        Some(Verdict {
-            m,
-            ov_a: self.ov_b,
-            ov_b: self.ov_a,
-            scale: (m[0] * m[4] - m[1] * m[3]).abs().sqrt(),
-            rot_deg: m[3].atan2(m[0]).to_degrees(),
-            ..self.clone()
-        })
-    }
-
-    /// Every bar this verdict has to clear, under one tier's rules.
-    ///
-    /// Two of these are the CLI's `--min-frame-overlap` and
+    /// Two of the bars are the CLI's `--min-frame-overlap` and
     /// `--min-pixel-correlation`, and the nouns are the whole point: `ov_a`
     /// and `ov_b` are **frames**, pure geometry with no pixel read, so that
     /// floor asks what the transform *claims*; `blk` is the mean of |r| over
     /// the **pixels** of that overlap carrying detail, so that floor asks
-    /// whether the claim is *true*. They used to read as a loose and a tight
-    /// version of one bar, back when they were `--min-overlap` and
-    /// `--min-agreement`, and this comment was three times as long trying to
-    /// talk people out of it. They are the only defence against two failure
-    /// modes that do not overlap at all, and each is blind to the other's:
+    /// whether the claim is *true*. They are the only defence against two
+    /// failure modes that do not overlap at all, and each is blind to the
+    /// other's:
     ///
     ///   * Two different photographs on the same page furniture — the corpus's
     ///     two Excel screenshots — map onto each other perfectly. Measured
@@ -372,16 +240,98 @@ impl Verdict {
     /// thing standing between the tool and a wrong family merge. Loosening the
     /// first costs traps and merges nothing; loosening the second merges
     /// families and costs almost no traps. The sweeps are in `CLAUDE.md`.
-    pub fn accepted(&self, r: &Rules) -> bool {
-        self.scale.is_finite()
-            && self.scale >= 1.0 / r.max_scale
-            && self.scale <= r.max_scale
-            && (self.n_in >= r.min_aligned_points
-                || (r.framed && self.framed && self.n_in >= 3 && self.blk_min >= CLEAN_WORST_BLOCK))
-            && (!r.centred_evidence || self.centred)
-            && self.ov_a.max(self.ov_b) >= r.min_frame_overlap
-            && self.blk >= r.min_pixel_correlation
-            && self.blk_min >= r.min_worst_block
+    fn frames(&self, v: &Verdict) -> bool {
+        v.scale.is_finite()
+            && v.scale >= 1.0 / MAX_SCALE
+            && v.scale <= MAX_SCALE
+            && v.ov_a.max(v.ov_b) >= self.min_frame_overlap
+    }
+
+    /// What a direct verdict may do; see `Standing`.
+    ///
+    /// **A frame landing on a frame vouches for the geometry instead of the
+    /// points** (`Verdict::framed`): a verdict that takes one frame onto the
+    /// other whole, resized, may have as few aligned points as a transform is
+    /// fitted through when every detailed block of it agrees as a clean
+    /// anchor's does. A count of aligned points is a defence against a
+    /// transform that a few coincidental correspondences happen to agree on;
+    /// four corners landing on four corners, within the tolerance an inlier
+    /// is held to, is not something such a transform does. What it cannot
+    /// vouch for is the content, and that is the pixel check's at the bar a
+    /// cluster is built on. A picture with little detail — an icon, a logo, a
+    /// plain diagram — has a handful of features and was matched to its own
+    /// resized copy by none of them: a 512-pixel icon and its 128-pixel copy
+    /// had 7 aligned points and correlated at 0.997 on every block. Never
+    /// clean on that evidence: it may add a file to a cluster and never join
+    /// two.
+    pub fn standing(&self, v: &Verdict) -> Standing {
+        if !self.frames(v) {
+            return Standing::Rejected;
+        }
+        let points = v.n_in >= self.min_aligned_points;
+        let whole = v.framed && v.n_in >= 3 && v.blk_min >= CLEAN_WORST_BLOCK;
+        let agrees = v.blk >= self.min_pixel_correlation;
+        if points && v.centred && agrees && v.blk_min >= CLEAN_WORST_BLOCK {
+            Standing::Clean
+        } else if !(points || whole) {
+            Standing::Rejected
+        } else if v.centred && agrees {
+            Standing::Anchor
+        } else if v.blk >= (self.min_pixel_correlation - CLUSTER_SLACK_CORRELATION).max(0.0) {
+            Standing::Corroborating
+        } else {
+            Standing::Rejected
+        }
+    }
+
+    /// Whether a transform composed through other matches stands
+    /// (`claims::propagate`). No features vouch for it, so the inlier count is
+    /// not evidence about it, and the pixels have to answer on their own.
+    pub fn composed(&self, v: &Verdict) -> bool {
+        self.frames(v) && v.blk >= self.min_pixel_correlation
+    }
+}
+
+const GRID: usize = 48;
+const BLOCK: usize = 8;
+
+impl Verdict {
+    /// What two files with one working image are stated with when no pass
+    /// verified them (`same::Kind::SameGrey`): the identity, every one of
+    /// the `n` keypoints aligned and every block agreeing.
+    pub fn perfect(n: u32) -> Verdict {
+        Verdict {
+            n_in: n,
+            n_match: n,
+            centred: true,
+            framed: true,
+            ov_a: 1.0,
+            ov_b: 1.0,
+            scale: 1.0,
+            blk: 1.0,
+            blk_n: 1,
+            blk_min: 1.0,
+            ncc: 1.0,
+            ..Default::default()
+        }
+    }
+
+    /// The same verdict read from B to A: the transform inverted and every
+    /// figure that has a direction turned round with it. `None` when the
+    /// transform has no inverse.
+    ///
+    /// The counts, the correlations and `centred` — which passes on either
+    /// frame — say the same thing both ways.
+    pub fn reversed(&self) -> Option<Verdict> {
+        let m = invert_affine(&self.m)?;
+        Some(Verdict {
+            m,
+            ov_a: self.ov_b,
+            ov_b: self.ov_a,
+            scale: (m[0] * m[4] - m[1] * m[3]).abs().sqrt(),
+            rot_deg: m[3].atan2(m[0]).to_degrees(),
+            ..self.clone()
+        })
     }
 }
 
@@ -1919,7 +1869,7 @@ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
     // Asked first, since a verdict that lands frame on frame is read below
-    // the gate as well (`Rules::framed`): four corners, so it costs nothing,
+    // the gate as well (`Policy::standing`): four corners, so it costs nothing,
     // and a transform from a few coincidental points almost never passes.
     v.framed = frame_onto_frame(&m, aw, ah, bw, bh);
     let floor = |gate: u32| if v.framed { 3 } else { gate.max(3) };
@@ -2188,18 +2138,18 @@ mod tests {
         assert!(!frame_onto_frame(&[1.0, 0.0, 0.0, 0.0, 0.1, 0.0], aw, ah, aw, ah));
     }
 
-    /// Below the aligned-points bar, a verdict is accepted only when it lands
-    /// frame on frame and every detailed block agrees, and never as clean.
+    /// Below the aligned-points bar, a verdict is an anchor only when it lands
+    /// frame on frame and every detailed block agrees, and never clean.
     #[test]
     fn a_whole_frame_match_needs_fewer_points_and_every_block() {
         let policy = Policy::new(10, 0.85, 0.6);
+        let at = |v: Verdict| policy.standing(&v);
         let v = Verdict { n_in: 7, framed: true, centred: true, ov_a: 1.0, ov_b: 1.0, scale: 1.0, blk: 0.99, blk_min: 0.95, ..Default::default() };
-        assert!(v.accepted(&policy.anchor));
-        assert!(!v.accepted(&policy.clean), "it may add a file to a cluster and never join two");
-        assert!(!Verdict { framed: false, ..v }.accepted(&policy.anchor));
-        assert!(!Verdict { blk_min: 0.85, ..v }.accepted(&policy.anchor), "one block disagreeing");
-        assert!(!Verdict { n_in: 2, ..v }.accepted(&policy.anchor));
-        assert!(Verdict { n_in: 10, framed: false, blk_min: 0.5, ..v }.accepted(&policy.anchor), "the bar met is the bar as it was");
+        assert_eq!(at(v), Standing::Anchor, "it may add a file to a cluster and never join two");
+        assert!(at(Verdict { framed: false, ..v }) < Standing::Anchor);
+        assert!(at(Verdict { blk_min: 0.85, ..v }) < Standing::Anchor, "one block disagreeing");
+        assert!(at(Verdict { n_in: 2, ..v }) < Standing::Anchor);
+        assert_eq!(at(Verdict { n_in: 10, framed: false, blk_min: 0.5, ..v }), Standing::Anchor, "the bar met is the bar as it was");
     }
 
     /// The pyramid one output at a time, each pixel the [1 3 3 1]/8 filter
