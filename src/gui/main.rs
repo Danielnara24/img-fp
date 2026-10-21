@@ -21,10 +21,13 @@
 //! - `last.rs`    the last finished scan, kept so that a closed window does
 //!   not cost it
 //! - `labels.rs`  every mnemonic in the window, checked for clashes by a test
+//! - `commands.rs` every key the window answers to, and the F1 list read off
+//!   them
 //!
 //! Every control can be reached from the keyboard: Tab and the arrow keys move
 //! focus, and every labelled control has an Alt mnemonic.
 
+mod commands;
 mod folders;
 mod labels;
 mod last;
@@ -103,7 +106,8 @@ fn main() -> glib::ExitCode {
         let start = folders.borrow_mut().take().unwrap_or_default();
         build(app, start);
     });
-    app.set_accels_for_action("window.close", &["<Control>q", "<Control>w"]);
+    let quit = commands::accels(commands::Window::Quit);
+    app.set_accels_for_action("window.close", &quit.iter().map(String::as_str).collect::<Vec<_>>());
     // GTK is not handed the arguments: they are folders, not GTK options.
     app.run_with_args(&[args[0].to_string_lossy().into_owned()])
 }
@@ -276,79 +280,6 @@ fn follow_dark_text(window: &gtk::ApplicationWindow) {
     }
 }
 
-/// Every key the window answers to, in one place. Opened by F1.
-fn show_shortcuts(parent: &gtk::ApplicationWindow) {
-    const KEYS: &[(&str, &[(&str, &str)])] = &[
-        ("Everywhere", &[
-            ("Alt + underlined letter", "Use that button or field"),
-            ("Tab, Shift+Tab", "Move between controls"),
-            ("F1", "This list"),
-            ("Ctrl+Q, Ctrl+W", "Quit"),
-        ]),
-        ("Scan", &[
-            ("Ctrl+Enter", "Start the scan"),
-            ("Escape", "Cancel the scan"),
-            ("Delete", "Remove the selected folder from a list"),
-        ]),
-        ("Results", &[
-            ("Arrow keys, Home, End", "Select an image of the group or folder, from anywhere on the page"),
-            ("Up, Down in the groups", "Change group"),
-            ("Enter in the groups", "Go to the group's images"),
-            ("Left, Right in the folders", "Close or open a folder"),
-            ("Space or Delete", "Mark or unmark the selected image for the Trash"),
-            ("Shift+arrow key", "Move, giving each image passed the mark last given by hand"),
-            ("Shift+click", "Mark or unmark every image from the one last marked or unmarked to this one"),
-            ("Enter, double click", "Open the selected image large"),
-            ("Alt+V, Alt+O, Alt+F", "View it large, open it, show it in its folder"),
-            ("Alt+E", "Mark every other image of the group"),
-            ("Alt+U, Alt+A", "Unmark the group or folder, unmark everything"),
-            ("Alt+M", "In the tree view, mark every image in the folder"),
-            ("Alt+W", "Switch between the groups and the folder tree"),
-            ("Menu, Shift+F10, right click", "The same, as a menu"),
-            ("Ctrl+Page Down", "Next group or folder"),
-            ("Ctrl+Page Up", "Previous group or folder"),
-            ("Ctrl+Plus, Ctrl+Minus", "Larger or smaller images"),
-            ("Ctrl+0", "Images as large as fit the page"),
-        ]),
-        ("Large view", &[
-            ("Left, Right", "Previous or next image"),
-            ("Space or Delete", "Mark or unmark it"),
-            ("Escape", "Close"),
-        ]),
-    ];
-    let grid = gtk::Grid::builder()
-        .row_spacing(6)
-        .column_spacing(24)
-        .margin_top(16)
-        .margin_bottom(16)
-        .margin_start(20)
-        .margin_end(20)
-        .build();
-    let mut row = 0;
-    for (section, keys) in KEYS {
-        let head = gtk::Label::builder().label(*section).xalign(0.0).margin_top(if row == 0 { 0 } else { 10 }).build();
-        head.add_css_class("heading");
-        grid.attach(&head, 0, row, 2, 1);
-        row += 1;
-        for (key, what) in keys.iter() {
-            let k = gtk::Label::builder().label(*key).xalign(0.0).build();
-            k.add_css_class("monospace");
-            grid.attach(&k, 0, row, 1, 1);
-            grid.attach(&gtk::Label::builder().label(*what).xalign(0.0).build(), 1, row, 1, 1);
-            row += 1;
-        }
-    }
-    let win = gtk::Window::builder()
-        .title("Keyboard shortcuts")
-        .transient_for(parent)
-        .modal(true)
-        .resizable(false)
-        .child(&grid)
-        .build();
-    close_on_escape(&win);
-    win.present();
-}
-
 /// Escape closes a secondary window, as it does a dialog.
 pub fn close_on_escape(win: &gtk::Window) {
     let keys = gtk::EventControllerKey::new();
@@ -441,12 +372,12 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed({
         let w = window.clone();
-        move |_, key, _, _| {
-            if key == gtk::gdk::Key::F1 {
-                show_shortcuts(&w);
-                return glib::Propagation::Stop;
+        move |_, key, _, mods| match commands::WINDOW.find(key, mods) {
+            Some(commands::Window::Help) => {
+                commands::show_help(&w);
+                glib::Propagation::Stop
             }
-            glib::Propagation::Proceed
+            _ => glib::Propagation::Proceed,
         }
     });
     window.add_controller(keys);

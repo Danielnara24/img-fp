@@ -51,8 +51,8 @@ pub const LOG_CHOOSE: &str = "Bro_wse…";
 pub const GROUPS: &str = "_Groups";
 /// The tree view's heading, in GROUPS' place.
 pub const FOLDERS_TREE: &str = "_Browse folders";
-// The results page's menu. Its letters are Alt shortcuts on the whole page,
-// so they are checked with the page's own.
+// The results page's menu (`commands::MENU`). Its letters are Alt shortcuts
+// on the whole page, so they are checked with the page's own.
 pub const ENLARGE: &str = "_View large";
 pub const MARK_OTHERS: &str = "Mark all _except this";
 pub const UNMARK_GROUP: &str = "_Unmark group";
@@ -94,6 +94,8 @@ pub fn letter(label: &str) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::MENU;
+    use crate::results::View;
 
     fn checked(label: &str) -> char {
         assert_eq!(label.matches('_').count(), 1, "{label:?} should have exactly one mnemonic");
@@ -126,23 +128,13 @@ mod tests {
         distinct("general tab", &[&page[..], &general[..]].concat());
         distinct("advanced tab", &[&page[..], &advanced[..]].concat());
         assert_eq!(letter(SCAN), letter(CANCEL));
-        distinct(
-            "results",
-            &[
-                GROUPS, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG, ENLARGE, OPEN, SHOW_FOLDER, MARK_OTHERS,
-                UNMARK_GROUP, UNMARK_ALL, TO_TREE,
-            ],
-        );
-        distinct(
-            "results, tree view",
-            &[
-                FOLDERS_TREE, MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG, ENLARGE, OPEN, SHOW_FOLDER,
-                MARK_OTHERS, MARK_FOLDER, UNMARK_FOLDER, UNMARK_ALL_FOLDERS, TO_GROUPS,
-            ],
-        );
-        assert_eq!(letter(UNMARK_GROUP), letter(UNMARK_FOLDER));
-        assert_eq!(letter(UNMARK_ALL), letter(UNMARK_ALL_FOLDERS));
-        assert_eq!(letter(TO_TREE), letter(TO_GROUPS));
+        // The page's own, with each view's heading and menu
+        // (`commands::MENU`), whose letters are Alt on the whole page.
+        for view in [View::Groups, View::Folders] {
+            let menu = MENU.iter().flat_map(|s| s.iter()).filter_map(|c| c.label(view));
+            let page = [view.heading(), MARK_SUGGESTED, TRASH, TO_SETTINGS, SUGGEST_RULE, RESULTS_LOG].into_iter();
+            distinct(&format!("results, {view:?}"), &page.chain(menu).collect::<Vec<_>>());
+        }
         assert_eq!(letter(TRASH), letter(&trash_n(2)));
         distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE]);
         distinct("confirmation", &[CONFIRM_CANCEL, CONFIRM_TRASH]);

@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.59.0)
+## Status (0.60.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -353,6 +353,34 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   `--suggest correlation` identical but `runtime_seconds`. Code lines (no
   comments or blanks) outside tests in the files touched 2,329 -> 2,323;
   tests +91.
+- 0.60.0 (the window's keys and views, `gui/commands.rs`; see *The
+  window*): before, a key was written in up to five places (an arm of one of
+  six key controllers: the results page's image, Alt and Ctrl ones, the
+  large view's, the scan page's, F1; a line of the hand-written F1 list; the
+  results menu's two tables, one a view; its `gio` action; the mnemonic
+  test's lists), and the page's two views were `tree_view: bool`, tested in
+  ten functions, with three versions of "show what the view has selected"
+  (`rebuild`, `toggle_view`, `reshow`). Now each part of the window that
+  takes keys is a `commands::Section` of `Row`s (an F1 line and the chords
+  it describes); a controller asks `Section::find` and does the command
+  (`Results::key` decides only which keys the page takes from the focused
+  widget, `Results::run` what each does, for keys, the menu and its
+  actions alike); the F1 list, the menu, its actions and the quit
+  accelerators are read off the tables. The views are `results::View`, each
+  list one owner of its widgets (`Strip`, `Folders`), and `show_view`,
+  `step`, `scope`, `side_list` the one `match` each. Tests: no key bound
+  twice on a page, every command bound, every menu item a mnemonic and only
+  those, a menu letter the same in both views, the F1 list as it was. Found
+  by the table and dropped (user's decision): the large view also took Page
+  Up / Page Down, and a folder list Backspace, which the F1 list never said.
+  Proved under Xvfb with metacity, base vs new, three scripted runs (a
+  kept `derived/Desktop` scan; a hard-link farm of it in nested folders,
+  for the tree): every key of every section pressed, in both views, from
+  the images, the lists and buttons, 60 screenshots pixel-identical and the
+  marks files identical, but for the progress bar of a scan cancelled
+  mid-run (before the two keys were dropped). Non-test code in the files touched 3,554 -> 3,783 (`commands.rs`
+  321; `main.rs` -69; `results.rs` -20, `Results::new` 685 -> 529 lines);
+  tests 111 -> 264.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1101,6 +1129,17 @@ Do not retry without new evidence:
   Alt); F1 lists keys; dark theme followed from the desktop's text colour;
   tree view by folder (`gui/folders.rs`).
 - Mnemonics live in `gui/labels.rs` with a clash test; add labels there.
+- Keys live in `gui/commands.rs`: a `Section` per part of the window
+  (`WINDOW`, `SCAN`, `RESULTS`, `LARGE`), each `Row` a line of the F1 list
+  and the chords it describes; the results menu is `MENU` and its items'
+  mnemonics. **Adding a key**: a binding in the row that says it, and an
+  arm where the section's commands are done (`Results::run` for the page);
+  a new command is a variant of the section's enum, and the tests fail
+  until it is bound and described. Not a key controller of its own.
+- The results page's two views are `results::View` (`Groups`, `Folders`):
+  a question that differs between them is one `match` (`show_view`,
+  `step`, `scope`, `side_list`) or a `View` method, not a flag tested where
+  it is used.
 - Options are one table, `gui/options.rs` (`Opt`: key in `gui.json`, clap
   id, `Kind`, label, tip, hint; `ALL`). `Settings` holds a `Value` per
   entry, `Setup` a `Control` per entry; defaults are clap's

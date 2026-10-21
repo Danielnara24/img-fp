@@ -7,6 +7,7 @@
 //! report file, the cache, and a log file. The progress bar, the log and
 //! Scan/Cancel sit below both.
 
+use crate::commands;
 use crate::labels as l;
 use crate::last;
 use crate::results::{self, Prepared, Results};
@@ -83,14 +84,14 @@ impl PathList {
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
             let me = Rc::downgrade(&me);
-            move |_, key, _, _| {
-                if matches!(key, gdk::Key::Delete | gdk::Key::KP_Delete | gdk::Key::BackSpace) {
-                    if let Some(me) = me.upgrade() {
-                        me.remove_selected();
-                    }
-                    return glib::Propagation::Stop;
+            move |_, key, _, mods| {
+                if commands::SCAN.find(key, mods) != Some(commands::Scan::Remove) {
+                    return glib::Propagation::Proceed;
                 }
-                glib::Propagation::Proceed
+                if let Some(me) = me.upgrade() {
+                    me.remove_selected();
+                }
+                glib::Propagation::Stop
             }
         });
         me.list.add_controller(keys);
@@ -565,16 +566,12 @@ impl Setup {
                 if me.app.stack.visible_child_name().as_deref() != Some("setup") {
                     return glib::Propagation::Proceed;
                 }
-                if key == gdk::Key::Escape && me.scanning() {
-                    me.cancel();
-                    return glib::Propagation::Stop;
+                match commands::SCAN.find(key, mods) {
+                    Some(commands::Scan::Cancel) if me.scanning() => me.cancel(),
+                    Some(commands::Scan::Start) if !me.scanning() => me.start(),
+                    _ => return glib::Propagation::Proceed,
                 }
-                let enter = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter);
-                if enter && mods.contains(gdk::ModifierType::CONTROL_MASK) && !me.scanning() {
-                    me.start();
-                    return glib::Propagation::Stop;
-                }
-                glib::Propagation::Proceed
+                glib::Propagation::Stop
             }
         });
         app.window.add_controller(keys);
