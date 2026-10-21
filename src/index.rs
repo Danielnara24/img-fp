@@ -1603,7 +1603,7 @@ impl InvertedFile {
     /// would be divided by as a query, which is how a query is read the other
     /// way round: the intersection `query` accumulates is the same from either
     /// side, so `score * mass(query) / mass(other)` is how much of `other` the
-    /// query holds. See `lib::both_ways`.
+    /// query holds. See `retrieve::both_ways`.
     pub fn mass(&self, wl: &WordList) -> f32 {
         let mut m = 0f32;
         for (w, c) in wl.runs() {

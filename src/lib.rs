@@ -48,6 +48,7 @@ mod prof;
 mod progress;
 use progress::Stage;
 mod report;
+mod retrieve;
 mod sift;
 mod simd;
 mod spill;
@@ -62,7 +63,7 @@ mod walk;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
-use index::{InvertedFile, Vocabulary, WordList};
+use index::{Vocabulary, WordList};
 use problems::{Log, Problems};
 use rayon::prelude::*;
 use sift::{Features, DESC_LEN};
@@ -601,158 +602,6 @@ const FEATURES: usize = 600;
 /// nothing — which on every corpus tried has been the second or third. The
 /// constant only exists so a pathological graph cannot spin forever.
 const PROPAGATE_MAX_ROUNDS: usize = 8;
-
-/// Candidate pairs verified per slice; see `pipeline::retrieve_and_verify`.
-/// A few seconds of work across the workers, so the barrier between slices
-/// costs nothing measurable, and a few megabytes of verdicts, so a slice's
-/// own collect is no transient worth the name.
-const VERIFY_SLICE: usize = 1 << 16;
-
-/// A query's scores read both ways round: for each candidate, the larger of
-/// how much of the query it holds and how much of it the query holds.
-///
-/// `query` scores containment of the query, which finds a crop's original
-/// and not an original's crop. A scan of one folder asks both questions by
-/// querying from both files, but against a library only the scanned files
-/// ask — querying from every library file was the cost the mode exists to
-/// avoid — so a photograph whose library copy is a crop would rank that crop
-/// by how little of the photograph it holds. The intersection `query`
-/// accumulates is the same from either side, so the other reading is the
-/// score scaled by the two lists' idf masses (`InvertedFile::mass`), and
-/// costs one multiply a candidate.
-fn both_ways(scored: &mut [(u32, f32)], query_mass: f32, mass: &[f32]) {
-    for (j, s) in scored.iter_mut() {
-        let m = mass[*j as usize];
-        if m > 0.0 {
-            *s = s.max(*s * query_mass / m);
-        }
-    }
-}
-
-/// The `k` best-scoring candidates a query returned, best first, ties to the
-/// lowest index.
-///
-/// The ordering is a total order — the scores may tie but the image indices
-/// cannot — so the `k` that come out and the order they come out in are
-/// settled by the comparator alone, and selecting before sorting gives the
-/// same answer as sorting the lot. It is not the same cost: a query on a
-/// corpus of any size touches most of it, so this was sorting some nine
-/// thousand candidates to keep a hundred and fifty of them, once per query
-/// and three times more for every image the second look re-asks. Measured on
-/// a nine-thousand-image corpus it was 2.2 ms a query, which is more than the
-/// retrieval it ranks.
-///
-/// **The selection runs on integers.** A positive finite float's bits order
-/// the same way the float does, so `(!score_bits << 32) | index` is one `u64`
-/// whose ascending order is exactly the comparator's — score descending, then
-/// the lower index — and comparing two of them is one instruction where the
-/// float comparator was a `partial_cmp`, an `unwrap` and a tie-break, each a
-/// branch the selection mispredicts about half the time. Nearly every score a
-/// query hands this is positive — a touched image shares a word, and only a
-/// word in every image weighs nothing; anything else takes the comparator, as
-/// before.
-fn rank_best(scored: &mut Vec<(u32, f32)>, k: usize) {
-    let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0));
-    if k == 0 {
-        scored.clear();
-        return;
-    }
-    if scored.len() <= k || !scored.iter().all(|e| e.1 > 0.0 && e.1.is_finite()) {
-        if scored.len() > k {
-            scored.select_nth_unstable_by(k - 1, cmp);
-            scored.truncate(k);
-        }
-        scored.sort_unstable_by(cmp);
-        return;
-    }
-    RANK_KEYS.with(|keys| {
-        let keys = &mut *keys.borrow_mut();
-        keys.clear();
-        keys.extend(scored.iter().map(|&(j, s)| (!s.to_bits() as u64) << 32 | j as u64));
-        keys.select_nth_unstable(k - 1);
-        keys.truncate(k);
-        keys.sort_unstable();
-        scored.clear();
-        scored.extend(keys.iter().map(|&key| (key as u32, f32::from_bits(!((key >> 32) as u32)))));
-    });
-}
-
-thread_local! {
-    /// `rank_best`'s keys, kept per worker rather than allocated per query.
-    static RANK_KEYS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// The three variants' candidate lists as one: each candidate once, under the
-/// variant it scored highest for, and the best `k` of those in the order
-/// `rank_best` uses — score, then the lower index.
-///
-/// Each list is already its variant's best `k`, and that is enough to rank
-/// the merge exactly. A candidate outside its best variant's top `k` has `k`
-/// others ahead of it there, and each of those scores at least as well in the
-/// merge as it did in that list, so it could not have made the merged `k`
-/// either.
-fn merge_variants(merged: &mut Vec<(u32, f32, u8)>, k: usize) {
-    merged.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
-    merged.dedup_by_key(|e| e.0);
-    merged.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    merged.truncate(k);
-}
-
-simd::dispatched! {
-    /// Quantise every descriptor of an image into the sorted word list the
-    /// inverted file speaks.
-    fn quantise(vocab: &Vocabulary, f: &Features) -> WordList => quantise_any;
-}
-
-/// `quantise`, for whichever copy `dispatched!` chose.
-#[cfg_attr(dispatch, inline(always))]
-fn quantise_any(vocab: &Vocabulary, f: &Features) -> WordList {
-    let mut buf = Vec::with_capacity(4);
-    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(f.len() * 2);
-    for i in 0..f.len() {
-        vocab.quantise(f.d(i), &mut buf);
-        for &w in buf.iter() {
-            pairs.push((w, i as u32));
-        }
-    }
-    pairs.sort_unstable();
-    // A keypoint index fits an entry's `KP_BITS`: `retain_best` holds an
-    // image to `FEATURES`. `from_sorted` checks it, and the word's bound.
-    WordList::from_sorted(&pairs)
-}
-
-/// The same features as seen in a mirrored (and/or inverted) copy of the
-/// image: descriptor bins permuted, keypoints moved. Building this costs a
-/// permutation rather than a second extraction pass.
-fn variant_features(f: &Features, var: Variant) -> Features {
-    let mut kps = f.kps.to_vec();
-    let mut desc = vec![0u8; f.desc.len()];
-    let mut perm: [u8; DESC_LEN] = std::array::from_fn(|i| i as u8);
-    if var.mirror {
-        perm = compose_perm(&perm, &sift::mirror_perm());
-    }
-    if var.invert {
-        perm = compose_perm(&perm, &sift::invert_perm());
-    }
-    for i in 0..f.len() {
-        sift::permute(f.d(i), &perm, &mut desc[i * DESC_LEN..(i + 1) * DESC_LEN]);
-    }
-    let w = f.w as f32;
-    for k in kps.iter_mut() {
-        if var.mirror {
-            k.x = w - 1.0 - k.x;
-            k.angle = (180.0 - k.angle).rem_euclid(360.0);
-        }
-        if var.invert {
-            k.angle = (k.angle + 180.0).rem_euclid(360.0);
-        }
-    }
-    Features { w: f.w, h: f.h, kps: kps.into(), desc: desc.into() }
-}
-
-fn compose_perm(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> [u8; DESC_LEN] {
-    std::array::from_fn(|i| a[b[i] as usize])
-}
 
 // ---------------------------------------------------------------- output
 
@@ -1569,7 +1418,7 @@ mod tests {
             }
         }
         let fm = sift::extract(&m, &p);
-        let vf = variant_features(&f, Variant { mirror: true, invert: false });
+        let vf = f.seen_as(Variant::TURNED[0]);
         assert_eq!(vf.len(), f.len());
         // Every derived keypoint should sit on a real one in the mirrored
         // extraction, with a close descriptor.
@@ -1601,42 +1450,6 @@ mod tests {
         for (a, b) in id.iter().zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]) {
             assert!((a - b).abs() < 1e-4, "{id:?}");
         }
-    }
-
-    /// `rank_best` selects on integer keys when it can; it has to choose the
-    /// same candidates in the same order as the float comparator, ties and
-    /// all, and fall back to the comparator for anything a key cannot carry.
-    #[test]
-    fn rank_best_keys_order_as_the_comparator_does() {
-        let cmp = |a: &(u32, f32), b: &(u32, f32)| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0));
-        let mut x = 0x2545_f491_4f6c_dd1du64;
-        let mut next = || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x
-        };
-        for n in [0usize, 1, 5, 149, 150, 151, 400, 3000] {
-            for levels in [3u64, 50, 1 << 20] {
-                let mut scored: Vec<(u32, f32)> = (0..n as u32).map(|j| (j, 1e-3 + (next() % levels) as f32 * 0.37)).collect();
-                // Shuffled, since a query now hands them over in index order.
-                for i in (1..scored.len()).rev() {
-                    scored.swap(i, (next() % (i as u64 + 1)) as usize);
-                }
-                for k in [0usize, 1, 7, 150] {
-                    let mut want = scored.clone();
-                    want.sort_by(cmp);
-                    want.truncate(k);
-                    let mut got = scored.clone();
-                    super::rank_best(&mut got, k);
-                    assert_eq!(got.iter().map(|e| (e.0, e.1.to_bits())).collect::<Vec<_>>(), want.iter().map(|e| (e.0, e.1.to_bits())).collect::<Vec<_>>(), "n {n} levels {levels} k {k}");
-                }
-            }
-        }
-        // A score no key can carry goes to the comparator.
-        let mut got = vec![(3u32, 0.0f32), (1, 2.0), (2, 2.0)];
-        super::rank_best(&mut got, 2);
-        assert_eq!(got, vec![(1, 2.0), (2, 2.0)]);
     }
 
     /// The hash read a piece at a time is the hash of the whole: every length
@@ -1875,15 +1688,15 @@ mod tests {
             let pool: Vec<&[u8; DESC_LEN]> = (0..fa.len()).map(|i| fa.d(i)).chain((0..fb.len()).map(|i| fb.d(i))).map(|d| d.try_into().unwrap()).collect();
             let vp = index::VocabParams::for_corpus(pool.len());
             let vocab = Vocabulary::build(pool, &vp);
-            let lists = vec![quantise(&vocab, &fa), quantise(&vocab, &fb)];
-            let inv = InvertedFile::build(&lists, vocab.n_live_words());
+            let lists = vec![retrieve::quantise(&vocab, &fa), retrieve::quantise(&vocab, &fb)];
+            let inv = index::InvertedFile::build(&lists, vocab.n_live_words());
             let (mut acc, mut scored) = (vec![0f32; 2], Vec::new());
             inv.query(&lists[1], 1, &mut acc, &mut scored);
             let mut cands = Vec::new();
             index::shared(&lists[0], &lists[1], &mut cands, 60_000);
             let pair = verify::Pair { fa: &fa, fb: &fb, ta: &ta, tb: &tb };
-            let v = verify::verify(&pair, &cands, Variant::default(), (3, 0.2), &mut Vec::new(), &mut verify::Scratch::default());
-            let t = verify::verify_transform(&pair, &v.m, Variant::default(), 0.2);
+            let v = verify::verify(&pair, &cands, Variant::SAME, (3, 0.2), &mut Vec::new(), &mut verify::Scratch::default());
+            let t = verify::verify_transform(&pair, &v.m, Variant::SAME, 0.2);
             let kps = |f: &Features| f.kps.iter().map(|k| [k.x, k.y, k.sigma, k.angle].map(f32::to_bits)).collect::<Vec<_>>();
             let verdict = |v: &Verdict| (v.n_match, v.n_in, v.m.map(f32::to_bits), [v.ov_a, v.ov_b, v.blk, v.ncc, v.blk_min].map(f32::to_bits), v.blk_n);
             (

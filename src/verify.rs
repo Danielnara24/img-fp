@@ -28,17 +28,8 @@ use crate::timed;
 /// 2x3 row-major affine: b = M * (a, 1).
 pub type Affine = [f32; 6];
 
-/// How the query image was transformed before its descriptors were matched.
-///
-/// `mirror` matters only while matching: a mirrored match is folded into the
-/// transform itself, as an affine with negative determinant, so that
-/// transforms stay composable. `invert` is a colour relation and cannot be,
-/// so it rides along.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Variant {
-    pub mirror: bool,
-    pub invert: bool,
-}
+/// How the query image was turned before its descriptors were matched.
+pub use crate::sift::Variant;
 
 /// The coordinate map of a horizontal mirror on an image `w` wide.
 #[inline]

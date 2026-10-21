@@ -4,6 +4,7 @@ use super::*;
 use analysis::{Item, Planes, Read};
 use decode::Refused;
 use claims::{Claim, Clusters, How, Propagation};
+use retrieve::{quantise, Index};
 use verify::Standing;
 
 /// What every stage of a run reads: what it was asked, and where it says
@@ -85,14 +86,95 @@ impl Scope {
         &self.library
     }
 
-    /// A query's best `k` candidates. Against a library not every file asks,
-    /// so each candidate is read both ways round (`both_ways`), by the idf
-    /// mass of the query's list and of every file's (`mass`, kept only then).
-    fn rank(&self, scored: &mut Vec<(u32, f32)>, query_mass: impl FnOnce() -> f32, mass: &[f32], k: usize) {
-        if self.against {
-            both_ways(scored, query_mass(), mass);
+    /// The files an anchor among `edges` reached from a file that has asked
+    /// and that have not asked themselves: those ask next. None in a plain
+    /// scan, whose files all asked in the first round.
+    ///
+    /// Against a library, the scanned files ask first, and then every library
+    /// file a file that has asked anchored asks in turn, round after round
+    /// until none is new: the library's own pairs are what a chain from a
+    /// scanned file runs through (`propagate`), and they are wanted only where
+    /// the library touches the scan. A library of unique photographs is
+    /// nearly all unreached and asks nothing, where the union of both sides
+    /// had every file of it ask and be re-asked mirrored.
+    fn reached(&self, edges: &[Edge], policy: &verify::Policy, asked: &[bool]) -> Vec<usize> {
+        let mut next = vec![false; asked.len()];
+        for e in edges.iter().filter(|e| policy.standing(&e.v) >= Standing::Anchor) {
+            let (i, j) = e.ends();
+            for (x, y) in [(i, j), (j, i)] {
+                if asked[x] && self.library[y] && !asked[y] {
+                    next[y] = true;
+                }
+            }
         }
-        rank_best(scored, k);
+        (0..next.len()).filter(|&i| next[i]).collect()
+    }
+
+    /// The matched files the second look asks again, mirrored and inverted,
+    /// after the `direct` verdicts.
+    ///
+    /// A mirrored or inverted copy shares no visual words with its original,
+    /// so retrieval cannot find it, and the query has to be re-asked turned
+    /// (`sift::Variant`). Doing that for every image would roughly double the
+    /// retrieval cost for a handful of pairs, so it is asked only where the
+    /// first pass came up short: a file with no matches, or with so few that
+    /// it may be hanging off the edge of its real cluster.
+    ///
+    /// A byte-identical copy is not counted. It is the same picture, so it says
+    /// nothing about whether the picture's other versions were found — and
+    /// counted, it kept every file that has a copy from ever being asked
+    /// again: in a library where each photograph is there twice over, no file
+    /// was, and every mirrored and inverted version in it went unfound.
+    /// Ask again for images that no *pair* of matches has anchored yet. A
+    /// file with one match is not safely found: that match may be the wrong
+    /// one, and a mirrored query is cheap next to being wrong. Two is not a
+    /// fitted threshold, it is "more than one" — the same minimal constant
+    /// the bridge test uses for "more than one file", and the only place a
+    /// count appears in either rule. Trying the tighter reading, "no matches
+    /// at all", costs a seed apiece on three of the held-out mirror
+    /// transforms.
+    ///
+    /// Against a library, a library file is asked as any file is once the scan
+    /// has reached it: one with no match at all is no part of an answer, and
+    /// asking each of those is what made matching both sides as one four times
+    /// the cost against a library of unique photographs. That leaves the case
+    /// those files covered: a mirror of a scanned picture that nothing else in
+    /// the library matches, which matched as one scan is re-asked itself, for
+    /// having no match, and here is found from the scan's side or not at all.
+    /// Counting a scanned file's matches cannot tell when to look — on
+    /// IMGS-AGAINST the files it caught had six — and re-asking every scanned
+    /// file found them at a third more CPU. A mirror of one file of a picture's
+    /// family is a mirror of the family, so each clean-anchor component that
+    /// holds a scanned file is re-asked once, through its best-connected
+    /// member, and propagation carries what that finds to the rest: 2,635
+    /// files re-asked there against 11,024, the same finds. Clean anchors,
+    /// because weak ones join families into a few large components, and one
+    /// member of each found ten fewer.
+    fn re_askers(&self, direct: &[Edge], policy: &verify::Policy, matched: &[bool]) -> Vec<usize> {
+        let n = matched.len();
+        let mut degree = vec![0u32; n];
+        for e in anchors(direct, policy) {
+            degree[e.a()] += 1;
+            degree[e.b()] += 1;
+        }
+        let mut rep = vec![false; n];
+        if self.against {
+            let d = Clusters::joined(n, anchors(direct, policy).filter(|e| policy.standing(&e.v) == Standing::Clean));
+            // Per component: whether a scanned file is in it, and its best-
+            // connected member, ties to the lowest index.
+            let mut best: HashMap<usize, (bool, usize)> = HashMap::new();
+            for i in (0..n).filter(|&i| degree[i] > 0) {
+                let e = best.entry(d.id(i)).or_insert((false, i));
+                e.0 |= !self.library[i];
+                if degree[i] > degree[e.1] {
+                    e.1 = i;
+                }
+            }
+            for (scanned, i) in best.into_values() {
+                rep[i] |= scanned;
+            }
+        }
+        (0..n).filter(|&i| matched[i] && (rep[i] || (degree[i] < 2 && !(self.library[i] && degree[i] == 0)))).collect()
     }
 }
 
@@ -262,8 +344,10 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
     let gate = policy.gate();
     let gate = if dump.is_some() { (gate.0.min(3), gate.1.min(0.2)) } else { gate };
     let pass = Pass { items, matched: &matched, policy: &policy, gate, dumping: dump.is_some() };
-    let (index, all_direct, verified) = retrieve_and_verify(&cx, &scope, &pass);
-    let variant_edges = second_look(&cx, &scope, &pass, index, &all_direct, dump.as_mut());
+    let index = index_all(&cx, &scope, &pass);
+    let (mut direct, verified) = retrieve_and_verify(&cx, &scope, &pass, &index);
+    let turned = second_look(&cx, &scope, &pass, index, &direct);
+    direct.extend(turned);
 
     // Nothing after this point matches a descriptor against another. What is
     // left — propagation, corroboration, assembly — works from thumbnails,
@@ -279,15 +363,14 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
     timed!(37, release_memory());
     stage!(cx, "released the index and the descriptors");
 
-    let claims = cluster(&cx, items, &policy, &all_direct, &variant_edges, verified, dump.as_mut());
-    drop(variant_edges);
+    let claims = cluster(&cx, items, &policy, &direct, verified, dump.as_mut());
     if let (Some(path), Some(dump)) = (&args.dump, dump) {
-        write_dump(&cx, path, &files, items, &all_direct, dump)?;
+        write_dump(&cx, path, &files, items, &direct, dump)?;
     }
     // Every verdict the matching made, and what the dump alone reads: nothing
     // below does. Held to the end, they were 65 MB on 27,000 pictures through
     // the assembly, which is where such a run peaks.
-    drop(all_direct);
+    drop(direct);
 
     let found = assemble(&cx, &scope, gui, &files, &stats, analysed, claims);
     finish(&cx, &scope, gui, &files, found, problems, started)
@@ -621,6 +704,12 @@ fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted,
     not_asked
 }
 
+/// Candidate pairs verified per slice; see `retrieve_and_verify`. A few
+/// seconds of work across the workers, so the barrier between slices costs
+/// nothing measurable, and a few megabytes of verdicts, so a slice's own
+/// collect is no transient worth the name.
+const VERIFY_SLICE: usize = 1 << 16;
+
 /// What both verification passes read: the files, which of them are
 /// matched (`run`), the acceptance bars, and the gate a verdict must clear
 /// before its pixels are read.
@@ -640,11 +729,10 @@ type Work = (Vec<(u32, u32)>, Vec<(u32, u32)>, verify::Scratch);
 impl Pass<'_> {
     /// Candidate `j` put to the geometry and the pixels against file `i`,
     /// whose features under `variant` are `fi` and their words `wi` (its own
-    /// for the direct pass). The edge, from the lower index to the higher,
-    /// when it stands at least `least` or `--dump` records it, and whether it
-    /// does.
+    /// as it is). The edge, from the lower index to the higher, when it
+    /// stands at all (`Standing::Corroborating`) or `--dump` records it.
     #[allow(clippy::too_many_arguments)]
-    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, least: Standing, (cands, matches, scratch): &mut Work) -> Option<(Edge, bool)> {
+    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, (cands, matches, scratch): &mut Work) -> Option<Edge> {
         timed!(15, index::shared(wi, &lists[j], cands, 60_000));
         if cands.len() < 3 {
             return None;
@@ -657,15 +745,13 @@ impl Pass<'_> {
             tb: &items[j].thumb,
         };
         let v = verify::verify(&p, cands, variant, self.gate, matches, scratch);
-        let accepted = self.policy.standing(&v) >= least;
-        if !accepted && !(self.dumping && v.n_in >= 3) {
+        if self.policy.standing(&v) == Standing::Rejected && !(self.dumping && v.n_in >= 3) {
             return None;
         }
         // Every edge runs from the lower index to the higher, and its verdict
         // with it: stored the other way round, the report's `scale` for the
         // pair was the reciprocal of the scale between the files it names.
-        let e = if i < j { Edge::new(i, j, v) } else { Edge::new(j, i, v.reversed()?) };
-        Some((e, accepted))
+        if i < j { Some(Edge::new(i, j, v)) } else { Some(Edge::new(j, i, v.reversed()?)) }
     }
 }
 
@@ -678,20 +764,10 @@ fn anchors<'a>(direct: &'a [Edge], policy: &'a verify::Policy) -> impl Iterator<
     direct.iter().filter(|e| policy.standing(&e.v) >= Standing::Anchor).copied()
 }
 
-/// The vocabulary and every matched file's words, which the second look asks
-/// again with, and each list's idf mass against a library (`both_ways`).
-struct Index<'a> {
-    vocab: Vocabulary<'a>,
-    lists: Vec<WordList>,
-    mass: Vec<f32>,
-}
-
-/// Build the vocabulary from the corpus, quantise every matched file, ask the
-/// inverted file for each one's candidates and verify them: the direct
-/// verdicts, and how many candidates were verified, which is what a round of
-/// propagation may spend.
-fn retrieve_and_verify<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> (Index<'a>, Vec<Edge>, usize) {
-    let (args, progress) = (cx.args, &cx.progress);
+/// The vocabulary, built from the corpus, and every matched file's words:
+/// the index every file asks.
+fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Index<'a> {
+    let progress = &cx.progress;
     let (items, matched) = (pass.items, pass.matched);
     let n = items.len();
     let n_match = matched.iter().filter(|&&m| m).count();
@@ -739,29 +815,31 @@ fn retrieve_and_verify<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> (Index<'
         .collect();
     stage!(cx, "quantised");
 
-    // Inverted file, of every word; see `InvertedFile::build`.
+    // Inverted file, of every word; see `InvertedFile::build`. Against a
+    // library, not every file asks, so each list's idf mass is kept for
+    // reading its answers both ways round; see `retrieve::both_ways`.
     progress.begin(Stage::InvertedFile);
-    let inv = timed!(13, InvertedFile::build(&lists, vocab.n_live_words()));
+    let index = Index::new(items, matched, vocab, lists, scope.against);
     stage!(cx, "inverted file");
+    index
+}
 
-    // Against a library, not every file asks, so each list's idf mass is kept
-    // for reading its answers both ways round; see `both_ways`.
-    let mass: Vec<f32> = if scope.against { (0..n).map(|i| inv.mass(&lists[i])).collect() } else { Vec::new() };
-
-    // ---- candidates, then verification
-    //
+/// Every file that asks first asks the index as it is, and its candidates are
+/// verified: the direct verdicts, and how many candidates were verified,
+/// which is what a round of propagation may spend.
+fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (Vec<Edge>, usize) {
+    let (args, progress) = (cx.args, &cx.progress);
+    let (items, matched) = (pass.items, pass.matched);
+    let n = items.len();
+    let n_match = matched.iter().filter(|&&m| m).count();
+    let n_desc_match: usize = (0..n).filter(|&i| matched[i]).map(|i| items[i].feats.len()).sum();
     // Retrieval and verification are separate passes so that a pair proposed
     // from both sides is verified once. Containment scoring is asymmetric —
     // the crop finds the photograph much more readily than the reverse — so
     // both directions genuinely have to be asked.
     let bar = progress.begin_counted(Stage::Candidates, n_desc_match as u64, n_match, "images");
-    // Against a library, the scanned files ask first, and then every library
-    // file a file that has asked anchored asks in turn, round after round
-    // until none is new: the library's own pairs are what a chain from a
-    // scanned file runs through (`propagate`), and they are wanted only where
-    // the library touches the scan. A library of unique photographs is
-    // nearly all unreached and asks nothing, where the union of both sides
-    // had every file of it ask and be re-asked mirrored.
+    // Against a library, the scanned files ask first, and then the library
+    // files they reach, round after round until none is new (`Scope::reached`).
     let mut asked = vec![false; n];
     let mut ask: Vec<usize> = (0..n).filter(|&i| matched[i] && scope.asks_first(i)).collect();
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
@@ -769,204 +847,93 @@ fn retrieve_and_verify<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> (Index<'
     let mut verified = 0usize;
     let mut round = 0usize;
     loop {
-    for &i in ask.iter() {
-        asked[i] = true;
-    }
-    let first = round == 0;
-    let mut cand_pairs: Vec<(u32, u32)> = ask
-        .par_iter()
-        .copied()
-        .map_init(
-            || (vec![0f32; n], Vec::new()),
-            |(acc, scored), i| {
-                timed!(14, inv.query(&lists[i], i as u32, acc, scored));
-                if first {
-                    bar.add(items[i].feats.len() as u64);
-                }
-                timed!(41, {
-                    // Every image the query touched, including one that scores
-                    // nothing: that happens only when all it shares are words
-                    // in every image, which only a small folder or one that is
-                    // all one picture has (see `query_touched`) — and on a
-                    // folder of two it is every word a duplicate shares. Dropping it
-                    // there found no pair at all; the second look never did.
-                    scored.retain(|&(j, _)| matched[j as usize]);
-                    scope.rank(scored, || mass[i], &mass, args.candidates);
-                    scored
-                        .iter()
-                        .map(|&(j, _)| if (j as usize) < i { (j, i as u32) } else { (i as u32, j) })
-                        .collect::<Vec<_>>()
-                })
-            },
-        )
-        .flatten()
-        .collect();
-    timed!(35, {
-        cand_pairs.par_sort_unstable();
-        cand_pairs.dedup();
-    });
-    // Only a library's files ask after the first round, and only they can
-    // propose a pair an earlier round verified.
-    if scope.against {
-        cand_pairs.retain(|p| seen.insert(*p));
-    }
-    if first {
-        stage!(cx, "candidates: {} pairs", cand_pairs.len());
-    } else {
-        stage!(cx, "  library round {round}: {} library files asked, {} more candidates", ask.len(), cand_pairs.len());
-    }
-
-    if first {
-        progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
-    }
-    let vbar = first.then(|| progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs"));
-    // Verified a slice of the candidates at a time, each slice's verdicts
-    // appended to the one list as it finishes. A parallel `collect` of a
-    // filtered stream gathers every worker's results into vectors of their
-    // own, grown by doubling, and only then copies them into one: on a corpus
-    // of 27,000 pictures that was some 300 MB alive for a moment at the end of
-    // verification, which was the run's peak, and the holes it left in the
-    // heap were dirtied again by the second look. The slices are taken in
-    // order and each is collected in order, so the list is the one a single
-    // collect gave, verdict for verdict.
-    let from = all_direct.len();
-    for slice in cand_pairs.chunks(VERIFY_SLICE) {
-        let part: Vec<Edge> = slice
+        for &i in ask.iter() {
+            asked[i] = true;
+        }
+        let first = round == 0;
+        let mut cand_pairs: Vec<(u32, u32)> = ask
             .par_iter()
-            .map_init(Work::default, |work, &(i, j)| timed!(42, {
-                if let Some(b) = &vbar {
-                    b.tick();
-                }
-                let (i, j) = (i as usize, j as usize);
-                pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::default(), Standing::Corroborating, work).map(|(e, _)| e)
-            }))
+            .map_init(
+                || index.asking(),
+                |a, &i| {
+                    let cands = index.candidates(i, &[&index.lists()[i]], args.candidates, a);
+                    if first {
+                        bar.add(items[i].feats.len() as u64);
+                    }
+                    let i = i as u32;
+                    cands.iter().map(|&(j, ..)| if j < i { (j, i) } else { (i, j) }).collect::<Vec<_>>()
+                },
+            )
             .flatten()
             .collect();
-        all_direct.extend(part);
-    }
-    verified += cand_pairs.len();
-    drop(cand_pairs);
-    // The library files this round's anchors reached that have not asked:
-    // none in a plain scan, whose files all asked in the first round.
-    let mut next = vec![false; n];
-    for e in &all_direct[from..] {
-        let (i, j) = e.ends();
-        if pass.policy.standing(&e.v) >= Standing::Anchor {
-            for (x, y) in [(i, j), (j, i)] {
-                if asked[x] && scope.library[y] && !asked[y] {
-                    next[y] = true;
-                }
-            }
+        timed!(35, {
+            cand_pairs.par_sort_unstable();
+            cand_pairs.dedup();
+        });
+        // Only a library's files ask after the first round, and only they can
+        // propose a pair an earlier round verified.
+        if scope.against {
+            cand_pairs.retain(|p| seen.insert(*p));
         }
+        if first {
+            stage!(cx, "candidates: {} pairs", cand_pairs.len());
+            progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
+        } else {
+            stage!(cx, "  library round {round}: {} library files asked, {} more candidates", ask.len(), cand_pairs.len());
+        }
+        let vbar = first.then(|| progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs"));
+        // Verified a slice of the candidates at a time, each slice's verdicts
+        // appended to the one list as it finishes. A parallel `collect` of a
+        // filtered stream gathers every worker's results into vectors of their
+        // own, grown by doubling, and only then copies them into one: on a corpus
+        // of 27,000 pictures that was some 300 MB alive for a moment at the end of
+        // verification, which was the run's peak, and the holes it left in the
+        // heap were dirtied again by the second look. The slices are taken in
+        // order and each is collected in order, so the list is the one a single
+        // collect gave, verdict for verdict.
+        let from = all_direct.len();
+        for slice in cand_pairs.chunks(VERIFY_SLICE) {
+            let part: Vec<Edge> = slice
+                .par_iter()
+                .map_init(Work::default, |work, &(i, j)| timed!(42, {
+                    if let Some(b) = &vbar {
+                        b.tick();
+                    }
+                    let (i, j) = (i as usize, j as usize);
+                    pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j, Variant::SAME, work)
+                }))
+                .flatten()
+                .collect();
+            all_direct.extend(part);
+        }
+        verified += cand_pairs.len();
+        drop(cand_pairs);
+        ask = scope.reached(&all_direct[from..], pass.policy, &asked);
+        if ask.is_empty() {
+            break;
+        }
+        round += 1;
     }
-    ask = (0..n).filter(|&i| next[i]).collect();
-    if ask.is_empty() {
-        break;
-    }
-    round += 1;
-    }
-    // Verification reads the word lists and never the postings, and the
-    // second look, which does, is asked of a few per cent of the files after
-    // verification is done. So the postings are let go here and built again
-    // from the same lists if the second look has anything to ask: on a corpus
-    // of 27,000 pictures that is 94 MB off the run's peak, which is the end of
-    // verification, for a rebuild of under two seconds on one thread. The
-    // build is deterministic, so the second index is the first.
-    drop(inv);
     let n_edges = anchors(&all_direct, pass.policy).count();
     stage!(cx, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
-    (Index { vocab, lists, mass }, all_direct, verified)
+    (all_direct, verified)
 }
 
-/// The second look at images nothing matched: each asked again mirrored and
-/// inverted. The anchors it finds; the index goes with it.
-fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: Index, direct: &[Edge], dump: Option<&mut Dump>) -> Vec<Edge> {
-    // A mirrored or inverted copy shares no visual words with its original —
-    // the descriptor bins are permuted — so retrieval cannot find it, and the
-    // query has to be re-asked with the permutation applied. Doing that for
-    // every image would roughly double the retrieval cost for a handful of
-    // pairs, so it is asked only where the first pass came up short: a file
-    // with no matches, or with so few that it may be hanging off the edge of
-    // its real cluster.
+/// The second look at files the direct pass came up short on
+/// (`Scope::re_askers`): each asks again mirrored and inverted. Its verdicts,
+/// kept as the direct pass's are; the index goes with it.
+fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, mut index: Index, direct: &[Edge]) -> Vec<Edge> {
     let (args, progress) = (cx.args, &cx.progress);
-    let (items, matched, policy) = (pass.items, pass.matched, pass.policy);
-    let Index { vocab, lists, mass } = index;
-    let n = items.len();
-    let n_edges = anchors(direct, policy).count();
-    let mut degree = vec![0u32; n];
-    for e in anchors(direct, policy) {
-        degree[e.a()] += 1;
-        degree[e.b()] += 1;
-    }
-    // A byte-identical copy is not counted. It is the same picture, so it says
-    // nothing about whether the picture's other versions were found — and
-    // counted, it kept every file that has a copy from ever being asked
-    // again: in a library where each photograph is there twice over, no file
-    // was, and every mirrored and inverted version in it went unfound.
-    // Ask again, mirrored and inverted, for images that no *pair* of matches
-    // has anchored yet. A file with one match is not safely found: that match
-    // may be the wrong one, and a mirrored query is cheap next to being wrong.
-    // Two is not a fitted threshold, it is "more than one" — the same minimal
-    // constant the bridge test uses for "more than one file", and the only
-    // place a count appears in either rule. Trying the tighter reading, "no
-    // matches at all", costs a seed apiece on three of the held-out mirror
-    // transforms.
-    //
-    // Against a library, a library file is asked as any file is once the scan
-    // has reached it: one with no match at all is no part of an answer, and
-    // asking each of those is what made matching both sides as one four times
-    // the cost against a library of unique photographs. That leaves the case
-    // those files covered: a mirror of a scanned picture that nothing else in
-    // the library matches, which matched as one scan is re-asked itself, for
-    // having no match, and here is found from the scan's side or not at all.
-    // Counting a scanned file's matches cannot tell when to look — on
-    // IMGS-AGAINST the files it caught had six — and re-asking every scanned
-    // file found them at a third more CPU. A mirror of one file of a picture's
-    // family is a mirror of the family, so each clean-anchor component that
-    // holds a scanned file is re-asked once, through its best-connected
-    // member, and propagation carries what that finds to the rest: 2,635
-    // files re-asked there against 11,024, the same finds. Clean anchors,
-    // because weak ones join families into a few large components, and one
-    // member of each found ten fewer.
-    //
+    let (items, policy) = (pass.items, pass.policy);
+    // The postings go until the second look asks; see `Index::let_go`.
+    index.let_go();
     // `--skip-mirrored` asks it of nobody, and everything below then does
     // nothing: no word lists made, no postings rebuilt, no verdicts.
-    let lonely: Vec<usize> = if args.skip_mirrored {
-        Vec::new()
-    } else {
-        // Against a library, each clean-anchor component that holds a scanned
-        // file is re-asked through its best-connected member, whatever its
-        // matches; see above.
-        let mut rep = vec![false; n];
-        if scope.against {
-            let d = Clusters::joined(n, anchors(direct, policy).filter(|e| policy.standing(&e.v) == Standing::Clean));
-            // Per component: whether a scanned file is in it, and its best-
-            // connected member, ties to the lowest index.
-            let mut best: HashMap<usize, (bool, usize)> = HashMap::new();
-            for i in (0..n).filter(|&i| degree[i] > 0) {
-                let e = best.entry(d.id(i)).or_insert((false, i));
-                e.0 |= !scope.library[i];
-                if degree[i] > degree[e.1] {
-                    e.1 = i;
-                }
-            }
-            for (scanned, i) in best.into_values() {
-                rep[i] |= scanned;
-            }
-        }
-        (0..n)
-            .filter(|&i| matched[i] && (rep[i] || (degree[i] < 2 && !(scope.library[i] && degree[i] == 0))))
-            .collect()
-    };
-    let variants = [
-        Variant { mirror: true, invert: false },
-        Variant { mirror: false, invert: true },
-        Variant { mirror: true, invert: true },
-    ];
+    let askers: Vec<usize> = if args.skip_mirrored { Vec::new() } else { scope.re_askers(direct, policy, pass.matched) };
     // Each variant is asked the same retrieval question it always was, and
     // then the three answers are spent as one: a candidate is verified once,
     // under the variant it scored highest for, and only the best `-k` of the
-    // merged list are verified at all.
+    // merged list are verified at all (`Index::candidates`).
     //
     // It used to be the best `-k` of *each* variant, three verdicts' worth of
     // candidates per file, and a verdict is what the pass spends most of its
@@ -983,78 +950,32 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: Index, direct: &[Edg
     // not one false pair more.
     // What each re-asked file will cost the bar: three descents and three
     // queries, which scale with its descriptors, and up to `-k` verdicts.
-    let lonely_weight: Vec<u64> = {
+    let weight: Vec<u64> = {
         let fc = progress.forecast_now();
-        lonely.iter().map(|&i| fc.variant_cost(items[i].feats.len())).collect()
+        askers.iter().map(|&i| fc.variant_cost(items[i].feats.len())).collect()
     };
-    let total_weight: u64 = lonely_weight.iter().sum();
+    let total_weight: u64 = weight.iter().sum();
+    let n_edges = anchors(direct, policy).count();
     progress.forecast(|f| {
         f.variants = Some(total_weight);
         f.edges = Some(n_edges);
     });
-    let bar = progress.begin_counted(Stage::Variants, total_weight, lonely.len(), "images");
-    // The vocabulary is wanted here only to quantise the re-asked files'
-    // mirrored and inverted descriptors, and the postings only to query them.
-    // Where those files are few — a benchmark corpus, whose files nearly all
-    // found their family — their word lists are quantised first and the
-    // vocabulary let go before the postings are built again (see the drop
-    // after the candidates), so the two are never held together: on 27,000
-    // pictures that is 1,336 files' lists, some 20 MB, against a 181 MB
-    // vocabulary. Where they are most of the corpus — a found one, where
-    // nearly every file is re-asked — their lists would outweigh the
-    // vocabulary several times over, and each file's are made and spent in
-    // turn as before. The words are the same words either way.
-    let n_live = vocab.n_live_words();
-    let mut vocab = Some(vocab);
-    let ahead_bytes = lonely.iter().map(|&i| lists[i].len()).sum::<usize>() * 3 * WordList::BYTES_PER_ENTRY;
-    let ahead: Option<Vec<[WordList; 3]>> = (ahead_bytes < vocab.as_ref().unwrap().heap_bytes()).then(|| {
-        let vocab = vocab.as_ref().unwrap();
-        lonely
-            .par_iter()
-            .map(|&i| {
-                std::array::from_fn(|v| {
-                    let vf = timed!(40, variant_features(&items[i].feats, variants[v]));
-                    timed!(39, quantise(vocab, &vf))
-                })
-            })
-            .collect()
-    });
-    if ahead.is_some() {
-        vocab = None;
-    }
-    let inv = (!lonely.is_empty()).then(|| timed!(13, InvertedFile::build(&lists, n_live)));
-    let variant_all: Vec<(Edge, bool)> = lonely
+    let bar = progress.begin_counted(Stage::Variants, total_weight, askers.len(), "images");
+    index.turn(&askers);
+    let index = &index;
+    let turned: Vec<Edge> = askers
         .par_iter()
         .enumerate()
-        .zip(lonely_weight.par_iter())
+        .zip(weight.par_iter())
         .map_init(
-            || (vec![0f32; n], Vec::new(), Work::default(), Vec::new()),
-            |(acc, scored, work, merged), ((k, &i), &w)| timed!(38, {
-                let mut out: Vec<(Edge, bool)> = Vec::new();
-                let vf: [Features; 3] = timed!(40, std::array::from_fn(|v| variant_features(&items[i].feats, variants[v])));
-                let made: [WordList; 3];
-                let wl: &[WordList; 3] = match &ahead {
-                    Some(a) => &a[k],
-                    None => {
-                        let vocab = vocab.as_ref().unwrap();
-                        made = std::array::from_fn(|v| timed!(39, quantise(vocab, &vf[v])));
-                        &made
-                    }
-                };
-                merged.clear();
-                for v in 0..3 {
-                    let inv = inv.as_ref().unwrap();
-                    timed!(14, inv.query(&wl[v], i as u32, acc, scored));
-                    timed!(41, scope.rank(scored, || inv.mass(&wl[v]), &mass, args.candidates));
-                    merged.extend(scored.iter().map(|&(j, s)| (j, s, v as u8)));
-                }
-                timed!(41, merge_variants(merged, args.candidates));
-                for &(j, _, v) in merged.iter() {
-                    let (j, v) = (j as usize, v as usize);
-                    // An anchor, or — for `--dump`, which records every
-                    // verdict the geometry could fit, as the direct pass's
-                    // does — anything with three aligned points.
-                    out.extend(pass.verify(&lists, i, &vf[v], &wl[v], j, variants[v], Standing::Anchor, work));
+            || (index.asking(), Work::default()),
+            |(a, work), ((at, &i), &w)| timed!(38, {
+                let seen: [Features; 3] = timed!(40, std::array::from_fn(|v| items[i].feats.seen_as(Variant::TURNED[v])));
+                let words = index.turned(at, &seen);
+                let mut out: Vec<Edge> = Vec::new();
+                for &(j, _, v) in index.candidates(i, &[&words[0], &words[1], &words[2]], args.candidates, a) {
+                    let v = v as usize;
+                    out.extend(pass.verify(index.lists(), i, &seen[v], &words[v], j as usize, Variant::TURNED[v], work));
                 }
                 bar.add(w);
                 out
@@ -1062,18 +983,14 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: Index, direct: &[Edg
         )
         .flatten()
         .collect();
-    let variant_edges: Vec<Edge> = variant_all.iter().filter(|e| e.1).map(|e| e.0).collect();
-    if let Some(dump) = dump {
-        dump.variant = variant_all.into_iter().map(|e| e.0).collect();
-    }
     if args.skip_mirrored {
         stage!(cx, "variants: skipped");
     } else {
-        stage!(cx, "variants: {} more pairs from {} unmatched images", variant_edges.len(), lonely.len());
+        stage!(cx, "variants: {} more pairs from {} unmatched images", anchors(&turned, policy).count(), askers.len());
     }
     // Nothing after this matches a descriptor against another, so the
     // vocabulary, the inverted file and the word lists go with this stage.
-    variant_edges
+    turned
 }
 
 /// From anchors to the run's claims: drop weak bridges, admit weak anchors
@@ -1085,19 +1002,19 @@ fn cluster(
     items: &[Item],
     policy: &verify::Policy,
     direct: &[Edge],
-    variant_edges: &[Edge],
     prop_budget: usize,
     dump: Option<&mut Dump>,
 ) -> Vec<Claim> {
     let progress = &cx.progress;
     let n = items.len();
     let dumping = dump.is_some();
-    // One edge per pair of files. The mirrored and inverted pass can verify a
-    // pair the direct pass already anchored, and two lonely files can each
-    // find the other — and a pair counted twice is two links to the bridge
-    // test, so a lone match between two clusters stopped being a bridge by
-    // being found twice. The direct verdict is kept where there are two.
-    let all: Vec<Edge> = claims::unique_pairs(anchors(direct, policy).chain(variant_edges.iter().copied()));
+    // One edge per pair of files. The second look can verify a pair the
+    // direct pass already anchored, and two lonely files can each find the
+    // other — and a pair counted twice is two links to the bridge test, so a
+    // lone match between two clusters stopped being a bridge by being found
+    // twice. The direct pass's verdicts come first, and one is kept where
+    // there are two.
+    let all: Vec<Edge> = claims::unique_pairs(anchors(direct, policy));
 
     // Every anchor faces the bridge test, whichever pass produced it: a
     // mirrored match joining two clusters is exactly as consequential as a
@@ -1214,10 +1131,18 @@ fn cluster(
     // Weaker matches, admitted only between files an anchor already put in the
     // same cluster. They cannot merge anything, so they cost recall to refuse
     // and risk nothing to accept.
+    //
+    // A turned verdict is not one of them. Mirrored, a subject with two
+    // sides alike (a butterfly, a face) matches another of its kind as well
+    // as it matches itself, and below an anchor's bar that is what such a
+    // match mostly is: let in, the turned verdicts added 437 true pairs on
+    // IMGS-ALL, IMGS3 and IMGS5 (recall +0.02 to +0.03 points, and 16 false
+    // ones inside IMGS5's merges) and on the found corpus 12 pairs, every
+    // one two butterflies of a species.
     let anchored: std::collections::HashSet<(usize, usize)> = claimed.iter().map(Edge::ends).collect();
-    let corroborated = direct
-        .iter()
-        .filter(|e| !anchored.contains(&e.ends()) && policy.standing(&e.v) >= Standing::Corroborating && clusters.same(e.a(), e.b()));
+    let corroborated = direct.iter().filter(|e| {
+        e.v.variant == Variant::SAME && !anchored.contains(&e.ends()) && policy.standing(&e.v) >= Standing::Corroborating && clusters.same(e.a(), e.b())
+    });
     let how = |k: usize| if k < n_anchors { How::Direct } else { How::Propagated };
     let n_claimed = claimed.len();
     let claims: Vec<Claim> = claimed
@@ -1233,12 +1158,11 @@ fn cluster(
     claims
 }
 
-/// Every verdict the matching made, for `--dump`: the direct pass's are the
-/// run's own list, and these the ones nothing after their stage reads.
+/// Every verdict the matching made, for `--dump`: those of the files' own
+/// questions are the run's own list, and these the ones nothing after their
+/// stage reads.
 #[derive(Default)]
 struct Dump {
-    /// Every verdict the second look kept.
-    variant: Vec<Edge>,
     /// The last verdict on each composed hypothesis propagation considered.
     propagated: Vec<Edge>,
 }
@@ -1247,40 +1171,39 @@ struct Dump {
 fn write_dump(cx: &Ctx, path: &Path, files: &[PathBuf], items: &[Item], direct: &[Edge], dump: Dump) -> Result<()> {
     let write = |w: &mut dyn Write| -> std::io::Result<()> {
         writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min,m0,m1,m2,m3,m4,m5,aw,ah,bw,bh")?;
-        for (kind, set) in [("direct", direct), ("variant", &dump.variant), ("propagated", &dump.propagated)] {
-            for e in set.iter() {
-                let ((a, b), v) = (e.ends(), &e.v);
-                // The paths as their own bytes, quoted the way CSV quotes:
-                // written with `{:?}`, a name holding a quote or a comma split
-                // into two columns, and a tab or a non-UTF-8 byte came out as
-                // an escape that names no file.
-                use std::os::unix::ffi::OsStrExt;
-                let figures = [
-                    kind.to_string(),
-                    v.n_match.to_string(),
-                    v.n_in.to_string(),
-                    format!("{:.4}", v.ov_a),
-                    format!("{:.4}", v.ov_b),
-                    format!("{:.5}", v.scale),
-                    format!("{:.1}", v.rot_deg),
-                    format!("{:.4}", v.blk),
-                    v.blk_n.to_string(),
-                    format!("{:.4}", v.ncc),
-                    (v.centred as u8).to_string(),
-                    (e.inverted() as u8).to_string(),
-                    format!("{:.4}", v.blk_min),
-                ];
-                // The transform from `a`'s working image to `b`'s, and the two
-                // working images' sizes, which the suggestion's frame tests read.
-                let figures: Vec<String> = figures
-                    .into_iter()
-                    .chain(v.m.iter().map(|x| format!("{x:.6}")))
-                    .chain([items[a].feats.w, items[a].feats.h, items[b].feats.w, items[b].feats.h].map(|x| x.to_string()))
-                    .collect();
-                let mut row: Vec<&[u8]> = vec![files[a].as_os_str().as_bytes(), files[b].as_os_str().as_bytes()];
-                row.extend(figures.iter().map(|f| f.as_bytes()));
-                report::csv_row_with(w, &row, b',')?;
-            }
+        let kind = |e: &Edge| if e.v.variant != Variant::SAME { "variant" } else { "direct" };
+        for (e, kind) in direct.iter().map(|e| (e, kind(e))).chain(dump.propagated.iter().map(|e| (e, "propagated"))) {
+            let ((a, b), v) = (e.ends(), &e.v);
+            // The paths as their own bytes, quoted the way CSV quotes:
+            // written with `{:?}`, a name holding a quote or a comma split
+            // into two columns, and a tab or a non-UTF-8 byte came out as
+            // an escape that names no file.
+            use std::os::unix::ffi::OsStrExt;
+            let figures = [
+                kind.to_string(),
+                v.n_match.to_string(),
+                v.n_in.to_string(),
+                format!("{:.4}", v.ov_a),
+                format!("{:.4}", v.ov_b),
+                format!("{:.5}", v.scale),
+                format!("{:.1}", v.rot_deg),
+                format!("{:.4}", v.blk),
+                v.blk_n.to_string(),
+                format!("{:.4}", v.ncc),
+                (v.centred as u8).to_string(),
+                (e.inverted() as u8).to_string(),
+                format!("{:.4}", v.blk_min),
+            ];
+            // The transform from `a`'s working image to `b`'s, and the two
+            // working images' sizes, which the suggestion's frame tests read.
+            let figures: Vec<String> = figures
+                .into_iter()
+                .chain(v.m.iter().map(|x| format!("{x:.6}")))
+                .chain([items[a].feats.w, items[a].feats.h, items[b].feats.w, items[b].feats.h].map(|x| x.to_string()))
+                .collect();
+            let mut row: Vec<&[u8]> = vec![files[a].as_os_str().as_bytes(), files[b].as_os_str().as_bytes()];
+            row.extend(figures.iter().map(|f| f.as_bytes()));
+            report::csv_row_with(w, &row, b',')?;
         }
         Ok(())
     };
@@ -1809,10 +1732,10 @@ mod tests {
         let lists: Vec<WordList> = items.iter().map(|it| quantise(&vocab, &it.feats)).collect();
         let policy = verify::Policy::new(MIN_ALIGNED_POINTS, 0.5, 0.6);
         let pass = Pass { items: &items, matched: &[true, true], policy: &policy, gate: (3, 0.2), dumping: false };
-        let ask = |i: usize, j: usize| pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::default(), Standing::Anchor, &mut Work::default());
-        let (low, a) = ask(0, 1).expect("a picture and its downscale are an anchor");
-        let (high, b) = ask(1, 0).expect("asked from the other end too");
-        assert!(a && b);
+        let ask = |i: usize, j: usize| pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::SAME, &mut Work::default());
+        let low = ask(0, 1).expect("a picture and its downscale match");
+        let high = ask(1, 0).expect("asked from the other end too");
+        assert!(policy.standing(&low.v) >= Standing::Anchor && policy.standing(&high.v) >= Standing::Anchor, "an anchor from either end");
         assert_eq!((low.a(), low.b()), (0, 1));
         assert_eq!((high.a(), high.b()), (0, 1));
         assert!((low.v.scale - high.v.scale).abs() < 0.02 * low.v.scale, "scale {} from below, {} from above", low.v.scale, high.v.scale);

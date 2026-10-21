@@ -1740,10 +1740,77 @@ fn retain_best(all: &[Keypoint], all_desc: &[u8], response: &[f32], n: usize) ->
 
 // ---------------------------------------------------------------- variants
 
+/// A picture as it would be seen mirrored, inverted, both or neither: what a
+/// query's features are turned by before they are looked up and matched.
+///
+/// A mirrored or inverted copy shares no visual words with its original (the
+/// descriptor bins are permuted), so it is found only by asking with the
+/// features turned the same way (`Features::seen_as`). `mirror` matters only
+/// while matching: a mirrored match is folded into its transform, as an
+/// affine with negative determinant, so that transforms stay composable.
+/// `invert` is a colour relation and cannot be, so it rides along.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Variant {
+    pub mirror: bool,
+    pub invert: bool,
+}
+
+impl Variant {
+    /// The picture as it is.
+    pub const SAME: Variant = Variant { mirror: false, invert: false };
+    /// Every variant but the picture as it is: what the second look asks.
+    pub const TURNED: [Variant; 3] = [
+        Variant { mirror: true, invert: false },
+        Variant { mirror: false, invert: true },
+        Variant { mirror: true, invert: true },
+    ];
+
+    /// `desc_of_the_variant[i] == desc[perm[i]]`.
+    fn perm(self) -> [u8; DESC_LEN] {
+        let mut perm: [u8; DESC_LEN] = std::array::from_fn(|i| i as u8);
+        let mut then = |p: [u8; DESC_LEN]| perm = std::array::from_fn(|i| perm[p[i] as usize]);
+        if self.mirror {
+            then(mirror_perm());
+        }
+        if self.invert {
+            then(invert_perm());
+        }
+        perm
+    }
+}
+
+impl Features {
+    /// The same features as seen in the picture's `v`: descriptor bins
+    /// permuted, keypoints moved. Building this costs a permutation rather
+    /// than a second extraction.
+    pub fn seen_as(&self, v: Variant) -> Features {
+        let perm = v.perm();
+        let mut desc = vec![0u8; self.desc.len()];
+        for (i, out) in desc.chunks_exact_mut(DESC_LEN).enumerate() {
+            let d = self.d(i);
+            for (o, &p) in out.iter_mut().zip(&perm) {
+                *o = d[p as usize];
+            }
+        }
+        let mut kps = self.kps.to_vec();
+        let w = self.w as f32;
+        for k in kps.iter_mut() {
+            if v.mirror {
+                k.x = w - 1.0 - k.x;
+                k.angle = (180.0 - k.angle).rem_euclid(360.0);
+            }
+            if v.invert {
+                k.angle = (k.angle + 180.0).rem_euclid(360.0);
+            }
+        }
+        Features { w: self.w, h: self.h, kps: kps.into(), desc: desc.into() }
+    }
+}
+
 /// Permutation such that `desc_of_mirrored_image[i] == desc[MIRROR_PERM[i]]`
 /// for the mirrored keypoint. Rows (the axis perpendicular to the keypoint
 /// orientation) flip and orientation bins reverse.
-pub fn mirror_perm() -> [u8; DESC_LEN] {
+fn mirror_perm() -> [u8; DESC_LEN] {
     let mut p = [0u8; DESC_LEN];
     for r in 0..D {
         for c in 0..D {
@@ -1758,7 +1825,7 @@ pub fn mirror_perm() -> [u8; DESC_LEN] {
 
 /// Inversion negates every gradient: orientation bins unchanged relative to
 /// the (also rotated) dominant orientation, spatial grid rotated 180 degrees.
-pub fn invert_perm() -> [u8; DESC_LEN] {
+fn invert_perm() -> [u8; DESC_LEN] {
     let mut p = [0u8; DESC_LEN];
     for r in 0..D {
         for c in 0..D {
@@ -1771,11 +1838,6 @@ pub fn invert_perm() -> [u8; DESC_LEN] {
     p
 }
 
-pub fn permute(desc: &[u8], perm: &[u8; DESC_LEN], out: &mut [u8]) {
-    for i in 0..DESC_LEN {
-        out[i] = desc[perm[i] as usize];
-    }
-}
 // ---------------------------------------------------------------- kernel timings
 
 /// Single-threaded timings of the extractor's inner loops, for comparing two

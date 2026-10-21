@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.56.0)
+## Status (0.57.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -271,6 +271,30 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   +138, of which tests +47; pipeline.rs -84; lib.rs -61; analysis.rs +104
   new): the cache's API is wider (`Asked`, `Unasked`, `Kept`, `Compacted`)
   and the pipeline narrower.
+- 0.57.0 (retrieval rebuilt, `retrieve.rs`; see *Retrieval*): before, the
+  question "which files may this one be" was written twice: the direct pass
+  (with the library rounds woven in by `if scope.against` / `first`) and the
+  second look (its own query, rank and verify loop, three `Variant` literals
+  indexed as `v as u8`), with `both_ways`, `rank_best`, `merge_variants`,
+  `quantise` and `variant_features` in `lib.rs`, and the index's memory
+  (postings dropped and rebuilt, the vocabulary an `Option` of `unwrap`s,
+  the `ahead` lists) handled inline in the stages. Now `Index::candidates`
+  answers any set of variants, `Index` owns the postings' and vocabulary's
+  lifetimes (`let_go`, `turn`, `turned`), `sift::Variant` is `SAME` /
+  `TURNED` with `Features::seen_as`, and who asks is `Scope::reached` /
+  `re_askers`. The second look's verdicts join the direct list
+  (`Pass::verify` keeps whatever stands; the dump's kind is read off
+  `Verdict::variant`), and corroboration reads `Variant::SAME` verdicts by
+  rule, with its measured reason (*Tried and rejected*). Proved: the
+  `ref.sh` battery (cold, cached, `--against` IMGS-ALL with dumps,
+  IMGS-PROVENANCE, the found corpus, Desktop edge runs) and all 90
+  `pairs.py` reports identical to 0.56.0, both after the refactor and with
+  the one list; per-symbol `ymm` counts identical. Cached IMGS-ALL (ABBA):
+  CPU 560.8 (at 1,981 MHz) / 485.6 base, 497.3 / 503.7 new; peak
+  RssAnon+swap 605 / 601 MB base, 600 / 604 new. Cached found corpus
+  (ABBA): CPU 343.3 (2,006 MHz) / 293.7 base, 302.0 / 297.0 new; peak 182
+  MB both. Code lines (no comments or blanks, tests included) in the files
+  touched 7,049 -> 7,110 (`retrieve.rs` 198, of which tests 45).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -334,10 +358,14 @@ the man page generated from `Args`. Hidden flags (`hide = true`, re-added in
 
 ```
 src/
-  lib.rs        Args, matching helpers (ranking, variants), what a report pair
-                is stated from (`Stated`); cli_main, worker_main
-  pipeline.rs   one scan as stages: run -> analyse_all -> retrieve_and_verify
-                -> second_look -> cluster -> assemble -> finish
+  lib.rs        Args, what a report pair is stated from (`Stated`); cli_main,
+                worker_main
+  pipeline.rs   one scan as stages: run -> analyse_all -> index_all ->
+                retrieve_and_verify -> second_look -> cluster -> assemble
+                -> finish
+  retrieve.rs   the index a file asks (`Index`): quantise, candidates (query,
+                rank, merge over variants), the postings' and vocabulary's
+                lifetimes
   main.rs       img-fp: calls cli_main
   analysis.rs   one file's analysis (`Item`) and what reading it came to
                 (`Read`); `analyse`, `Planes`
@@ -353,7 +381,7 @@ src/
     budget.rs   decode budget, max_alloc, cgroup room
     tests.rs    + `fingerprints`, the per-file differential check
   heif.rs       libheif loaded at run time (libloading), not linked
-  sift.rs       local features
+  sift.rs       local features; `Variant` and `Features::seen_as`
   index.rs      vocabulary tree, inverted file, containment scoring
   verify.rs     correspondence, geometry, pixel check; `Policy` and `Standing`
   claims.rs     Edge, Clusters, bridge test, admission, propagation, Claim/How
@@ -436,14 +464,16 @@ CROP.
 `run` is a list of stage calls; each stage is a function that takes what the
 one before handed it, returns what the next reads, and lets go of the rest
 (memory peaks are kept by who owns what, not by `drop` order in one scope).
-What a run was asked about is a `Scope` (`asks_first`, `speaks_of`,
-`pinned`, `rank`): a plain scan is the scope with no library, and the
-library rounds of retrieval are the same loop, which ends after one round
-when every file has asked. `Scope::against` is read directly only where the
-library mode does something else, not the same thing with fewer files: the
-second look's per-component re-ask, the round's already-verified set, the
-report kind, and `--last`. Both verification passes put a candidate through
-`Pass::verify`. `--dump` is a `Dump` the stages hand their verdicts to.
+What a run was asked about is a `Scope` (`asks_first`, `reached`,
+`re_askers`, `speaks_of`, `pinned`): a plain scan is the scope with no
+library, and the library rounds of retrieval are the same loop, which ends
+after one round when every file has asked. `Scope::against` is read directly
+only where the library mode does something else, not the same thing with
+fewer files: the second look's per-component re-ask (`re_askers`), the
+round's already-verified set, the report kind, and `--last`. Both
+verification passes put a candidate through `Pass::verify`, which keeps
+every verdict that stands at all; the second look's go into the same list as
+the direct pass's (`Verdict::variant` says which asked). `--dump` is a `Dump` the stages hand their verdicts to.
 Every run ends in `finish` (verdicts or groups; an empty walk is the same
 path with nothing `Found`). Logging goes through `Ctx` (`stage!`, `say!`).
 
@@ -451,6 +481,25 @@ path with nothing `Found`). Logging goes through `Ctx` (`stage!`, `say!`).
 a verdict recorded for its own sake goes to `Dump`; a new stage is a function
 between two others with its inputs and outputs typed. Not an `if` on an
 `Args` flag inside a stage.
+
+## Retrieval (`retrieve.rs`)
+
+A file asks the index under one or more variants of itself
+(`sift::Variant`: `SAME`, or `TURNED`, mirrored / inverted / both, whose
+features are `Features::seen_as`). `Index::candidates` is the one question:
+each list it is handed is queried, read both ways round against a library
+(`both_ways`), ranked (`rank_best`), and the lists merged into the best `-k`
+(`merge_variants`; one list is its own merge). The direct pass asks every
+file as it is (pairs from both ends deduped, verified from the lower);
+the second look asks `Scope::re_askers` turned, verified from the asker
+as it asks (its turned features exist only then). The index owns what the
+questions need held: the postings are let go between the passes (`let_go`)
+and built again for the second look (`turn`), whose askers' turned words are
+made ahead where that lets the vocabulary go.
+
+**Adding a question**: who asks is a `Scope` method, what they ask as is a
+`Variant` (or a set of them), and the answer is `Index::candidates`. Not a
+third retrieval loop.
 
 ## Decoding (`decode/`)
 
@@ -931,6 +980,14 @@ Do not retry without new evidence:
   k-means update, mip pyramid instead of blur in `whole_worst`, one-file
   bridge test (`IMGFP_CUT`), cosine retrieval, best-edge-first propagation
   tree, k-truss / biconnected grouping, plain-tap pixel sampling.
+- Corroboration from the second look's verdicts (0.57.0; turned verdicts
+  above the corroborating bar and below an anchor's, admitted inside
+  clusters like direct ones): +437 true pairs on IMGS-ALL, IMGS3, IMGS5
+  (recall +0.02 to +0.03 points; IMGS5 +16 false, all inside its existing
+  merges), keep rule unchanged; on the found corpus +12 pairs, every one a
+  mirrored match of two specimens of a butterfly species by eye (a subject
+  with two sides alike matches its kind mirrored). Kept out:
+  `pipeline::cluster` reads `Variant::SAME` verdicts for corroboration.
 - Claim graph (0.54.0 survey, each rule off alone, cached IMGS-ALL at 512
   and its cliffs, IMGS3 alone): one cover test for every join, clean
   anchors included (recall -1.0, 17 perfect transforms, Segovia merges at
