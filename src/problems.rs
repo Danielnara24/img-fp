@@ -114,126 +114,51 @@ impl Tally {
     }
 }
 
-/// Count it, keep it if there is room for it, and write it to the log
-/// whatever happens. A free function rather than a method so that one field of
-/// `Problems` can be written while another is read.
-fn record(log: &Log, tally: &mut Tally, label: &str, what: String) {
-    if log.active() {
-        log.line(&format!("{label}: {what}"));
-    }
-    tally.record(what);
-}
-
-/// Everything the run skipped or could not do, in the order it is reported.
-pub struct Problems<'a> {
-    log: &'a Log,
-
+/// Something the run passes over or could not do: one category of the
+/// summary. Its words (the log's tag, the summary's label) and whether it is
+/// a problem are [`Note::says`], the one place a category is described; the
+/// summary lists them in the order of [`Note::ALL`].
+///
+/// **Adding a category**: a variant here, an arm in `says`, a place in
+/// `ALL`. Not a counter of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Note {
     // Skips: the tool passing over what it was never going to read.
-    not_an_image: Tally,
-    set_aside: Tally,
-    hidden: Tally,
-    not_image_content: Tally,
-    symlink: Tally,
-    symlink_loop: Tally,
-    listed_twice: Tally,
-    excluded: Tally,
-    mac_metadata: Tally,
-    camera_raw: Tally,
-    featureless: Tally,
-
-    // Problems: what was asked for and did not happen.
-    unresolved_exclude: Tally,
-    unscannable: Tally,
-    unreadable: Tally,
-    damaged: Tally,
-    cache: Tally,
-}
-
-impl<'a> Problems<'a> {
-    pub fn new(log: &'a Log) -> Self {
-        Problems {
-            log,
-            not_an_image: Tally::default(),
-            set_aside: Tally::default(),
-            hidden: Tally::default(),
-            not_image_content: Tally::default(),
-            symlink: Tally::default(),
-            symlink_loop: Tally::default(),
-            listed_twice: Tally::default(),
-            excluded: Tally::default(),
-            mac_metadata: Tally::default(),
-            camera_raw: Tally::default(),
-            unresolved_exclude: Tally::default(),
-            unscannable: Tally::default(),
-            unreadable: Tally::default(),
-            featureless: Tally::default(),
-            damaged: Tally::default(),
-            cache: Tally::default(),
-        }
-    }
-
-
-    // ---- skips
-
     /// A file the walk's extension list turned away — by default, one whose
     /// extension names a format img-fp does not read, or that has none. The
     /// filter is why a scan of a home directory is not an attempt to decode
     /// it, and it is also the one thing that can hide a photograph: a JPEG
     /// saved as `.txt`, or with no extension, is passed over here and never
     /// sniffed unless `-x '*'` asks for it. Hence the count.
-    pub fn not_an_image(&mut self, path: &str) {
-        record(self.log, &mut self.not_an_image, "skip/not-an-image", path.into());
-    }
-
+    NotAnImage,
     /// A Trash or a thumbnail cache met during a walk, and not gone into:
     /// what is inside is copies of pictures that are elsewhere, or were
     /// thrown away. See `SetAside` in `walk.rs`.
-    pub fn set_aside(&mut self, path: &str) {
-        record(self.log, &mut self.set_aside, "skip/trash-or-thumbnails", path.into());
-    }
-
+    SetAside,
     /// A hidden folder met during a walk without `--hidden`, and not gone
     /// into. See `is_hidden` in `walk.rs`.
-    pub fn hidden(&mut self, path: &str) {
-        record(self.log, &mut self.hidden, "skip/hidden-folder", path.into());
-    }
-
-    /// A symlink met during a walk that does not follow them. A folder that
-    /// is *all* symlinks scans as empty without `--follow-symlinks`, which is
-    /// worth saying rather than leaving to be deduced.
-    pub fn symlink(&mut self, path: &str) {
-        record(self.log, &mut self.symlink, "skip/symlink", path.into());
-    }
-
-    /// A followed link leading back into a folder the walk is already inside.
-    /// Everything behind it is being walked by the other route, so nothing is
-    /// missing and this is not a problem.
-    pub fn symlink_loop(&mut self, path: &str) {
-        record(self.log, &mut self.symlink_loop, "skip/symlink-loop", path.into());
-    }
-
-    /// A root named on the command line that `--exclude` covers. Only named
-    /// roots are counted: an excluded subtree met during a walk is pruned
-    /// whole, and a count of it would depend on which route reached it.
-    pub fn excluded(&mut self, path: &str) {
-        record(self.log, &mut self.excluded, "skip/excluded", path.into());
-    }
-
+    Hidden,
     /// A file a wildcard walk (`-x '*'`, `-x '!gif'`) handed over whose bytes
     /// are no picture format at all. It never claimed to be an image, so
     /// nothing was asked of it and nothing failed — which is what separates it
     /// from a `.jpg` that will not decode, still a problem.
-    pub fn not_image_content(&mut self, path: &str) {
-        record(self.log, &mut self.not_image_content, "skip/not-image-content", path.into());
-    }
-
+    NotImageContent,
+    /// A symlink met during a walk that does not follow them. A folder that
+    /// is *all* symlinks scans as empty without `--follow-symlinks`, which is
+    /// worth saying rather than leaving to be deduced.
+    Symlink,
+    /// A followed link leading back into a folder the walk is already inside.
+    /// Everything behind it is being walked by the other route, so nothing is
+    /// missing and this is not a problem.
+    SymlinkLoop,
     /// A second name for a file already listed: named twice, reached by two
     /// overlapping roots, a symlink to it, a hard link. It is analysed once;
     /// the count is what explains a file total smaller than the names found.
-    pub fn listed_twice(&mut self, path: &str) {
-        record(self.log, &mut self.listed_twice, "skip/listed-twice", path.into());
-    }
-
+    ListedTwice,
+    /// A root named on the command line that `--exclude` covers. Only named
+    /// roots are counted: an excluded subtree met during a walk is pruned
+    /// whole, and a count of it would depend on which route reached it.
+    Excluded,
     /// A macOS metadata file (AppleDouble): the `._` twin a Mac writes
     /// beside every file it copies onto a drive or a share that cannot hold
     /// its extended attributes, and puts in `__MACOSX` in a zip. It carries
@@ -241,20 +166,14 @@ impl<'a> Problems<'a> {
     /// such file was an image that would not decode, exit 2, and two of them
     /// alike — which they often are — a byte-identical *image* with one of
     /// them suggested for deletion.
-    pub fn mac_metadata(&mut self, path: &str) {
-        record(self.log, &mut self.mac_metadata, "skip/mac-metadata", path.into());
-    }
-
+    MacMetadata,
     /// A camera's raw file in a TIFF container (`decode::Refused::CameraRaw`). Its
     /// first picture is the camera's preview, a few hundred pixels across,
     /// and read as the photograph it was judged at that size and suggested
     /// for deletion beside the camera's own JPEG of it. Not read, so a skip:
     /// nothing failed. A byte-identical copy of one is still found, as the
     /// exact pass reads bytes, not pictures.
-    pub fn camera_raw(&mut self, path: &str) {
-        record(self.log, &mut self.camera_raw, "skip/camera-raw", path.into());
-    }
-
+    CameraRaw,
     /// An image that decoded and described to nothing: no local features at
     /// all, which happens to a blank or near-blank picture — a solid colour,
     /// a smooth gradient. It can match nothing but a byte-identical copy of
@@ -263,79 +182,112 @@ impl<'a> Problems<'a> {
     /// move the exit code. It used to be a problem, and a folder holding one
     /// plain backdrop exited 2 on every run, which a script reads as a scan
     /// that went wrong.
-    pub fn featureless(&mut self, path: &str) {
-        record(self.log, &mut self.featureless, "skip/featureless", path.into());
-    }
+    Featureless,
 
-    // ---- problems
-
+    // Problems: what was asked for and did not happen.
     /// An `--exclude` path that does not resolve, and so excludes nothing. A
     /// typo in the one flag whose job is "leave this alone" is not a detail.
-    pub fn unresolved_exclude(&mut self, path: &str, err: &dyn std::fmt::Display) {
-        record(self.log, &mut self.unresolved_exclude, "problem/unresolved-exclude", format!("{path}: {err}"));
-    }
-
+    UnresolvedExclude,
     /// A directory — or a root that is not there at all — the walk could not
     /// read. Its contents are absent from the run entirely, which is the
     /// difference between this and an image that failed: there is no telling
     /// how many files it should have contributed.
-    pub fn unscannable(&mut self, path: &str, err: &dyn std::fmt::Display) {
-        record(self.log, &mut self.unscannable, "problem/unscannable", format!("{path}: {err}"));
-    }
-
+    Unscannable,
     /// An image that would not decode. It is in `files_enumerated` and not in
     /// `files_analysed`, and it is listed in the JSON output's `failures` with
     /// the same message.
-    pub fn unreadable(&mut self, path: &str, err: &str) {
-        record(self.log, &mut self.unreadable, "problem/unreadable", format!("{path}: {err}"));
-    }
-
+    Unreadable,
     /// An image that decoded only in part: a JPEG cut off in its image data,
     /// which the decoder fills out with grey rather than refuse.
     /// It is analysed — what is there may still be worth matching — and its
     /// rows in the report say `damaged`, because a damaged file is the one
     /// copy not to keep, and nothing about its pairs says so. Every other
-    /// format refuses such a file outright, which is `unreadable`.
-    pub fn damaged(&mut self, path: &str, err: &str) {
-        record(self.log, &mut self.damaged, "problem/damaged", format!("{path}: {err}"));
-    }
-
+    /// format refuses such a file outright, which is `Unreadable`.
+    Damaged,
     /// The `--cache` file could not be read or could not be written. Nothing
     /// about the result changes — the cache is an optimisation and a run
     /// without it computes the same pairs — but the user asked for it, the
     /// next run will be just as slow, and the exit code is the only place that
     /// can be said to a script.
-    pub fn cache(&mut self, what: String) {
-        record(self.log, &mut self.cache, "problem/cache", what);
-    }
+    Cache,
+}
 
-    // ---- reporting
+/// Whether a category moves the exit code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Weight {
+    Skip,
+    Problem,
+}
 
-    fn skips(&self) -> [(&Tally, &'static str); 11] {
+impl Note {
+    /// Every category, in the order the summary lists them.
+    const ALL: [Note; 16] = {
+        use Note::*;
         [
-            (&self.not_an_image, "file(s) whose extension is not searched, or with none (see -x)"),
-            (&self.set_aside, "Trash, thumbnail or snapshot folder(s), not gone into (name one to scan it)"),
-            (&self.hidden, "hidden folder(s), not gone into (see --hidden)"),
-            (&self.not_image_content, "file(s) that are not images (reached by a wildcard -x)"),
-            (&self.symlink, "symlink(s), which are not followed (see --follow-symlinks)"),
-            (&self.symlink_loop, "symlink(s) leading back into a folder already being walked"),
-            (&self.listed_twice, "path(s) already listed under another name (named twice, overlapping roots, a symlink or a hard link)"),
-            (&self.excluded, "named path(s) skipped because --exclude covers them"),
-            (&self.mac_metadata, "macOS metadata file(s) (\"._\" files), which hold no picture"),
-            (&self.camera_raw, "camera raw file(s), which img-fp does not read (only a byte-identical copy is found)"),
+            NotAnImage, SetAside, Hidden, NotImageContent, Symlink, SymlinkLoop, ListedTwice, Excluded,
+            MacMetadata, CameraRaw, Featureless, UnresolvedExclude, Unscannable, Unreadable, Damaged, Cache,
+        ]
+    };
+
+    /// What a category is: a skip or a problem, its tag in the log, and its
+    /// label in the summary.
+    fn says(self) -> (Weight, &'static str, &'static str) {
+        use Weight::*;
+        match self {
+            Note::NotAnImage => (Skip, "skip/not-an-image", "file(s) whose extension is not searched, or with none (see -x)"),
+            Note::SetAside => (Skip, "skip/trash-or-thumbnails", "Trash, thumbnail or snapshot folder(s), not gone into (name one to scan it)"),
+            Note::Hidden => (Skip, "skip/hidden-folder", "hidden folder(s), not gone into (see --hidden)"),
+            Note::NotImageContent => (Skip, "skip/not-image-content", "file(s) that are not images (reached by a wildcard -x)"),
+            Note::Symlink => (Skip, "skip/symlink", "symlink(s), which are not followed (see --follow-symlinks)"),
+            Note::SymlinkLoop => (Skip, "skip/symlink-loop", "symlink(s) leading back into a folder already being walked"),
+            Note::ListedTwice => (Skip, "skip/listed-twice", "path(s) already listed under another name (named twice, overlapping roots, a symlink or a hard link)"),
+            Note::Excluded => (Skip, "skip/excluded", "named path(s) skipped because --exclude covers them"),
+            Note::MacMetadata => (Skip, "skip/mac-metadata", "macOS metadata file(s) (\"._\" files), which hold no picture"),
+            Note::CameraRaw => (Skip, "skip/camera-raw", "camera raw file(s), which img-fp does not read (only a byte-identical copy is found)"),
             // The label says what it costs rather than what the code did.
-            (&self.featureless, "image(s) with no detail to match, such as a blank picture: only an identical copy can match one"),
-        ]
+            Note::Featureless => (Skip, "skip/featureless", "image(s) with no detail to match, such as a blank picture: only an identical copy can match one"),
+            Note::UnresolvedExclude => (Problem, "problem/unresolved-exclude", "--exclude path(s) could not be resolved; nothing was excluded for them"),
+            Note::Unscannable => (Problem, "problem/unscannable", "path(s) could not be scanned"),
+            Note::Unreadable => (Problem, "problem/unreadable", "image(s) could not be read"),
+            Note::Damaged => (Problem, "problem/damaged", "image(s) are cut off and were analysed as far as they could be read"),
+            Note::Cache => (Problem, "problem/cache", "cache problem(s)"),
+        }
     }
 
-    fn problems(&self) -> [(&Tally, &'static str); 5] {
-        [
-            (&self.unresolved_exclude, "--exclude path(s) could not be resolved; nothing was excluded for them"),
-            (&self.unscannable, "path(s) could not be scanned"),
-            (&self.unreadable, "image(s) could not be read"),
-            (&self.damaged, "image(s) are cut off and were analysed as far as they could be read"),
-            (&self.cache, "cache problem(s)"),
-        ]
+    fn weight(self) -> Weight {
+        self.says().0
+    }
+}
+
+/// Everything the run skipped or could not do: a tally per [`Note`].
+pub struct Problems<'a> {
+    log: &'a Log,
+    tallies: [Tally; Note::ALL.len()],
+}
+
+impl<'a> Problems<'a> {
+    pub fn new(log: &'a Log) -> Self {
+        Problems { log, tallies: Default::default() }
+    }
+
+    /// Count it, keep it if there is room for it, and write it to the log
+    /// whatever happens. `what` is the path, or for a problem the path and
+    /// why (`"{path}: {err}"`).
+    pub fn note(&mut self, n: Note, what: impl std::fmt::Display) {
+        let what = what.to_string();
+        if self.log.active() {
+            self.log.line(&format!("{}: {what}", n.says().1));
+        }
+        self.tallies[n as usize].record(what);
+    }
+
+    fn tally(&self, n: Note) -> &Tally {
+        &self.tallies[n as usize]
+    }
+
+    /// The categories of one weight that fired, in the summary's order.
+    fn fired(&self, w: Weight) -> impl Iterator<Item = (&Tally, &'static str)> {
+        Note::ALL.into_iter().filter(move |n| n.weight() == w).map(|n| (self.tally(n), n.says().2)).filter(|(t, _)| t.count > 0)
     }
 
     pub fn any(&self) -> bool {
@@ -352,12 +304,12 @@ impl<'a> Problems<'a> {
     /// run neither took nor made one for it (`cache::Store::finish`), not for
     /// this reason.
     pub fn walk_was_complete(&self) -> bool {
-        self.unscannable.count == 0
+        self.tally(Note::Unscannable).count == 0
     }
 
     /// Problems only. A skip is not a failure and must not move the exit code.
     pub fn count(&self) -> usize {
-        self.problems().iter().map(|(t, _)| t.count).sum()
+        self.fired(Weight::Problem).map(|(t, _)| t.count).sum()
     }
 
     /// Printed last, after the results, because it is the part to act on.
@@ -373,14 +325,14 @@ impl<'a> Problems<'a> {
     /// log (`last::Notes::log`).
     pub fn summary(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        let skips: Vec<_> = self.skips().into_iter().filter(|(t, _)| t.count > 0).collect();
+        let skips: Vec<_> = self.fired(Weight::Skip).collect();
         if !skips.is_empty() {
             lines.push("\nSkipped:".to_string());
             for (tally, label) in skips {
                 self.render(tally, label, &mut lines);
             }
         }
-        let problems: Vec<_> = self.problems().into_iter().filter(|(t, _)| t.count > 0).collect();
+        let problems: Vec<_> = self.fired(Weight::Problem).collect();
         if !problems.is_empty() {
             lines.push(format!("\nProblems ({} total):", self.count()));
             for (tally, label) in problems {
@@ -427,11 +379,21 @@ mod tests {
         let log = Log::default();
         let mut p = p(&log);
         for i in 0..50 {
-            p.unreadable(&format!("/x/{i}.jpg"), "not an image");
+            p.note(Note::Unreadable, format_args!("/x/{i}.jpg: not an image"));
         }
         assert_eq!(p.count(), 50, "every failure is counted");
-        assert_eq!(p.unreadable.samples.len(), MAX_SAMPLES, "only a few are named");
+        assert_eq!(p.tally(Note::Unreadable).samples.len(), MAX_SAMPLES, "only a few are named");
         assert!(p.any());
+    }
+
+    #[test]
+    fn every_category_has_its_tally() {
+        // `tallies` is indexed by the variant's number, and `ALL` is what
+        // the summary walks: each variant once, in declaration order.
+        for (i, n) in Note::ALL.into_iter().enumerate() {
+            assert_eq!(n as usize, i, "{n:?} is out of place in ALL");
+        }
+        assert_eq!(Note::ALL.len(), Note::Cache as usize + 1, "a variant is missing from ALL");
     }
 
     #[test]
@@ -446,14 +408,17 @@ mod tests {
     fn a_skip_is_not_a_problem_and_does_not_move_the_exit_code() {
         let log = Log::default();
         let mut p = p(&log);
-        p.not_an_image("/notes.txt");
-        p.not_image_content("/README");
-        p.symlink("/link.jpg");
-        p.symlink_loop("/a/up");
-        p.listed_twice("/a.jpg");
-        p.excluded("/keep");
-        p.mac_metadata("/._a.jpg");
-        p.featureless("/blank.png");
+        p.note(Note::NotAnImage, "/notes.txt");
+        p.note(Note::NotImageContent, "/README");
+        p.note(Note::Symlink, "/link.jpg");
+        p.note(Note::SymlinkLoop, "/a/up");
+        p.note(Note::ListedTwice, "/a.jpg");
+        p.note(Note::Excluded, "/keep");
+        p.note(Note::MacMetadata, "/._a.jpg");
+        p.note(Note::Featureless, "/blank.png");
+        p.note(Note::SetAside, "/.Trash-1000");
+        p.note(Note::Hidden, "/.git");
+        p.note(Note::CameraRaw, "/a.dng");
         assert_eq!(p.count(), 0, "skips are not failures");
         assert!(!p.any(), "so a scan of a home directory still exits 0");
     }
@@ -462,11 +427,11 @@ mod tests {
     fn every_problem_category_counts_towards_the_exit_code() {
         let log = Log::default();
         let mut p = p(&log);
-        p.unscannable("/nope", &"No such file or directory");
-        p.unreadable("/a.jpg", "unsupported");
-        p.cache("could not write /tmp/c".into());
-        p.unresolved_exclude("/kepe", &"No such file or directory");
-        p.damaged("/cut.jpg", "cut off");
+        p.note(Note::Unscannable, "/nope: No such file or directory");
+        p.note(Note::Unreadable, "/a.jpg: unsupported");
+        p.note(Note::Cache, "could not write /tmp/c");
+        p.note(Note::UnresolvedExclude, "/kepe: No such file or directory");
+        p.note(Note::Damaged, "/cut.jpg: cut off");
         assert_eq!(p.count(), 5);
     }
 
@@ -479,7 +444,7 @@ mod tests {
             let log = Log::open(Some(&path)).unwrap();
             let mut p = p(&log);
             for i in 0..50 {
-                p.unreadable(&format!("/x/{i}.jpg"), "not an image");
+                p.note(Note::Unreadable, format_args!("/x/{i}.jpg: not an image"));
             }
             p.print_summary();
         }

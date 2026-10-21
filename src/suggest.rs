@@ -85,7 +85,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::decode::Traits;
-use crate::verify::{Affine, Thumb, Verdict};
+use crate::verify::{invert_affine, linear_scale, mirrored, Affine, Thumb, Verdict};
 
 /// What the reports say to do with a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -401,7 +401,7 @@ pub fn suggest_pinned(
                 }
                 let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
                 let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
-                let mi = invert(m);
+                let mi = invert_affine(m);
                 let a_out = outside(m, pa.work, pb.work);
                 let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
                 let a_in_b = out_by(m, pa.work, pb.work) <= TOL + TOL_PX / pa.dims.0.min(pa.dims.1).max(1) as f32;
@@ -584,12 +584,6 @@ impl Facts {
             a
         }
     }
-}
-
-/// Whether a transform turns its picture over: a left-right or top-bottom
-/// flip, alone or with any rotation.
-fn mirrored(m: &Affine) -> bool {
-    m[0] * m[4] - m[1] * m[3] < 0.0
 }
 
 /// For each DELETE, the file that stays and holds it: the end of its chain
@@ -785,7 +779,7 @@ impl Ctx<'_> {
         let e = self.side(f, g)?;
         match &self.links[e.link as usize].2 {
             Link::Exact => None,
-            Link::Edge(_, m, _) => if e.forward { Some(*m) } else { invert(m) },
+            Link::Edge(_, m, _) => if e.forward { Some(*m) } else { invert_affine(m) },
         }
     }
 
@@ -1170,15 +1164,6 @@ fn outside(m: &Affine, a: (u32, u32), b: (u32, u32)) -> f32 {
     (1.0 - area(&poly) / whole).clamp(0.0, 1.0)
 }
 
-fn invert(m: &Affine) -> Option<Affine> {
-    let d = m[0] * m[4] - m[1] * m[3];
-    if d.abs() < 1e-12 {
-        return None;
-    }
-    let (a, b, c, e) = (m[4] / d, -m[1] / d, -m[3] / d, m[0] / d);
-    Some([a, b, -(a * m[2] + b * m[5]), c, e, -(c * m[2] + e * m[5])])
-}
-
 /// How much softer a picture is at its own pixel scale: how much its pixels
 /// differ more from those two away than from their neighbours, along and
 /// down.
@@ -1229,7 +1214,7 @@ fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &
     let sd = td.w as f32 / wd.0 as f32;
     let sk = tk.w as f32 / wk.0 as f32;
     let span_d = td.w as f32 / N as f32;
-    let span_k = (m[0] * m[4] - m[1] * m[3]).abs().sqrt() * sk * wd.0 as f32 / N as f32;
+    let span_k = linear_scale(m) * sk * wd.0 as f32 / N as f32;
     let bd = blurs.get(d, td, span_d);
     let bk = blurs.get(k, tk, span_k);
     let mut a = [0f32; N * N];

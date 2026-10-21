@@ -107,7 +107,7 @@ pub struct File {
     pub dims: Option<(u32, u32)>,
     /// Its length, as the walk found it.
     pub bytes: Option<u64>,
-    /// Decoded only in part; see `problems::Problems::damaged`.
+    /// Decoded only in part; see `problems::Note::Damaged`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub damaged: bool,
     /// One of `--against`'s library, not one of the files scanned.

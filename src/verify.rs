@@ -319,7 +319,7 @@ impl Verdict {
             m,
             ov_a: self.ov_b,
             ov_b: self.ov_a,
-            scale: (m[0] * m[4] - m[1] * m[3]).abs().sqrt(),
+            scale: linear_scale(&m),
             rot_deg: m[3].atan2(m[0]).to_degrees(),
             ..self.clone()
         })
@@ -504,8 +504,28 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
     Some(out)
 }
 
+/// The determinant of a transform's linear part: the factor it scales area
+/// by, negative when it turns the picture over.
+#[inline(always)]
+pub fn det(m: &Affine) -> f32 {
+    m[0] * m[4] - m[1] * m[3]
+}
+
+/// The factor a transform scales length by, on average over directions.
+#[inline(always)]
+pub fn linear_scale(m: &Affine) -> f32 {
+    det(m).abs().sqrt()
+}
+
+/// Whether a transform turns its picture over: a left-right or top-bottom
+/// flip, alone or with any rotation.
+pub fn mirrored(m: &Affine) -> bool {
+    det(m) < 0.0
+}
+
+/// The transform back, or `None` when it has none.
 pub fn invert_affine(m: &Affine) -> Option<Affine> {
-    let det = m[0] * m[4] - m[1] * m[3];
+    let det = det(m);
     if det.abs() < 1e-12 {
         return None;
     }
@@ -588,7 +608,7 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     let cap = n.min(600);
     for &(i, j) in pairs.iter().take(cap) {
         let m = from_single(&a.kps[i as usize], &b.kps[j as usize]);
-        let s = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
+        let s = linear_scale(&m);
         if !(s.is_finite() && s > 1e-3 && s < 1e3) {
             continue;
         }
@@ -1657,7 +1677,7 @@ fn pixel_check_with(
     // a photograph matched into a slide is read densely on one side and across
     // a handful of pixels on the other.
     let step_a = ((x1 - x0) / (GRID - 1) as f32).max((y1 - y0) / (GRID - 1) as f32);
-    let lin = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
+    let lin = linear_scale(&m);
     let raw_a = (step_a * ta.scale).max(1e-6);
     let raw_b = (step_a * lin * tb.scale).max(1e-6);
     // Filtering each side over its own footprint puts both at one sample per
@@ -1857,7 +1877,7 @@ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     let m_query = m;
     let m = if var.mirror { compose(&mirror_affine(aw), &m) } else { m };
     v.m = m;
-    v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
+    v.scale = linear_scale(&m);
     v.rot_deg = m[3].atan2(m[0]).to_degrees();
     // Asked first, since a verdict that lands frame on frame is read below
     // the gate as well (`Policy::standing`): four corners, so it costs nothing,
@@ -1911,7 +1931,7 @@ fn verify_transform_any(p: &Pair, m: &Affine, var: Variant, min_ov: f32) -> Verd
     let mut v = Verdict { m: *m, variant: var, ..Default::default() };
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
-    v.scale = (m[0] * m[4] - m[1] * m[3]).abs().sqrt();
+    v.scale = linear_scale(&m);
     if !(v.scale.is_finite() && v.scale > 1e-3) {
         return v;
     }

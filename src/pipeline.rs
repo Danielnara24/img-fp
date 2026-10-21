@@ -7,6 +7,7 @@ use claims::{Claim, Clusters, How, Propagation};
 use retrieve::{quantise, Index};
 use outcome::{Against, Asked, Evidence, Group, Head, Member};
 use verify::Standing;
+use problems::Note;
 
 /// What every stage of a run reads: what it was asked, and where it says
 /// what it is doing.
@@ -250,7 +251,7 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 // Asked for and not done, and the next run will read the cache
                 // this one meant to be rid of.
-                Err(e) => problems.cache(format!("could not delete {}: {e}", p.display())),
+                Err(e) => problems.note(Note::Cache, format_args!("could not delete {}: {e}", p.display())),
             }
         }
     }
@@ -590,7 +591,7 @@ fn analyse_all(
     let prune = args.prune_cache
         && (problems.walk_was_complete() || {
             say!(cx, "not pruning: the walk could not read everything it was pointed at");
-            problems.cache("--prune-cache skipped: the walk was incomplete".into());
+            problems.note(Note::Cache, "--prune-cache skipped: the walk was incomplete");
             false
         });
     progress.forecast(|f| {
@@ -640,7 +641,7 @@ fn finish_cache(cx: &Ctx, p: &Path, store: &mut cache::Store, prune: bool, probl
         // Not fatal — the pairs this run reports are the same pairs — but
         // the next run will pay for this one's analysis all over again,
         // which is exactly what a problem is here.
-        problems.cache(format!("could not write {}: {e}", p.display()));
+        problems.note(Note::Cache, format_args!("could not write {}: {e}", p.display()));
     }
     if kept.carried > 0 {
         stage!(cx, "cache: {} records kept from other scans", kept.carried);
@@ -655,7 +656,7 @@ fn finish_cache(cx: &Ctx, p: &Path, store: &mut cache::Store, prune: bool, probl
         cache::Compacted::Unneeded { records, unused } => stage!(cx, "cache: {records} records, {unused} of them unused, not compacted"),
         cache::Compacted::Busy => stage!(cx, "cache: not compacted, another run has it open"),
         cache::Compacted::Done => {}
-        cache::Compacted::Failed(e) => problems.cache(format!("could not write {}: {e}", p.display())),
+        cache::Compacted::Failed(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", p.display())),
     }
 }
 
@@ -681,25 +682,25 @@ fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted,
     for ((f, it), &not_asked) in files.iter().zip(items).zip(&not_asked) {
         let f = f.display().to_string();
         match &it.read {
-            Read::Refused(Refused::MacMetadata) => problems.mac_metadata(&f),
+            Read::Refused(Refused::MacMetadata) => problems.note(Note::MacMetadata, &f),
             // A raw file is a picture, not read: a skip, and still in its
             // exact group, since a copy of its bytes is a copy of it.
-            Read::Refused(Refused::CameraRaw) => problems.camera_raw(&f),
+            Read::Refused(Refused::CameraRaw) => problems.note(Note::CameraRaw, &f),
             // A file a wildcard walk reached that is no picture at all never
             // claimed to be one; see `extensions.rs`.
-            Read::Refused(_) if not_asked => problems.not_image_content(&f),
-            Read::Refused(r) => problems.unreadable(&f, &r.to_string()),
-            Read::Failed(e) => problems.unreadable(&f, e),
+            Read::Refused(_) if not_asked => problems.note(Note::NotImageContent, &f),
+            Read::Refused(r) => problems.note(Note::Unreadable, format_args!("{f}: {r}")),
+            Read::Failed(e) => problems.note(Note::Unreadable, format_args!("{f}: {e}")),
             // Decoded, described, and described to nothing. Nothing failed —
             // a blank picture really has no local features — but the file is
             // in the corpus and the matcher has nothing to say about it, and
             // that is worth a line for the same reason a refusal is: the run
             // did not answer the question it was asked about this file.
-            Read::Whole | Read::Damaged(_) if it.feats.len() == 0 => problems.featureless(&f),
+            Read::Whole | Read::Damaged(_) if it.feats.len() == 0 => problems.note(Note::Featureless, &f),
             Read::Whole | Read::Damaged(_) => {}
         }
         if let Some(why) = it.read.damaged() {
-            problems.damaged(&f, why);
+            problems.note(Note::Damaged, format_args!("{f}: {why}"));
         }
     }
     not_asked

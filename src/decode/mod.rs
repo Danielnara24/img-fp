@@ -95,7 +95,7 @@ pub enum Refused {
     /// A macOS metadata file (AppleDouble or AppleSingle, by its first four
     /// bytes): the `._` twin a Mac leaves beside a file it copies, which
     /// carries the picture's name and none of its pixels. A skip whatever it
-    /// is called; see `problems::Problems::mac_metadata`.
+    /// is called; see `problems::Note::MacMetadata`.
     MacMetadata,
     /// A camera's raw file in a TIFF container (`tiff::open`).
     CameraRaw,

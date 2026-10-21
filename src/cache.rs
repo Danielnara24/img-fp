@@ -68,7 +68,7 @@
 //! compacts it when it does, by copying bytes rather than packing them again.
 
 use crate::decode::Traits;
-use crate::problems::Problems;
+use crate::problems::{Note, Problems};
 use crate::sift::{Features, Keypoint, DESC_LEN};
 use crate::verify::Thumb;
 use anyhow::{anyhow, bail, Result};
@@ -243,7 +243,7 @@ pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<
     let path = locate(explicit);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            problems.cache(format!("could not create {}: {e}", dir.display()));
+            problems.note(Note::Cache, format_args!("could not create {}: {e}", dir.display()));
             return None;
         }
     }
@@ -875,7 +875,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
                     // Another run made it first.
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                     Err(e) => {
-                        problems.cache(format!("could not write {}: {e}", path.display()));
+                        problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display()));
                         return (out, store);
                     }
                 }
@@ -883,7 +883,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
             Err(e) => {
                 // A cache that can be read and not written still answers this
                 // run. It just keeps nothing new, and that is worth saying.
-                problems.cache(format!("could not open {} for writing: {e}", path.display()));
+                problems.note(Note::Cache, format_args!("could not open {} for writing: {e}", path.display()));
                 // What it holds is still counted, although nothing will be
                 // appended: `stale` measures how many records a later one
                 // superseded against this, and a count of zero beside a full map
@@ -914,7 +914,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
                     flock(&f, LOCK_SH);
                     store.file = Some(f);
                 }
-                Err(e) => problems.cache(format!("could not write {}: {e}", path.display())),
+                Err(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display())),
             }
             return (out, store);
         }
@@ -937,7 +937,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
                     let cut = f.set_len(tail.end);
                     flock(&f, LOCK_SH);
                     if let Err(e) = cut {
-                        problems.cache(format!("could not repair {}: {e}", path.display()));
+                        problems.note(Note::Cache, format_args!("could not repair {}: {e}", path.display()));
                         return (out, store);
                     }
                 }
@@ -953,7 +953,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
                 if exclusive(&f, path) {
                     match replace_with(path, |f| Buf(f).header()) {
                         Ok(f) => store.file = Some(f),
-                        Err(e) => problems.cache(format!("could not write {}: {e}", path.display())),
+                        Err(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display())),
                     }
                 }
                 return (out, store);
@@ -1048,14 +1048,14 @@ fn read_file(
     match read_stream(std::io::BufReader::with_capacity(1 << 20, f), size, want, walked, out, others) {
         Ok(tail) => {
             if let Some(why) = &tail.broken_at {
-                problems.cache(format!(
+                problems.note(Note::Cache, format_args!(
                     "{} is damaged part-way through ({why}); the {} record(s) before the damage are kept",
                     path.display(),
                     tail.count
                 ));
             }
             if tail.damaged > 0 {
-                problems.cache(format!(
+                problems.note(Note::Cache, format_args!(
                     "ignoring {} damaged record(s) in {}; their images are analysed again",
                     tail.damaged,
                     path.display()
@@ -1069,7 +1069,7 @@ fn read_file(
             Found::OtherVersion(v)
         }
         Err(Reject::Damaged(e)) => {
-            problems.cache(format!("ignoring {}: {e}", path.display()));
+            problems.note(Note::Cache, format_args!("ignoring {}: {e}", path.display()));
             out.clear();
             others.clear();
             Found::Unusable

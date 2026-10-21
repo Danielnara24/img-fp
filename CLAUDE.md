@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.60.0)
+## Status (0.61.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -381,6 +381,26 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   mid-run (before the two keys were dropped). Non-test code in the files touched 3,554 -> 3,783 (`commands.rs`
   321; `main.rs` -69; `results.rs` -20, `Results::new` 685 -> 529 lines);
   tests 111 -> 264.
+- 0.61.0 (refactor, no change to output): what a run skips or could not
+  do is one `problems::Note` per category (its weight, log tag and summary
+  label in `Note::says`, its order in `Note::ALL`), counted by
+  `Problems::note`. Before, each of the 16 categories was a `Tally` field,
+  a line in `new`, a method, and an entry in `skips()` / `problems()` with a
+  hand-counted array length, and a missed place compiled. The byte pass
+  (`exact_groups`, its sample and whole-file hashes, the byte compare)
+  moved from `lib.rs` to `same.rs`, beside the other two sameness answers.
+  A transform's determinant, scale, mirroring and inverse are written once
+  in `verify` (`det`, `linear_scale`, `mirrored`, `invert_affine`); the keep
+  rule had its own `invert` and `mirrored` (its inverse divided by the
+  determinant, `verify`'s multiplies by its reciprocal, so the last bit
+  could differ). Proved: a tree that hits every category, ten configurations
+  (wildcard, extension list, followed links, excludes, an unwritable cache
+  and a cache path that is a folder, `--log-file` to a file and to stdout,
+  JSON), stdout, stderr, log, report and exit code identical to 0.60.0;
+  cached IMGS-ALL report (1,110,436 pairs, every suggestion) and console
+  identical but `runtime_seconds`; all 90 `pairs.py` reports and lists
+  identical; per-symbol `ymm` counts identical. Code and test lines (no
+  comments or blanks) in the files touched 8,242 -> 8,212.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -471,7 +491,8 @@ src/
   index.rs      vocabulary tree, inverted file, containment scoring
   verify.rs     correspondence, geometry, pixel check; `Policy` and `Standing`
   claims.rs     Edge, Clusters, bridge test, admission, propagation, Claim/How
-  same.rs       which files are one file (bytes, analysis, colour), and their pairs
+  same.rs       which files are one file (bytes, analysis, colour), and their pairs;
+                the byte pass (`exact_groups`: size, sample, hash, bytes)
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
   cache.rs      on-disk analysis cache: answers for a run's files by number,
@@ -484,7 +505,7 @@ src/
   suggest.rs    KEEP / DELETE / REVIEW per file
   against.rs    --against: each scanned file's verdict, read off an Outcome
   last.rs       --last (the last scan's Outcome, kept beside the cache)
-  problems.rs   skips, problems, exit codes, --log-file
+  problems.rs   skips, problems, exit codes, --log-file; one `Note` a category
   progress.rs   progress bar
   simd.rs       x86-64-v3 vs portable kernels (`dispatched!`, `v3()`)
   spill.rs      analysis arrays in an unlinked scratch file, read via mmap
@@ -1195,6 +1216,9 @@ Do not retry without new evidence:
   Problems: undecodable, unreadable path, unresolved `--exclude`,
   cut-off JPEG (`decode::jpeg::cut_off`; analysed, marked
   `DAMAGED`, never cached), cache I/O failure.
+  **Adding a category**: a `problems::Note` variant, its arm in `Note::says`
+  (skip or problem, log tag, summary label) and its place in `Note::ALL`;
+  callers say `problems.note(Note::X, what)`. Not a counter of its own.
 - `-o`, `--dump`, `--log-file` may not name a picture or each other; at most
   one may be stdout. Reports and the dump are written whole or not at all
   (`report::write_whole`: beside the destination, through any symlink, with

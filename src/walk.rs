@@ -39,7 +39,7 @@
 //! that follows links ever asks the filesystem where a path leads.
 
 use crate::extensions::Wanted;
-use crate::problems::Problems;
+use crate::problems::{Note, Problems};
 use anyhow::Context;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -150,12 +150,12 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
         let (meta, canon) = match std::fs::metadata(root).and_then(|m| Ok((m, std::fs::canonicalize(root)?))) {
             Ok(found) => found,
             Err(e) => {
-                problems.unscannable(&shown, &e);
+                problems.note(Note::Unscannable, format_args!("{shown}: {e}"));
                 continue;
             }
         };
         if is_excluded(&canon, &excludes) {
-            problems.excluded(&shown);
+            problems.note(Note::Excluded, &shown);
             continue;
         }
         if meta.is_file() {
@@ -173,7 +173,7 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
         } else {
             // A socket, a fifo, a device node: naming one is a mistake worth
             // hearing about rather than a file worth trying to decode.
-            problems.unscannable(&shown, &"not a file or a folder");
+            problems.note(Note::Unscannable, format_args!("{shown}: not a file or a folder"));
         }
     }
     settle(found, problems)
@@ -226,9 +226,9 @@ fn walk_dir(
             Err(e) => {
                 let at = e.path().unwrap_or(root).display().to_string();
                 if e.loop_ancestor().is_some() {
-                    problems.symlink_loop(&at);
+                    problems.note(Note::SymlinkLoop, &at);
                 } else {
-                    problems.unscannable(&at, &e);
+                    problems.note(Note::Unscannable, format_args!("{at}: {e}"));
                 }
                 continue;
             }
@@ -237,14 +237,14 @@ fn walk_dir(
         // only ever seen here when links are not being followed.
         let kind = entry.file_type();
         if kind.is_symlink() {
-            problems.symlink(&entry.path().display().to_string());
+            problems.note(Note::Symlink, entry.path().display());
             continue;
         }
         if !kind.is_file() {
             continue;
         }
         if !req.wanted.accepts(entry.path()) {
-            problems.not_an_image(&entry.path().display().to_string());
+            problems.note(Note::NotAnImage, entry.path().display());
             continue;
         }
         // Again for the file itself, which is what catches a link to a file
@@ -260,7 +260,7 @@ fn walk_dir(
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {
-                problems.unscannable(&entry.path().display().to_string(), &e);
+                problems.note(Note::Unscannable, format_args!("{}: {}", entry.path().display(), e));
                 continue;
             }
         };
@@ -275,9 +275,9 @@ fn walk_dir(
     }
     for (dir, trash) in passed_over.into_inner() {
         if trash {
-            problems.set_aside(&dir.display().to_string());
+            problems.note(Note::SetAside, dir.display());
         } else {
-            problems.hidden(&dir.display().to_string());
+            problems.note(Note::Hidden, dir.display());
         }
     }
 }
@@ -406,7 +406,7 @@ fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
         };
         let rank = |f: &Found| (f.library, f.link);
         let dropped = if rank(&f) < rank(&kept[at]) { std::mem::replace(&mut kept[at], f).path } else { f.path };
-        problems.listed_twice(&dropped.display().to_string());
+        problems.note(Note::ListedTwice, dropped.display());
     }
     // A later real name may have displaced an earlier link.
     kept.sort_by(|a, b| a.path.cmp(&b.path));
@@ -435,7 +435,7 @@ fn resolve_excludes(requested: &[PathBuf], problems: &mut Problems) -> Vec<PathB
     for p in requested {
         match std::fs::canonicalize(p) {
             Ok(real) => excludes.push(real),
-            Err(e) => problems.unresolved_exclude(&p.display().to_string(), &e),
+            Err(e) => problems.note(Note::UnresolvedExclude, format_args!("{}: {}", p.display(), e)),
         }
     }
     excludes
