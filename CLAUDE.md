@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.57.0)
+## Status (0.58.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -295,6 +295,37 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   (ABBA): CPU 343.3 (2,006 MHz) / 293.7 base, 302.0 / 297.0 new; peak 182
   MB both. Code lines (no comments or blanks, tests included) in the files
   touched 7,049 -> 7,110 (`retrieve.rs` 198, of which tests 45).
+- 0.58.0 (`--against` is an `Outcome`; see *A finished scan*): before, a
+  run against a library ended in a second finish (`write_answers` beside
+  `write_groups`) with its own copy of everything after the pairs:
+  `against::Pair` / `Facts` / `Header` / `Row`, three writers, the stdout
+  and broken-pipe handling, the evidence text, a holder-chain walk of its
+  own and a sort by verdict string, and `Found` carried `against_pairs`
+  beside `graph`. Drift: the text dropped "corroborated" (`report::evidence`
+  said it; the copy wrote "9 points"), and a looping chain named a file kept
+  where `kept_at_end` names none. And it could not be kept for `--last`.
+  Now `Outcome::against` holds each scanned file's holder and library pairs,
+  `against::answers` reads the verdicts as things stand, `report.rs` writes
+  both layouts through one `write_layout`, `pipeline::finish` is one path
+  (`outcome` + `numbered_groups`), and `--last` / `--last --list` rewrite a
+  comparison (the window leaves one alone). Proved: a random differential
+  test (old `answer` + `rows` + writers kept in a test module, 20,000
+  libraries of up to 13 files with chains, mirrored / inverted / clean
+  pairs, non-UTF-8 names) identical in all three layouts; with corroborated
+  pairs too, 7,345 of 20,000 differ, all by the restored clause in the text
+  alone. `ref.sh` battery (now with `--against` text, CSV, stdout and
+  `--list -o`, Desktop and IMGS-AGAINST) identical to 0.57.0 (no IMGS-AGAINST
+  row rests on a corroborated pair); all 90 `pairs.py` reports identical;
+  `--last` of each `--against` report identical to the scan's (JSON less
+  `pairs`), `--list` too. On a symlink farm of IMGS-AGAINST with a library
+  file and a scanned holder deleted and a scanned file replaced: 11 repeats
+  answered again (9 better by another library copy, 2 new), the changed file
+  not a repeat, the gone ones left out. Cached IMGS-AGAINST (ABBA): CPU
+  539.6 (2,140 MHz) / 508.3 base, 517.2 / 513.2 new; peak RssAnon+swap
+  602 / 602 MB base, 604 / 602 new (the new one also keeps an 11.1 MB scan).
+  Code lines (no comments or blanks, tests included) in the files touched
+  6,452 -> 6,541: `against.rs` 375 -> 184, `report.rs` 741 -> 949 (the
+  second layout), `last.rs` +30 (`--last` of a comparison), tests +60.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -390,11 +421,13 @@ src/
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
   cache.rs      on-disk analysis cache: answers for a run's files by number,
                 and decides what the file keeps (`Store::finish`)
-  outcome.rs    a finished scan (groups by number, evidence, content rule's
-                suggestions), as the report, --last and the window read it
-  report.rs     text / CSV / JSON reports, written from an Outcome
+  outcome.rs    a finished scan (groups by number, or against a library each
+                scanned file's pairs; evidence, content rule's suggestions),
+                as the report, --last and the window read it
+  report.rs     text / CSV / JSON reports of either kind, written from an
+                Outcome
   suggest.rs    KEEP / DELETE / REVIEW per file
-  against.rs    --against
+  against.rs    --against: each scanned file's verdict, read off an Outcome
   last.rs       --last (the last scan's Outcome, kept beside the cache)
   problems.rs   skips, problems, exit codes, --log-file
   progress.rs   progress bar
@@ -588,8 +621,18 @@ bytes when not UTF-8). The rules on it are its methods: `actions(mode)`
 deletes a lapsed file), `lapse(ids, Gone | Changed)` (takes back what rests
 on a lapsed file, `suggest::revoke`), `look` (which files are gone or
 changed now), `shown` (the groups a report writes: no gone file, no group
-without its representative or with one file). `--against` reads the same
-`Evidence` off each pair.
+without its representative or with one file).
+
+A run `--against` a library is an `Outcome` too: no groups, and `against`
+holds each scanned file (`Asked`) with its nearest holder and its pairs with
+library files (`Match`: `Evidence` and the clean flag). Its verdicts are not
+stored but read as things stand, `against::answers` (so `--last` lapses them
+as it lapses groups: a file gone is not answered, nor is it one the library
+has; a repeat whose holder or kept file has lapsed is answered by the
+library alone), and the report writes them in its second layout. Before
+0.58.0 it ended in a report of its own (`against::Row`, three writers, its
+own holder-chain walk and stdout handling) and could not be kept; the text
+had dropped "corroborated".
 
 **Adding a question about a finished scan**: an `Outcome` method, asked by
 the report, `--last` and the window alike. No reader parses the report: it
@@ -786,7 +829,8 @@ ranked by `both_ways`. The second look also re-asks the best-connected member
 of each clean-anchor component holding a scanned file. A scanned original
 whose library copy is a same-frame re-encode is `repeat` (user's decision).
 Copy election: the first member of an exact group is the original, so cached
-and cold runs agree.
+and cold runs agree. Kept for `--last` like any scan (see *A finished scan*);
+`--last --list` lists it; the window does not open one.
 
 ### `--last` (`last.rs`)
 
@@ -794,8 +838,8 @@ Every finished scan's `Outcome` is kept in `last-scan/found.json` beside
 the cache file, `Notes` in `scan.json` (shared with the window); `--last`
 re-writes text/CSV byte-for-byte, JSON without `pairs`. A scan kept before
 0.55.0 (`result.json`, the report) is not read: run a scan. Not kept under
-`--no-cache`, `--no-last`, `--against`, or a walk that found no picture;
-the window keeps by the same rule. Paths are kept absolute
+`--no-cache`, `--no-last`, or a walk that found no picture; the window keeps
+by the same rule. Paths are kept absolute
 (`Outcome::save`): read back from another folder, or by the window from
 `$HOME`, relative ones named other files. The window's
 Trash leaves a file whose length differs from the scan's, or whose ctime is

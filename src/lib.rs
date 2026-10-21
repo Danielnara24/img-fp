@@ -118,12 +118,12 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     against: Vec<PathBuf>,
 
-    /// With `--against`, print only the paths of the images with this
-    /// verdict, one a line, instead of the report: repeat, better, review or
+    /// With `--against`, or `--last` after a scan against a library, print
+    /// only the paths of the images with this verdict, one a line, instead of the report: repeat, better, review or
     /// new. Repeat the option, or separate verdicts with commas, for several.
     ///
     /// The report is still written to `--output`, if that names a file.
-    #[arg(long, value_enum, value_delimiter = ',', value_name = "VERDICT", requires = "against")]
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "VERDICT")]
     list: Vec<against::Verdict>,
 
     /// Include subfolders.
@@ -271,15 +271,18 @@ struct Args {
 
     /// Write the last scan's report again, without scanning: in another
     /// format with `--output` or `--format`, or with another `--suggest` rule.
+    /// After a scan against a library, its verdicts, or with `--list` their
+    /// paths.
     ///
     /// The last scan is the last one run from the command line or the window,
     /// kept beside the cache. Files deleted since are left out, and a DELETE
-    /// whose kept copy was one of them is REVIEW. A JSON report has the
-    /// groups but no list of pairs.
+    /// whose kept copy was one of them is REVIEW; against a library, a repeat
+    /// of one is answered by the library alone. A JSON report has no list of
+    /// pairs.
     #[arg(
         long,
         conflicts_with_all = [
-            "roots", "from_file", "null", "against", "list", "recursive", "exclude", "follow_symlinks",
+            "roots", "from_file", "against", "recursive", "exclude", "follow_symlinks",
             "hidden", "extensions", "work_size", "candidates", "min_aligned_points", "min_frame_overlap",
             "min_pixel_correlation", "skip_mirrored", "dump", "no_cache", "clear_cache", "prune_cache", "no_last",
         ]
@@ -605,7 +608,6 @@ const PROPAGATE_MAX_ROUNDS: usize = 8;
 
 // ---------------------------------------------------------------- output
 
-use outcome::{Group, Head, Member};
 use report::OutPair;
 use same::Same;
 
@@ -884,6 +886,9 @@ fn validate(args: &Args) -> std::result::Result<(), String> {
     }
     // The verdicts are the content rule's, with the library kept; the other
     // two rules read groups, which a run against a library does not make.
+    if !args.list.is_empty() && args.against.is_empty() && !args.last {
+        return Err("--list needs --against, or --last to list a kept scan run against a library".into());
+    }
     if !args.against.is_empty() && args.suggest != suggest::Mode::Content {
         return Err("--against decides with the content rule, and cannot be used with --suggest".into());
     }
@@ -952,7 +957,14 @@ fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
         report::check_writable(path)?;
     }
     if args.last {
-        let asked = last::Rewrite { cache: args.cache.as_deref(), output: args.output.as_deref(), format: args.format, suggest: args.suggest };
+        let asked = last::Rewrite {
+            cache: args.cache.as_deref(),
+            output: args.output.as_deref(),
+            format: args.format,
+            suggest: args.suggest,
+            list: &args.list,
+            null: args.null,
+        };
         for line in last::rewrite(&asked)? {
             progress::to_stderr(&line);
             log.line(&line);

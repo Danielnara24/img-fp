@@ -20,6 +20,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::against::{self, Answer};
 use crate::outcome::{Evidence, Member, Outcome, Relation};
 use crate::suggest::{Action, Mode};
 
@@ -342,14 +343,7 @@ impl Serialize for OutPair {
 /// A reader that goes away early — `img-fp DIR | head` — is how a pipeline
 /// ends, not a failed run, so a broken pipe on stdout is not an error.
 pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<&[OutPair]>) -> Result<()> {
-    let said = Said::of(scan, mode);
-    let body = |w: &mut dyn Write| -> std::io::Result<()> {
-        match target.format {
-            Format::Json => write_json(w, &said, pairs),
-            Format::Txt => write_txt(w, &said),
-            Format::Csv => write_csv(w, &said),
-        }
-    };
+    let body = |w: &mut dyn Write| write_layout(w, target.format, scan, mode, pairs);
     match &target.sink {
         // Fatal, and the context is the whole of what makes exit 1 useful:
         // this is the run's output, there is nowhere else it went, and "No
@@ -362,6 +356,26 @@ pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<&[O
                 other => other.context("could not write the results to stdout"),
             }
         }
+    }
+}
+
+/// The report of `scan` in `format`: its groups, or against a library each
+/// scanned file's verdict.
+fn write_layout(w: &mut dyn Write, format: Format, scan: &Outcome, mode: Mode, pairs: Option<&[OutPair]>) -> std::io::Result<()> {
+    if scan.against.is_some() {
+        let answers = against::answers(scan);
+        let rows = answer_rows(scan, &answers);
+        return match format {
+            Format::Json => write_answers_json(w, scan, &rows, pairs),
+            Format::Txt => write_answers_txt(w, &rows),
+            Format::Csv => write_answers_csv(w, &rows),
+        };
+    }
+    let said = Said::of(scan, mode);
+    match format {
+        Format::Json => write_json(w, &said, pairs),
+        Format::Txt => write_txt(w, &said),
+        Format::Csv => write_csv(w, &said),
     }
 }
 
@@ -406,6 +420,7 @@ impl<'a> Said<'a> {
                 pixel_correlation: p.map(|p| p.pixel_correlation),
                 mirrored: p.map(|p| p.mirrored),
                 inverted: p.map(|p| p.inverted),
+                with: p,
                 damaged: f.damaged,
                 kept_copy: kept.map(|k| k.display().to_string()),
                 kept_copy_bytes: kept.and_then(|k| raw_bytes(k)),
@@ -432,7 +447,6 @@ struct JsonGroup<'a> {
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
 fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<&[OutPair]>) -> std::io::Result<()> {
-    let head = &said.scan.head;
     let groups: Vec<JsonGroup> = said
         .groups
         .iter()
@@ -442,20 +456,29 @@ fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<&[OutPair]>) -> std:
             JsonGroup { group: group_name(gi), representative: rep.display().to_string(), representative_bytes: raw_bytes(rep), files: said.rows(g).collect() }
         })
         .collect();
-    let mut config = head.config.clone();
-    config["suggest"] = format!("{:?}", said.mode).to_lowercase().into();
-    writeln!(w, "{{")?;
-    writeln!(w, "  \"tool\": \"img-fp\",")?;
-    writeln!(w, "  \"config\": {},", serde_json::to_string(&config)?)?;
-    writeln!(w, "  \"files_enumerated\": {},", head.files_enumerated)?;
-    writeln!(w, "  \"files_analysed\": {},", head.files_analysed)?;
-    list(w, "failures", &head.failures, false)?;
-    writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&head.runtime_seconds)?)?;
+    write_head(w, said.scan, said.mode)?;
     list(w, "groups", &groups, pairs.is_none())?;
     if let Some(pairs) = pairs {
         list_par(w, "pairs", pairs, true)?;
     }
     writeln!(w, "}}")
+}
+
+/// The JSON's opening lines: what the run was and what it read.
+fn write_head(w: &mut dyn Write, scan: &Outcome, mode: Mode) -> std::io::Result<()> {
+    let head = &scan.head;
+    let mut config = head.config.clone();
+    config["suggest"] = format!("{mode:?}").to_lowercase().into();
+    writeln!(w, "{{")?;
+    writeln!(w, "  \"tool\": \"img-fp\",")?;
+    writeln!(w, "  \"config\": {},", serde_json::to_string(&config)?)?;
+    writeln!(w, "  \"files_enumerated\": {},", head.files_enumerated)?;
+    writeln!(w, "  \"files_analysed\": {},", head.files_analysed)?;
+    if let Some(a) = &scan.against {
+        writeln!(w, "  \"library_files\": {},", a.library_files)?;
+    }
+    list(w, "failures", &head.failures, false)?;
+    writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&head.runtime_seconds)?)
 }
 
 /// One key of the document and its list, a record a line.
@@ -546,6 +569,9 @@ struct Row<'a> {
     pixel_correlation: Option<f32>,
     mirrored: Option<bool>,
     inverted: Option<bool>,
+    /// The pair these figures are, for the text's clause.
+    #[serde(skip)]
+    with: Option<Evidence>,
     /// The file decoded only in part. Written only when it did.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     damaged: bool,
@@ -580,7 +606,7 @@ fn write_txt(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
             let damaged = if r.damaged { "DAMAGED, " } else { "" };
             // The path as its own bytes, as `ls` would print it: a name that
             // is not UTF-8 is still the name of the file.
-            write!(w, "\t{role:<ROLE_COLUMN$} {action:<ACTION_COLUMN$} {dims}, {size}, {damaged}{}", evidence(&r))?;
+            write!(w, "\t{role:<ROLE_COLUMN$} {action:<ACTION_COLUMN$} {dims}, {size}, {damaged}{}", evidence(r.with))?;
             w.write_all(r.raw.as_os_str().as_bytes())?;
             writeln!(w)?;
         }
@@ -589,23 +615,21 @@ fn write_txt(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The evidence clause of a member's text row, ending in the separator before
-/// the path. Empty for the representative.
-fn evidence(r: &Row) -> String {
-    let (Some(how), Some(ov), Some(corr)) = (r.relation, r.frame_overlap, r.pixel_correlation) else {
-        return String::new();
-    };
-    let mut s = match (how, r.aligned_points) {
-        ("identical", _) => "identical".to_string(),
-        ("same_pixels", _) => "same pixels".to_string(),
-        ("corroborated", Some(n)) => format!("corroborated, {n} points, overlap {ov:.2}, correlation {corr:.2}"),
+/// What a pair says, as a text row's clause ends it: before the path.
+fn evidence(e: Option<Evidence>) -> String {
+    let Some(e) = e else { return String::new() };
+    let (ov, corr) = (e.frame_overlap, e.pixel_correlation);
+    let mut s = match (e.relation, e.aligned_points) {
+        (Relation::Identical, _) => "identical".to_string(),
+        (Relation::SamePixels, _) => "same pixels".to_string(),
+        (Relation::Corroborated, Some(n)) => format!("corroborated, {n} points, overlap {ov:.2}, correlation {corr:.2}"),
         (_, Some(n)) => format!("{n} points, overlap {ov:.2}, correlation {corr:.2}"),
-        (how, None) => format!("{how}, overlap {ov:.2}, correlation {corr:.2}"),
+        (how, None) => format!("{}, overlap {ov:.2}, correlation {corr:.2}", how.as_str()),
     };
-    if r.mirrored == Some(true) {
+    if e.mirrored {
         s.push_str(", mirrored");
     }
-    if r.inverted == Some(true) {
+    if e.inverted {
         s.push_str(", inverted");
     }
     s.push_str(", ");
@@ -634,9 +658,6 @@ const CSV_HEADER: [&str; 15] = [
 /// One row per file per group, `;`-separated as `vid-fp`'s is, an unmeasured
 /// figure an empty cell.
 fn write_csv(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
-    fn cell<T: ToString>(x: Option<T>) -> String {
-        x.map(|x| x.to_string()).unwrap_or_default()
-    }
     csv_row(w, &CSV_HEADER.map(str::as_bytes))?;
     for (gi, g) in said.groups.iter().enumerate() {
         let group = group_name(gi);
@@ -664,6 +685,11 @@ fn write_csv(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A figure as a cell: empty where it was not measured.
+fn cell<T: ToString>(x: Option<T>) -> String {
+    x.map(|x| x.to_string()).unwrap_or_default()
 }
 
 /// A field is quoted when it holds the separator, a quote or a line break,
@@ -697,6 +723,199 @@ pub fn csv_row_with(w: &mut dyn Write, fields: &[&[u8]], sep: u8) -> std::io::Re
     w.write_all(b"\n")
 }
 
+// ---------------------------------------------------------------- --against
+
+/// One scanned file against the library, as all three layouts state it.
+#[derive(Serialize)]
+struct AnswerRow<'a> {
+    verdict: &'static str,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_bytes: Option<Vec<u8>>,
+    #[serde(skip)]
+    raw: &'a Path,
+    width: Option<u32>,
+    height: Option<u32>,
+    size_bytes: u64,
+    /// The file the verdict rests on, and which side it is from.
+    #[serde(rename = "match")]
+    by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_bytes: Option<Vec<u8>>,
+    #[serde(skip)]
+    by_raw: Option<&'a Path>,
+    match_in: Option<&'static str>,
+    match_width: Option<u32>,
+    match_height: Option<u32>,
+    match_size_bytes: Option<u64>,
+    relation: Option<&'static str>,
+    aligned_points: Option<u32>,
+    frame_overlap: Option<f32>,
+    pixel_correlation: Option<f32>,
+    mirrored: Option<bool>,
+    inverted: Option<bool>,
+    #[serde(skip)]
+    with: Option<Evidence>,
+    /// For a repeat of a repeat, the file kept at the end of the chain.
+    kept: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kept_bytes: Option<Vec<u8>>,
+    #[serde(skip)]
+    kept_raw: Option<&'a Path>,
+    kept_in: Option<&'static str>,
+    library_matches: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    damaged: bool,
+}
+
+/// The rows, in the answers' order.
+fn answer_rows<'a>(scan: &'a Outcome, answers: &[Answer]) -> Vec<AnswerRow<'a>> {
+    let files = &scan.files;
+    let side = |g: usize| if files[g].library { "library" } else { "scan" };
+    answers
+        .iter()
+        .map(|a| {
+            let f = &files[a.file];
+            let by = a.by.map(|g| &files[g]);
+            let kept = a.kept.map(|g| &files[g]);
+            let p = a.with;
+            AnswerRow {
+                verdict: a.verdict.as_str(),
+                path: f.path.display().to_string(),
+                path_bytes: raw_bytes(&f.path),
+                raw: &f.path,
+                width: f.dims.map(|d| d.0),
+                height: f.dims.map(|d| d.1),
+                size_bytes: f.bytes.unwrap_or(0),
+                by: by.map(|g| g.path.display().to_string()),
+                match_bytes: by.and_then(|g| raw_bytes(&g.path)),
+                by_raw: by.map(|g| g.path.as_path()),
+                match_in: a.by.map(side),
+                match_width: by.and_then(|g| g.dims).map(|d| d.0),
+                match_height: by.and_then(|g| g.dims).map(|d| d.1),
+                match_size_bytes: by.and_then(|g| g.bytes),
+                relation: p.map(|p| p.relation.as_str()),
+                aligned_points: p.and_then(|p| p.aligned_points),
+                frame_overlap: p.map(|p| p.frame_overlap),
+                pixel_correlation: p.map(|p| p.pixel_correlation),
+                mirrored: p.map(|p| p.mirrored),
+                inverted: p.map(|p| p.inverted),
+                with: p,
+                kept: kept.map(|g| g.path.display().to_string()),
+                kept_bytes: kept.and_then(|g| raw_bytes(&g.path)),
+                kept_raw: kept.map(|g| g.path.as_path()),
+                kept_in: a.kept.map(side),
+                library_matches: a.library_matches,
+                damaged: f.damaged,
+            }
+        })
+        .collect()
+}
+
+fn dims_text(w: Option<u32>, h: Option<u32>) -> String {
+    match (w, h) {
+        (Some(w), Some(h)) => format!("{w}x{h}"),
+        _ => "-".into(),
+    }
+}
+
+/// One block per verdict. Each file is a line, the verdict leading at a fixed
+/// width and the path trailing, as in the groups report; the file it rests on
+/// follows on a line of its own, with the evidence.
+fn write_answers_txt(w: &mut dyn Write, rows: &[AnswerRow]) -> std::io::Result<()> {
+    for block in rows.chunk_by(|x, y| x.verdict == y.verdict) {
+        let v = block[0].verdict;
+        writeln!(w, "{v}: {} {}", block.len(), if block.len() == 1 { "file" } else { "files" })?;
+        for r in block {
+            let damaged = if r.damaged { "DAMAGED, " } else { "" };
+            write!(w, "\t{:<ACTION_COLUMN$} {}, {}, {damaged}", format!("{},", v.to_uppercase()), dims_text(r.width, r.height), format_size(r.size_bytes))?;
+            w.write_all(r.raw.as_os_str().as_bytes())?;
+            writeln!(w)?;
+            if let (Some(by), Some(side)) = (r.by_raw, r.match_in) {
+                let size = r.match_size_bytes.map(format_size).unwrap_or_else(|| "-".into());
+                write!(w, "\t        in {side}: {}, {size}, {}", dims_text(r.match_width, r.match_height), evidence(r.with))?;
+                w.write_all(by.as_os_str().as_bytes())?;
+                writeln!(w)?;
+                if let (Some(kept), Some(side)) = (r.kept_raw, r.kept_in) {
+                    write!(w, "\t        which repeats, in {side}: ")?;
+                    w.write_all(kept.as_os_str().as_bytes())?;
+                    writeln!(w)?;
+                }
+            }
+        }
+        writeln!(w)?;
+    }
+    Ok(())
+}
+
+/// The CSV's columns, an `AnswerRow`'s fields in its order.
+const ANSWERS_CSV_HEADER: [&str; 20] = [
+    "verdict",
+    "path",
+    "width",
+    "height",
+    "size_bytes",
+    "match",
+    "match_in",
+    "match_width",
+    "match_height",
+    "match_size_bytes",
+    "relation",
+    "aligned_points",
+    "frame_overlap",
+    "pixel_correlation",
+    "mirrored",
+    "inverted",
+    "kept",
+    "kept_in",
+    "library_matches",
+    "damaged",
+];
+
+fn write_answers_csv(w: &mut dyn Write, rows: &[AnswerRow]) -> std::io::Result<()> {
+    csv_row(w, &ANSWERS_CSV_HEADER.map(str::as_bytes))?;
+    for r in rows {
+        fn path(p: Option<&Path>) -> &[u8] {
+            p.map(|p| p.as_os_str().as_bytes()).unwrap_or_default()
+        }
+        csv_row(
+            w,
+            &[
+                r.verdict.as_bytes(),
+                r.raw.as_os_str().as_bytes(),
+                cell(r.width).as_bytes(),
+                cell(r.height).as_bytes(),
+                r.size_bytes.to_string().as_bytes(),
+                path(r.by_raw),
+                r.match_in.unwrap_or_default().as_bytes(),
+                cell(r.match_width).as_bytes(),
+                cell(r.match_height).as_bytes(),
+                cell(r.match_size_bytes).as_bytes(),
+                r.relation.unwrap_or_default().as_bytes(),
+                cell(r.aligned_points).as_bytes(),
+                cell(r.frame_overlap).as_bytes(),
+                cell(r.pixel_correlation).as_bytes(),
+                cell(r.mirrored).as_bytes(),
+                cell(r.inverted).as_bytes(),
+                path(r.kept_raw),
+                r.kept_in.unwrap_or_default().as_bytes(),
+                r.library_matches.to_string().as_bytes(),
+                if r.damaged { b"true".as_slice() } else { b"".as_slice() },
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_answers_json(w: &mut dyn Write, scan: &Outcome, rows: &[AnswerRow], pairs: Option<&[OutPair]>) -> std::io::Result<()> {
+    write_head(w, scan, Mode::Content)?;
+    list(w, "files", rows, pairs.is_none())?;
+    if let Some(pairs) = pairs {
+        list_par(w, "pairs", pairs, true)?;
+    }
+    writeln!(w, "}}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,7 +931,7 @@ mod tests {
     }
 
     fn file(p: &str) -> File {
-        File { path: PathBuf::from(p), dims: None, bytes: None, damaged: false }
+        File { path: PathBuf::from(p), dims: None, bytes: None, damaged: false, library: false }
     }
 
     /// One group: `/0.jpg`, which holds an identical `/1.jpg` and a mirrored
@@ -736,19 +955,19 @@ mod tests {
 
     fn txt(o: &Outcome) -> Vec<u8> {
         let mut buf = Vec::new();
-        write_txt(&mut buf, &Said::of(o, Mode::Content)).unwrap();
+        write_layout(&mut buf, Format::Txt, o, Mode::Content, None).unwrap();
         buf
     }
 
     fn csv(o: &Outcome) -> Vec<u8> {
         let mut buf = Vec::new();
-        write_csv(&mut buf, &Said::of(o, Mode::Content)).unwrap();
+        write_layout(&mut buf, Format::Csv, o, Mode::Content, None).unwrap();
         buf
     }
 
     fn json(o: &Outcome, pairs: Option<&[OutPair]>) -> serde_json::Value {
         let mut buf = Vec::new();
-        write_json(&mut buf, &Said::of(o, Mode::Content), pairs).unwrap();
+        write_layout(&mut buf, Format::Json, o, Mode::Content, pairs).unwrap();
         serde_json::from_slice(&buf).unwrap()
     }
 
@@ -851,6 +1070,22 @@ mod tests {
         assert_eq!(v["groups"][0]["files"][2]["relation"], "corroborated");
         assert_eq!(v["pairs"][1]["corroborated"], true);
         assert!(v["pairs"][0].get("corroborated").is_none());
+    }
+
+    /// And against a library, whose text said only "9 points" while it had
+    /// a layout of its own.
+    #[test]
+    fn a_corroborated_pair_says_so_against_a_library() {
+        use crate::outcome::{Against, Asked, Match};
+        let corroborated = Evidence { relation: Relation::Corroborated, aligned_points: Some(9), pixel_correlation: 0.97, ..ev(Relation::Direct) };
+        let mut files = vec![file("/s.jpg"), file("/l.jpg")];
+        files[1].library = true;
+        let asked = vec![Asked { file: 0, holder: Some(Member { file: 1, with: Some(corroborated) }), library: vec![Match { file: 1, with: corroborated, clean: true }] }];
+        let o = Outcome::of_against(Head::default(), 0.7, files, Against { library_files: 1, asked }, vec![Some(Action::Delete), Some(Action::Keep)], vec![Some(1), None]);
+        let text = String::from_utf8(txt(&o)).unwrap();
+        assert!(text.contains("\tREPEAT, -, 0B, /s.jpg\n\t        in library: -, -, corroborated, 9 points, overlap 0.99, correlation 0.97, /l.jpg\n"), "{text}");
+        assert!(String::from_utf8(csv(&o)).unwrap().contains(";library;;;;corroborated;9;0.987;0.97;false;false;"));
+        assert_eq!(json(&o, None)["files"][0]["relation"], "corroborated");
     }
 
     /// A name that is not UTF-8 is written as itself by the text and the CSV,

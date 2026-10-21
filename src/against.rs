@@ -25,11 +25,9 @@
 use serde::Serialize;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
 
-use crate::outcome::Evidence;
-use crate::report::{self, Format, Sink, Target};
-use crate::suggest::{self, Action};
+use crate::outcome::{Asked, Evidence, Match, Member, Outcome};
+use crate::suggest::{self, Action, Lapse, Mode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,25 +54,15 @@ impl Verdict {
     }
 }
 
-/// One stated pair, as the verdicts read it.
-pub struct Pair {
-    pub a: usize,
-    pub b: usize,
-    pub ev: Evidence,
-    /// No block of the overlap disagrees (`suggest::CLEAN`); the same bytes
-    /// or pixels always are.
-    pub clean: bool,
-}
-
-/// What the run says about one scanned file.
+/// What the run says about one scanned file, as things stand.
 pub struct Answer {
     pub file: usize,
     pub verdict: Verdict,
     /// The file the verdict rests on: for a repeat, the one that shows all of
     /// it; for better and review, the library file it matches best.
     pub by: Option<usize>,
-    /// The pair with `by`, as an index into the pairs.
-    pub pair: Option<usize>,
+    /// Their pair.
+    pub with: Option<Evidence>,
     /// For a repeat whose `by` is itself a repeat, the file at the end of
     /// that chain, which is the one kept: deletion spreads from a kept file
     /// one holder at a time, so each link holds the next.
@@ -83,200 +71,89 @@ pub struct Answer {
     pub library_matches: usize,
 }
 
-/// Every scanned file's answer, in path order. `asked` is the scanned files;
-/// `actions` and `keeper` are `suggest::suggest_pinned`'s, with the library
-/// pinned.
-pub fn answer(asked: &[usize], library: &[bool], pairs: &[Pair], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<Answer> {
-    let n = library.len();
-    let mut of: Vec<Vec<usize>> = vec![Vec::new(); n];
+/// Each scanned file's pairs, as its verdict will read them. `asked` are
+/// the scanned files, `pairs` the stated ones (ends, evidence, clean), and
+/// `actions` and `keeper` `suggest::suggest_pinned`'s with the library
+/// pinned; all by the run's numbers.
+pub fn asked(asked: &[usize], library: &[bool], pairs: &[(usize, usize, Evidence, bool)], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<Asked> {
+    let mut of: Vec<Vec<usize>> = vec![Vec::new(); library.len()];
     for (k, p) in pairs.iter().enumerate() {
-        of[p.a].push(k);
-        of[p.b].push(k);
+        of[p.0].push(k);
+        of[p.1].push(k);
     }
-    let other = |p: &Pair, f: usize| if p.a == f { p.b } else { p.a };
+    let other = |k: usize, f: usize| if pairs[k].0 == f { pairs[k].1 } else { pairs[k].0 };
     asked
         .iter()
         .map(|&f| {
-            let to_library: Vec<usize> = of[f].iter().copied().filter(|&k| library[other(&pairs[k], f)]).collect();
-            let library_matches = to_library.len();
-            if actions[f] == Some(Action::Delete) {
-                if let Some(g) = keeper[f] {
-                    let pair = of[f].iter().copied().find(|&k| other(&pairs[k], f) == g);
-                    let mut end = g;
-                    for _ in 0..n {
-                        match keeper[end] {
-                            Some(next) if actions[end] == Some(Action::Delete) => end = next,
-                            _ => break,
-                        }
-                    }
-                    let kept = (end != g).then_some(end);
-                    return Answer { file: f, verdict: Verdict::Repeat, by: Some(g), pair, kept, library_matches };
-                }
-            }
-            // The best library match: a clean one first, then the closest.
-            // A mirror image, like a negative, is not the picture as the
-            // library has it, whatever it shows: at best a copy to look at.
-            let clean = |k: usize| pairs[k].clean && !pairs[k].ev.inverted && !pairs[k].ev.mirrored;
-            let best = to_library
+            let holder = keeper[f].filter(|_| actions[f] == Some(Action::Delete)).map(|g| Member {
+                file: g,
+                with: of[f].iter().find(|&&k| other(k, f) == g).map(|&k| pairs[k].2),
+            });
+            let library = of[f]
                 .iter()
-                .copied()
-                .max_by(|&x, &y| clean(x).cmp(&clean(y)).then(pairs[x].ev.pixel_correlation.total_cmp(&pairs[y].ev.pixel_correlation)));
-            let verdict = match best {
-                Some(k) if clean(k) => Verdict::Better,
-                Some(k) if pairs[k].ev.pixel_correlation >= suggest::REVIEW => Verdict::Review,
-                _ => Verdict::New,
-            };
-            let best = best.filter(|_| verdict != Verdict::New);
-            Answer { file: f, verdict, by: best.map(|k| other(&pairs[k], f)), pair: best, kept: None, library_matches }
+                .filter(|&&k| library[other(k, f)])
+                .map(|&k| Match { file: other(k, f), with: pairs[k].2, clean: pairs[k].3 })
+                .collect();
+            Asked { file: f, holder, library }
         })
         .collect()
 }
 
-/// What the report states about a file beside its path.
-pub struct Facts<'a> {
-    pub dims: &'a [(u32, u32)],
-    pub sizes: &'a [u64],
-    pub damaged: &'a [bool],
-}
-
-/// One scanned file, as all three layouts state it.
-#[derive(Serialize)]
-struct Row<'a> {
-    verdict: &'static str,
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_bytes: Option<Vec<u8>>,
-    #[serde(skip)]
-    raw: &'a Path,
-    width: Option<u32>,
-    height: Option<u32>,
-    size_bytes: u64,
-    /// The file the verdict rests on, and which side it is from.
-    #[serde(rename = "match")]
-    by: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    match_bytes: Option<Vec<u8>>,
-    #[serde(skip)]
-    by_raw: Option<&'a Path>,
-    match_in: Option<&'static str>,
-    match_width: Option<u32>,
-    match_height: Option<u32>,
-    match_size_bytes: Option<u64>,
-    relation: Option<&'static str>,
-    aligned_points: Option<u32>,
-    frame_overlap: Option<f32>,
-    pixel_correlation: Option<f32>,
-    mirrored: Option<bool>,
-    inverted: Option<bool>,
-    /// For a repeat of a repeat, the file kept at the end of the chain.
-    kept: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kept_bytes: Option<Vec<u8>>,
-    #[serde(skip)]
-    kept_raw: Option<&'a Path>,
-    kept_in: Option<&'static str>,
-    library_matches: usize,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    damaged: bool,
-}
-
-fn rows<'a>(answers: &'a [Answer], pairs: &'a [Pair], library: &'a [bool], files: &'a [PathBuf], facts: &Facts) -> Vec<Row<'a>> {
-    let dims = |i: usize| facts.dims.get(i).copied().filter(|d| d.0 > 0 && d.1 > 0);
-    let mut rows: Vec<Row> = answers
+/// Every scanned file's answer, as things stand, in the report's order:
+/// by verdict, then by path. A file gone since the scan has none, and a
+/// file gone is not one the library has. A repeat rests on the file that
+/// holds it and on the file kept at the end of its chain: if either has gone
+/// or changed, the file is answered by the library alone (`Outcome::lapse`).
+pub fn answers(scan: &Outcome) -> Vec<Answer> {
+    let Some(against) = &scan.against else { return Vec::new() };
+    let content = scan.actions(Mode::Content);
+    let there = |i: usize| scan.lapsed(i) != Some(Lapse::Gone);
+    let mut answers: Vec<Answer> = against
+        .asked
         .iter()
+        .filter(|a| there(a.file))
         .map(|a| {
-            let p = a.pair.map(|k| &pairs[k].ev);
-            Row {
-                verdict: a.verdict.as_str(),
-                path: files[a.file].display().to_string(),
-                path_bytes: report::raw_bytes(&files[a.file]),
-                raw: &files[a.file],
-                width: dims(a.file).map(|d| d.0),
-                height: dims(a.file).map(|d| d.1),
-                size_bytes: facts.sizes[a.file],
-                by: a.by.map(|g| files[g].display().to_string()),
-                match_bytes: a.by.and_then(|g| report::raw_bytes(&files[g])),
-                by_raw: a.by.map(|g| files[g].as_path()),
-                match_in: a.by.map(|g| if library[g] { "library" } else { "scan" }),
-                match_width: a.by.and_then(dims).map(|d| d.0),
-                match_height: a.by.and_then(dims).map(|d| d.1),
-                match_size_bytes: a.by.map(|g| facts.sizes[g]),
-                relation: p.map(|p| p.relation.as_str()),
-                aligned_points: p.and_then(|p| p.aligned_points),
-                frame_overlap: p.map(|p| p.frame_overlap),
-                pixel_correlation: p.map(|p| p.pixel_correlation),
-                mirrored: p.map(|p| p.mirrored),
-                inverted: p.map(|p| p.inverted),
-                kept: a.kept.map(|g| files[g].display().to_string()),
-                kept_bytes: a.kept.and_then(|g| report::raw_bytes(&files[g])),
-                kept_raw: a.kept.map(|g| files[g].as_path()),
-                kept_in: a.kept.map(|g| if library[g] { "library" } else { "scan" }),
-                library_matches: a.library_matches,
-                damaged: facts.damaged[a.file],
+            let f = a.file;
+            let library: Vec<&Match> = a.library.iter().filter(|m| there(m.file)).collect();
+            let library_matches = library.len();
+            let holder = a.holder.filter(|h| content[f] == Some(Action::Delete) && scan.lapsed(h.file).is_none());
+            if let Some(h) = holder {
+                let kept = scan.kept_copy(f).filter(|&k| k != h.file);
+                return Answer { file: f, verdict: Verdict::Repeat, by: Some(h.file), with: h.with, kept, library_matches };
             }
+            // The best library match: a clean one first, then the closest.
+            // A mirror image, like a negative, is not the picture as the
+            // library has it, whatever it shows: at best a copy to look at.
+            let clean = |m: &Match| m.clean && !m.with.inverted && !m.with.mirrored;
+            let best = library
+                .into_iter()
+                .max_by(|x, y| clean(x).cmp(&clean(y)).then(x.with.pixel_correlation.total_cmp(&y.with.pixel_correlation)));
+            let verdict = match best {
+                Some(m) if clean(m) => Verdict::Better,
+                Some(m) if m.with.pixel_correlation >= suggest::REVIEW => Verdict::Review,
+                _ => Verdict::New,
+            };
+            let best = best.filter(|_| verdict != Verdict::New);
+            Answer { file: f, verdict, by: best.map(|m| m.file), with: best.map(|m| m.with), kept: None, library_matches }
         })
         .collect();
-    rows.sort_by(|x, y| verdict_rank(x.verdict).cmp(&verdict_rank(y.verdict)).then_with(|| x.raw.cmp(y.raw)));
-    rows
+    answers.sort_by(|x, y| x.verdict.cmp(&y.verdict).then_with(|| scan.files[x.file].path.cmp(&scan.files[y.file].path)));
+    answers
 }
 
-fn verdict_rank(v: &str) -> usize {
-    ["repeat", "better", "review", "new"].iter().position(|&x| x == v).unwrap_or(4)
-}
-
-/// The run's settings, counts and failures, as the JSON states them.
-pub struct Header<'a> {
-    pub config: serde_json::Value,
-    pub files_enumerated: usize,
-    pub files_analysed: usize,
-    pub library_files: usize,
-    pub failures: &'a [serde_json::Value],
-    pub runtime_seconds: f64,
-}
-
-/// Write the report where `target` says. `out_pairs` are the stated pairs as
-/// the JSON lists them, for `score.py`.
-#[allow(clippy::too_many_arguments)]
-pub fn write(
-    target: &Target,
-    header: &Header,
-    answers: &[Answer],
-    pairs: &[Pair],
-    out_pairs: &[report::OutPair],
-    library: &[bool],
-    files: &[PathBuf],
-    facts: &Facts,
-) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let rows = rows(answers, pairs, library, files, facts);
-    let body = |w: &mut dyn Write| -> std::io::Result<()> {
-        match target.format {
-            Format::Txt => write_txt(w, &rows),
-            Format::Csv => write_csv(w, &rows),
-            Format::Json => write_json(w, header, &rows, out_pairs),
-        }
-    };
-    match &target.sink {
-        Sink::File(path) => report::write_whole(path, body),
-        Sink::Stdout => {
-            let mut w = std::io::BufWriter::new(std::io::stdout().lock());
-            match body(&mut w).and_then(|()| w.flush()) {
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-                other => other.context("could not write the results to stdout"),
-            }
-        }
-    }
+/// How many of each verdict, as the summary line says it.
+pub fn tally(answers: &[Answer]) -> String {
+    let n = |v: Verdict| answers.iter().filter(|a| a.verdict == v).count();
+    format!("{} repeat, {} better, {} to review, {} new", n(Verdict::Repeat), n(Verdict::Better), n(Verdict::Review), n(Verdict::New))
 }
 
 /// `--list`: the paths with the verdicts asked for, in the report's order,
 /// one a line or NUL-separated, on stdout.
-pub fn list(answers: &[Answer], files: &[PathBuf], wanted: &[Verdict], nul: bool) -> anyhow::Result<()> {
-    let mut chosen: Vec<&Answer> = answers.iter().filter(|a| wanted.contains(&a.verdict)).collect();
-    chosen.sort_by(|x, y| x.verdict.cmp(&y.verdict).then_with(|| files[x.file].cmp(&files[y.file])));
+pub fn list(scan: &Outcome, answers: &[Answer], wanted: &[Verdict], nul: bool) -> anyhow::Result<()> {
     let mut w = std::io::BufWriter::new(std::io::stdout().lock());
-    let go = || -> std::io::Result<()> {
-        for a in chosen {
-            w.write_all(files[a.file].as_os_str().as_bytes())?;
+    let mut go = || -> std::io::Result<()> {
+        for a in answers.iter().filter(|a| wanted.contains(&a.verdict)) {
+            w.write_all(scan.files[a.file].path.as_os_str().as_bytes())?;
             w.write_all(if nul { b"\0" } else { b"\n" })?;
         }
         w.flush()
@@ -287,170 +164,96 @@ pub fn list(answers: &[Answer], files: &[PathBuf], wanted: &[Verdict], nul: bool
     }
 }
 
-fn dims_text(w: Option<u32>, h: Option<u32>) -> String {
-    match (w, h) {
-        (Some(w), Some(h)) => format!("{w}x{h}"),
-        _ => "-".into(),
-    }
-}
-
-/// One block per verdict. Each file is a line, the verdict leading at a fixed
-/// width and the path trailing, as in the groups report; the file it rests on
-/// follows on a line of its own, with the evidence.
-fn write_txt(w: &mut dyn Write, rows: &[Row]) -> std::io::Result<()> {
-    let mut at = 0;
-    while at < rows.len() {
-        let v = rows[at].verdict;
-        let end = at + rows[at..].iter().take_while(|r| r.verdict == v).count();
-        writeln!(w, "{v}: {} {}", end - at, if end - at == 1 { "file" } else { "files" })?;
-        for r in &rows[at..end] {
-            let damaged = if r.damaged { "DAMAGED, " } else { "" };
-            write!(
-                w,
-                "\t{:<7} {}, {}, {damaged}",
-                format!("{},", v.to_uppercase()),
-                dims_text(r.width, r.height),
-                report::format_size(r.size_bytes)
-            )?;
-            w.write_all(r.raw.as_os_str().as_bytes())?;
-            writeln!(w)?;
-            if let (Some(by), Some(side)) = (r.by_raw, r.match_in) {
-                let mut ev = match (r.relation, r.aligned_points) {
-                    (Some("identical"), _) => "identical".to_string(),
-                    (Some("same_pixels"), _) => "same pixels".to_string(),
-                    (Some(how), n) => {
-                        let pts = n.map(|n| format!("{n} points, ")).unwrap_or_else(|| format!("{how}, "));
-                        format!("{pts}overlap {:.2}, correlation {:.2}", r.frame_overlap.unwrap_or(0.0), r.pixel_correlation.unwrap_or(0.0))
-                    }
-                    (None, _) => String::new(),
-                };
-                if r.mirrored == Some(true) {
-                    ev.push_str(", mirrored");
-                }
-                if r.inverted == Some(true) {
-                    ev.push_str(", inverted");
-                }
-                let size = r.match_size_bytes.map(report::format_size).unwrap_or_else(|| "-".into());
-                write!(w, "\t        in {side}: {}, {size}, {ev}, ", dims_text(r.match_width, r.match_height))?;
-                w.write_all(by.as_os_str().as_bytes())?;
-                writeln!(w)?;
-                if let (Some(kept), Some(side)) = (r.kept_raw, r.kept_in) {
-                    write!(w, "\t        which repeats, in {side}: ")?;
-                    w.write_all(kept.as_os_str().as_bytes())?;
-                    writeln!(w)?;
-                }
-            }
-        }
-        writeln!(w)?;
-        at = end;
-    }
-    Ok(())
-}
-
-/// The CSV's columns, a `Row`'s fields in its order.
-const CSV_HEADER: [&str; 20] = [
-    "verdict",
-    "path",
-    "width",
-    "height",
-    "size_bytes",
-    "match",
-    "match_in",
-    "match_width",
-    "match_height",
-    "match_size_bytes",
-    "relation",
-    "aligned_points",
-    "frame_overlap",
-    "pixel_correlation",
-    "mirrored",
-    "inverted",
-    "kept",
-    "kept_in",
-    "library_matches",
-    "damaged",
-];
-
-fn write_csv(w: &mut dyn Write, rows: &[Row]) -> std::io::Result<()> {
-    fn cell<T: ToString>(x: Option<T>) -> String {
-        x.map(|x| x.to_string()).unwrap_or_default()
-    }
-    report::csv_row_with(w, &CSV_HEADER.map(str::as_bytes), b';')?;
-    for r in rows {
-        let figures = [cell(r.width), cell(r.height), r.size_bytes.to_string()];
-        let after = [
-            r.match_in.unwrap_or_default().to_string(),
-            cell(r.match_width),
-            cell(r.match_height),
-            cell(r.match_size_bytes),
-            r.relation.unwrap_or_default().to_string(),
-            cell(r.aligned_points),
-            cell(r.frame_overlap),
-            cell(r.pixel_correlation),
-            cell(r.mirrored),
-            cell(r.inverted),
-        ];
-        let tail = [r.kept_in.unwrap_or_default().to_string(), r.library_matches.to_string(), if r.damaged { "true".into() } else { String::new() }];
-        let mut fields: Vec<&[u8]> = vec![r.verdict.as_bytes(), r.raw.as_os_str().as_bytes()];
-        fields.extend(figures.iter().map(|f| f.as_bytes()));
-        fields.push(r.by_raw.map(|p| p.as_os_str().as_bytes()).unwrap_or_default());
-        fields.extend(after.iter().map(|f| f.as_bytes()));
-        fields.push(r.kept_raw.map(|p| p.as_os_str().as_bytes()).unwrap_or_default());
-        fields.extend(tail.iter().map(|f| f.as_bytes()));
-        report::csv_row_with(w, &fields, b';')?;
-    }
-    Ok(())
-}
-
-fn write_json(w: &mut dyn Write, h: &Header, rows: &[Row], out_pairs: &[report::OutPair]) -> std::io::Result<()> {
-    writeln!(w, "{{")?;
-    writeln!(w, "  \"tool\": \"img-fp\",")?;
-    writeln!(w, "  \"config\": {},", serde_json::to_string(&h.config)?)?;
-    writeln!(w, "  \"files_enumerated\": {},", h.files_enumerated)?;
-    writeln!(w, "  \"files_analysed\": {},", h.files_analysed)?;
-    writeln!(w, "  \"library_files\": {},", h.library_files)?;
-    report::list(w, "failures", h.failures, false)?;
-    writeln!(w, "  \"runtime_seconds\": {},", serde_json::to_string(&h.runtime_seconds)?)?;
-    report::list(w, "files", rows, false)?;
-    report::list_par(w, "pairs", out_pairs, true)?;
-    writeln!(w, "}}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::outcome::Relation;
+    use crate::outcome::{Against, File, Head, Relation};
+    use std::path::PathBuf;
 
-    fn pair(a: usize, b: usize, corr: f32, clean: bool) -> Pair {
+    fn pair(a: usize, b: usize, corr: f32, clean: bool) -> (usize, usize, Evidence, bool) {
         let ev = Evidence { relation: Relation::Direct, aligned_points: Some(40), frame_overlap: 1.0, pixel_correlation: corr, mirrored: false, inverted: false };
-        Pair { a, b, ev, clean }
+        (a, b, ev, clean)
+    }
+
+    /// A scan against `library`, its files numbered as the run's.
+    fn scan(library: &[bool], pairs: &[(usize, usize, Evidence, bool)], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Outcome {
+        let n = library.len();
+        let scanned: Vec<usize> = (0..n).filter(|&i| !library[i]).collect();
+        let files = (0..n).map(|i| File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: None, bytes: Some(1), damaged: false, library: library[i] }).collect();
+        let against = Against { library_files: n - scanned.len(), asked: asked(&scanned, library, pairs, actions, keeper) };
+        Outcome::of_against(Head::default(), 0.7, files, against, actions.to_vec(), suggest::kept_at_end(actions, keeper))
+    }
+
+    fn said(scan: &Outcome) -> Vec<(usize, Verdict, Option<usize>, Option<usize>)> {
+        let mut v: Vec<_> = answers(scan).iter().map(|a| (a.file, a.verdict, a.by, a.kept)).collect();
+        v.sort();
+        v
+    }
+
+    // 0..5 scanned, 5..8 library.
+    const LIBRARY: [bool; 8] = [false, false, false, false, false, true, true, true];
+    const K: Option<Action> = Some(Action::Keep);
+    const D: Option<Action> = Some(Action::Delete);
+
+    fn example() -> Outcome {
+        let pairs = vec![
+            pair(0, 5, 0.99, true),  // deleted by 5: repeat
+            pair(1, 6, 0.97, true),  // kept: better
+            pair(2, 7, 0.93, false), // weak and close: review
+            pair(3, 7, 0.70, false), // weak and far: new
+            pair(4, 0, 0.99, true),  // repeat of a scanned file
+            pair(4, 6, 0.95, true),  // and clean to the library
+        ];
+        let actions = [D, K, Some(Action::Review), K, D, K, K, K];
+        let keeper = [Some(5), None, None, None, Some(0), None, None, None];
+        scan(&LIBRARY, &pairs, &actions, &keeper)
     }
 
     #[test]
     fn each_scanned_file_gets_one_verdict() {
-        // 0..4 scanned, 4..7 library.
-        let library = [false, false, false, false, false, true, true, true];
-        let pairs = vec![
-            pair(0, 5, 0.99, true), // deleted by 5: repeat
-            pair(1, 6, 0.97, true), // kept: better
-            pair(2, 7, 0.93, false), // weak and close: review
-            pair(3, 7, 0.70, false), // weak and far: new
-            pair(4, 0, 0.99, true), // repeat of a scanned file
-        ];
-        let d = Some(Action::Delete);
-        let actions = [d, Some(Action::Keep), Some(Action::Review), Some(Action::Keep), d, Some(Action::Keep), Some(Action::Keep), Some(Action::Keep)];
-        let keeper = [Some(5), None, None, None, Some(0), None, None, None];
-        let got: Vec<(Verdict, Option<usize>)> =
-            answer(&[0, 1, 2, 3, 4], &library, &pairs, &actions, &keeper).iter().map(|a| (a.verdict, a.by)).collect();
         assert_eq!(
-            got,
+            said(&example()),
             vec![
-                (Verdict::Repeat, Some(5)),
-                (Verdict::Better, Some(6)),
-                (Verdict::Review, Some(7)),
-                (Verdict::New, None),
-                (Verdict::Repeat, Some(0)),
+                (0, Verdict::Repeat, Some(5), None),
+                (1, Verdict::Better, Some(6), None),
+                (2, Verdict::Review, Some(7), None),
+                (3, Verdict::New, None, None),
+                (4, Verdict::Repeat, Some(0), Some(5)),
             ]
         );
+    }
+
+    /// Read back by `--last`: a file gone is not answered, nor is it one the
+    /// library has; a repeat resting on a file gone or changed, as the one
+    /// that holds it or the one kept, is answered by the library alone.
+    #[test]
+    fn a_repeat_rests_on_its_holder_and_on_the_file_kept() {
+        let mut s = example();
+        s.lapse([0], Lapse::Changed);
+        assert_eq!(
+            said(&s),
+            vec![
+                (0, Verdict::Better, Some(5), None),
+                (1, Verdict::Better, Some(6), None),
+                (2, Verdict::Review, Some(7), None),
+                (3, Verdict::New, None, None),
+                (4, Verdict::Better, Some(6), None),
+            ]
+        );
+        let mut s = example();
+        s.lapse([5, 3], Lapse::Gone);
+        let got = said(&s);
+        assert_eq!(got[0], (0, Verdict::New, None, None), "its only library match is gone");
+        assert!(got.iter().all(|a| a.0 != 3), "a file gone is not answered");
+        assert_eq!(got.last(), Some(&(4, Verdict::Better, Some(6), None)), "the file kept is gone");
+    }
+
+    /// A chain of holders that loops names no kept file.
+    #[test]
+    fn a_chain_that_loops_names_no_kept_file() {
+        let library = [false, false, false, true];
+        let pairs = vec![pair(0, 1, 0.99, true), pair(1, 2, 0.99, true), pair(2, 1, 0.99, true)];
+        let s = scan(&library, &pairs, &[D, D, D, K], &[Some(1), Some(2), Some(1), None]);
+        assert!(answers(&s).iter().all(|a| a.kept.is_none()));
     }
 }

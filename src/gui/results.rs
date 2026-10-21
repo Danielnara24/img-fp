@@ -2869,7 +2869,7 @@ mod tests {
     fn state(content: [Option<Action>; 3]) -> State {
         use img_fp::outcome::{File, Group, Head, Member};
         let ev = Evidence { relation: Relation::Direct, aligned_points: Some(40), frame_overlap: 1.0, pixel_correlation: 0.99, mirrored: false, inverted: false };
-        let files = (0..3).map(|i| File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false }).collect();
+        let files = (0..3).map(|i| File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false, library: false }).collect();
         let members = (0..3).map(|i| Member { file: i, with: (i > 0).then_some(ev) }).collect();
         let kept = content.iter().map(|a| (*a == Some(Action::Delete)).then_some(0)).collect();
         let p = prepare(Outcome::new(Head::default(), 0.7, files, vec![Group { members }], content.to_vec(), kept));

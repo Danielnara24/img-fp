@@ -161,9 +161,10 @@ The last scan is the last one to finish, from the command line or the
 desktop app, which opens on it. It is kept in `last-scan/` beside the cache,
 and files deleted since are left out. A file suggested for deletion because
 another file shows all of it becomes REVIEW if that other file has been
-deleted since. A JSON report written this way has the groups but no list of
-pairs. Scans run with `--no-cache` are not kept, and neither are scans
-`--against` a library or scans that found no images.
+deleted since. A JSON report written this way has no list of pairs. Scans
+run with `--no-cache` are not kept, and neither are scans that found no
+images. A scan `--against` a library is kept too, and written again with its
+verdicts (see Comparing with a library); the desktop app does not open one.
 
 ## Comparing with a library
 
@@ -217,6 +218,17 @@ NUL-separated with `-0`), in place of the report. The report is still written
 to `-o` if you name a file. The CSV report has a `verdict` column and the file
 it rests on in `match` and `match_in`, and the JSON lists every matched pair
 as well.
+
+`--last` writes the last comparison again, and `--last --list` lists it,
+without comparing again:
+
+```bash
+img-fp --last --list new,better -0 | xargs -0 cp -t ~/Pictures/2026
+```
+
+Images deleted since are left out, a library image deleted since no longer
+counts as one the library has, and a repeat of an image deleted or changed
+since is answered by the rest of the library.
 
 ## Desktop app
 
@@ -366,7 +378,7 @@ to stderr.
 | `--follow-symlinks` | Follow symlinks met while walking a folder | off |
 | `--hidden` | Also walk hidden folders, whose names start with a dot | off |
 | `--against <PATH>` | Compare the scanned images with a library of images you already keep, a folder or an image file; repeat for several. Each scanned image gets a verdict instead of a group (see Comparing with a library) | |
-| `--list <VERDICT>` | With `--against`, print only the paths of the images with these verdicts, one per line, instead of the report: `repeat`, `better`, `review` or `new`, comma-separated or repeated | |
+| `--list <VERDICT>` | With `--against`, or `--last` after a comparison with a library, print only the paths of the images with these verdicts, one per line, instead of the report: `repeat`, `better`, `review` or `new`, comma-separated or repeated | |
 | `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken only by those two forms | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
@@ -376,7 +388,7 @@ to stderr.
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.7` |
 | `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |
 | `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
-| `--last` | Write the last scan's report again without scanning, in another format with `-o` or `--format`, or with another `--suggest` rule (see Usage) | |
+| `--last` | Write the last scan's report again without scanning, in another format with `-o` or `--format`, or with another `--suggest` rule (see Usage); after a comparison with a library, its verdicts, or with `--list` their paths | |
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |

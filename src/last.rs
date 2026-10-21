@@ -16,14 +16,16 @@
 //! `last-scan/` in the folder of the cache file the run used, so a sweep
 //! handing itself a `--cache` of its own keeps its scans out of the default
 //! one; the window always uses the default folder. Not kept under
-//! `--no-cache` or `--no-last`, nor for a run `--against` a library, whose
-//! report is another shape. The folder is this user's alone, since it lists
+//! `--no-cache` or `--no-last`. A run `--against` a library is kept as
+//! one too, its scanned files in place of groups; the window does not open
+//! one, since it cannot run one. The folder is this user's alone, since it lists
 //! their files, and is written beside the old one and renamed into place, so
 //! a scan read back is never one scan's report with another's notes.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+use crate::against;
 use crate::outcome::Outcome;
 use crate::report;
 use crate::suggest::{self, Lapse};
@@ -211,13 +213,17 @@ pub struct Rewrite<'a> {
     pub output: Option<&'a Path>,
     pub format: Option<report::Format>,
     pub suggest: suggest::Mode,
+    /// `--list`'s verdicts, for a scan against a library, and `--null`.
+    pub list: &'a [against::Verdict],
+    pub null: bool,
 }
 
 /// `--last`: write the kept scan's report again, where `-o` says, in the
-/// layout `--format` says, with `--suggest`'s rule. Files gone or changed
-/// since the scan are taken in as the window takes them in
-/// (`Outcome::lapse`); a file gone is left out of its groups
-/// (`Outcome::shown`). Returns the lines to say about it.
+/// layout `--format` says, with `--suggest`'s rule, or for a scan against a
+/// library its verdicts and `--list`'s paths. Files gone or changed since the
+/// scan are taken in as the window takes them in (`Outcome::lapse`); a file
+/// gone is left out (`Outcome::shown`, `against::answers`). Returns the lines
+/// to say about it.
 pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
     let dir = dir(asked.cache);
     let unread = || format!("could not read the kept scan in {}", dir.display());
@@ -232,46 +238,76 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
         anyhow::bail!("the scan kept in {} was kept by an earlier version of img-fp: run a scan", dir.display());
     }
     let mut scan = Outcome::load(&dir.join(REPORT)).with_context(unread)?;
+    let against = scan.against.is_some();
+    if against && asked.suggest != suggest::Mode::Content {
+        anyhow::bail!("the kept scan was run against a library, which decides with the content rule; --suggest cannot be used with it");
+    }
+    if !against && !asked.list.is_empty() {
+        anyhow::bail!("the kept scan was not run against a library; --list needs one");
+    }
     if asked.suggest == suggest::Mode::Content && !scan.has_content() {
         anyhow::bail!("the kept scan has no suggestions by content; --suggest content needs a new scan");
     }
+    let repeats: Vec<usize> = against::answers(&scan).iter().filter(|a| a.verdict == against::Verdict::Repeat).map(|a| a.file).collect();
     let (gone, changed) = scan.look(Some(notes.changed_after()));
     scan.lapse(gone.iter().copied(), Lapse::Gone);
     scan.lapse(changed.iter().copied(), Lapse::Changed);
-    // The content rule's deletions taken back; the group rules name no kept
-    // copy.
-    let unheld = if asked.suggest == suggest::Mode::Content { (0..scan.files.len()).filter(|&i| scan.unheld(i) == Some(Lapse::Gone)).count() } else { 0 };
+    let answers = against::answers(&scan);
+    // What rested on a file gone: the content rule's deletions taken back
+    // (the group rules name no kept copy), or the repeats of one, which the
+    // library alone now answers.
+    let unheld = if against {
+        let now: std::collections::HashSet<usize> = answers.iter().filter(|a| a.verdict == against::Verdict::Repeat).map(|a| a.file).collect();
+        repeats.iter().filter(|&&f| scan.lapsed(f).is_none() && !now.contains(&f)).count()
+    } else if asked.suggest == suggest::Mode::Content {
+        (0..scan.files.len()).filter(|&i| scan.unheld(i) == Some(Lapse::Gone)).count()
+    } else {
+        0
+    };
     let (gone, changed) = (gone.len(), changed.len());
 
+    // With `--list`, its paths take stdout, and the report goes only to a
+    // file `-o` names.
     let target = report::Target::of(asked.output, asked.format);
-    report::write_with(&target, &scan, asked.suggest, None)?;
+    let report = asked.list.is_empty() || matches!(target.sink, report::Sink::File(_));
+    if report {
+        report::write_with(&target, &scan, asked.suggest, None)?;
+    }
+    if !asked.list.is_empty() {
+        against::list(&scan, &answers, asked.list, asked.null)?;
+    }
 
     let when = ago(notes.finished);
-    let groups = scan.shown().count();
+    let said = if against { against::tally(&answers) } else { groups_said(scan.shown().count()) };
     let mut lines = vec![match &target.sink {
-        report::Sink::File(p) => format!("{} from the scan {when} -> {}", groups_said(groups), p.display()),
-        report::Sink::Stdout => format!("{} from the scan {when}", groups_said(groups)),
+        report::Sink::File(p) if report => format!("{said} from the scan {when} -> {}", p.display()),
+        _ => format!("{said} from the scan {when}"),
     }];
     if gone > 0 {
         lines.push(format!("{gone} {} gone since the scan {} left out", if gone == 1 { "file" } else { "files" }, if gone == 1 { "is" } else { "are" }));
     }
     if changed > 0 {
-        lines.push(format!(
-            "{changed} {} changed since the scan: none of {} is suggested for deletion, nor is anything resting on {}",
-            if changed == 1 { "file has" } else { "files have" },
-            if changed == 1 { "it" } else { "them" },
-            if changed == 1 { "it" } else { "them" }
-        ));
+        let (one, many) = if changed == 1 { ("file has", "it") } else { ("files have", "them") };
+        let what = if against { "is a repeat" } else { "is suggested for deletion" };
+        lines.push(format!("{changed} {one} changed since the scan: none of {many} {what}, nor is anything resting on {many}"));
     }
     if unheld > 0 {
-        lines.push(format!(
-            "{unheld} {} whose kept copy is gone {} REVIEW instead",
-            if unheld == 1 { "deletion" } else { "deletions" },
-            if unheld == 1 { "is" } else { "are" }
-        ));
+        lines.push(if against {
+            format!(
+                "{unheld} {} of a file gone since the scan {} answered by the library alone",
+                if unheld == 1 { "repeat" } else { "repeats" },
+                if unheld == 1 { "is" } else { "are" }
+            )
+        } else {
+            format!(
+                "{unheld} {} whose kept copy is gone {} REVIEW instead",
+                if unheld == 1 { "deletion" } else { "deletions" },
+                if unheld == 1 { "is" } else { "are" }
+            )
+        });
     }
-    if target.format == report::Format::Json {
-        lines.push("The JSON has the groups and no \"pairs\" list, which only a scan writes.".into());
+    if report && target.format == report::Format::Json {
+        lines.push(format!("The JSON has the {} and no \"pairs\" list, which only a scan writes.", if against { "verdicts" } else { "groups" }));
     }
     Ok(lines)
 }
@@ -311,7 +347,7 @@ mod tests {
     /// asked to write it as `name`.
     fn last(root: &Path, name: &str, suggest: suggest::Mode) -> (Vec<String>, Vec<u8>) {
         let out = root.join(name);
-        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: Some(&out), format: None, suggest };
+        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: Some(&out), format: None, suggest, list: &[], null: false };
         let said = rewrite(&asked).unwrap();
         (said, std::fs::read(out).unwrap())
     }
@@ -344,7 +380,7 @@ mod tests {
             std::fs::write(f, vec![b'x'; k + 1]).unwrap();
         }
         let dims = [Some((640, 480)), Some((640, 480)), Some((320, 240)), None, Some((10, 10)), Some((8, 8))];
-        let files: Vec<File> = paths.iter().enumerate().map(|(k, p)| File { path: p.clone(), dims: dims[k], bytes: Some(k as u64 + 1), damaged: k == 2 }).collect();
+        let files: Vec<File> = paths.iter().enumerate().map(|(k, p)| File { path: p.clone(), dims: dims[k], bytes: Some(k as u64 + 1), damaged: k == 2, library: false }).collect();
         let m = |file, with| Member { file, with };
         let mirrored = Some(Evidence { mirrored: true, ..ev(Relation::Propagated, 0.9).unwrap() });
         let inverted = Some(Evidence { inverted: true, ..ev(Relation::Corroborated, 0.6).unwrap() });
@@ -389,7 +425,7 @@ mod tests {
         for f in &paths {
             std::fs::write(f, b"x").unwrap();
         }
-        let files = paths.iter().map(|p| File { path: p.clone(), dims: Some((8, 8)), bytes: Some(1), damaged: false }).collect();
+        let files = paths.iter().map(|p| File { path: p.clone(), dims: Some((8, 8)), bytes: Some(1), damaged: false, library: false }).collect();
         let m = |file, with| Member { file, with };
         let groups = vec![Group { members: vec![m(0, None), m(1, ev(Relation::Direct, 0.99)), m(2, ev(Relation::Direct, 0.99))] }];
         let d = Some(Action::Delete);
@@ -431,7 +467,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(NOTES), serde_json::to_vec(&Notes::now(false, 0, 1, String::new(), vec![])).unwrap()).unwrap();
         std::fs::write(dir.join("result.json"), b"{}").unwrap();
-        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: None, format: None, suggest: suggest::Mode::Content };
+        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: None, format: None, suggest: suggest::Mode::Content, list: &[], null: false };
         let e = rewrite(&asked).unwrap_err().to_string();
         assert!(e.contains("earlier version"), "{e}");
         let _ = std::fs::remove_dir_all(&root);

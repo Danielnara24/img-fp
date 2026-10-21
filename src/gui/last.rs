@@ -81,9 +81,9 @@ pub fn exists() -> bool {
     dir().is_some_and(|d| d.join(NOTES).is_file())
 }
 
-/// The scan kept last time, if there is one that can still be read. One that
-/// cannot — kept by a build that wrote another shape — is deleted, so that it
-/// is not tried on every start.
+/// The scan kept last time, if there is one that can still be read and is
+/// not against a library. One that cannot be read — kept by a build that
+/// wrote another shape — is deleted, so that it is not tried on every start.
 pub fn load() -> Option<Last> {
     load_in(&dir()?)
 }
@@ -99,6 +99,11 @@ fn load_in(dir: &Path) -> Option<Last> {
         let _ = std::fs::remove_dir_all(dir);
         return None;
     };
+    // A scan against a library, kept for `--last`: the window cannot show
+    // one, and leaves it for the command line.
+    if found.against.is_some() {
+        return None;
+    }
     let mut prepared = results::prepare(found);
     prepared.set_roots(notes.roots.clone());
     // Gone as the Trash counts it: not found. A file that cannot be looked at
@@ -131,7 +136,7 @@ mod tests {
         let report = |name: &str, files: &[&Path]| {
             use img_fp::outcome::{File, Group, Head, Member};
             let ev = img_fp::Evidence { relation: img_fp::Relation::Identical, aligned_points: None, frame_overlap: 1.0, pixel_correlation: 1.0, mirrored: false, inverted: false };
-            let files: Vec<File> = files.iter().map(|p| File { path: p.to_path_buf(), dims: None, bytes: None, damaged: false }).collect();
+            let files: Vec<File> = files.iter().map(|p| File { path: p.to_path_buf(), dims: None, bytes: None, damaged: false, library: false }).collect();
             let members = (0..files.len()).map(|i| Member { file: i, with: (i > 0).then_some(ev) }).collect();
             let head = Head { files_analysed: 7, ..Default::default() };
             let p = root.join(name);

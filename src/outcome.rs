@@ -15,6 +15,13 @@
 //! bar of 0.6 after the default had moved to 0.7), and keeping a scan meant
 //! swapping the content rule's suggestions into the run's report and back.
 //!
+//! A run against a library is one too: its scanned files, each with its
+//! pairs with the library (`Against`), in place of groups, and the verdicts
+//! read from them as things stand (`against::answers`). It used to end in a
+//! report of its own, its rows, layouts and holder chain written a second
+//! time beside the groups', and the text had already dropped "corroborated";
+//! and it could not be kept, so `--last` had nothing to write.
+//!
 //! A scan is kept (`save`) as this, not as a report: `--last` and the window
 //! open it with `load`. Nothing else reads the file, and a file of another
 //! `FORMAT` is not read: run a scan.
@@ -103,6 +110,9 @@ pub struct File {
     /// Decoded only in part; see `problems::Problems::damaged`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub damaged: bool,
+    /// One of `--against`'s library, not one of the files scanned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub library: bool,
 }
 
 /// One file of a group, and its pair with the representative: `None` for
@@ -124,6 +134,38 @@ impl Group {
     pub fn rep(&self) -> usize {
         self.members[0].file
     }
+}
+
+/// A file scanned against a library, and the pairs its verdict is read from
+/// (`against::answers`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Asked {
+    pub file: usize,
+    /// For a file the content rule deletes, the file nearest it in its chain
+    /// of holders, and their pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<Member>,
+    /// Its pairs with the library's files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library: Vec<Match>,
+}
+
+/// One pair with a library file.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Match {
+    pub file: usize,
+    pub with: Evidence,
+    /// No block of the overlap disagrees (`suggest::CLEAN`); one file always.
+    pub clean: bool,
+}
+
+/// What a run against a library found: each file it scanned, in place of
+/// groups.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Against {
+    /// How many library files the run read.
+    pub library_files: usize,
+    pub asked: Vec<Asked>,
 }
 
 /// What the report states above the groups.
@@ -150,6 +192,9 @@ pub struct Outcome {
     /// Largest first. They overlap: a file matched by two representatives
     /// that did not match each other is in both.
     pub groups: Vec<Group>,
+    /// A run against a library: its scanned files, and no groups.
+    #[serde(default)]
+    pub against: Option<Against>,
     /// The content rule's suggestion for each file, and for each it deletes
     /// the kept file at the end of its chain of holders
     /// (`suggest::kept_at_end`). Empty when the run did not work it out.
@@ -172,6 +217,8 @@ struct Saved<'a> {
     min_correlation: f32,
     files: Vec<File>,
     groups: &'a [Group],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    against: &'a Option<Against>,
     content: &'a [Option<Action>],
     kept: &'a [Option<usize>],
 }
@@ -180,7 +227,13 @@ impl Outcome {
     /// `content` and `kept` are by file, or empty when the content rule was
     /// not worked out.
     pub fn new(head: Head, min_correlation: f32, files: Vec<File>, groups: Vec<Group>, content: Vec<Option<Action>>, kept: Vec<Option<usize>>) -> Outcome {
-        Outcome { format: FORMAT, head, min_correlation, files, groups, content, kept, lapsed: Vec::new(), unheld: Vec::new() }
+        Outcome { format: FORMAT, head, min_correlation, files, groups, against: None, content, kept, lapsed: Vec::new(), unheld: Vec::new() }
+    }
+
+    /// A run against a library: `against` in place of groups, and the
+    /// content rule's suggestions, which its verdicts are read from.
+    pub fn of_against(head: Head, min_correlation: f32, files: Vec<File>, against: Against, content: Vec<Option<Action>>, kept: Vec<Option<usize>>) -> Outcome {
+        Outcome { against: Some(against), ..Outcome::new(head, min_correlation, files, Vec::new(), content, kept) }
     }
 
     /// Whether the content rule's suggestions are here to be asked.
@@ -314,6 +367,7 @@ impl Outcome {
             min_correlation: self.min_correlation,
             files,
             groups: &self.groups,
+            against: &self.against,
             content: &self.content,
             kept: &self.kept,
         };
@@ -340,7 +394,7 @@ mod tests {
     }
 
     fn file(i: usize) -> File {
-        File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false }
+        File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false, library: false }
     }
 
     /// 0 holds 1 and 2; 3 holds 4. The content rule deletes 1 and 2 for 0,
