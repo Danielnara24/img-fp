@@ -61,7 +61,7 @@ mod verify;
 mod walk;
 
 use anyhow::{Context, Result};
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use clap_complete::Shell;
 use index::{Vocabulary, WordList};
 use problems::{Log, Problems};
@@ -279,14 +279,8 @@ struct Args {
     /// whose kept copy was one of them is REVIEW; against a library, a repeat
     /// of one is answered by the library alone. A JSON report has no list of
     /// pairs.
-    #[arg(
-        long,
-        conflicts_with_all = [
-            "roots", "from_file", "against", "recursive", "exclude", "follow_symlinks",
-            "hidden", "extensions", "work_size", "candidates", "min_aligned_points", "min_frame_overlap",
-            "min_pixel_correlation", "skip_mirrored", "dump", "no_cache", "clear_cache", "prune_cache", "no_last",
-        ]
-    )]
+    // What it may be given with is `WITH_LAST`.
+    #[arg(long)]
     last: bool,
 
     /// Don't keep this scan for `--last` and the window.
@@ -616,7 +610,7 @@ use same::Same;
 /// The command line: `img-fp`.
 pub fn cli_main() -> Result<()> {
     check_cpu()?;
-    let args = Args::parse();
+    let args = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
     if let Some(shell) = args.completions {
         let mut cmd = Args::command();
         let name = cmd.get_name().to_string();
@@ -854,7 +848,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let args = Args::try_parse_from(argv)?;
+    let args = parse(argv)?;
     progress::speak_json();
     execute(&args, Some(result))
 }
@@ -866,7 +860,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let args = Args::try_parse_from(argv).map_err(|e| e.to_string())?;
+    let args = parse(argv).map_err(|e| e.to_string())?;
     validate(&args)?;
     outputs_are_not_pictures(&args).map_err(|e| e.to_string())?;
     outputs_are_distinct(&args).map_err(|e| e.to_string())
@@ -895,29 +889,76 @@ fn validate(args: &Args) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// The defaults of the options a window shows, read from `Args` itself so the
-/// two can never disagree.
-pub struct Defaults {
-    pub work_size: usize,
-    pub candidates: usize,
-    pub min_aligned_points: u32,
-    pub min_frame_overlap: f32,
-    pub min_pixel_correlation: f32,
-    pub skip_mirrored: bool,
-    pub extensions: Vec<String>,
+/// What `--last` may be given with: how to write the kept scan again, never
+/// how to scan. A list of what it takes rather than of what it refuses, so a
+/// scan option added later is refused without being named here. It was the
+/// other way round, a list of eighteen options to refuse, which every new
+/// one had to join.
+const WITH_LAST: [&str; 10] = ["last", "null", "list", "output", "format", "threads", "suggest", "cache", "verbose", "log_file"];
+
+/// `argv` as `Args`, refusing what clap's attributes cannot say: `--last`
+/// beside an option not in `WITH_LAST`, in clap's words for a conflict.
+fn parse<I, T>(argv: I) -> std::result::Result<Args, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut cmd = Args::command();
+    let m = cmd.try_get_matches_from_mut(argv)?;
+    if m.get_flag("last") {
+        let given = |a: &&clap::Arg| m.value_source(a.get_id().as_str()) == Some(clap::parser::ValueSource::CommandLine);
+        let refused = cmd.get_arguments().filter(given).find(|a| !WITH_LAST.contains(&a.get_id().as_str())).map(|a| a.to_string());
+        if let Some(a) = refused {
+            return Err(cmd.error(clap::error::ErrorKind::ArgumentConflict, format!("the argument '--last' cannot be used with '{a}'")));
+        }
+    }
+    Args::from_arg_matches(&m)
 }
 
-pub fn defaults() -> Defaults {
-    let a = Args::parse_from(["img-fp", "."]);
-    Defaults {
-        work_size: a.work_size,
-        candidates: a.candidates,
-        min_aligned_points: a.min_aligned_points,
-        min_frame_overlap: a.min_frame_overlap,
-        min_pixel_correlation: a.min_pixel_correlation,
-        skip_mirrored: a.skip_mirrored,
-        extensions: a.extensions,
-    }
+/// One of the command line's options as a window passes it: its long flag,
+/// and its default as the command line takes it (several values joined by
+/// commas, a switch's `false`; `None` with no default). A window's defaults
+/// are read from here, so the two can never disagree.
+pub struct Flag {
+    pub long: String,
+    pub default: Option<String>,
+}
+
+/// The option whose clap id is `id`, if it has a long flag.
+pub fn flag(id: &str) -> Option<Flag> {
+    // Built, or a switch has no default yet.
+    let mut cmd = Args::command();
+    cmd.build();
+    let a = cmd.get_arguments().find(|a| a.get_id() == id)?;
+    let d: Vec<String> = a.get_default_values().iter().map(|v| v.to_string_lossy().into_owned()).collect();
+    Some(Flag { long: format!("--{}", a.get_long()?), default: (!d.is_empty()).then(|| d.join(",")) })
+}
+
+/// Every option's clap id, for a window's test that it has decided about
+/// each one.
+pub fn option_ids() -> Vec<String> {
+    Args::command().get_arguments().map(|a| a.get_id().to_string()).collect()
+}
+
+/// The options `argv` gives, by clap id, each with its values as typed (a
+/// switch's is `true`), or clap's message if img-fp would refuse `argv`. A
+/// window's tests read back the command lines it makes.
+pub fn given<I, T>(argv: I) -> std::result::Result<std::collections::BTreeMap<String, Vec<String>>, String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut cmd = Args::command();
+    let m = cmd.try_get_matches_from_mut(argv).map_err(|e| e.to_string())?;
+    Ok(cmd
+        .get_arguments()
+        .map(|a| a.get_id().as_str())
+        .filter(|id| m.value_source(id) == Some(clap::parser::ValueSource::CommandLine))
+        .map(|id| {
+            let raw = m.get_raw(id).into_iter().flatten().map(|v| v.to_string_lossy().into_owned()).collect();
+            (id.to_string(), raw)
+        })
+        .collect())
 }
 
 /// A preview of an image for a window: RGBA, long side at most `long`, or
@@ -1652,6 +1693,28 @@ mod tests {
             &["--min-pixel-correlation", "1.01"], &["-k", "0"]] {
             assert!(!ok(bad), "{bad:?}");
         }
+    }
+
+    /// `--last` rewrites a kept scan: it takes the options that say how,
+    /// and refuses every one that says what or how to scan, as the list of
+    /// eighteen it replaced did.
+    #[test]
+    fn last_takes_only_what_rewrites_a_report() {
+        let ok = |extra: &[&str]| parse(["img-fp", "--last"].iter().chain(extra)).is_ok();
+        assert!(ok(&[]));
+        for good in [&["-0", "--list", "new"][..], &["-o", "r.csv"], &["--format", "json"], &["-t", "2"], &["--suggest", "correlation"],
+            &["--cache", "/x.bin"], &["-v"], &["--log-file", "/l.txt"]] {
+            assert!(ok(good), "{good:?}");
+        }
+        for bad in [&["."][..], &["--from-file", "f"], &["--against", "/a"], &["-r"], &["-e", "/x"], &["--follow-symlinks"], &["--hidden"],
+            &["-x", "png"], &["--work-size", "640"], &["-k", "20"], &["--min-aligned-points", "5"], &["--min-frame-overlap", "0.5"],
+            &["--min-pixel-correlation", "0.5"], &["--skip-mirrored"], &["--dump", "d.csv"], &["--no-cache"], &["--clear-cache"],
+            &["--prune-cache"], &["--no-last"]] {
+            let e = parse(["img-fp", "--last"].iter().chain(bad)).err().unwrap_or_else(|| panic!("{bad:?} accepted"));
+            assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict, "{bad:?}");
+            assert!(e.to_string().contains("'--last' cannot be used with"), "{e}");
+        }
+        assert!(parse(["img-fp", "--work-size", "640", "."]).is_ok(), "a default given is only refused beside --last");
     }
 
     /// In a build that cannot assume AVX2, the two copies of every dispatched

@@ -13,6 +13,8 @@
 //! - `settings.rs` those choices as a value: what is kept between runs (the
 //!   paths, and options set away from img-fp's defaults), and all of it turned into an
 //!   img-fp command line
+//! - `options.rs` each option the window shows, said once: its flag, how it
+//!   is shown and in what words
 //! - `scan.rs`    the child process and what it says
 //! - `results.rs` the groups, for choosing what to move to the Trash
 //! - `thumbs.rs`  pictures for the results, decoded off the main thread
@@ -27,6 +29,7 @@ mod folders;
 mod labels;
 mod last;
 mod mosaic;
+mod options;
 mod results;
 mod scan;
 mod settings;

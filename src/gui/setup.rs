@@ -11,7 +11,8 @@ use crate::labels as l;
 use crate::last;
 use crate::results::{self, Prepared, Results};
 use crate::scan::{self, Event, Scan};
-use crate::settings::{ReportFormat, Settings};
+use crate::options::{self as o, Kind, Opt, Value};
+use crate::settings::Settings;
 use crate::App;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -215,34 +216,85 @@ fn section(text: &str) -> gtk::Label {
     l
 }
 
+/// The label on the left of an option's row, with its tooltip.
+fn label_of(opt: &Opt, target: &gtk::Widget) -> gtk::Label {
+    let label = label_for(opt.label, target);
+    label.set_tooltip_text(opt.tip);
+    label
+}
+
+/// What is written beside or under an option: its hint, or else its tooltip.
+fn hint_of(opt: &Opt) -> &'static str {
+    opt.hint.or(opt.tip).unwrap_or("")
+}
+
+/// An option's widget, made from its entry in `options::ALL`.
+enum Control {
+    Check(gtk::CheckButton),
+    Spin(gtk::SpinButton),
+    Entry(gtk::Entry),
+    Choice(gtk::DropDown),
+}
+
+impl Control {
+    fn of(opt: &Opt) -> Control {
+        let c = match opt.kind {
+            Kind::Check { .. } => Control::Check(gtk::CheckButton::with_mnemonic(opt.label)),
+            Kind::Number { min, max, step, digits } => Control::Spin(spin(min, max, step, digits)),
+            Kind::Text => Control::Entry(entry()),
+            Kind::Choice(cs) => Control::Choice(gtk::DropDown::from_strings(&cs.iter().map(|c| c.2).collect::<Vec<_>>())),
+        };
+        c.widget().set_tooltip_text(opt.tip);
+        c
+    }
+
+    fn widget(&self) -> gtk::Widget {
+        match self {
+            Control::Check(c) => c.clone().upcast(),
+            Control::Spin(s) => s.clone().upcast(),
+            Control::Entry(e) => e.clone().upcast(),
+            Control::Choice(d) => d.clone().upcast(),
+        }
+    }
+
+    fn show(&self, opt: &Opt, v: &Value) {
+        match (self, &opt.kind) {
+            (Control::Check(c), _) => c.set_active(v.on()),
+            (Control::Spin(s), _) => s.set_value(v.number()),
+            (Control::Entry(e), _) => e.set_text(v.text()),
+            (Control::Choice(d), Kind::Choice(cs)) => d.set_selected(cs.iter().position(|c| c.0 == v.text()).unwrap_or(0) as u32),
+            (Control::Choice(_), _) => unreachable!("a drop-down is made for a choice"),
+        }
+    }
+
+    fn read(&self, opt: &Opt) -> Value {
+        match (self, &opt.kind) {
+            (Control::Check(c), _) => Value::On(c.is_active()),
+            (Control::Spin(s), _) => {
+                // A value typed but not yet committed with Enter or Tab is
+                // still the value meant.
+                s.update();
+                opt.number(s.value())
+            }
+            (Control::Entry(e), _) => Value::Text(e.text().trim().to_string()),
+            (Control::Choice(d), Kind::Choice(cs)) => Value::Text(cs[(d.selected() as usize).min(cs.len() - 1)].0.to_string()),
+            (Control::Choice(_), _) => unreachable!("a drop-down is made for a choice"),
+        }
+    }
+}
+
 pub struct Setup {
     pub root: gtk::Box,
     app: Rc<App>,
     results: Rc<Results>,
 
     folders: Rc<PathList>,
-    recursive: gtk::CheckButton,
-    work_size: gtk::SpinButton,
-    candidates: gtk::SpinButton,
-    min_points: gtk::SpinButton,
-    min_overlap: gtk::SpinButton,
-    min_correlation: gtk::SpinButton,
-    mirrored: gtk::CheckButton,
-    report: gtk::CheckButton,
-    report_path: gtk::Entry,
-    report_format: gtk::DropDown,
-
-    threads: gtk::SpinButton,
-    extensions: gtk::Entry,
     exclude: Rc<PathList>,
-    symlinks: gtk::CheckButton,
-    hidden: gtk::CheckButton,
-    use_cache: gtk::CheckButton,
+    report_path: gtk::Entry,
     cache_path: gtk::Entry,
-    clear_cache: gtk::CheckButton,
-    prune_cache: gtk::CheckButton,
-    log: gtk::CheckButton,
     log_path: gtk::Entry,
+    /// One per option, in `options::ALL`'s order.
+    options: Vec<Control>,
 
     notebook: gtk::Notebook,
     scan_button: gtk::Button,
@@ -262,29 +314,12 @@ impl Setup {
     pub fn new(app: Rc<App>, settings: Settings, results: Rc<Results>) -> Rc<Setup> {
         let window = &app.window;
 
+        let options: Vec<Control> = o::ALL.iter().map(|opt| Control::of(opt)).collect();
+        let w = |opt: &Opt| options[opt.at()].widget();
+
         // ---- General
         let folders = PathList::new(window, l::ADD_FOLDER, l::REMOVE_FOLDER, "No folders yet. Add one, or drop it here.", 130);
-        let recursive = gtk::CheckButton::with_mnemonic(l::RECURSIVE);
-        let hidden = gtk::CheckButton::with_mnemonic(l::HIDDEN);
-        hidden.set_tooltip_text(Some(
-            "Also look in folders whose names start with a dot. They hold programs' icons and themes rather than photos, \
-             so they are left out unless one is added as a folder to scan.",
-        ));
         let exclude = PathList::new(window, l::ADD_EXCLUDE, l::REMOVE_EXCLUDE, "Nothing left out.", 90);
-        // Up to JPEG's largest side, 65,535. The command line has no limit,
-        // and this one used to be 4,096, which turned away a size the command
-        // line takes for nothing; past the largest picture in a folder any
-        // size means what 0 (full size) means.
-        let work_size = spin(0.0, 65535.0, 32.0, 0);
-        let min_points = spin(0.0, 200.0, 1.0, 0);
-        let min_overlap = spin(0.0, 1.0, 0.05, 2);
-        let min_correlation = spin(0.0, 1.0, 0.05, 2);
-        let mirrored = gtk::CheckButton::with_mnemonic(l::MIRRORED);
-        mirrored.set_tooltip_text(Some(
-            "Images that found fewer than two matches are searched again, mirrored and inverted. In a library with few \
-             duplicates that is most images and most of a rescan's time. Turned off, scans there are much faster, \
-             most mirrored and inverted copies are missed, and a group they linked together can split in two.",
-        ));
 
         let g = grid();
         let folders_label = label_for(l::FOLDERS, &folders.list);
@@ -292,8 +327,8 @@ impl Setup {
         g.attach(&folders_label, 0, 0, 1, 1);
         g.attach(&folders.root, 1, 0, 2, 1);
         let walk_box = gtk::Box::new(gtk::Orientation::Horizontal, 18);
-        walk_box.append(&recursive);
-        walk_box.append(&hidden);
+        walk_box.append(&w(&o::RECURSIVE));
+        walk_box.append(&w(&o::HIDDEN));
         g.attach(&walk_box, 1, 1, 2, 1);
         let exclude_label = label_for(l::EXCLUDE, &exclude.list);
         exclude_label.set_valign(gtk::Align::Start);
@@ -301,114 +336,67 @@ impl Setup {
         g.attach(&exclude.root, 1, 2, 2, 1);
 
         g.attach(&section("What counts as a duplicate"), 0, 3, 3, 1);
-        let rows: [(&str, &gtk::SpinButton, &str); 2] = [
-            (l::WORK_SIZE, &work_size, "Pixels on the long side each image is analysed at. Higher finds more, especially small pictures inside larger ones such as slides and collages, but is slower. 640 is a good choice when that matters. 0 does not shrink images at all, which is much slower on large photos."),
-            (l::MIN_CORRELATION, &min_correlation, "How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter."),
-        ];
-        for (i, (text, w, tip)) in rows.into_iter().enumerate() {
-            let r = 4 + i as i32;
-            let label = label_for(text, w);
-            label.set_tooltip_text(Some(tip));
-            w.set_tooltip_text(Some(tip));
-            g.attach(&label, 0, r, 1, 1);
-            g.attach(w, 1, r, 1, 1);
-            g.attach(&hint(tip), 2, r, 1, 1);
+        for (r, opt) in [(4, &o::WORK_SIZE), (5, &o::MIN_CORRELATION)] {
+            g.attach(&label_of(opt, &w(opt)), 0, r, 1, 1);
+            g.attach(&w(opt), 1, r, 1, 1);
+            g.attach(&hint(hint_of(opt)), 2, r, 1, 1);
         }
-        g.attach(&mirrored, 1, 6, 2, 1);
-        g.attach(&hint("Off is much faster on a library with few duplicates, and misses most mirrored and inverted copies."), 1, 7, 2, 1);
+        g.attach(&w(&o::MIRRORED), 1, 6, 2, 1);
+        g.attach(&hint(hint_of(&o::MIRRORED)), 1, 7, 2, 1);
         let general = gtk::ScrolledWindow::builder().child(&g).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
 
         // ---- Advanced
-        let threads = spin(0.0, 1024.0, 1.0, 0);
-        let candidates = spin(1.0, 2000.0, 10.0, 0);
-        let extensions = entry();
-        let symlinks = gtk::CheckButton::with_mnemonic(l::SYMLINKS);
-        let report = gtk::CheckButton::with_mnemonic(l::REPORT);
         let report_path = entry();
         report_path.set_placeholder_text(Some("results.txt, results.csv or results.json"));
         let report_choose = gtk::Button::with_mnemonic(l::REPORT_CHOOSE);
-        let report_format = gtk::DropDown::from_strings(&ReportFormat::ALL.map(|f| f.label()));
-        let use_cache = gtk::CheckButton::with_mnemonic(l::USE_CACHE);
         let cache_path = entry();
         cache_path.set_placeholder_text(Some(&format!("the default: ~/.cache/img-fp/{}", img_fp::cache_file_name())));
         let cache_choose = gtk::Button::with_mnemonic(l::CACHE_CHOOSE);
-        let clear_cache = gtk::CheckButton::with_mnemonic(l::CLEAR_CACHE);
-        let prune_cache = gtk::CheckButton::with_mnemonic(l::PRUNE_CACHE);
-        let log = gtk::CheckButton::with_mnemonic(l::LOG_FILE);
         let log_path = entry();
         let log_choose = gtk::Button::with_mnemonic(l::LOG_CHOOSE);
 
         let a = grid();
-        a.attach(&label_for(l::THREADS, &threads), 0, 0, 1, 1);
-        let threads_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        threads_box.append(&threads);
-        let threads_hint = hint("Worker threads. 0 uses every core.");
-        threads_hint.set_hexpand(true);
-        threads_box.append(&threads_hint);
-        a.attach(&threads_box, 1, 0, 2, 1);
-        let candidates_tip = "Possible matches checked for each image.";
-        let candidates_label = label_for(l::CANDIDATES, &candidates);
-        candidates_label.set_tooltip_text(Some(candidates_tip));
-        candidates.set_tooltip_text(Some(candidates_tip));
-        a.attach(&candidates_label, 0, 1, 1, 1);
-        let candidates_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        candidates_box.append(&candidates);
-        let candidates_hint = hint(candidates_tip);
-        candidates_hint.set_hexpand(true);
-        candidates_box.append(&candidates_hint);
-        a.attach(&candidates_box, 1, 1, 2, 1);
-        let strict: [(&str, &gtk::SpinButton, &str); 2] = [
-            (l::MIN_POINTS, &min_points, "Matching points two images must share. Higher is stricter."),
-            (l::MIN_OVERLAP, &min_overlap, "How much of one image must lie inside the other, from 0 to 1. Higher is stricter."),
-        ];
-        for (i, (text, w, tip)) in strict.into_iter().enumerate() {
-            let r = 2 + i as i32;
-            let label = label_for(text, w);
-            label.set_tooltip_text(Some(tip));
-            w.set_tooltip_text(Some(tip));
-            a.attach(&label, 0, r, 1, 1);
+        for (r, opt) in [(0, &o::THREADS), (1, &o::CANDIDATES), (2, &o::MIN_POINTS), (3, &o::MIN_OVERLAP)] {
+            a.attach(&label_of(opt, &w(opt)), 0, r, 1, 1);
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-            row.append(w);
-            let h = hint(tip);
+            row.append(&w(opt));
+            let h = hint(hint_of(opt));
             h.set_hexpand(true);
             row.append(&h);
             a.attach(&row, 1, r, 2, 1);
         }
         a.attach(&section("Which files"), 0, 4, 3, 1);
-        a.attach(&label_for(l::EXTENSIONS, &extensions), 0, 5, 1, 1);
-        a.attach(&extensions, 1, 5, 2, 1);
-        a.attach(
-            &hint("Extensions a folder is searched for, comma-separated. * takes every file, and !gif leaves GIFs out of everything else."),
-            1, 6, 2, 1,
-        );
-        a.attach(&symlinks, 1, 7, 2, 1);
+        a.attach(&label_of(&o::EXTENSIONS, &w(&o::EXTENSIONS)), 0, 5, 1, 1);
+        a.attach(&w(&o::EXTENSIONS), 1, 5, 2, 1);
+        a.attach(&hint(hint_of(&o::EXTENSIONS)), 1, 6, 2, 1);
+        a.attach(&w(&o::SYMLINKS), 1, 7, 2, 1);
         a.attach(&section("Report"), 0, 8, 3, 1);
-        a.attach(&report, 0, 9, 1, 1);
+        a.attach(&w(&o::REPORT), 0, 9, 1, 1);
         let report_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         report_box.append(&report_path);
         report_box.append(&report_choose);
         a.attach(&report_box, 1, 9, 2, 1);
-        a.attach(&label_for(l::REPORT_FORMAT, &report_format), 0, 10, 1, 1);
-        report_format.set_halign(gtk::Align::Start);
-        a.attach(&report_format, 1, 10, 2, 1);
+        a.attach(&label_of(&o::REPORT_FORMAT, &w(&o::REPORT_FORMAT)), 0, 10, 1, 1);
+        w(&o::REPORT_FORMAT).set_halign(gtk::Align::Start);
+        a.attach(&w(&o::REPORT_FORMAT), 1, 10, 2, 1);
         a.attach(&section("Cache"), 0, 11, 3, 1);
-        a.attach(&use_cache, 0, 12, 3, 1);
-        a.attach(&hint("Keeps each image's analysis, so a folder scanned again only analyses what changed."), 0, 13, 3, 1);
+        a.attach(&w(&o::USE_CACHE), 0, 12, 3, 1);
+        a.attach(&hint(hint_of(&o::USE_CACHE)), 0, 13, 3, 1);
         a.attach(&label_for(l::CACHE_FILE, &cache_path), 0, 14, 1, 1);
         let cache_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         cache_box.append(&cache_path);
         cache_box.append(&cache_choose);
         a.attach(&cache_box, 1, 14, 2, 1);
-        a.attach(&clear_cache, 1, 15, 2, 1);
-        a.attach(&prune_cache, 1, 16, 2, 1);
+        a.attach(&w(&o::CLEAR_CACHE), 1, 15, 2, 1);
+        a.attach(&w(&o::PRUNE_CACHE), 1, 16, 2, 1);
         a.attach(&hint("Both apply to the next scan only."), 1, 17, 2, 1);
         a.attach(&section("Log"), 0, 18, 3, 1);
-        a.attach(&log, 0, 19, 1, 1);
+        a.attach(&w(&o::LOG), 0, 19, 1, 1);
         let log_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         log_box.append(&log_path);
         log_box.append(&log_choose);
         a.attach(&log_box, 1, 19, 2, 1);
-        a.attach(&hint("Every skipped file, problem and stage timing, in full."), 1, 20, 2, 1);
+        a.attach(&hint(hint_of(&o::LOG)), 1, 20, 2, 1);
         let version = hint(concat!("img-fp ", env!("CARGO_PKG_VERSION")));
         version.set_margin_top(18);
         a.attach(&version, 0, 21, 3, 1);
@@ -471,27 +459,11 @@ impl Setup {
             app: app.clone(),
             results,
             folders,
-            recursive,
-            work_size,
-            candidates,
-            min_points,
-            min_overlap,
-            min_correlation,
-            mirrored,
-            report,
-            report_path,
-            report_format,
-            threads,
-            extensions,
             exclude,
-            symlinks,
-            hidden,
-            use_cache,
+            report_path,
             cache_path,
-            clear_cache,
-            prune_cache,
-            log,
             log_path,
+            options,
             notebook,
             scan_button,
             cancel_button,
@@ -509,9 +481,9 @@ impl Setup {
 
         // What depends on what.
         for (check, deps) in [
-            (&me.report, vec![me.report_path.clone().upcast::<gtk::Widget>(), report_choose.clone().upcast(), me.report_format.clone().upcast()]),
-            (&me.use_cache, vec![me.cache_path.clone().upcast(), cache_choose.clone().upcast(), me.prune_cache.clone().upcast()]),
-            (&me.log, vec![me.log_path.clone().upcast(), log_choose.clone().upcast()]),
+            (me.check(&o::REPORT), vec![me.report_path.clone().upcast::<gtk::Widget>(), report_choose.clone().upcast(), me.control(&o::REPORT_FORMAT).widget()]),
+            (me.check(&o::USE_CACHE), vec![me.cache_path.clone().upcast(), cache_choose.clone().upcast(), me.control(&o::PRUNE_CACHE).widget()]),
+            (me.check(&o::LOG), vec![me.log_path.clone().upcast(), log_choose.clone().upcast()]),
         ] {
             let sync = move |c: &gtk::CheckButton| {
                 for d in &deps {
@@ -573,8 +545,7 @@ impl Setup {
             let me = Rc::downgrade(&me);
             move |_| {
                 if let Some(me) = me.upgrade() {
-                    let keep = me.read();
-                    me.show(&Settings { folders: keep.folders, exclude: keep.exclude, ..Settings::default() });
+                    me.show(&me.read().with_defaults());
                 }
             }
         });
@@ -639,58 +610,37 @@ impl Setup {
 
     fn show(&self, s: &Settings) {
         self.folders.set(s.folders.clone());
-        self.recursive.set_active(s.recursive);
-        self.work_size.set_value(s.work_size as f64);
-        self.candidates.set_value(s.candidates as f64);
-        self.min_points.set_value(s.min_aligned_points as f64);
-        self.min_overlap.set_value(s.min_frame_overlap as f64);
-        self.min_correlation.set_value(s.min_pixel_correlation as f64);
-        self.mirrored.set_active(s.mirrored);
-        self.report.set_active(s.report);
-        self.report_path.set_text(&s.report_path);
-        self.report_format.set_selected(ReportFormat::ALL.iter().position(|f| *f == s.report_format).unwrap_or(0) as u32);
-        self.threads.set_value(s.threads as f64);
-        self.extensions.set_text(&s.extensions);
         self.exclude.set(s.exclude.clone());
-        self.symlinks.set_active(s.follow_symlinks);
-        self.hidden.set_active(s.hidden);
-        self.use_cache.set_active(s.use_cache);
+        self.report_path.set_text(&s.report_path);
         self.cache_path.set_text(&s.cache_path);
-        self.clear_cache.set_active(s.clear_cache);
-        self.prune_cache.set_active(s.prune_cache);
-        self.log.set_active(s.log);
         self.log_path.set_text(&s.log_path);
+        for (opt, c) in o::ALL.iter().zip(&self.options) {
+            c.show(opt, s.get(opt));
+        }
     }
 
     fn read(&self) -> Settings {
-        // A value typed but not yet committed with Enter or Tab is still the
-        // value meant.
-        for s in [&self.work_size, &self.candidates, &self.min_points, &self.min_overlap, &self.min_correlation, &self.threads] {
-            s.update();
+        let mut s = Settings::default();
+        s.folders = self.folders.paths();
+        s.exclude = self.exclude.paths();
+        s.report_path = self.report_path.text().to_string();
+        s.cache_path = self.cache_path.text().to_string();
+        s.log_path = self.log_path.text().to_string();
+        for (opt, c) in o::ALL.iter().zip(&self.options) {
+            s.set(opt, c.read(opt));
         }
-        Settings {
-            folders: self.folders.paths(),
-            recursive: self.recursive.is_active(),
-            work_size: self.work_size.value() as usize,
-            candidates: self.candidates.value() as usize,
-            min_aligned_points: self.min_points.value() as u32,
-            min_frame_overlap: self.min_overlap.value() as f32,
-            min_pixel_correlation: self.min_correlation.value() as f32,
-            mirrored: self.mirrored.is_active(),
-            report: self.report.is_active(),
-            report_path: self.report_path.text().to_string(),
-            report_format: ReportFormat::ALL[(self.report_format.selected() as usize).min(ReportFormat::ALL.len() - 1)],
-            threads: self.threads.value() as usize,
-            extensions: self.extensions.text().to_string(),
-            exclude: self.exclude.paths(),
-            follow_symlinks: self.symlinks.is_active(),
-            hidden: self.hidden.is_active(),
-            use_cache: self.use_cache.is_active(),
-            cache_path: self.cache_path.text().to_string(),
-            clear_cache: self.clear_cache.is_active(),
-            prune_cache: self.prune_cache.is_active(),
-            log: self.log.is_active(),
-            log_path: self.log_path.text().to_string(),
+        s
+    }
+
+    fn control(&self, opt: &Opt) -> &Control {
+        &self.options[opt.at()]
+    }
+
+    /// The check button of a check option.
+    fn check(&self, opt: &Opt) -> &gtk::CheckButton {
+        match self.control(opt) {
+            Control::Check(c) => c,
+            _ => panic!("{} is not a check", opt.key),
         }
     }
 
@@ -802,7 +752,7 @@ impl Setup {
         // scan: not one run without the cache, and not one that found
         // nothing (see `img_fp::last`). Kept regardless, a scan of an empty
         // folder replaced the last one worth having, and its marks with it.
-        let keep = settings.use_cache;
+        let keep = settings.on(&o::USE_CACHE);
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let mut stderr: Vec<String> = Vec::new();
@@ -905,8 +855,8 @@ impl Setup {
         let scan = self.scan.borrow_mut().take();
         let took = self.took();
         // The one-off cache requests have been carried out, or given up on.
-        self.clear_cache.set_active(false);
-        self.prune_cache.set_active(false);
+        self.check(&o::CLEAR_CACHE).set_active(false);
+        self.check(&o::PRUNE_CACHE).set_active(false);
         // The error a run that failed printed last, if it printed one.
         let error_line = || stderr.iter().rev().find(|l| l.starts_with("Error")).map(|l| l.trim_start_matches("Error:").trim().to_string());
         // A scan that finished, and then could not write what it was asked to

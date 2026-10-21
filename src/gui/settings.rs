@@ -5,90 +5,42 @@
 //! scan from here is the scan those flags would run from a shell, and the log
 //! says which flags they were.
 
+use crate::options::{self as o, Opt, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ReportFormat {
-    /// Whatever the file name's extension says, as `-o` alone does.
-    #[default]
-    FromName,
-    Txt,
-    Csv,
-    Json,
-}
-
-impl ReportFormat {
-    pub const ALL: [ReportFormat; 4] = [ReportFormat::FromName, ReportFormat::Txt, ReportFormat::Csv, ReportFormat::Json];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ReportFormat::FromName => "From the file name",
-            ReportFormat::Txt => "Text",
-            ReportFormat::Csv => "CSV",
-            ReportFormat::Json => "JSON",
-        }
-    }
-
-    fn flag(self) -> Option<&'static str> {
-        match self {
-            ReportFormat::FromName => None,
-            ReportFormat::Txt => Some("txt"),
-            ReportFormat::Csv => Some("csv"),
-            ReportFormat::Json => Some("json"),
-        }
-    }
-}
-
-/// What the window shows, and what of it is kept between runs.
+/// What the window shows, and what of it is kept between runs: the paths,
+/// and a value for each option of `options::ALL`.
 ///
 /// The paths are kept as they are: the folders, the exclusions and the three
-/// file names typed in. **An option is kept only where it differs from the
-/// command line's default** (`Kept`), so one never touched follows the default
-/// when the default moves. Saving every option as it stood, which the window
-/// did until 0.19, froze defaults nobody had chosen: `.dds` left the extension
-/// list then and a window from 0.17 went on asking for it, exiting 2 on every
-/// `.dds` it met. An option set by hand stays set until changed or put back
-/// with the Defaults button. The one-off cache requests (clear, prune) are
-/// never kept: they are carried out once.
+/// file names typed in. **An option is kept only where it differs from its
+/// default**, so one never touched follows the default when the default
+/// moves. Saving every option as it stood, which the window did until 0.19,
+/// froze defaults nobody had chosen: `.dds` left the extension list then and
+/// a window from 0.17 went on asking for it, exiting 2 on every `.dds` it
+/// met. An option set by hand stays set until changed or put back with the
+/// Defaults button. The one-off cache requests (clear, prune) are never kept:
+/// they are carried out once.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "Saved", into = "Saved")]
 pub struct Settings {
     pub folders: Vec<PathBuf>,
-    pub recursive: bool,
-    pub work_size: usize,
-    pub candidates: usize,
-    pub min_aligned_points: u32,
-    pub min_frame_overlap: f32,
-    pub min_pixel_correlation: f32,
-    /// The second look; off is `--skip-mirrored`.
-    pub mirrored: bool,
-
-    pub report: bool,
-    pub report_path: String,
-    pub report_format: ReportFormat,
-
-    pub threads: usize,
-    /// As `-x` takes it: comma-separated.
-    pub extensions: String,
     pub exclude: Vec<PathBuf>,
-    pub follow_symlinks: bool,
-    pub hidden: bool,
-    pub use_cache: bool,
+    pub report_path: String,
     /// Empty for img-fp's own default.
     pub cache_path: String,
-    pub clear_cache: bool,
-    pub prune_cache: bool,
-    pub log: bool,
     pub log_path: String,
+    /// One per option, in `options::ALL`'s order.
+    values: Vec<Value>,
 }
 
 /// `Settings` as the file holds them: the paths, and under `options` each
-/// option that differs from its default. The options are a key of their own
-/// because the windows before 0.19 wrote every option at the top level: read
-/// as choices now, a file one of them left would bring back the defaults of
-/// its day.
+/// option that differs from its default, by its key. The options are a key
+/// of their own because the windows before 0.19 wrote every option at the
+/// top level: read as choices now, a file one of them left would bring back
+/// the defaults of its day.
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct Saved {
@@ -99,152 +51,39 @@ struct Saved {
     exclude: Vec<PathBuf>,
     cache_path: String,
     log_path: String,
-    #[serde(skip_serializing_if = "Kept::is_empty")]
-    options: Kept,
-}
-
-/// The options set away from their defaults; `None` is "the default".
-#[derive(Serialize, Deserialize, Default, PartialEq)]
-#[serde(default)]
-struct Kept {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recursive: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    work_size: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    candidates: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_aligned_points: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_frame_overlap: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_pixel_correlation: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mirrored: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    report: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    report_format: Option<ReportFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    threads: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    extensions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    follow_symlinks: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hidden: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    use_cache: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    log: Option<bool>,
-}
-
-impl Kept {
-    fn is_empty(&self) -> bool {
-        *self == Kept::default()
-    }
-}
-
-/// `v` if it is not `d`. The thresholds come back from a spin button through
-/// f64, so they are compared to its last digit, not to the bit.
-fn changed<T: PartialEq>(v: T, d: T) -> Option<T> {
-    (v != d).then_some(v)
-}
-
-fn changed_f32(v: f32, d: f32) -> Option<f32> {
-    ((v - d).abs() > 1e-4).then_some(v)
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    options: BTreeMap<String, serde_json::Value>,
 }
 
 impl From<Settings> for Saved {
     fn from(s: Settings) -> Saved {
-        let d = Settings::default();
-        Saved {
-            options: Kept {
-                recursive: changed(s.recursive, d.recursive),
-                work_size: changed(s.work_size, d.work_size),
-                candidates: changed(s.candidates, d.candidates),
-                min_aligned_points: changed(s.min_aligned_points, d.min_aligned_points),
-                min_frame_overlap: changed_f32(s.min_frame_overlap, d.min_frame_overlap),
-                min_pixel_correlation: changed_f32(s.min_pixel_correlation, d.min_pixel_correlation),
-                mirrored: changed(s.mirrored, d.mirrored),
-                report: changed(s.report, d.report),
-                report_format: changed(s.report_format, d.report_format),
-                threads: changed(s.threads, d.threads),
-                extensions: changed(s.extensions.trim().to_string(), d.extensions),
-                follow_symlinks: changed(s.follow_symlinks, d.follow_symlinks),
-                hidden: changed(s.hidden, d.hidden),
-                use_cache: changed(s.use_cache, d.use_cache),
-                log: changed(s.log, d.log),
-            },
-            folders: s.folders,
-            report_path: s.report_path,
-            exclude: s.exclude,
-            cache_path: s.cache_path,
-            log_path: s.log_path,
-        }
+        let options = o::ALL
+            .iter()
+            .zip(&s.values)
+            .filter(|(opt, v)| opt.kept && **v != opt.default_value())
+            .map(|(opt, v)| (opt.key.to_string(), opt.as_json(v)))
+            .collect();
+        Saved { folders: s.folders, report_path: s.report_path, exclude: s.exclude, cache_path: s.cache_path, log_path: s.log_path, options }
     }
 }
 
 impl From<Saved> for Settings {
+    /// An option missing, of another type, or not kept, is its default.
     fn from(f: Saved) -> Settings {
-        let d = Settings::default();
-        let o = f.options;
-        Settings {
-            folders: f.folders,
-            recursive: o.recursive.unwrap_or(d.recursive),
-            work_size: o.work_size.unwrap_or(d.work_size),
-            candidates: o.candidates.unwrap_or(d.candidates),
-            min_aligned_points: o.min_aligned_points.unwrap_or(d.min_aligned_points),
-            min_frame_overlap: o.min_frame_overlap.unwrap_or(d.min_frame_overlap),
-            min_pixel_correlation: o.min_pixel_correlation.unwrap_or(d.min_pixel_correlation),
-            mirrored: o.mirrored.unwrap_or(d.mirrored),
-            report: o.report.unwrap_or(d.report),
-            report_path: f.report_path,
-            report_format: o.report_format.unwrap_or(d.report_format),
-            threads: o.threads.unwrap_or(d.threads),
-            extensions: o.extensions.unwrap_or(d.extensions),
-            exclude: f.exclude,
-            follow_symlinks: o.follow_symlinks.unwrap_or(d.follow_symlinks),
-            hidden: o.hidden.unwrap_or(d.hidden),
-            use_cache: o.use_cache.unwrap_or(d.use_cache),
-            cache_path: f.cache_path,
-            clear_cache: false,
-            prune_cache: false,
-            log: o.log.unwrap_or(d.log),
-            log_path: f.log_path,
-        }
+        let values = o::ALL
+            .iter()
+            .map(|opt| {
+                let kept = f.options.get(opt.key).filter(|_| opt.kept).and_then(|j| opt.read_json(j));
+                kept.unwrap_or_else(|| opt.default_value())
+            })
+            .collect();
+        Settings { folders: f.folders, exclude: f.exclude, report_path: f.report_path, cache_path: f.cache_path, log_path: f.log_path, values }
     }
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        let d = img_fp::defaults();
-        Settings {
-            folders: Vec::new(),
-            // The command line's default is the top folder only; a person
-            // pointing a window at their photos means all of them.
-            recursive: true,
-            work_size: d.work_size,
-            candidates: d.candidates,
-            min_aligned_points: d.min_aligned_points,
-            min_frame_overlap: d.min_frame_overlap,
-            min_pixel_correlation: d.min_pixel_correlation,
-            mirrored: !d.skip_mirrored,
-            report: false,
-            report_path: String::new(),
-            report_format: ReportFormat::FromName,
-            threads: 0,
-            extensions: d.extensions.join(","),
-            exclude: Vec::new(),
-            follow_symlinks: false,
-            hidden: false,
-            use_cache: true,
-            cache_path: String::new(),
-            clear_cache: false,
-            prune_cache: false,
-            log: false,
-            log_path: String::new(),
-        }
+        Saved::default().into()
     }
 }
 
@@ -304,6 +143,26 @@ impl Settings {
         self
     }
 
+    /// The value of option `o`.
+    pub fn get(&self, o: &Opt) -> &Value {
+        &self.values[o.at()]
+    }
+
+    pub fn set(&mut self, o: &Opt, v: Value) {
+        self.values[o.at()] = v;
+    }
+
+    /// Whether the check option `o` is on.
+    pub fn on(&self, o: &Opt) -> bool {
+        self.get(o).on()
+    }
+
+    /// Every option and file name back to its default, as the Defaults
+    /// button puts them; the folders to scan and to leave out are kept.
+    pub fn with_defaults(self) -> Settings {
+        Settings { folders: self.folders, exclude: self.exclude, ..Settings::default() }
+    }
+
     /// The img-fp command line these settings are, program name first.
     ///
     /// Every option the window shows is passed, default or not, so the log
@@ -311,60 +170,42 @@ impl Settings {
     /// after `--`, so that no folder name can be read as a flag.
     pub fn argv(&self) -> Vec<OsString> {
         let mut a: Vec<OsString> = vec!["img-fp".into()];
-        let mut flag = |f: &str, v: String| {
+        for (opt, v) in o::ALL.iter().zip(&self.values) {
+            a.extend(opt.command_line(v).into_iter().map(OsString::from));
+        }
+        // The window's own switches, each with the path it stands for.
+        let mut flag = |f: &str, v: &str| {
             a.push(f.into());
             a.push(v.into());
         };
-        flag("--work-size", self.work_size.to_string());
-        flag("--candidates", self.candidates.to_string());
-        flag("--min-aligned-points", self.min_aligned_points.to_string());
-        flag("--min-frame-overlap", format!("{}", self.min_frame_overlap));
-        flag("--min-pixel-correlation", format!("{}", self.min_pixel_correlation));
-        flag("--threads", self.threads.to_string());
-        let ext = self.extensions.trim();
-        if !ext.is_empty() {
-            flag("--extensions", ext.to_string());
-        }
-        if self.report && !self.report_path.trim().is_empty() {
-            flag("--output", self.report_path.trim().to_string());
-            if let Some(f) = self.report_format.flag() {
-                flag("--format", f.to_string());
+        let (report, cache, log) = (self.report_path.trim(), self.cache_path.trim(), self.log_path.trim());
+        if self.on(&o::REPORT) && !report.is_empty() {
+            flag("--output", report);
+            if let Some(f) = o::REPORT_FORMAT.choice_flag(self.get(&o::REPORT_FORMAT)) {
+                flag("--format", f);
             }
         }
+        let use_cache = self.on(&o::USE_CACHE);
         // The named file goes with `--no-cache` too when it is to be cleared:
         // left out, `--clear-cache` deleted the default cache, not the one in
         // the field.
-        if !self.use_cache {
-            a.push("--no-cache".into());
+        if !cache.is_empty() && (use_cache || self.on(&o::CLEAR_CACHE)) {
+            flag("--cache", cache);
         }
-        if !self.cache_path.trim().is_empty() && (self.use_cache || self.clear_cache) {
-            a.push("--cache".into());
-            a.push(self.cache_path.trim().into());
-        }
-        if self.log && !self.log_path.trim().is_empty() {
-            a.push("--log-file".into());
-            a.push(self.log_path.trim().into());
+        if self.on(&o::LOG) && !log.is_empty() {
+            flag("--log-file", log);
         }
         for e in &self.exclude {
             a.push("--exclude".into());
             a.push(e.into());
         }
-        if self.recursive {
-            a.push("--recursive".into());
+        if !use_cache {
+            a.push("--no-cache".into());
         }
-        if self.follow_symlinks {
-            a.push("--follow-symlinks".into());
-        }
-        if self.hidden {
-            a.push("--hidden".into());
-        }
-        if !self.mirrored {
-            a.push("--skip-mirrored".into());
-        }
-        if self.clear_cache {
+        if self.on(&o::CLEAR_CACHE) {
             a.push("--clear-cache".into());
         }
-        if self.prune_cache && self.use_cache {
+        if self.on(&o::PRUNE_CACHE) && use_cache {
             a.push("--prune-cache".into());
         }
         a.push("--".into());
@@ -388,6 +229,7 @@ fn absolute(p: &str, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::Kind;
 
     /// A folder whose name is not UTF-8 is remembered, and does not stop the
     /// rest of the settings from being remembered with it.
@@ -413,17 +255,27 @@ mod tests {
     #[test]
     fn only_options_set_by_hand_are_kept() {
         let d = Settings::default();
-        let s = Settings { folders: vec!["/x".into()], work_size: 640, use_cache: false, log: true, recursive: false,
-            report_format: ReportFormat::Csv, min_pixel_correlation: 0.55, clear_cache: true, prune_cache: true, ..Default::default() };
+        let mut s = Settings { folders: vec!["/x".into()], ..Default::default() };
+        s.set(&o::WORK_SIZE, Value::Number(640.0));
+        s.set(&o::USE_CACHE, Value::On(false));
+        s.set(&o::LOG, Value::On(true));
+        s.set(&o::RECURSIVE, Value::On(false));
+        s.set(&o::REPORT_FORMAT, Value::Text("Csv".into()));
+        s.set(&o::MIN_CORRELATION, Value::Number(0.55));
+        s.set(&o::CLEAR_CACHE, Value::On(true));
+        s.set(&o::PRUNE_CACHE, Value::On(true));
         let v: serde_json::Value = serde_json::to_value(&s).unwrap();
-        let mut keys: Vec<&str> = v["options"].as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        keys.sort_unstable();
+        let keys: Vec<&str> = v["options"].as_object().unwrap().keys().map(|k| k.as_str()).collect();
         assert_eq!(keys, ["log", "min_pixel_correlation", "recursive", "report_format", "use_cache", "work_size"]);
+        assert_eq!(v["options"]["work_size"], serde_json::json!(640));
         let back: Settings = serde_json::from_value(v).unwrap();
-        assert_eq!((back.work_size, back.use_cache, back.log, back.recursive), (640, false, true, false));
-        assert_eq!((back.report_format, back.min_pixel_correlation), (ReportFormat::Csv, 0.55));
-        assert_eq!((back.candidates, back.extensions.as_str()), (d.candidates, d.extensions.as_str()));
-        assert!(!back.clear_cache && !back.prune_cache, "one-off requests are not repeated");
+        for opt in [&o::WORK_SIZE, &o::USE_CACHE, &o::LOG, &o::RECURSIVE, &o::REPORT_FORMAT, &o::MIN_CORRELATION] {
+            assert_eq!(back.get(opt), s.get(opt), "{}", opt.key);
+        }
+        for opt in [&o::CANDIDATES, &o::EXTENSIONS] {
+            assert_eq!(back.get(opt), d.get(opt), "{}", opt.key);
+        }
+        assert!(!back.on(&o::CLEAR_CACHE) && !back.on(&o::PRUNE_CACHE), "one-off requests are not repeated");
 
         // Nothing set by hand: nothing but the paths is written.
         let v: serde_json::Value = serde_json::to_value(Settings { folders: vec!["/x".into()], ..Default::default() }).unwrap();
@@ -436,8 +288,29 @@ mod tests {
         let s: Settings = serde_json::from_str(old).unwrap();
         assert_eq!(s.folders, vec![PathBuf::from("/x")]);
         assert_eq!(s.report_path, "/r.csv");
-        assert_eq!((s.work_size, s.min_pixel_correlation, s.use_cache), (d.work_size, d.min_pixel_correlation, d.use_cache));
-        assert_eq!((s.extensions.as_str(), s.threads, s.recursive), (d.extensions.as_str(), d.threads, d.recursive));
+        assert_eq!(s.values, d.values);
+
+        // A value of another type, or a choice not offered, is the default;
+        // the rest of the file still reads. (It used to make the whole file
+        // the defaults, folders and all.)
+        let odd = r#"{"folders": ["/x"], "options": {"work_size": "big", "report_format": "Pdf", "threads": 3}}"#;
+        let s: Settings = serde_json::from_str(odd).unwrap();
+        assert_eq!(s.folders, vec![PathBuf::from("/x")]);
+        assert_eq!((s.get(&o::WORK_SIZE), s.get(&o::REPORT_FORMAT)), (d.get(&o::WORK_SIZE), d.get(&o::REPORT_FORMAT)));
+        assert_eq!(s.get(&o::THREADS), &Value::Number(3.0));
+    }
+
+    /// A file written by the window before the options were a table reads
+    /// as it did: a float kept as an f32 comes back at its decimals.
+    #[test]
+    fn a_file_from_before_the_table_reads_as_it_did() {
+        let f = r#"{"folders": ["/x"], "options": {"min_frame_overlap": 0.550000011920929, "mirrored": false,
+            "report_format": "Json", "extensions": "png,gif", "report": true}}"#;
+        let s: Settings = serde_json::from_str(f).unwrap();
+        assert_eq!(s.get(&o::MIN_OVERLAP), &Value::Number(0.55));
+        assert!(!s.on(&o::MIRRORED) && s.on(&o::REPORT));
+        assert_eq!(s.get(&o::REPORT_FORMAT).text(), "Json");
+        assert_eq!(s.get(&o::EXTENSIONS).text(), "png,gif");
     }
 
     #[test]
@@ -458,28 +331,23 @@ mod tests {
     fn every_setting_makes_a_command_line_img_fp_accepts() {
         let mut s = Settings { folders: vec!["/tmp".into(), "/-odd name".into()], ..Default::default() };
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
-        s.use_cache = false;
-        s.clear_cache = true;
-        s.prune_cache = true;
+        for (opt, v) in [(&o::USE_CACHE, false), (&o::CLEAR_CACHE, true), (&o::PRUNE_CACHE, true), (&o::REPORT, true), (&o::LOG, true),
+            (&o::SYMLINKS, true), (&o::HIDDEN, true), (&o::MIRRORED, false), (&o::RECURSIVE, false)] {
+            s.set(opt, Value::On(v));
+        }
         s.cache_path = "/tmp/x".into();
-        s.report = true;
         s.report_path = "/tmp/r.csv".into();
-        s.report_format = ReportFormat::Json;
-        s.log = true;
+        s.set(&o::REPORT_FORMAT, Value::Text("Json".into()));
         s.log_path = "/tmp/l.txt".into();
         s.exclude = vec!["/tmp/a".into()];
-        s.follow_symlinks = true;
-        s.hidden = true;
-        s.mirrored = false;
-        s.recursive = false;
-        s.extensions = "*".into();
+        s.set(&o::EXTENSIONS, Value::Text("*".into()));
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
-        s.use_cache = true;
+        s.set(&o::USE_CACHE, Value::On(true));
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
         // Not using the cache and not clearing it: the named file is left
         // out, since the run would neither read nor write it.
-        s.use_cache = false;
-        s.clear_cache = false;
+        s.set(&o::USE_CACHE, Value::On(false));
+        s.set(&o::CLEAR_CACHE, Value::On(false));
         assert_eq!(img_fp::check_args(s.argv()), Ok(()));
         assert!(!s.argv().iter().any(|a| a == "--cache"));
     }
@@ -488,7 +356,9 @@ mod tests {
     /// field, not the default one.
     #[test]
     fn clearing_without_using_clears_the_named_file() {
-        let s = Settings { folders: vec!["/tmp".into()], use_cache: false, clear_cache: true, cache_path: "/x/mine.bin".into(), ..Default::default() };
+        let mut s = Settings { folders: vec!["/tmp".into()], cache_path: "/x/mine.bin".into(), ..Default::default() };
+        s.set(&o::USE_CACHE, Value::On(false));
+        s.set(&o::CLEAR_CACHE, Value::On(true));
         let a = s.argv();
         let at = a.iter().position(|x| x == "--cache").expect("the named cache is passed");
         assert_eq!(a[at + 1], "/x/mine.bin");
@@ -496,11 +366,32 @@ mod tests {
         assert_eq!(img_fp::check_args(a), Ok(()));
     }
 
+    /// Every option with a flag reaches img-fp as what it was set to, at its
+    /// default and away from it, and is read back by the command line as
+    /// that value.
     #[test]
-    fn defaults_are_img_fps_own() {
-        let d = img_fp::defaults();
-        let s = Settings::default();
-        assert_eq!((s.work_size, s.candidates, s.min_aligned_points), (d.work_size, d.candidates, d.min_aligned_points));
-        assert_eq!(s.mirrored, !d.skip_mirrored);
+    fn every_option_reaches_the_command_line_as_set() {
+        for opt in o::ALL.iter().filter(|opt| opt.arg.is_some()) {
+            let id = opt.arg.unwrap();
+            let away = match (&opt.kind, opt.default_value()) {
+                (Kind::Check { .. }, Value::On(b)) => Value::On(!b),
+                (Kind::Number { max, .. }, Value::Number(n)) => opt.number(if n + 1.0 <= *max { n + 1.0 } else { n / 2.0 }),
+                (Kind::Text, _) => Value::Text("png,gif".into()),
+                (_, v) => panic!("{}: nothing away from {v:?}", opt.key),
+            };
+            for v in [opt.default_value(), away] {
+                let mut s = Settings { folders: vec!["/tmp".into()], ..Default::default() };
+                s.set(opt, v.clone());
+                let given = img_fp::given(s.argv()).unwrap_or_else(|e| panic!("{}: {e}", opt.key));
+                let back = match (&opt.kind, given.get(id)) {
+                    (Kind::Check { inverted }, g) => Value::On(g.is_some() != *inverted),
+                    (Kind::Number { .. }, Some(g)) => opt.parse(&g[0]).unwrap(),
+                    (Kind::Text, Some(g)) => Value::Text(g.join(",")),
+                    (_, None) => panic!("{} not passed", opt.key),
+                    _ => unreachable!(),
+                };
+                assert_eq!(back, v, "{}", opt.key);
+            }
+        }
     }
 }

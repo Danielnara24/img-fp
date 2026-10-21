@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.58.0)
+## Status (0.59.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -326,6 +326,33 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   Code lines (no comments or blanks, tests included) in the files touched
   6,452 -> 6,541: `against.rs` 375 -> 184, `report.rs` 741 -> 949 (the
   second layout), `last.rs` +30 (`--last` of a comparison), tests +60.
+- 0.59.0 (the window's options are a table, `gui/options.rs`; see *The
+  window*): before, each option the window shows was written out by hand in
+  about thirteen places (a field of `Settings`, of `Kept`, two `From`
+  lines, `Default`, `argv`; a field of `Setup`, its widget, struct init,
+  `show`, `read`, a tooltip; `lib::Defaults`), so a place missed compiled
+  and passed (the frozen defaults before 0.19, the clear-cache that deleted
+  the default file). Now an option is one `Opt` (key, clap id, kind, words),
+  its default read from clap itself (`img_fp::flag`; `Defaults` gone),
+  `Settings` a value per option, `Setup` a `Control` per option, and a test
+  (`every_flag_is_decided`) fails until every flag of `Args` is shown,
+  passed by hand (`BY_HAND`) or not the window's (`NOT_SHOWN`). `--last`
+  takes an allowlist (`WITH_LAST`, checked in `lib::parse`) instead of
+  `conflicts_with_all` over eighteen scan options, so a new scan option is
+  refused by it unnamed; same refusals, exit 2, clap's usage line worded a
+  little differently. A settings value of the wrong type now falls back
+  alone (it made the whole file the defaults, folders and all). Proved: a
+  differential test (old `settings.rs` in a temporary test module, 20,000
+  random settings stepped like spin buttons): img-fp reads the same options
+  off both command lines (`img_fp::given`; only their order differs), the
+  files hold the same JSON and each build reads the other's, and a flipped
+  option always changes the command line; under Xvfb, base vs new with a
+  kept `gui.json`: both tabs, the results page and "Restore defaults"
+  pixel-identical, same worker argv (reordered), same saved `gui.json`,
+  same report; cached Desktop scan and its `--last` txt / csv / json /
+  `--suggest correlation` identical but `runtime_seconds`. Code lines (no
+  comments or blanks) outside tests in the files touched 2,329 -> 2,323;
+  tests +91.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1074,6 +1101,13 @@ Do not retry without new evidence:
   Alt); F1 lists keys; dark theme followed from the desktop's text colour;
   tree view by folder (`gui/folders.rs`).
 - Mnemonics live in `gui/labels.rs` with a clash test; add labels there.
+- Options are one table, `gui/options.rs` (`Opt`: key in `gui.json`, clap
+  id, `Kind`, label, tip, hint; `ALL`). `Settings` holds a `Value` per
+  entry, `Setup` a `Control` per entry; defaults are clap's
+  (`img_fp::flag`) unless the entry says otherwise (`recursive` is on in
+  the window). **Adding an option**: an `Opt` in `ALL` and a place on the
+  page for its widget; a flag the window does not show goes in `BY_HAND`
+  or `NOT_SHOWN` (the test says which is missing). Not a field.
 - Zoom (`Mosaic::zoom`, header `[-][+]`, Ctrl+Plus/Minus/0): a chosen row
   height, steps of √2 (twice/half the area); a group that fits the page at
   rows at least that tall is fitted as before. Limits are the page's: a row
