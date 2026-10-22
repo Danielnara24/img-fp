@@ -8,11 +8,13 @@ use retrieve::{quantise, Index};
 use outcome::{Against, Asked, Group, Head, Member};
 use verify::Standing;
 use problems::Note;
+use outputs::{Outputs, To};
 
 /// What every stage of a run reads: what it was asked, and where it says
 /// what it is doing.
 struct Ctx<'a> {
     args: &'a Args,
+    outputs: &'a Outputs,
     log: &'a Log,
     progress: progress::Progress,
     t: Instant,
@@ -182,7 +184,7 @@ impl Scope {
 
 /// One scan, from the paths asked for to the report: each stage below hands
 /// the next what it found, and lets go of what nothing after it reads.
-pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> Result<()> {
+pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Problems, gui: Option<&Path>) -> Result<()> {
     // Before anything is read: a file changed since is not one this run can
     // vouch for (`last::Notes::changed_after`).
     let started = last::now_nanos();
@@ -205,7 +207,7 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
     if args.threads > 0 {
         rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
     }
-    let cx = Ctx { args, log, progress: progress::Progress::new(), t: t_start };
+    let cx = Ctx { args, outputs, log, progress: progress::Progress::new(), t: t_start };
 
     // Where the analysis is kept. Resolved even when the file does not exist
     // yet, because that is the first run and it is the run that creates it —
@@ -366,8 +368,8 @@ pub(crate) fn run(args: &Args, log: &Log, problems: &mut Problems, gui: Option<&
     stage!(cx, "released the index and the descriptors");
 
     let claims = cluster(&cx, items, &policy, &direct, verified, dump.as_mut());
-    if let (Some(path), Some(dump)) = (&args.dump, dump) {
-        write_dump(&cx, path, &files, items, &direct, dump)?;
+    if let (Some(to), Some(dump)) = (&outputs.dump, dump) {
+        write_dump(&cx, to, &files, items, &direct, dump)?;
     }
     // Every verdict the matching made, and what the dump alone reads: nothing
     // below does. Held to the end, they were 65 MB on 27,000 pictures through
@@ -1222,7 +1224,7 @@ fn dump_columns<'a>() -> table::Table<Dumped<'a>> {
 }
 
 /// Write `--dump`: one row per verdict (`dump_columns`).
-fn write_dump(cx: &Ctx, path: &Path, files: &[PathBuf], items: &[Item], direct: &[Edge], dump: Dump) -> Result<()> {
+fn write_dump(cx: &Ctx, to: &To, files: &[PathBuf], items: &[Item], direct: &[Edge], dump: Dump) -> Result<()> {
     let write = |w: &mut dyn Write| -> std::io::Result<()> {
         let columns = dump_columns();
         columns.csv_header(w, b',')?;
@@ -1230,16 +1232,8 @@ fn write_dump(cx: &Ctx, path: &Path, files: &[PathBuf], items: &[Item], direct: 
         let rows = direct.iter().map(|e| (e, kind(e))).chain(dump.propagated.iter().map(|e| (e, "propagated")));
         rows.map(|(e, kind)| Dumped { e, kind, files, items }).try_for_each(|r| columns.csv(w, &r, b','))
     };
-    // `-` is stdout, which `stdout_has_one_reader` has kept for it alone;
-    // a file is written whole or not at all, as the report is.
-    if path == stdout_path() {
-        let mut w = std::io::BufWriter::new(std::io::stdout().lock());
-        write(&mut w).and_then(|()| w.flush())?;
-        say!(cx, "dumped verdicts -> stdout");
-    } else {
-        report::write_whole(path, write)?;
-        say!(cx, "dumped verdicts -> {}", path.display());
-    }
+    to.write("the dump", write)?;
+    say!(cx, "dumped verdicts -> {}", to.name());
     Ok(())
 }
 
@@ -1506,7 +1500,7 @@ fn finish(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], mut fo
     // either would replace a scan worth writing out again. The window keeps
     // by the same rule.
     if keeps_last(args, gui) && scan.head.files_enumerated > 0 {
-        let roots = if args.from_file.is_some() || args.roots.iter().any(|r| r == stdout_path()) {
+        let roots = if args.from_file.is_some() || args.roots.iter().any(|r| r == Path::new("-")) {
             // Read from a list, they are files rather than the folders the
             // window's tree starts from, and it finds those itself.
             Vec::new()
@@ -1524,17 +1518,13 @@ fn finish(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], mut fo
     if let Some(path) = gui {
         timed!(36, scan.save(path))?;
     }
-    // Where `-o` says. Under the window stdout is the progress channel, and
-    // with `--list` it is the list's, so the report goes there only if one
-    // was asked for by name.
-    let target = report::Target::of(args.output.as_deref(), args.format);
+    // Where `outputs::plan` says.
     let mut went = None;
-    let stdout_taken = gui.is_some() || !args.list.is_empty();
-    if !stdout_taken || args.output.as_deref().is_some_and(|p| p != stdout_path()) {
-        timed!(36, report::write_with(&target, &scan, args.suggest, Some(report::Pairs { files, list: &pairs })))?;
-        went = target.file();
+    if let Some(r) = &cx.outputs.report {
+        timed!(36, report::write_with(r, &scan, args.suggest, Some(report::Pairs { files, list: &pairs })))?;
+        went = r.to.file();
     }
-    if !args.list.is_empty() {
+    if cx.outputs.list {
         against::list(&scan, &answers, &args.list, args.null)?;
     }
     let summary = if files.is_empty() { "No images found.".to_string() } else { summary };

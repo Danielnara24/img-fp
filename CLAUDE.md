@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.64.0)
+## Status (0.65.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -483,6 +483,33 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   one cell swapped); `ref.sh` battery against 0.63.0 the same way. Code lines
   (no comments, blanks or tests) 1,800 -> 1,782 (`report.rs` 696 -> 524,
   `table.rs` 137, `write_dump` +17).
+- 0.65.0 (where a run's output goes, `outputs.rs`; see *Where a run's
+  output goes*): every rule about the report, `--dump`, `--log-file` and
+  `--list` is `outputs::plan`, asked by the run and the window's pre-check
+  alike, and each output is a `To` written one way. Before: four checks in
+  `lib.rs`, each building its own list of the flags; whether the report went
+  to stdout decided three times; four stdout writers. Changed on purpose
+  (user's decision): (a) the log through a descriptor, FIFO or device is
+  written as opened, as `-o` is (`--log-file /dev/stdout >> run.log` emptied
+  `run.log`); (b) `--dump -` into a closed pipe ends quietly, as the report
+  does (was exit 1, and no report written); (c) `-o -` under the window is
+  refused (was accepted and not written); (d) the window's pre-check asks
+  every rule the worker does (`--dump -` was refused only once it ran); (e)
+  no output may name the kept scan (`-o .../last-scan/found.json` broke the
+  next `--last`). Proved: a 75-case matrix of flag combinations and
+  destinations (stdout, `./-`, `/dev/stdout` under `>` and `>>`, `/dev/fd/3`,
+  `/dev/null`, FIFOs, links to files not there, folders, missing parents,
+  pictures, two flags on one file, the cache, the kept scan, closed pipes,
+  `--last`, `--against`, `--list`), 0.64.0 against new: exit code, stdout,
+  stderr and every file left identical in 69, the other 6 exactly (a), (b),
+  (e); the window's worker for (c); the quick `ref.sh` battery and
+  `last.sh` identical, `lastag.sh` but for "N minutes ago". Code lines (no
+  comments, blanks or tests) in the files touched 3,007 -> 3,030 (`lib.rs`
+  -70, `report.rs` -151 of which ~145 moved, `outputs.rs` 265): simpler, not
+  smaller. Also: 0.62.0-0.64.0 were never released: the compare view's
+  arrows called `f64::hypot`, which made the window need `hypot@GLIBC_2.35`,
+  and the release check refused it (`gui::results::length` now); 0.65.0 is
+  the first release since 0.61.0.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -585,6 +612,8 @@ src/
                 as the report, --last and the window read it
   report.rs     text / CSV / JSON reports of either kind, written from an
                 Outcome; each layout's rows a `table::Table`
+  outputs.rs    where a run's outputs go (`plan`: report, dump, log, list;
+                every rule about them), and how each is written (`To`)
   table.rs      a record written as columns (`Column`, `Cell`): CSV header,
                 CSV cells and JSON keys from one list
   suggest.rs    KEEP / DELETE / REVIEW per file
@@ -807,6 +836,31 @@ shapes.
 **Adding a column**: one `Column` in its table (`group_columns`,
 `answer_columns`, `pipeline::dump_columns`). Not a field, a header entry and
 a cell.
+
+## Where a run's output goes (`outputs.rs`)
+
+A run's outputs (the report, `--dump`, `--log-file`, `--list`) are placed
+once, before anything is written, by `outputs::plan`, which holds every rule
+about them: the report goes to stdout unless `-o` names a file or `--list`
+or the window's progress has stdout; at most one output on stdout, and
+under the window none; none names a picture; no two name one file, nor the
+cache or the kept scan (`last-scan/found.json`, `scan.json`) while the run
+uses them; each file written at the end can be (`check_writable`). The
+window's pre-check (`check_args`) asks the same `plan`. Each output is a
+`To` (`Stdout` or a path) and is written one way: `To::write` (stdout
+through a buffer, a reader gone is the pipeline's end, an error names the
+output; a file whole, `write_whole`), or for the log, written as the run
+goes, `To::open_log`. A path is written as what it names (`Dest`): a
+descriptor (`/dev/stdout`, `>(...)`, `>>`) as opened, a FIFO or device in
+place, only a regular file replaced. Before 0.65.0 the rules were four
+checks in `lib.rs`, whether the report went to stdout was decided three
+times (`lib`, `pipeline::finish`, `last::rewrite`), each output wrote stdout
+its own way (`--dump - | head` exited 1), and the log was opened with
+`File::create`, so `--log-file /dev/stdout >> run.log` emptied `run.log`.
+
+**Adding an output**: a field of `Outputs`, set in `plan` with its entry in
+`Outputs::claims`; written through `To`. Not a check in `lib.rs` nor a
+stdout writer of its own.
 
 ## A finished scan (`outcome.rs`)
 
@@ -1167,8 +1221,11 @@ generic `extend`) silently runs the plain copy; check with `objdump`, counting
 `ymm` per symbol. Test both copies agree:
 `RUSTFLAGS="-C target-cpu=x86-64" cargo test --release --lib`.
 
-glibc floor is **2.34**; `release.yml` fails if it moves. f32 libm functions
-(`hypotf` is 2.35) can raise it: check
+glibc floor is **2.34**; `release.yml` fails if it moves. f32 and f64 libm functions
+(`hypotf` and `hypot` are 2.35; 0.34-0.35 and 0.62-0.64 were never released
+for it) can raise it, in either binary: run the workflow's "Verify the
+binaries" step on a `RUSTFLAGS="-C target-cpu=x86-64"` build of both before
+tagging, or at least check
 `objdump -T target/plain/release/img-fp | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1`.
 
 Decoder hazards:
@@ -1352,11 +1409,13 @@ Do not retry without new evidence:
   **Adding a category**: a `problems::Note` variant, its arm in `Note::says`
   (skip or problem, log tag, summary label) and its place in `Note::ALL`;
   callers say `problems.note(Note::X, what)`. Not a counter of its own.
-- `-o`, `--dump`, `--log-file` may not name a picture or each other; at most
-  one may be stdout. Reports and the dump are written whole or not at all
-  (`report::write_whole`: beside the destination, through any symlink, with
-  its mode, then renamed; an interrupt removes the half-written one): a
-  failed write used to leave the last report cut off. `--cache` with `--no-cache` only beside
+- `-o`, `--dump`, `--log-file` may not name a picture, each other, the
+  cache or the kept scan; at most one output may be stdout, none under the
+  window (`outputs::plan`, see *Where a run's output goes*). Reports and
+  the dump are written whole or not at all (`outputs::write_whole`: beside
+  the destination, through any symlink, with its mode, then renamed; an
+  interrupt removes the half-written one): a failed write used to leave the
+  last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
 - **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC15.bin`
   (named for its format, so upgrades start a new file). Records keyed by

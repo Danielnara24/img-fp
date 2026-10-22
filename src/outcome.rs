@@ -427,7 +427,7 @@ impl Outcome {
             content: &self.content,
             kept: &self.kept,
         };
-        crate::report::write_whole(path, |w| serde_json::to_writer(&mut *w, &saved).map_err(std::io::Error::other))
+        crate::outputs::write_whole(path, |w| serde_json::to_writer(&mut *w, &saved).map_err(std::io::Error::other))
     }
 
     /// Read a scan `save` wrote.

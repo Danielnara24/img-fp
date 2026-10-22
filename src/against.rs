@@ -23,7 +23,6 @@
 //! may run through them, and does not look for the rest.
 
 use serde::Serialize;
-use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::outcome::{Asked, Evidence, Match, Member, Outcome};
@@ -147,18 +146,13 @@ pub fn tally(answers: &[Answer]) -> String {
 /// `--list`: the paths with the verdicts asked for, in the report's order,
 /// one a line or NUL-separated, on stdout.
 pub fn list(scan: &Outcome, answers: &[Answer], wanted: &[Verdict], nul: bool) -> anyhow::Result<()> {
-    let mut w = std::io::BufWriter::new(std::io::stdout().lock());
-    let mut go = || -> std::io::Result<()> {
+    crate::outputs::To::Stdout.write("the list", |w| {
         for a in answers.iter().filter(|a| wanted.contains(&a.verdict)) {
             w.write_all(scan.files[a.file].path.as_os_str().as_bytes())?;
             w.write_all(if nul { b"\0" } else { b"\n" })?;
         }
-        w.flush()
-    };
-    match go() {
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        other => Ok(other?),
-    }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

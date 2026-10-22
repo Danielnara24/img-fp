@@ -42,6 +42,7 @@ mod heif;
 mod index;
 pub mod last;
 pub mod outcome;
+mod outputs;
 mod pipeline;
 mod problems;
 mod prof;
@@ -679,8 +680,7 @@ where
 {
     let args = parse(argv).map_err(|e| e.to_string())?;
     validate(&args)?;
-    outputs_are_not_pictures(&args).map_err(|e| e.to_string())?;
-    outputs_are_distinct(&args).map_err(|e| e.to_string())
+    outputs::plan(&args, true).map(drop).map_err(|e| format!("{e:#}"))
 }
 
 /// The combinations of flags clap cannot express.
@@ -799,26 +799,15 @@ pub use decode::{fit_preview, preview, preview_fit};
 /// anyhow's own `main` handling prints the error and supplies the code.
 fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
     validate(args).map_err(anyhow::Error::msg)?;
-    stdout_has_one_reader(args, gui)?;
-    outputs_are_not_pictures(args)?;
-    outputs_are_distinct(args)?;
+    let outputs = outputs::plan(args, gui.is_some())?;
     // Opened before any work, so that a log file that cannot be written is an
     // ordinary fatal error at the top of the run rather than a discovery made
     // an hour into one.
-    let log = Log::open(args.log_file.as_deref())?;
-    // The same for the two files written at the end, which would otherwise
-    // fail after the whole run — a directory named where a file was meant is
-    // the usual way. Checked, not created: a run that dies should not leave an
-    // empty results file, nor truncate the last one.
-    let stdout = Path::new("-");
-    for path in [&args.output, &args.dump].into_iter().flatten().filter(|p| *p != stdout) {
-        report::check_writable(path)?;
-    }
+    let log = Log::open(outputs.log.as_ref())?;
     if args.last {
         let asked = last::Rewrite {
             cache: args.cache.as_deref(),
-            output: args.output.as_deref(),
-            format: args.format,
+            report: outputs.report.as_ref(),
             suggest: args.suggest,
             list: &args.list,
             null: args.null,
@@ -831,106 +820,11 @@ fn execute(args: &Args, gui: Option<&Path>) -> Result<()> {
     }
     interrupt()?;
     let mut problems = Problems::new(&log);
-    let outcome = pipeline::run(args, &log, &mut problems, gui);
+    let outcome = pipeline::run(args, &outputs, &log, &mut problems, gui);
     problems.print_summary();
     outcome?;
     if problems.any() {
         std::process::exit(EXIT_WITH_PROBLEMS);
-    }
-    Ok(())
-}
-
-/// Refuse two outputs that would both be written to stdout.
-///
-/// The report goes there unless `-o` names a file, and `--dump -` and
-/// `--log-file -` go there too; any two of them would be one stream of
-/// interleaved CSV, log lines and report that nothing can read back. Under the
-/// window stdout is the progress channel, so neither may use it at all.
-fn stdout_has_one_reader(args: &Args, gui: Option<&Path>) -> Result<()> {
-    if gui.is_some() && !args.against.is_empty() {
-        anyhow::bail!("--against cannot be used in the window");
-    }
-    if gui.is_some() && args.last {
-        anyhow::bail!("--last cannot be used in the window");
-    }
-    let dash = |p: &Option<PathBuf>| p.as_deref() == Some(stdout_path());
-    let mut on_stdout: Vec<&str> = Vec::new();
-    // `--list` takes stdout's place for the report, which then goes only to
-    // a file `-o` names.
-    let report_there = match args.output.as_deref() {
-        None => args.list.is_empty(),
-        Some(p) => p == stdout_path(),
-    };
-    if gui.is_none() && report_there {
-        on_stdout.push("the report");
-    }
-    if !args.list.is_empty() {
-        on_stdout.push("--list");
-    }
-    if dash(&args.dump) {
-        on_stdout.push("--dump -");
-    }
-    if dash(&args.log_file) {
-        on_stdout.push("--log-file -");
-    }
-    if gui.is_some() && !on_stdout.is_empty() {
-        anyhow::bail!("{} cannot be used here: stdout carries the scan's progress", on_stdout.join(" and "));
-    }
-    if on_stdout.len() > 1 {
-        let fix = if on_stdout[0] == "the report" { "; send the report to a file with -o" } else { "" };
-        anyhow::bail!("{} would both be written to stdout{fix}", on_stdout.join(" and "));
-    }
-    Ok(())
-}
-
-/// Refuse an `-o`, `--dump` or `--log-file` that names a picture.
-///
-/// Each of the three replaces whatever file it names, and nothing asked what
-/// that file was: `img-fp photos -o photos/a.jpg` wrote the report over
-/// `a.jpg`, exit 0, and the report it wrote named `a.jpg` as its group's
-/// representative. The plausible way to get there is a glob — `img-fp -o
-/// *.jpg` is `-o` the first JPEG and a scan of the rest — and the log is the
-/// worst of the three, truncated before anything else has run. A picture is
-/// what this tool is asked to look after, so it never writes over one; a file
-/// that is not a picture, such as last run's report, is written over as
-/// before. Asked before the log is opened, so before anything is written.
-fn outputs_are_not_pictures(args: &Args) -> Result<()> {
-    for (flag, p) in [("-o", &args.output), ("--dump", &args.dump), ("--log-file", &args.log_file)] {
-        let Some(p) = p.as_deref().filter(|p| *p != stdout_path()) else { continue };
-        if decode::is_a_picture(p) {
-            anyhow::bail!("{flag} {} is a picture, and img-fp will not write over one; name another file", p.display());
-        }
-    }
-    Ok(())
-}
-
-/// Refuse two of `-o`, `--dump`, `--log-file` and the cache naming one file.
-///
-/// The log is opened at the start and written a line at a time, and the
-/// report and the dump are written at the end, so two of them on one file
-/// overwrite each other: the report replaced the dump outright, and over the
-/// log it was followed by a run of NUL bytes and the end of the log, written
-/// at the offset the log had reached. Nothing said so, and the run exited 0.
-///
-/// The cache is one of them while the run uses it. `-o` naming it wrote the
-/// report over the analysis of every folder the machine had scanned, with
-/// exit 0, and the next run found "not a cache file" and started again; the
-/// default cache is out of sight, so it is the easiest of the four to name by
-/// mistake.
-fn outputs_are_distinct(args: &Args) -> Result<()> {
-    let cache = (!args.no_cache).then(|| cache::locate(args.cache.as_deref()));
-    let named: Vec<(&str, &Path)> = [("-o", &args.output), ("--dump", &args.dump), ("--log-file", &args.log_file)]
-        .into_iter()
-        .filter_map(|(flag, p)| Some((flag, p.as_deref()?)))
-        .filter(|(_, p)| *p != stdout_path())
-        .chain(cache.as_deref().map(|p| ("the cache", p)))
-        .collect();
-    for (i, (fa, a)) in named.iter().enumerate() {
-        for (fb, b) in &named[i + 1..] {
-            if report::same_destination(a, b) {
-                anyhow::bail!("{fa} and {fb} would both write {}; give each its own file", b.display());
-            }
-        }
     }
     Ok(())
 }
@@ -1114,10 +1008,6 @@ fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn stdout_path() -> &'static Path {
-    Path::new("-")
-}
-
 #[cfg(test)]
 mod tests {
     /// The vocabulary has to scale with the corpus, and the reason is a bug
@@ -1235,25 +1125,6 @@ mod tests {
         }
     }
 
-    /// Two outputs never share stdout, and under the window neither the dump
-    /// nor the log may use it at all.
-    #[test]
-    fn stdout_carries_one_output() {
-        let check = |extra: &[&str], gui: bool| {
-            let args = Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
-            stdout_has_one_reader(&args, gui.then_some(Path::new("/r.json"))).is_ok()
-        };
-        assert!(check(&[], false));
-        assert!(check(&["-o", "r.json", "--dump", "-"], false));
-        assert!(check(&["-o", "r.json", "--log-file", "-"], false));
-        assert!(!check(&["--dump", "-"], false), "the report is on stdout already");
-        assert!(!check(&["-o", "-", "--log-file", "-"], false));
-        assert!(!check(&["-o", "r.json", "--dump", "-", "--log-file", "-"], false));
-        assert!(check(&["--dump", "./-"], false), "a file named - is ./-");
-        assert!(check(&[], true), "the window's report is a file");
-        assert!(!check(&["--dump", "-"], true));
-    }
-
     /// A named cache beside `--no-cache` is the file `--clear-cache` deletes,
     /// and without `--clear-cache` it is refused.
     #[test]
@@ -1265,25 +1136,15 @@ mod tests {
         assert!(check_args(["img-fp", "--cache", "/x.bin", "--no-cache", "."]).is_err());
     }
 
-    /// Two outputs on one file are refused before anything is written.
+    /// The window asks before it starts a scan what the scan would refuse:
+    /// its worker's stdout is the progress channel.
     #[test]
-    fn two_outputs_on_one_file_are_refused() {
-        let args = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
-        let dir = std::env::temp_dir().join(format!("img-fp-outputs-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (r, l) = (dir.join("r.txt"), dir.join("l.txt"));
-        let (r, l) = (r.to_str().unwrap(), l.to_str().unwrap());
-        assert!(outputs_are_distinct(&args(&["-o", r, "--log-file", l])).is_ok());
-        assert!(outputs_are_distinct(&args(&["-o", r, "--log-file", r])).is_err());
-        assert!(outputs_are_distinct(&args(&["-o", r, "--dump", r])).is_err());
-        assert!(outputs_are_distinct(&args(&["--dump", r, "--log-file", r, "-o", l])).is_err());
-        assert!(outputs_are_distinct(&args(&["-o", "-", "--log-file", r])).is_ok());
-        // Nor the cache, while the run uses it.
-        assert!(outputs_are_distinct(&args(&["-o", r, "--cache", r])).is_err());
-        assert!(outputs_are_distinct(&args(&["--log-file", l, "--cache", l])).is_err());
-        assert!(outputs_are_distinct(&args(&["-o", r, "--cache", l])).is_ok());
-        assert!(outputs_are_distinct(&args(&["-o", r, "--cache", r, "--no-cache", "--clear-cache"])).is_ok());
-        std::fs::remove_dir_all(&dir).ok();
+    fn the_window_is_refused_what_its_worker_would_be() {
+        assert_eq!(check_args(["img-fp", "."]), Ok(()));
+        for given in [["--dump", "-"], ["--log-file", "-"], ["-o", "-"]] {
+            let e = check_args(["img-fp"].into_iter().chain(given).chain(["."])).unwrap_err();
+            assert!(e.contains("stdout carries the scan's progress"), "{given:?}: {e}");
+        }
     }
 
     /// Values the thresholds are not measured on are refused by the parser,

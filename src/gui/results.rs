@@ -2996,6 +2996,14 @@ fn axes_origin(frame: &Place) -> Option<(f32, f32)> {
     (area.abs() > 1e-12).then(|| ((cx / (3.0 * area)) as f32, (cy / (3.0 * area)) as f32))
 }
 
+/// `dx.hypot(dy)` without asking libm for it: glibc 2.35 versioned `hypot`
+/// anew, so a window built on a newer system asked for glibc 2.35 and the
+/// release check refused it (0.62.0 to 0.64.0 were never published; 0.34.0
+/// and 0.35.0 the same way, through `hypotf`, see `suggest::hypot`).
+fn length(dx: f64, dy: f64) -> f64 {
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// The two arrows, from `origin` inside the convex `frame`, all in screen
 /// pixels: each one's tip, X (the reference's right) then Y (its up, towards
 /// the top side of its frame). `None` for a map that flattens the picture.
@@ -3006,7 +3014,7 @@ fn axis_tips(origin: (f64, f64), axes: &[f64; 4], frame: &[(f64, f64)]) -> Optio
         return None;
     }
     let tip = |(dx, dy): (f64, f64)| {
-        let len = dx.hypot(dy);
+        let len = length(dx, dy);
         let u = (dx / len, dy / len);
         let reach = (AXIS_REACH * to_edge(frame, origin, u)).max(AXIS_LEAST);
         (origin.0 + reach * u.0, origin.1 + reach * u.1)
@@ -3081,7 +3089,7 @@ fn paint_overlay(cr: &gtk::cairo::Context, (w, h): (f64, f64), (pw, ph): (f64, f
     cr.set_line_join(gtk::cairo::LineJoin::Round);
     let arrows = [(tips[0], AXIS_X, "X"), (tips[1], AXIS_Y, "Y")].map(|(tip, colour, name)| {
         let (dx, dy) = (tip.0 - origin.0, tip.1 - origin.1);
-        let len = dx.hypot(dy);
+        let len = length(dx, dy);
         // Thinner on a short arrow, so a small frame's do not crowd it.
         (tip, colour, name, len, (dx / len, dy / len), (len / 30.0).clamp(1.5, 2.5))
     });

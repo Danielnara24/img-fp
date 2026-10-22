@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crate::against;
 use crate::outcome::Outcome;
+use crate::outputs::Report;
 use crate::report;
 use crate::suggest::{self, Lapse};
 
@@ -210,8 +211,8 @@ pub mod paths {
 /// What `--last` was asked for.
 pub struct Rewrite<'a> {
     pub cache: Option<&'a Path>,
-    pub output: Option<&'a Path>,
-    pub format: Option<report::Format>,
+    /// Where `outputs::plan` sends the report, if anywhere.
+    pub report: Option<&'a Report>,
     pub suggest: suggest::Mode,
     /// `--list`'s verdicts, for a scan against a library, and `--null`.
     pub list: &'a [against::Verdict],
@@ -266,12 +267,8 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
     };
     let (gone, changed) = (gone.len(), changed.len());
 
-    // With `--list`, its paths take stdout, and the report goes only to a
-    // file `-o` names.
-    let target = report::Target::of(asked.output, asked.format);
-    let report = asked.list.is_empty() || matches!(target.sink, report::Sink::File(_));
-    if report {
-        report::write_with(&target, &scan, asked.suggest, None)?;
+    if let Some(r) = asked.report {
+        report::write_with(r, &scan, asked.suggest, None)?;
     }
     if !asked.list.is_empty() {
         against::list(&scan, &answers, asked.list, asked.null)?;
@@ -279,9 +276,9 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
 
     let when = ago(notes.finished);
     let said = if against { against::tally(&answers) } else { groups_said(scan.shown().count()) };
-    let mut lines = vec![match &target.sink {
-        report::Sink::File(p) if report => format!("{said} from the scan {when} -> {}", p.display()),
-        _ => format!("{said} from the scan {when}"),
+    let mut lines = vec![match asked.report.and_then(|r| r.to.file()) {
+        Some(p) => format!("{said} from the scan {when} -> {}", p.display()),
+        None => format!("{said} from the scan {when}"),
     }];
     if gone > 0 {
         lines.push(format!("{gone} {} gone since the scan {} left out", if gone == 1 { "file" } else { "files" }, if gone == 1 { "is" } else { "are" }));
@@ -306,7 +303,7 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
             )
         });
     }
-    if report && target.format == report::Format::Json {
+    if asked.report.is_some_and(|r| r.format == report::Format::Json) {
         lines.push(format!("The JSON has the {} and no \"pairs\" list, which only a scan writes.", if against { "verdicts" } else { "groups" }));
     }
     Ok(lines)
@@ -334,6 +331,7 @@ fn ago(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outputs::To;
     use crate::outcome::{Evidence, File, Group, Head, Member, Relation};
     use crate::suggest::Action;
     use std::os::unix::ffi::OsStringExt;
@@ -347,7 +345,8 @@ mod tests {
     /// asked to write it as `name`.
     fn last(root: &Path, name: &str, suggest: suggest::Mode) -> (Vec<String>, Vec<u8>) {
         let out = root.join(name);
-        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: Some(&out), format: None, suggest, list: &[], null: false };
+        let to = Report::new(To::Path(out.clone()), None);
+        let asked = Rewrite { cache: Some(&root.join("c.bin")), report: Some(&to), suggest, list: &[], null: false };
         let said = rewrite(&asked).unwrap();
         (said, std::fs::read(out).unwrap())
     }
@@ -395,7 +394,7 @@ mod tests {
         for (name, format) in [("txt", report::Format::Txt), ("csv", report::Format::Csv), ("json", report::Format::Json)] {
             for mode in [suggest::Mode::Content, suggest::Mode::Correlation, suggest::Mode::Representative] {
                 let first = root.join(format!("first.{name}"));
-                report::write_with(&report::Target { sink: report::Sink::File(first.clone()), format }, &scan, mode, None).unwrap();
+                report::write_with(&Report { to: To::Path(first.clone()), format }, &scan, mode, None).unwrap();
                 let (said, again) = last(&root, &format!("again.{name}"), mode);
                 assert_eq!(again, std::fs::read(first).unwrap(), "{name} {mode:?}");
                 assert_eq!(said.len(), 1 + (format == report::Format::Json) as usize, "{said:?}");
@@ -467,7 +466,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(NOTES), serde_json::to_vec(&Notes::now(false, 0, 1, String::new(), vec![])).unwrap()).unwrap();
         std::fs::write(dir.join("result.json"), b"{}").unwrap();
-        let asked = Rewrite { cache: Some(&root.join("c.bin")), output: None, format: None, suggest: suggest::Mode::Content, list: &[], null: false };
+        let asked = Rewrite { cache: Some(&root.join("c.bin")), report: None, suggest: suggest::Mode::Content, list: &[], null: false };
         let e = rewrite(&asked).unwrap_err().to_string();
         assert!(e.contains("earlier version"), "{e}");
         let _ = std::fs::remove_dir_all(&root);

@@ -32,9 +32,8 @@
 //! counter is ever wanted from inside a `par_iter`, that is the assumption to
 //! revisit.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::io::Write;
-use std::path::Path;
 use std::sync::Mutex;
 
 /// Worked examples kept per category, for the console.
@@ -60,20 +59,14 @@ const MAX_SAMPLES: usize = 10;
 /// debugging flag's alone, and small: a few microseconds a line, so even a
 /// walk that skips a quarter of a million files pays well under a second.
 ///
-/// `-` is stdout, as it is for `-o`; a file really named `-` is `./-`.
+/// Where it goes is `outputs::To::open_log`'s.
 #[derive(Default)]
 pub struct Log(Option<Mutex<Box<dyn Write + Send>>>);
 
 impl Log {
-    pub fn open(path: Option<&Path>) -> Result<Log> {
-        let Some(path) = path else { return Ok(Log(None)) };
-        let mut f: Box<dyn Write + Send> = if path == Path::new("-") {
-            Box::new(std::io::stdout())
-        } else {
-            Box::new(
-                std::fs::File::create(path).with_context(|| format!("could not create the log file {}", path.display()))?,
-            )
-        };
+    pub fn open(to: Option<&crate::outputs::To>) -> Result<Log> {
+        let Some(to) = to else { return Ok(Log(None)) };
+        let mut f = to.open_log()?;
         // `args_os`, not `args`: the latter panics on an argument that is not
         // UTF-8, and a folder with such a name is an ordinary thing to scan.
         let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -441,7 +434,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("run.log");
         {
-            let log = Log::open(Some(&path)).unwrap();
+            let log = Log::open(Some(&crate::outputs::To::Path(path.clone()))).unwrap();
             let mut p = p(&log);
             for i in 0..50 {
                 p.note(Note::Unreadable, format_args!("/x/{i}.jpg: not an image"));
