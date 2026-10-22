@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.63.0)
+## Status (0.64.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -465,6 +465,24 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   included. Cached IMGS-ALL (ABBA): peak RssAnon+swap 608 / 595 MB base,
   455 / 457 new; CPU 470.5 / 476.1 base, 444.9 / 459.1 new. Code lines (no
   comments, blanks or tests) in the files touched 3,691 -> 3,699.
+- 0.64.0 (the report's records, `table.rs`; see *The report's records*):
+  a row of a report or of `--dump` is written from one list of `Column`s
+  (name, which layouts carry it, how its `Cell` is read off the row), from
+  which the CSV header, the CSV cells and the JSON keys are all read. Before:
+  a column was a field of `report::Row` / `AnswerRow` with serde attributes,
+  a line where the row was filled in, an entry in `CSV_HEADER: [&str; 15]` /
+  `ANSWERS_CSV_HEADER: [&str; 20]` (hand-counted) and a cell in a list that
+  matched the header by position only (the dump's too), so a swapped cell
+  compiled and passed; a path was three fields (text, bytes, raw) written by
+  hand seven times; the six evidence columns were copied into every place.
+  Changed on purpose (user's decision): a group row's JSON keys are in the
+  CSV's order, so `path` follows `action` (was first). Proved: a random
+  differential test (old writers in a temporary test module, 20,000 scans and
+  libraries with odd names, every relation, lapses, all three formats and
+  rules): text and CSV byte-identical, JSON equal as parsed (it fails with
+  one cell swapped); `ref.sh` battery against 0.63.0 the same way. Code lines
+  (no comments, blanks or tests) 1,800 -> 1,782 (`report.rs` 696 -> 524,
+  `table.rs` 137, `write_dump` +17).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -566,7 +584,9 @@ src/
                 scanned file's pairs; evidence, content rule's suggestions),
                 as the report, --last and the window read it
   report.rs     text / CSV / JSON reports of either kind, written from an
-                Outcome
+                Outcome; each layout's rows a `table::Table`
+  table.rs      a record written as columns (`Column`, `Cell`): CSV header,
+                CSV cells and JSON keys from one list
   suggest.rs    KEEP / DELETE / REVIEW per file
   against.rs    --against: each scanned file's verdict, read off an Outcome
   last.rs       --last (the last scan's Outcome, kept beside the cache)
@@ -766,6 +786,27 @@ names; `--against` took the first pair met.
 
 **Adding something a pair says**: a field of `Pair`, set in
 `Stated::pair`. Not a side table keyed by its two files.
+
+## The report's records (`table.rs`)
+
+A row the run writes as columns (a group member, a file against a library,
+a `--dump` verdict) is a `Table`: a list of `Column`s, each its name, whether
+the CSV carries it, what the JSON does with it (`Json::Always`, a `null`
+when there is nothing; `Present`, a key only when there is something;
+`Never`) and a function reading its `Cell` off the row. The CSV header, the
+CSV cells and the JSON object are all read off that list, in its order, so
+the formats cannot drift apart and a CSV cannot shift. A `Cell::Path` is
+written as its own bytes in the CSV and as `name` plus `name_bytes` (when
+not UTF-8) in the JSON, everywhere. The pair's six columns are
+`report::evidence_columns`, shared by both layouts. The text layout is
+sentences, not columns, and is written by hand from the same rows. The
+JSON's `pairs` (`report::Written`, 1.1 M records, derived serde) and
+`failures` (a `serde_json::Value` kept in the `Outcome`) keep their own
+shapes.
+
+**Adding a column**: one `Column` in its table (`group_columns`,
+`answer_columns`, `pipeline::dump_columns`). Not a field, a header entry and
+a cell.
 
 ## A finished scan (`outcome.rs`)
 

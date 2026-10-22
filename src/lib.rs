@@ -55,6 +55,7 @@ mod spill;
 mod same;
 mod stated;
 mod suggest;
+mod table;
 pub use outcome::{Evidence, Outcome, Relation};
 pub use suggest::{Action, Lapse, Mode as SuggestMode};
 pub use cache::file_name as cache_file_name;

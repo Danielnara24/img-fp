@@ -1169,45 +1169,66 @@ struct Dump {
     propagated: Vec<Edge>,
 }
 
-/// Write `--dump`: one row per verdict, with the figures `replay.py` reads.
+/// A verdict as `--dump` writes it: the edge, which question made it, and
+/// the run's files, which its row names.
+struct Dumped<'a> {
+    e: &'a Edge,
+    kind: &'static str,
+    files: &'a [PathBuf],
+    items: &'a [Item],
+}
+
+/// `--dump`'s columns: the two files, then the figures `replay.py` reads,
+/// then the transform from `a`'s working image to `b`'s and the two working
+/// images' sizes, which the suggestion's frame tests read. Each path is its
+/// own bytes, quoted the way CSV quotes: written with `{:?}`, a name holding
+/// a quote or a comma split into two columns, and a tab or a non-UTF-8 byte
+/// came out as an escape that names no file.
+fn dump_columns<'a>() -> table::Table<Dumped<'a>> {
+    use table::{Cell, Column, Json};
+    fn col<'a>(name: &'static str, cell: for<'r> fn(&'r Dumped<'a>) -> Cell<'r>) -> Column<Dumped<'a>> {
+        Column { name, csv: true, json: Json::Never, cell }
+    }
+    fn m<'r, const K: usize>(r: &'r Dumped) -> Cell<'r> {
+        Cell::Fixed(r.e.v.m[K], 6)
+    }
+    table::Table(vec![
+        col("a", |r| Cell::Path(&r.files[r.e.ends().0])),
+        col("b", |r| Cell::Path(&r.files[r.e.ends().1])),
+        col("kind", |r| Cell::Text(r.kind.into())),
+        col("n_match", |r| Cell::Count(r.e.v.n_match.into())),
+        col("n_in", |r| Cell::Count(r.e.v.n_in.into())),
+        col("ov_a", |r| Cell::Fixed(r.e.v.ov_a, 4)),
+        col("ov_b", |r| Cell::Fixed(r.e.v.ov_b, 4)),
+        col("scale", |r| Cell::Fixed(r.e.v.scale, 5)),
+        col("rot", |r| Cell::Fixed(r.e.v.rot_deg, 1)),
+        col("blk", |r| Cell::Fixed(r.e.v.blk, 4)),
+        col("blk_n", |r| Cell::Count(r.e.v.blk_n.into())),
+        col("ncc", |r| Cell::Fixed(r.e.v.ncc, 4)),
+        col("centred", |r| Cell::Count(r.e.v.centred.into())),
+        col("inverted", |r| Cell::Count(r.e.inverted().into())),
+        col("blk_min", |r| Cell::Fixed(r.e.v.blk_min, 4)),
+        col("m0", m::<0>),
+        col("m1", m::<1>),
+        col("m2", m::<2>),
+        col("m3", m::<3>),
+        col("m4", m::<4>),
+        col("m5", m::<5>),
+        col("aw", |r| Cell::Count(r.items[r.e.ends().0].feats.w.into())),
+        col("ah", |r| Cell::Count(r.items[r.e.ends().0].feats.h.into())),
+        col("bw", |r| Cell::Count(r.items[r.e.ends().1].feats.w.into())),
+        col("bh", |r| Cell::Count(r.items[r.e.ends().1].feats.h.into())),
+    ])
+}
+
+/// Write `--dump`: one row per verdict (`dump_columns`).
 fn write_dump(cx: &Ctx, path: &Path, files: &[PathBuf], items: &[Item], direct: &[Edge], dump: Dump) -> Result<()> {
     let write = |w: &mut dyn Write| -> std::io::Result<()> {
-        writeln!(w, "a,b,kind,n_match,n_in,ov_a,ov_b,scale,rot,blk,blk_n,ncc,centred,inverted,blk_min,m0,m1,m2,m3,m4,m5,aw,ah,bw,bh")?;
+        let columns = dump_columns();
+        columns.csv_header(w, b',')?;
         let kind = |e: &Edge| if e.v.variant != Variant::SAME { "variant" } else { "direct" };
-        for (e, kind) in direct.iter().map(|e| (e, kind(e))).chain(dump.propagated.iter().map(|e| (e, "propagated"))) {
-            let ((a, b), v) = (e.ends(), &e.v);
-            // The paths as their own bytes, quoted the way CSV quotes:
-            // written with `{:?}`, a name holding a quote or a comma split
-            // into two columns, and a tab or a non-UTF-8 byte came out as
-            // an escape that names no file.
-            use std::os::unix::ffi::OsStrExt;
-            let figures = [
-                kind.to_string(),
-                v.n_match.to_string(),
-                v.n_in.to_string(),
-                format!("{:.4}", v.ov_a),
-                format!("{:.4}", v.ov_b),
-                format!("{:.5}", v.scale),
-                format!("{:.1}", v.rot_deg),
-                format!("{:.4}", v.blk),
-                v.blk_n.to_string(),
-                format!("{:.4}", v.ncc),
-                (v.centred as u8).to_string(),
-                (e.inverted() as u8).to_string(),
-                format!("{:.4}", v.blk_min),
-            ];
-            // The transform from `a`'s working image to `b`'s, and the two
-            // working images' sizes, which the suggestion's frame tests read.
-            let figures: Vec<String> = figures
-                .into_iter()
-                .chain(v.m.iter().map(|x| format!("{x:.6}")))
-                .chain([items[a].feats.w, items[a].feats.h, items[b].feats.w, items[b].feats.h].map(|x| x.to_string()))
-                .collect();
-            let mut row: Vec<&[u8]> = vec![files[a].as_os_str().as_bytes(), files[b].as_os_str().as_bytes()];
-            row.extend(figures.iter().map(|f| f.as_bytes()));
-            report::csv_row_with(w, &row, b',')?;
-        }
-        Ok(())
+        let rows = direct.iter().map(|e| (e, kind(e))).chain(dump.propagated.iter().map(|e| (e, "propagated")));
+        rows.map(|(e, kind)| Dumped { e, kind, files, items }).try_for_each(|r| columns.csv(w, &r, b','))
     };
     // `-` is stdout, which `stdout_has_one_reader` has kept for it alone;
     // a file is written whole or not at all, as the report is.
@@ -1311,7 +1332,7 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
         .filter_map(|(i, it)| {
             let e = it.read.error().filter(|_| !not_asked[i] && it.read != Read::Refused(Refused::CameraRaw))?;
             let mut f = serde_json::json!({"path": files[i].display().to_string(), "error": e});
-            if let Some(b) = report::raw_bytes(&files[i]) {
+            if let Some(b) = table::raw_bytes(&files[i]) {
                 f["path_bytes"] = b.into();
             }
             Some(f)

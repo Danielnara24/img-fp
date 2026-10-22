@@ -21,9 +21,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::against::{self, Answer};
-use crate::outcome::{Evidence, Member, Outcome, Relation};
+use crate::outcome::{Evidence, File, Member, Outcome, Relation};
 use crate::stated::Pair;
 use crate::suggest::{Action, Mode};
+use crate::table::{self, both, raw_bytes, Cell, Column, Json, Table};
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -249,21 +250,6 @@ fn resolve(path: &Path) -> (PathBuf, Option<i32>) {
     (p, None)
 }
 
-/// A path's bytes, when they are not UTF-8 and so cannot be a JSON string.
-///
-/// Every path in the JSON is written as text, and a name that is not UTF-8
-/// comes out of that with `U+FFFD` where its odd bytes were: readable, and the
-/// name of no file on disk. Anything that acts on the report — a script
-/// deleting the matches, or the window moving one to the Trash — needs the
-/// name itself, so such a path also carries its bytes beside it, as an array
-/// of numbers. A UTF-8 path, which is nearly every path, carries nothing.
-pub fn raw_bytes(p: &Path) -> Option<Vec<u8>> {
-    match p.to_str() {
-        Some(_) => None,
-        None => Some(p.as_os_str().as_bytes().to_vec()),
-    }
-}
-
 /// The stated pairs, as the JSON's `pairs` list writes them: by the run's
 /// file numbers, named from `files` as they are written.
 ///
@@ -366,18 +352,18 @@ pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<Pai
 fn write_layout(w: &mut dyn Write, format: Format, scan: &Outcome, mode: Mode, pairs: Option<Pairs>) -> std::io::Result<()> {
     if scan.against.is_some() {
         let answers = against::answers(scan);
-        let rows = answer_rows(scan, &answers);
+        let lines = answer_lines(scan, &answers);
         return match format {
-            Format::Json => write_answers_json(w, scan, &rows, pairs),
-            Format::Txt => write_answers_txt(w, &rows),
-            Format::Csv => write_answers_csv(w, &rows),
+            Format::Json => write_answers_json(w, scan, &lines, pairs),
+            Format::Txt => write_answers_txt(w, &lines),
+            Format::Csv => write_csv(w, &answer_columns(), &lines),
         };
     }
     let said = Said::of(scan, mode);
     match format {
         Format::Json => write_json(w, &said, pairs),
         Format::Txt => write_txt(w, &said),
-        Format::Csv => write_csv(w, &said),
+        Format::Csv => write_csv(w, &group_columns(), &said.lines().flatten().collect::<Vec<_>>()),
     }
 }
 
@@ -395,51 +381,40 @@ impl<'a> Said<'a> {
         Said { scan, mode, actions: scan.actions(mode), groups: scan.shown().collect() }
     }
 
-    /// A group's rows, representative first. A file in two groups has a row
-    /// in each, because its evidence differs: each row is its pair with
+    /// Each group's lines, representative first. A file in two groups has a
+    /// line in each, because its evidence differs: each is its pair with
     /// *that* group's representative.
-    fn rows(&self, g: &'a [Member]) -> impl Iterator<Item = Row<'a>> + '_ {
+    fn lines(&self) -> impl Iterator<Item = Vec<Line<'_>>> + '_ {
         let files = &self.scan.files;
-        g.iter().map(move |m| {
-            let f = &files[m.file];
-            let action = self.actions[m.file];
-            let kept = if self.mode == Mode::Content { self.scan.kept_copy(m.file) } else { None };
-            let kept = kept.filter(|_| action == Some(Action::Delete)).map(|k| &files[k].path);
-            let p = m.with;
-            Row {
-                path: f.path.display().to_string(),
-                path_bytes: raw_bytes(&f.path),
-                raw: &f.path,
-                role: if p.is_none() { "representative" } else { "match" },
-                action: action.map(Action::as_str),
-                width: f.dims.map(|d| d.0),
-                height: f.dims.map(|d| d.1),
-                size: f.bytes.map(format_size),
-                size_bytes: f.bytes,
-                relation: p.map(|p| p.relation.as_str()),
-                aligned_points: p.and_then(|p| p.aligned_points),
-                frame_overlap: p.map(|p| p.frame_overlap),
-                pixel_correlation: p.map(|p| p.pixel_correlation),
-                mirrored: p.map(|p| p.mirrored),
-                inverted: p.map(|p| p.inverted),
-                with: p,
-                damaged: f.damaged,
-                kept_copy: kept.map(|k| k.display().to_string()),
-                kept_copy_bytes: kept.and_then(|k| raw_bytes(k)),
-            }
+        self.groups.iter().enumerate().map(move |(group, g)| {
+            g.iter()
+                .map(|m| {
+                    let action = self.actions[m.file];
+                    let kept = if self.mode == Mode::Content { self.scan.kept_copy(m.file) } else { None };
+                    let kept = kept.filter(|_| action == Some(Action::Delete)).map(|k| files[k].path.as_path());
+                    Line { group, file: &files[m.file], action, with: m.with, kept }
+                })
+                .collect()
         })
     }
 }
 
-/// One group as the JSON states it: the text report's block, with each row
-/// an object whose keys are the CSV's columns.
-#[derive(Serialize)]
-struct JsonGroup<'a> {
-    group: String,
-    representative: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    representative_bytes: Option<Vec<u8>>,
-    files: Vec<Row<'a>>,
+/// One group as the JSON states it: the text report's block, each line an
+/// object whose keys are the CSV's columns.
+struct JsonGroup<'t, 'a> {
+    lines: Vec<Line<'a>>,
+    columns: &'t Table<Line<'a>>,
+}
+
+impl Serialize for JsonGroup<'_, '_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("group", &group_name(self.lines[0].group))?;
+        table::path_entry(&mut m, "representative", &self.lines[0].file.path)?;
+        m.serialize_entry("files", &self.columns.rows(&self.lines))?;
+        m.end()
+    }
 }
 
 /// The JSON, one group, pair and failure to a line.
@@ -449,15 +424,8 @@ struct JsonGroup<'a> {
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
 fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<Pairs>) -> std::io::Result<()> {
-    let groups: Vec<JsonGroup> = said
-        .groups
-        .iter()
-        .enumerate()
-        .map(|(gi, g)| {
-            let rep = &said.scan.files[g[0].file].path;
-            JsonGroup { group: group_name(gi), representative: rep.display().to_string(), representative_bytes: raw_bytes(rep), files: said.rows(g).collect() }
-        })
-        .collect();
+    let columns = group_columns();
+    let groups: Vec<JsonGroup> = said.lines().map(|lines| JsonGroup { lines, columns: &columns }).collect();
     write_head(w, said.scan, said.mode)?;
     list(w, "groups", &groups, pairs.is_none())?;
     if let Some(pairs) = pairs {
@@ -541,48 +509,74 @@ fn group_name(gi: usize) -> String {
     format!("group_{}", gi + 1)
 }
 
-/// One file of one group, as all three layouts state it: the CSV writes each
-/// field as a column, the JSON as a key, and the text as a clause.
+/// A line that states one pair, and so the columns of what it rests on.
 ///
 /// `None` is a figure that was not measured, and it is an empty cell or a
-/// `null` rather than a zero: the representative's evidence (it is what the
+/// `null` rather than a zero: a representative's evidence (it is what the
 /// others were compared with), `aligned_points` on a pair no keypoints vouch
-/// for, `width` on a header the probe cannot read.
-#[derive(Serialize)]
-struct Row<'a> {
-    path: String,
-    /// `path` as bytes, for a name that is not UTF-8; see `raw_bytes`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_bytes: Option<Vec<u8>>,
-    /// The path itself, which the text and the CSV write as it is.
-    #[serde(skip)]
-    raw: &'a Path,
-    role: &'static str,
-    /// KEEP, DELETE or REVIEW: what the run suggests doing with the file,
-    /// which is one answer for the file in every group it is in.
-    action: Option<&'static str>,
-    width: Option<u32>,
-    height: Option<u32>,
-    size: Option<String>,
-    size_bytes: Option<u64>,
-    relation: Option<&'static str>,
-    aligned_points: Option<u32>,
-    frame_overlap: Option<f32>,
-    pixel_correlation: Option<f32>,
-    mirrored: Option<bool>,
-    inverted: Option<bool>,
-    /// The pair these figures are, for the text's clause.
-    #[serde(skip)]
+/// for.
+trait Paired {
+    fn with(&self) -> Option<Evidence>;
+}
+
+/// A pair's columns, in every layout that states one.
+fn evidence_columns<R: Paired>() -> [Column<R>; 6] {
+    [
+        both("relation", |r| Cell::of(r.with(), |e| Cell::Text(e.relation.as_str().into()))),
+        both("aligned_points", |r| Cell::of(r.with().and_then(|e| e.aligned_points), |n| Cell::Count(n.into()))),
+        both("frame_overlap", |r| Cell::of(r.with(), |e| Cell::Figure(e.frame_overlap))),
+        both("pixel_correlation", |r| Cell::of(r.with(), |e| Cell::Figure(e.pixel_correlation))),
+        both("mirrored", |r| Cell::of(r.with(), |e| Cell::Yes(e.mirrored))),
+        both("inverted", |r| Cell::of(r.with(), |e| Cell::Yes(e.inverted))),
+    ]
+}
+
+/// A file's frame, `None` where the header could not be read.
+fn width(f: &File) -> Cell<'static> {
+    Cell::of(f.dims, |d| Cell::Count(d.0.into()))
+}
+
+fn height(f: &File) -> Cell<'static> {
+    Cell::of(f.dims, |d| Cell::Count(d.1.into()))
+}
+
+/// One file of one group, as every layout states it: its pair with that
+/// group's representative, and what the rule says of it.
+struct Line<'a> {
+    group: usize,
+    file: &'a File,
+    /// KEEP, DELETE or REVIEW: one answer for the file in every group it is
+    /// in.
+    action: Option<Action>,
     with: Option<Evidence>,
-    /// The file decoded only in part. Written only when it did.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    damaged: bool,
     /// For a DELETE, the kept file that shows everything this one does.
-    /// The JSON's alone: the text and the CSV keep their columns.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kept_copy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kept_copy_bytes: Option<Vec<u8>>,
+    kept: Option<&'a Path>,
+}
+
+impl Paired for Line<'_> {
+    fn with(&self) -> Option<Evidence> {
+        self.with
+    }
+}
+
+/// The groups' columns. `group` is the CSV's alone, since the JSON holds
+/// each line inside its group, and `kept_copy` the JSON's alone: the text
+/// and the CSV keep the columns they had.
+fn group_columns<'a>() -> Table<Line<'a>> {
+    let mut c: Vec<Column<Line>> = vec![
+        Column { name: "group", csv: true, json: Json::Never, cell: |r| Cell::Text(group_name(r.group).into()) },
+        both("role", |r| Cell::Text(if r.with.is_none() { "representative" } else { "match" }.into())),
+        both("action", |r| Cell::of(r.action, |a| Cell::Text(a.as_str().into()))),
+        both("path", |r| Cell::Path(&r.file.path)),
+        both("width", |r| width(r.file)),
+        both("height", |r| height(r.file)),
+        both("size", |r| Cell::of(r.file.bytes, |b| Cell::Text(format_size(b).into()))),
+        both("size_bytes", |r| Cell::of(r.file.bytes, Cell::Count)),
+    ];
+    c.extend(evidence_columns());
+    c.push(Column { name: "damaged", csv: true, json: Json::Present, cell: |r| Cell::flag(r.file.damaged) });
+    c.push(Column { name: "kept_copy", csv: false, json: Json::Present, cell: |r| r.kept.map_or(Cell::None, Cell::Path) });
+    Table(c)
 }
 
 /// Width of the role column, comma included: `MATCH,`.
@@ -590,26 +584,30 @@ const ROLE_COLUMN: usize = 6;
 /// Width of the action column, comma included: `DELETE,`.
 const ACTION_COLUMN: usize = 7;
 
+/// A frame as the text writes it.
+fn dims_text(dims: Option<(u32, u32)>) -> String {
+    match dims {
+        Some((w, h)) => format!("{w}x{h}"),
+        None => "-".into(),
+    }
+}
+
 /// One block per group, representative first, the layout `vid-fp`'s text
 /// report has: the role leads at a fixed width so it forms a column, and the
 /// path trails because it is the one field with no bounded length. Every
 /// figure carries its name, since there is no header to say which is which.
 fn write_txt(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
-    for (gi, g) in said.groups.iter().enumerate() {
+    for (gi, g) in said.lines().enumerate() {
         writeln!(w, "{}: {} files", group_name(gi), g.len())?;
-        for r in said.rows(g) {
-            let role = if r.role == "representative" { "REP," } else { "MATCH," };
-            let action = format!("{},", r.action.unwrap_or("-"));
-            let dims = match (r.width, r.height) {
-                (Some(w), Some(h)) => format!("{w}x{h}"),
-                _ => "-".into(),
-            };
-            let size = r.size.as_deref().unwrap_or("-");
-            let damaged = if r.damaged { "DAMAGED, " } else { "" };
+        for r in g {
+            let role = if r.with.is_none() { "REP," } else { "MATCH," };
+            let action = format!("{},", r.action.map_or("-", Action::as_str));
+            let size = r.file.bytes.map_or_else(|| "-".into(), format_size);
+            let damaged = if r.file.damaged { "DAMAGED, " } else { "" };
             // The path as its own bytes, as `ls` would print it: a name that
             // is not UTF-8 is still the name of the file.
-            write!(w, "\t{role:<ROLE_COLUMN$} {action:<ACTION_COLUMN$} {dims}, {size}, {damaged}{}", evidence(r.with))?;
-            w.write_all(r.raw.as_os_str().as_bytes())?;
+            write!(w, "\t{role:<ROLE_COLUMN$} {action:<ACTION_COLUMN$} {}, {size}, {damaged}{}", dims_text(r.file.dims), evidence(r.with))?;
+            w.write_all(r.file.path.as_os_str().as_bytes())?;
             writeln!(w)?;
         }
         writeln!(w)?;
@@ -638,209 +636,83 @@ fn evidence(e: Option<Evidence>) -> String {
     s
 }
 
-/// The CSV's columns: `group`, then a `Row`'s fields in its order.
-const CSV_HEADER: [&str; 15] = [
-    "group",
-    "role",
-    "action",
-    "path",
-    "width",
-    "height",
-    "size",
-    "size_bytes",
-    "relation",
-    "aligned_points",
-    "frame_overlap",
-    "pixel_correlation",
-    "mirrored",
-    "inverted",
-    "damaged",
-];
-
-/// One row per file per group, `;`-separated as `vid-fp`'s is, an unmeasured
-/// figure an empty cell.
-fn write_csv(w: &mut dyn Write, said: &Said) -> std::io::Result<()> {
-    csv_row(w, &CSV_HEADER.map(str::as_bytes))?;
-    for (gi, g) in said.groups.iter().enumerate() {
-        let group = group_name(gi);
-        for r in said.rows(g) {
-            csv_row(
-                w,
-                &[
-                    group.as_bytes(),
-                    r.role.as_bytes(),
-                    r.action.unwrap_or_default().as_bytes(),
-                    r.raw.as_os_str().as_bytes(),
-                    cell(r.width).as_bytes(),
-                    cell(r.height).as_bytes(),
-                    r.size.as_deref().unwrap_or_default().as_bytes(),
-                    cell(r.size_bytes).as_bytes(),
-                    r.relation.unwrap_or_default().as_bytes(),
-                    cell(r.aligned_points).as_bytes(),
-                    cell(r.frame_overlap).as_bytes(),
-                    cell(r.pixel_correlation).as_bytes(),
-                    cell(r.mirrored).as_bytes(),
-                    cell(r.inverted).as_bytes(),
-                    if r.damaged { b"true".as_slice() } else { b"".as_slice() },
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// A figure as a cell: empty where it was not measured.
-fn cell<T: ToString>(x: Option<T>) -> String {
-    x.map(|x| x.to_string()).unwrap_or_default()
-}
-
-/// A field is quoted when it holds the separator, a quote or a line break,
-/// with its quotes doubled — RFC 4180's rule, which is what every spreadsheet
-/// reads. Only a path can need it, and a path is written as its own bytes.
-fn csv_row(w: &mut dyn Write, fields: &[&[u8]]) -> std::io::Result<()> {
-    csv_row_with(w, fields, b';')
-}
-
-/// One CSV row with `sep` between the fields: a field holding the separator,
-/// a quote or a line break is quoted, its quotes doubled, and every field is
-/// written as its own bytes. `--dump` writes with commas.
-pub fn csv_row_with(w: &mut dyn Write, fields: &[&[u8]], sep: u8) -> std::io::Result<()> {
-    for (k, f) in fields.iter().enumerate() {
-        if k > 0 {
-            w.write_all(&[sep])?;
-        }
-        if f.iter().any(|&b| b == sep || matches!(b, b'"' | b'\n' | b'\r')) {
-            w.write_all(b"\"")?;
-            for piece in f.split_inclusive(|&b| b == b'"') {
-                w.write_all(piece)?;
-                if piece.ends_with(b"\"") {
-                    w.write_all(b"\"")?;
-                }
-            }
-            w.write_all(b"\"")?;
-        } else {
-            w.write_all(f)?;
-        }
-    }
-    w.write_all(b"\n")
+/// The CSV of either layout: its header, then a line a row, `;`-separated
+/// as `vid-fp`'s is.
+fn write_csv<R>(w: &mut dyn Write, columns: &Table<R>, rows: &[R]) -> std::io::Result<()> {
+    columns.csv_header(w, b';')?;
+    rows.iter().try_for_each(|r| columns.csv(w, r, b';'))
 }
 
 // ---------------------------------------------------------------- --against
 
-/// One scanned file against the library, as all three layouts state it.
-#[derive(Serialize)]
-struct AnswerRow<'a> {
-    verdict: &'static str,
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_bytes: Option<Vec<u8>>,
-    #[serde(skip)]
-    raw: &'a Path,
-    width: Option<u32>,
-    height: Option<u32>,
-    size_bytes: u64,
-    /// The file the verdict rests on, and which side it is from.
-    #[serde(rename = "match")]
-    by: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    match_bytes: Option<Vec<u8>>,
-    #[serde(skip)]
-    by_raw: Option<&'a Path>,
-    match_in: Option<&'static str>,
-    match_width: Option<u32>,
-    match_height: Option<u32>,
-    match_size_bytes: Option<u64>,
-    relation: Option<&'static str>,
-    aligned_points: Option<u32>,
-    frame_overlap: Option<f32>,
-    pixel_correlation: Option<f32>,
-    mirrored: Option<bool>,
-    inverted: Option<bool>,
-    #[serde(skip)]
-    with: Option<Evidence>,
-    /// For a repeat of a repeat, the file kept at the end of the chain.
-    kept: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kept_bytes: Option<Vec<u8>>,
-    #[serde(skip)]
-    kept_raw: Option<&'a Path>,
-    kept_in: Option<&'static str>,
-    library_matches: usize,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    damaged: bool,
+/// One scanned file against the library, as every layout states it, with
+/// the file its verdict rests on and the file kept at the end of a chain of
+/// repeats, and which side each is from.
+struct AnswerLine<'a> {
+    a: &'a Answer,
+    file: &'a File,
+    by: Option<(&'a File, &'static str)>,
+    kept: Option<(&'a File, &'static str)>,
 }
 
-/// The rows, in the answers' order.
-fn answer_rows<'a>(scan: &'a Outcome, answers: &[Answer]) -> Vec<AnswerRow<'a>> {
-    let files = &scan.files;
-    let side = |g: usize| if files[g].library { "library" } else { "scan" };
-    answers
-        .iter()
-        .map(|a| {
-            let f = &files[a.file];
-            let by = a.by.map(|g| &files[g]);
-            let kept = a.kept.map(|g| &files[g]);
-            let p = a.with;
-            AnswerRow {
-                verdict: a.verdict.as_str(),
-                path: f.path.display().to_string(),
-                path_bytes: raw_bytes(&f.path),
-                raw: &f.path,
-                width: f.dims.map(|d| d.0),
-                height: f.dims.map(|d| d.1),
-                size_bytes: f.bytes.unwrap_or(0),
-                by: by.map(|g| g.path.display().to_string()),
-                match_bytes: by.and_then(|g| raw_bytes(&g.path)),
-                by_raw: by.map(|g| g.path.as_path()),
-                match_in: a.by.map(side),
-                match_width: by.and_then(|g| g.dims).map(|d| d.0),
-                match_height: by.and_then(|g| g.dims).map(|d| d.1),
-                match_size_bytes: by.and_then(|g| g.bytes),
-                relation: p.map(|p| p.relation.as_str()),
-                aligned_points: p.and_then(|p| p.aligned_points),
-                frame_overlap: p.map(|p| p.frame_overlap),
-                pixel_correlation: p.map(|p| p.pixel_correlation),
-                mirrored: p.map(|p| p.mirrored),
-                inverted: p.map(|p| p.inverted),
-                with: p,
-                kept: kept.map(|g| g.path.display().to_string()),
-                kept_bytes: kept.and_then(|g| raw_bytes(&g.path)),
-                kept_raw: kept.map(|g| g.path.as_path()),
-                kept_in: a.kept.map(side),
-                library_matches: a.library_matches,
-                damaged: f.damaged,
-            }
-        })
-        .collect()
-}
-
-fn dims_text(w: Option<u32>, h: Option<u32>) -> String {
-    match (w, h) {
-        (Some(w), Some(h)) => format!("{w}x{h}"),
-        _ => "-".into(),
+impl Paired for AnswerLine<'_> {
+    fn with(&self) -> Option<Evidence> {
+        self.a.with
     }
+}
+
+/// The verdicts' columns.
+fn answer_columns<'a>() -> Table<AnswerLine<'a>> {
+    let mut c: Vec<Column<AnswerLine>> = vec![
+        both("verdict", |r| Cell::Text(r.a.verdict.as_str().into())),
+        both("path", |r| Cell::Path(&r.file.path)),
+        both("width", |r| width(r.file)),
+        both("height", |r| height(r.file)),
+        both("size_bytes", |r| Cell::Count(r.file.bytes.unwrap_or(0))),
+        both("match", |r| r.by.map_or(Cell::None, |(g, _)| Cell::Path(&g.path))),
+        both("match_in", |r| Cell::of(r.by, |(_, side)| Cell::Text(side.into()))),
+        both("match_width", |r| r.by.map_or(Cell::None, |(g, _)| width(g))),
+        both("match_height", |r| r.by.map_or(Cell::None, |(g, _)| height(g))),
+        both("match_size_bytes", |r| Cell::of(r.by.and_then(|(g, _)| g.bytes), Cell::Count)),
+    ];
+    c.extend(evidence_columns());
+    c.extend([
+        both::<AnswerLine>("kept", |r| r.kept.map_or(Cell::None, |(g, _)| Cell::Path(&g.path))),
+        both("kept_in", |r| Cell::of(r.kept, |(_, side)| Cell::Text(side.into()))),
+        both("library_matches", |r| Cell::Count(r.a.library_matches as u64)),
+        Column { name: "damaged", csv: true, json: Json::Present, cell: |r| Cell::flag(r.file.damaged) },
+    ]);
+    Table(c)
+}
+
+/// The lines, in the answers' order.
+fn answer_lines<'a>(scan: &'a Outcome, answers: &'a [Answer]) -> Vec<AnswerLine<'a>> {
+    let files = &scan.files;
+    let side = |g: usize| (&files[g], if files[g].library { "library" } else { "scan" });
+    answers.iter().map(|a| AnswerLine { a, file: &files[a.file], by: a.by.map(side), kept: a.kept.map(side) }).collect()
 }
 
 /// One block per verdict. Each file is a line, the verdict leading at a fixed
 /// width and the path trailing, as in the groups report; the file it rests on
 /// follows on a line of its own, with the evidence.
-fn write_answers_txt(w: &mut dyn Write, rows: &[AnswerRow]) -> std::io::Result<()> {
-    for block in rows.chunk_by(|x, y| x.verdict == y.verdict) {
-        let v = block[0].verdict;
+fn write_answers_txt(w: &mut dyn Write, lines: &[AnswerLine]) -> std::io::Result<()> {
+    for block in lines.chunk_by(|x, y| x.a.verdict.as_str() == y.a.verdict.as_str()) {
+        let v = block[0].a.verdict.as_str();
         writeln!(w, "{v}: {} {}", block.len(), if block.len() == 1 { "file" } else { "files" })?;
         for r in block {
-            let damaged = if r.damaged { "DAMAGED, " } else { "" };
-            write!(w, "\t{:<ACTION_COLUMN$} {}, {}, {damaged}", format!("{},", v.to_uppercase()), dims_text(r.width, r.height), format_size(r.size_bytes))?;
-            w.write_all(r.raw.as_os_str().as_bytes())?;
+            let damaged = if r.file.damaged { "DAMAGED, " } else { "" };
+            let size = format_size(r.file.bytes.unwrap_or(0));
+            write!(w, "\t{:<ACTION_COLUMN$} {}, {size}, {damaged}", format!("{},", v.to_uppercase()), dims_text(r.file.dims))?;
+            w.write_all(r.file.path.as_os_str().as_bytes())?;
             writeln!(w)?;
-            if let (Some(by), Some(side)) = (r.by_raw, r.match_in) {
-                let size = r.match_size_bytes.map(format_size).unwrap_or_else(|| "-".into());
-                write!(w, "\t        in {side}: {}, {size}, {}", dims_text(r.match_width, r.match_height), evidence(r.with))?;
-                w.write_all(by.as_os_str().as_bytes())?;
+            if let Some((by, side)) = r.by {
+                let size = by.bytes.map_or_else(|| "-".into(), format_size);
+                write!(w, "\t        in {side}: {}, {size}, {}", dims_text(by.dims), evidence(r.a.with))?;
+                w.write_all(by.path.as_os_str().as_bytes())?;
                 writeln!(w)?;
-                if let (Some(kept), Some(side)) = (r.kept_raw, r.kept_in) {
+                if let Some((kept, side)) = r.kept {
                     write!(w, "\t        which repeats, in {side}: ")?;
-                    w.write_all(kept.as_os_str().as_bytes())?;
+                    w.write_all(kept.path.as_os_str().as_bytes())?;
                     writeln!(w)?;
                 }
             }
@@ -850,68 +722,11 @@ fn write_answers_txt(w: &mut dyn Write, rows: &[AnswerRow]) -> std::io::Result<(
     Ok(())
 }
 
-/// The CSV's columns, an `AnswerRow`'s fields in its order.
-const ANSWERS_CSV_HEADER: [&str; 20] = [
-    "verdict",
-    "path",
-    "width",
-    "height",
-    "size_bytes",
-    "match",
-    "match_in",
-    "match_width",
-    "match_height",
-    "match_size_bytes",
-    "relation",
-    "aligned_points",
-    "frame_overlap",
-    "pixel_correlation",
-    "mirrored",
-    "inverted",
-    "kept",
-    "kept_in",
-    "library_matches",
-    "damaged",
-];
-
-fn write_answers_csv(w: &mut dyn Write, rows: &[AnswerRow]) -> std::io::Result<()> {
-    csv_row(w, &ANSWERS_CSV_HEADER.map(str::as_bytes))?;
-    for r in rows {
-        fn path(p: Option<&Path>) -> &[u8] {
-            p.map(|p| p.as_os_str().as_bytes()).unwrap_or_default()
-        }
-        csv_row(
-            w,
-            &[
-                r.verdict.as_bytes(),
-                r.raw.as_os_str().as_bytes(),
-                cell(r.width).as_bytes(),
-                cell(r.height).as_bytes(),
-                r.size_bytes.to_string().as_bytes(),
-                path(r.by_raw),
-                r.match_in.unwrap_or_default().as_bytes(),
-                cell(r.match_width).as_bytes(),
-                cell(r.match_height).as_bytes(),
-                cell(r.match_size_bytes).as_bytes(),
-                r.relation.unwrap_or_default().as_bytes(),
-                cell(r.aligned_points).as_bytes(),
-                cell(r.frame_overlap).as_bytes(),
-                cell(r.pixel_correlation).as_bytes(),
-                cell(r.mirrored).as_bytes(),
-                cell(r.inverted).as_bytes(),
-                path(r.kept_raw),
-                r.kept_in.unwrap_or_default().as_bytes(),
-                r.library_matches.to_string().as_bytes(),
-                if r.damaged { b"true".as_slice() } else { b"".as_slice() },
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn write_answers_json(w: &mut dyn Write, scan: &Outcome, rows: &[AnswerRow], pairs: Option<Pairs>) -> std::io::Result<()> {
+fn write_answers_json(w: &mut dyn Write, scan: &Outcome, lines: &[AnswerLine], pairs: Option<Pairs>) -> std::io::Result<()> {
+    let columns = answer_columns();
+    let files: Vec<_> = lines.iter().map(|r| columns.json(r)).collect();
     write_head(w, scan, Mode::Content)?;
-    list(w, "files", rows, pairs.is_none())?;
+    list(w, "files", &files, pairs.is_none())?;
     if let Some(pairs) = pairs {
         write_pairs(w, pairs)?;
     }
@@ -1006,7 +821,7 @@ mod tests {
         (o.files[0].dims, o.files[0].bytes) = (None, None);
         let text = String::from_utf8(csv(&o)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], CSV_HEADER.join(";"));
+        assert_eq!(lines[0], "group;role;action;path;width;height;size;size_bytes;relation;aligned_points;frame_overlap;pixel_correlation;mirrored;inverted;damaged");
         assert_eq!(lines[1], "group_1;representative;KEEP;/0.jpg;;;;;;;;;;;");
         assert_eq!(lines[2], "group_1;match;DELETE;/1.jpg;;;;;identical;;0.987;0.912;false;false;");
         assert_eq!(lines[3], "group_1;match;REVIEW;\"/2;x.jpg\";;;;;direct;42;0.987;0.912;true;false;");
@@ -1137,13 +952,6 @@ mod tests {
         std::os::unix::fs::symlink("new.txt", dir.join("to-new.txt")).unwrap();
         assert!(same_destination(&dir.join("to-new.txt"), &dir.join("new.txt")), "a link to a file not there yet");
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_quote_in_a_csv_field_is_doubled() {
-        let mut buf = Vec::new();
-        csv_row(&mut buf, &[b"a\"b;c", b"plain"]).unwrap();
-        assert_eq!(buf, b"\"a\"\"b;c\";plain\n");
     }
 
     /// A report replaces the last one only once it is written whole: one that
