@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.62.1)
+## Status (0.63.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -448,6 +448,23 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   page shows its first image, and asking again raises it; the info is three
   lines (path; size; evidence and suggestion). Checked under Xvfb; GUI
   tests pass.
+- 0.63.0 (the stated pairs, `stated.rs`; see *The stated pairs*): a
+  pair is stated once whichever way round it is met (`stated::unique`), and
+  what it says is worked out once into a `Pair` (evidence, file scale,
+  `Place`, clean) by file numbers, which the groups, `--against` and the
+  JSON's `pairs` read. Before: the JSON's `OutPair`s (two `Arc<str>` names,
+  two byte strings) were also where `numbered_groups` looked a member's
+  evidence up (a map filled in name order, the last winning); the place
+  was `pipeline::placements`, a second map copying that order by comparing
+  names; `--against` took the first pair met (`(a, b, Evidence, bool)`
+  tuples). Three answers to which pair states two files, held apart only by
+  no pair being stated both ways (IMGS-ALL: 0 of 1,110,436). Proved: the
+  `ref.sh` battery, `last.sh`, `lastag.sh` (only "N minutes ago" differs)
+  and all 90 `pairs.py` reports and lists identical to 0.62.1; cached
+  IMGS-ALL report and kept scan identical, `at` of all 51,289 members
+  included. Cached IMGS-ALL (ABBA): peak RssAnon+swap 608 / 595 MB base,
+  455 / 457 new; CPU 470.5 / 476.1 base, 444.9 / 459.1 new. Code lines (no
+  comments, blanks or tests) in the files touched 3,691 -> 3,699.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -511,8 +528,7 @@ the man page generated from `Args`. Hidden flags (`hide = true`, re-added in
 
 ```
 src/
-  lib.rs        Args, what a report pair is stated from (`Stated`); cli_main,
-                worker_main
+  lib.rs        Args; cli_main, worker_main
   pipeline.rs   one scan as stages: run -> analyse_all -> index_all ->
                 retrieve_and_verify -> second_look -> cluster -> assemble
                 -> finish
@@ -538,6 +554,8 @@ src/
   index.rs      vocabulary tree, inverted file, containment scoring
   verify.rs     correspondence, geometry, pixel check; `Policy` and `Standing`
   claims.rs     Edge, Clusters, bridge test, admission, propagation, Claim/How
+  stated.rs     the pairs a run states: what each rests on (`Stated`) and
+                what it says (`Pair`: evidence, scale, place, clean)
   same.rs       which files are one file (bytes, analysis, colour), and their pairs;
                 the byte pass (`exact_groups`: size, sample, hash, bytes)
   group.rs      pairs -> groups around a representative
@@ -729,6 +747,25 @@ flags or the `Clusters`, between two others in `cluster`. Not a new edge
 list, a second partition of the files, or a relation read off a verdict's
 fields. Verify a refactor with a cached IMGS-ALL run *and* its `--dump`
 against the base build, then the `ref.sh` battery and `pairs.py`.
+
+## The stated pairs (`stated.rs`)
+
+Every pair the run states is stated once, whichever way round it is met
+(`stated::unique`, first met wins), from what it rests on (`Stated`: the
+same bytes, the same pixels, or a `Claim`). The keep rule reads that
+(`Stated::link`); everything after it reads the `Pair` worked out from it
+once, by the run's file numbers: its `Evidence`, file scale, `Place` (`a`
+in `b`; `place_from` reads it from either end) and clean flag. The groups
+(`numbered_groups`), `--against` (`against::asked`) and the JSON's `pairs`
+(`report::Pairs`, named from the run's files as written) all read the one
+list. Before 0.63.0 each reader stated its pairs again: the JSON's records
+(`OutPair`, two names and two byte strings each) were also where a group
+member's evidence was looked up, last in name order; the compare view's
+place was a second map (`placements`) copying that order by comparing
+names; `--against` took the first pair met.
+
+**Adding something a pair says**: a field of `Pair`, set in
+`Stated::pair`. Not a side table keyed by its two files.
 
 ## A finished scan (`outcome.rs`)
 
@@ -1077,9 +1114,10 @@ cores / 8 threads, power-capped):
   2,330 -> ~1,040 MB, PSS unchanged at ~2,340, output identical, CPU within
   the base runs' own spread; then 776 MB once assembly stopped holding a
   second copy of the pairs, dump-only verdicts and a path string per pair
-  end (`OutPair` names are shared `Arc<str>`). The peak is still assembly
-  (graph, suggestion, `OutPair`s and the stable sort's buffer); matching
-  ~390 MB, analysis transients ~300 MB.
+  end. The peak is still assembly (graph, suggestion, the pairs and the
+  stable sort's buffer); matching ~390 MB, analysis transients ~300 MB.
+  0.63.0: a pair is held by file numbers (`stated::Pair`), named only as
+  the JSON is written: cached IMGS-ALL peak RssAnon+swap ~600 -> ~455 MB.
 
 Portability: `cargo install` builds plain x86-64; `simd.rs` dispatches the
 hand kernels and `dispatched!` gives hot functions a v3 copy. **Anything that

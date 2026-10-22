@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::against::{self, Answer};
 use crate::outcome::{Evidence, Member, Outcome, Relation};
+use crate::stated::Pair;
 use crate::suggest::{Action, Mode};
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,24 +264,17 @@ pub fn raw_bytes(p: &Path) -> Option<Vec<u8>> {
     }
 }
 
-/// One stated pair, as the JSON's `pairs` list writes it.
-pub struct OutPair {
-    /// Shared with every other pair naming the same file, and written as the
-    /// string it is: a copy of both names per pair was 2.3 million strings on
-    /// 27,000 pictures, the largest thing alive where such a run peaks.
-    pub a: std::sync::Arc<str>,
-    pub b: std::sync::Arc<str>,
-    /// `a` and `b` as bytes, for a name that is not UTF-8; see `raw_bytes`.
-    pub a_bytes: Option<Vec<u8>>,
-    pub b_bytes: Option<Vec<u8>>,
-    pub ev: Evidence,
-    /// How many pixels of `b` one pixel of `a` spans, in the files' own
-    /// pixels: 0.5 when `b` is `a` at half the size. See `lib::file_scale`.
-    pub scale: f32,
-    /// Indices into the run's file list. Not written: `a` and `b` say the
-    /// same thing.
-    pub ia: usize,
-    pub ib: usize,
+/// The stated pairs, as the JSON's `pairs` list writes them: by the run's
+/// file numbers, named from `files` as they are written.
+///
+/// A pair used to be held as its record here, two names and two byte
+/// strings beside its evidence, from the end of the analysis to the end of
+/// the run, a million of them at a run's peak; and other readers looked
+/// their pairs up in it.
+#[derive(Clone, Copy)]
+pub struct Pairs<'a> {
+    pub files: &'a [PathBuf],
+    pub list: &'a [Pair],
 }
 
 /// A pair as the JSON writes it: `aligned_points` 0 where no keypoint was
@@ -313,27 +307,35 @@ struct Written<'a> {
     corroborated: bool,
 }
 
-impl Serialize for OutPair {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        let r = self.ev.relation;
+impl<'a> Written<'a> {
+    /// `p`, named from `names`: each file's name and, when it is not UTF-8,
+    /// its bytes.
+    fn of(p: &Pair, names: &'a [(String, Option<Vec<u8>>)]) -> Written<'a> {
+        let (a, b) = (&names[p.a as usize], &names[p.b as usize]);
+        let r = p.ev.relation;
         Written {
-            a: &self.a,
-            b: &self.b,
-            a_bytes: &self.a_bytes,
-            b_bytes: &self.b_bytes,
-            aligned_points: self.ev.aligned_points.unwrap_or(0),
-            frame_overlap: self.ev.frame_overlap,
-            pixel_correlation: self.ev.pixel_correlation,
-            scale: self.scale,
-            mirrored: self.ev.mirrored,
-            inverted: self.ev.inverted,
+            a: &a.0,
+            b: &b.0,
+            a_bytes: &a.1,
+            b_bytes: &b.1,
+            aligned_points: p.ev.aligned_points.unwrap_or(0),
+            frame_overlap: p.ev.frame_overlap,
+            pixel_correlation: p.ev.pixel_correlation,
+            scale: p.scale,
+            mirrored: p.ev.mirrored,
+            inverted: p.ev.inverted,
             identical: r == Relation::Identical,
             same_pixels: r == Relation::SamePixels,
             propagated: r == Relation::Propagated,
             corroborated: r == Relation::Corroborated,
         }
-        .serialize(s)
     }
+}
+
+/// The JSON's `pairs`, its last key.
+fn write_pairs(w: &mut dyn Write, pairs: Pairs) -> std::io::Result<()> {
+    let names: Vec<(String, Option<Vec<u8>>)> = pairs.files.par_iter().map(|f| (f.display().to_string(), raw_bytes(f))).collect();
+    list_par(w, "pairs", pairs.list, |p| Written::of(p, &names), true)
 }
 
 /// Write the report of `scan` where `target` says, in the layout it says,
@@ -342,7 +344,7 @@ impl Serialize for OutPair {
 ///
 /// A reader that goes away early — `img-fp DIR | head` — is how a pipeline
 /// ends, not a failed run, so a broken pipe on stdout is not an error.
-pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<&[OutPair]>) -> Result<()> {
+pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<Pairs>) -> Result<()> {
     let body = |w: &mut dyn Write| write_layout(w, target.format, scan, mode, pairs);
     match &target.sink {
         // Fatal, and the context is the whole of what makes exit 1 useful:
@@ -361,7 +363,7 @@ pub fn write_with(target: &Target, scan: &Outcome, mode: Mode, pairs: Option<&[O
 
 /// The report of `scan` in `format`: its groups, or against a library each
 /// scanned file's verdict.
-fn write_layout(w: &mut dyn Write, format: Format, scan: &Outcome, mode: Mode, pairs: Option<&[OutPair]>) -> std::io::Result<()> {
+fn write_layout(w: &mut dyn Write, format: Format, scan: &Outcome, mode: Mode, pairs: Option<Pairs>) -> std::io::Result<()> {
     if scan.against.is_some() {
         let answers = against::answers(scan);
         let rows = answer_rows(scan, &answers);
@@ -446,7 +448,7 @@ struct JsonGroup<'a> {
 /// was a megabyte-long line on a found corpus and fifty on the benchmark one,
 /// and an editor asked to open that hangs; pretty-printed it would be ten lines
 /// a pair. One record a line opens anywhere and still greps.
-fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<&[OutPair]>) -> std::io::Result<()> {
+fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<Pairs>) -> std::io::Result<()> {
     let groups: Vec<JsonGroup> = said
         .groups
         .iter()
@@ -459,7 +461,7 @@ fn write_json(w: &mut dyn Write, said: &Said, pairs: Option<&[OutPair]>) -> std:
     write_head(w, said.scan, said.mode)?;
     list(w, "groups", &groups, pairs.is_none())?;
     if let Some(pairs) = pairs {
-        list_par(w, "pairs", pairs, true)?;
+        write_pairs(w, pairs)?;
     }
     writeln!(w, "}}")
 }
@@ -497,7 +499,7 @@ pub(crate) fn list<T: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], last: b
 /// 27,000 pictures are a million records and a quarter of a gigabyte, and
 /// they were the last thing a run did on one thread. A batch of pieces at a
 /// time, so that the report is never held whole.
-pub(crate) fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[T], last: bool) -> std::io::Result<()> {
+pub(crate) fn list_par<T: Sync, S: Serialize>(w: &mut dyn Write, key: &str, xs: &[T], view: impl Fn(&T) -> S + Sync, last: bool) -> std::io::Result<()> {
     const PIECE: usize = 4096;
     const BATCH: usize = 64 * PIECE;
     write!(w, "  \"{key}\": [")?;
@@ -510,7 +512,7 @@ pub(crate) fn list_par<T: Serialize + Sync>(w: &mut dyn Write, key: &str, xs: &[
                 for (k, x) in piece.iter().enumerate() {
                     let first = bi == 0 && pi == 0 && k == 0;
                     buf.extend_from_slice(if first { b"\n    " } else { b",\n    " });
-                    serde_json::to_writer(&mut buf, x)?;
+                    serde_json::to_writer(&mut buf, &view(x))?;
                 }
                 Ok(buf)
             })
@@ -907,11 +909,11 @@ fn write_answers_csv(w: &mut dyn Write, rows: &[AnswerRow]) -> std::io::Result<(
     Ok(())
 }
 
-fn write_answers_json(w: &mut dyn Write, scan: &Outcome, rows: &[AnswerRow], pairs: Option<&[OutPair]>) -> std::io::Result<()> {
+fn write_answers_json(w: &mut dyn Write, scan: &Outcome, rows: &[AnswerRow], pairs: Option<Pairs>) -> std::io::Result<()> {
     write_head(w, scan, Mode::Content)?;
     list(w, "files", rows, pairs.is_none())?;
     if let Some(pairs) = pairs {
-        list_par(w, "pairs", pairs, true)?;
+        write_pairs(w, pairs)?;
     }
     writeln!(w, "}}")
 }
@@ -926,8 +928,8 @@ mod tests {
         Evidence { relation, aligned_points: points, frame_overlap: 0.987, pixel_correlation: 0.912, mirrored: false, inverted: false }
     }
 
-    fn pair(ia: usize, ib: usize) -> OutPair {
-        OutPair { a: format!("/{ia}.jpg").into(), b: format!("/{ib}.jpg").into(), a_bytes: None, b_bytes: None, ev: ev(Relation::Direct), scale: 0.5, ia, ib }
+    fn pair(a: usize, b: usize) -> Pair {
+        Pair { a: a as u32, b: b as u32, ev: ev(Relation::Direct), scale: 0.5, place: None, clean: true }
     }
 
     fn file(p: &str) -> File {
@@ -945,7 +947,7 @@ mod tests {
         Outcome::new(head, 0.7, files, vec![Group { members }], vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review)], vec![None, Some(0), None])
     }
 
-    fn pairs() -> Vec<OutPair> {
+    fn pairs() -> Vec<Pair> {
         let mut mirrored = pair(0, 2);
         mirrored.ev.mirrored = true;
         let mut identical = pair(1, 0);
@@ -965,8 +967,10 @@ mod tests {
         buf
     }
 
-    fn json(o: &Outcome, pairs: Option<&[OutPair]>) -> serde_json::Value {
+    fn json(o: &Outcome, pairs: Option<&[Pair]>) -> serde_json::Value {
         let mut buf = Vec::new();
+        let files: Vec<PathBuf> = o.files.iter().map(|f| f.path.clone()).collect();
+        let pairs = pairs.map(|list| Pairs { files: &files, list });
         write_layout(&mut buf, Format::Json, o, Mode::Content, pairs).unwrap();
         serde_json::from_slice(&buf).unwrap()
     }
@@ -1036,11 +1040,13 @@ mod tests {
     #[test]
     fn the_pairs_are_written_on_every_thread_byte_for_byte() {
         for n in [0usize, 1, 2, 4095, 4096, 4097, 300_000] {
-            let xs: Vec<OutPair> = (0..n).map(|i| pair(i, i + 1)).collect();
+            let xs: Vec<Pair> = (0..n).map(|i| pair(i, i + 1)).collect();
+            let names: Vec<(String, Option<Vec<u8>>)> = (0..=n).map(|i| (format!("/{i}.jpg"), None)).collect();
+            let written: Vec<Written> = xs.iter().map(|p| Written::of(p, &names)).collect();
             for last in [false, true] {
                 let (mut a, mut b) = (Vec::new(), Vec::new());
-                list(&mut a, "pairs", &xs, last).unwrap();
-                list_par(&mut b, "pairs", &xs, last).unwrap();
+                list(&mut a, "pairs", &written, last).unwrap();
+                list_par(&mut b, "pairs", &xs, |p| Written::of(p, &names), last).unwrap();
                 assert!(a == b, "{n} pairs");
             }
         }
@@ -1098,9 +1104,7 @@ mod tests {
         let odd = b"/2;\xffx.jpg".to_vec();
         let mut o = scan();
         o.files[2].path = PathBuf::from(std::ffi::OsString::from_vec(odd.clone()));
-        let mut pairs = pairs();
-        pairs[1].b = o.files[2].path.display().to_string().into();
-        pairs[1].b_bytes = raw_bytes(&o.files[2].path);
+        let pairs = pairs();
 
         let txt = txt(&o);
         assert!(txt.windows(odd.len()).any(|w| w == odd), "the text names the file itself");

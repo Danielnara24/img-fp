@@ -53,6 +53,7 @@ mod sift;
 mod simd;
 mod spill;
 mod same;
+mod stated;
 mod suggest;
 pub use outcome::{Evidence, Outcome, Relation};
 pub use suggest::{Action, Lapse, Mode as SuggestMode};
@@ -73,7 +74,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use analysis::Item;
-use claims::{Claim, Edge, How};
+use claims::{Claim, Edge};
 use verify::{Variant, Verdict};
 
 #[derive(Parser, Debug)]
@@ -417,7 +418,7 @@ const PROPAGATE_MAX_ROUNDS: usize = 8;
 
 // ---------------------------------------------------------------- output
 
-use report::OutPair;
+use stated::{Pair, Stated};
 use same::{exact_groups, Same};
 
 // ---------------------------------------------------------------- main
@@ -1114,93 +1115,6 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 fn stdout_path() -> &'static Path {
     Path::new("-")
-}
-
-/// A verdict's scale, which is the analysis images', as the files' own.
-///
-/// A transform is fitted between working images, and every picture is
-/// analysed at about `--work-size` on its long side however large the file
-/// is: a photograph and a copy shrunk to a third of it are both 512 pixels
-/// there, and a crop of half the photograph is too. So the verdict's scale
-/// said 0.99 for the copy a third the size and 0.5 for the crop that has the
-/// photograph's own pixels. Measured in each file's pixels instead — each
-/// working image's long side over its file's — it is what a person reading
-/// "scale" expects: how many pixels of `b` one pixel of `a` spans.
-fn file_scale(scale: f32, a: &Item, b: &Item) -> f32 {
-    let shrink = |it: &Item| {
-        let file = it.dims.0.max(it.dims.1);
-        (file > 0).then(|| it.feats.w.max(it.feats.h) as f32 / file as f32)
-    };
-    match (shrink(a), shrink(b)) {
-        (Some(sa), Some(sb)) if sb > 0.0 => scale * sa / sb,
-        _ => scale,
-    }
-}
-
-fn round3(v: f32) -> f32 {
-    (v * 1000.0).round() / 1000.0
-}
-
-/// What a pair in the report is stated from, and what every reader of the
-/// report's pairs (the report, `--against`, the keep rule) reads off it.
-#[derive(Clone, Copy)]
-enum Stated<'a> {
-    /// The same bytes; see `exact_groups`.
-    Identical,
-    /// Not the same bytes, the same picture; see `same::Kind`.
-    SamePixels,
-    /// A verified pair.
-    Claim(&'a Claim),
-}
-
-impl<'a> Stated<'a> {
-    fn verdict(&self) -> Option<&'a Verdict> {
-        match self {
-            Stated::Claim(c) => Some(&c.e.v),
-            _ => None,
-        }
-    }
-
-    /// What the pair says, as the report, `--last`, the window and
-    /// `--against` read it.
-    fn evidence(&self) -> Evidence {
-        let relation = match self {
-            Stated::Identical => Relation::Identical,
-            Stated::SamePixels => Relation::SamePixels,
-            Stated::Claim(c) => match c.how {
-                How::Direct => Relation::Direct,
-                How::Propagated => Relation::Propagated,
-                How::Corroborated => Relation::Corroborated,
-            },
-        };
-        let v = self.verdict();
-        Evidence {
-            relation,
-            // None for a pair no keypoint was matched for: the same file, or
-            // a composed transform.
-            aligned_points: match self {
-                Stated::Claim(c) if c.how != How::Propagated => Some(c.e.v.n_in),
-                _ => None,
-            },
-            frame_overlap: v.map_or(1.0, |v| round3(v.ov_a.max(v.ov_b))),
-            pixel_correlation: v.map_or(1.0, |v| round3(v.blk)),
-            mirrored: v.is_some_and(|v| v.m[0] * v.m[4] - v.m[1] * v.m[3] < 0.0),
-            inverted: matches!(self, Stated::Claim(c) if c.e.inverted()),
-        }
-    }
-
-    /// No block of the overlap disagrees (`suggest::CLEAN`); the same file
-    /// always is.
-    fn clean(&self) -> bool {
-        self.verdict().is_none_or(|v| v.blk_min >= suggest::CLEAN)
-    }
-
-    fn link(&self) -> suggest::Link<'a> {
-        match self {
-            Stated::Claim(c) => suggest::Link::Edge(&c.e.v, c.e.v.m, c.e.inverted()),
-            _ => suggest::Link::Exact,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -554,7 +554,7 @@ fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::How;
+    use crate::claims::How;
     use crate::sift::{self, Features, DESC_LEN};
     use crate::verify::{Affine, Thumb, Verdict};
     use std::sync::Arc;

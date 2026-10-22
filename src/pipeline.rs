@@ -5,7 +5,7 @@ use analysis::{Item, Planes, Read};
 use decode::Refused;
 use claims::{Claim, Clusters, How, Propagation};
 use retrieve::{quantise, Index};
-use outcome::{Against, Asked, Evidence, Group, Head, Member};
+use outcome::{Against, Asked, Group, Head, Member};
 use verify::Standing;
 use problems::Note;
 
@@ -1241,10 +1241,10 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     // every file either end answers for, with the verdict its pair was found
     // on; see `Same::expand`.
     let claims = same.expand(claims);
-    // Which pairs are stated, and from what, in the order they are first
-    // met — the order `group::find` and every tie in the sort below keep. The
-    // records themselves are a million strings on a large corpus, so they are
-    // made afterwards on every thread rather than here on one.
+    // Which pairs are stated, and from what, each once in the order first
+    // met (`stated::unique`): the order every tie in the sort below keeps.
+    // What each says is worked out afterwards, on every thread
+    // (`Stated::pair`).
     //
     // The files that are one file come first (`Same::pairs`). Two of the
     // same bytes that are not pictures at all — a pair of empty files, two
@@ -1268,12 +1268,10 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
         };
         (a, b, s)
     });
-    let mut seen: std::collections::HashSet<(usize, usize)> = Default::default();
-    let stated: Vec<(usize, usize, Stated)> = ones
-        .chain(claims.iter().map(|c| (c.e.a(), c.e.b(), Stated::Claim(c))))
-        .filter(|&(a, b, _)| seen.insert((a, b)) && scope.speaks_of(a, b))
-        .collect();
-    drop(seen);
+    let stated = stated::unique(ones.chain(claims.iter().map(|c| (c.e.a(), c.e.b(), Stated::Claim(c)))))
+        .into_iter()
+        .filter(|&(a, b, _)| scope.speaks_of(a, b))
+        .collect::<Vec<_>>();
     drop(one_file);
     // What to do with each file, read off the same pairs. The other rules
     // read the groups, and are applied once those exist. Against a library,
@@ -1288,37 +1286,24 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     };
     // Every colour the suggestion measured is in the cache.
     drop(store);
-    // One name per file, shared by every pair that names it; see `OutPair::a`.
-    let names: Vec<std::sync::Arc<str>> = files.par_iter().map(|f| f.display().to_string().into()).collect();
-    let mut out_pairs: Vec<OutPair> = stated
-        .par_iter()
-        .map(|&(a, b, s)| OutPair {
-            a: names[a].clone(),
-            b: names[b].clone(),
-            a_bytes: report::raw_bytes(&files[a]),
-            b_bytes: report::raw_bytes(&files[b]),
-            ev: s.evidence(),
-            scale: round3(file_scale(s.verdict().map_or(1.0, |v| v.scale), &items[a], &items[b])),
-            ia: a,
-            ib: b,
-        })
-        .collect();
+    // What each pair says, which is all that is read of it from here on.
+    let mut pairs: Vec<Pair> = stated.par_iter().map(|&(a, b, s)| s.pair(a, b, &items)).collect();
+    drop(stated);
+    drop(claims);
     // The same pairs as the report reads them: the groups `group::find`
     // makes of them, or as the verdicts against a library read them
     // (`against.rs`).
-    let (grouping, places, asked) = if scope.against {
+    let (grouping, asked) = if scope.against {
         let scanned: Vec<usize> = (0..files.len()).filter(|&i| !scope.library[i] && !not_asked[i]).collect();
-        let pairs: Vec<(usize, usize, Evidence, bool)> = stated.iter().map(|&(a, b, s)| (a, b, s.evidence(), s.clean())).collect();
-        (None, HashMap::new(), against::asked(&scanned, &scope.library, &pairs, &actions, &keeper))
+        (None, against::asked(&scanned, &scope.library, &pairs, &actions, &keeper))
     } else {
-        let graph: Vec<(usize, usize)> = stated.iter().map(|&(a, b, _)| (a, b)).collect();
-        let grouping = timed!(28, group::find(files.len(), &graph));
-        let places = placements(files, &grouping, &stated, &items);
-        (Some(grouping), places, Vec::new())
+        let graph: Vec<(usize, usize)> = pairs.iter().map(Pair::ends).collect();
+        (Some(timed!(28, group::find(files.len(), &graph))), Vec::new())
     };
-    drop(stated);
-    // Stable, as `sort_by` is, so equal names keep the order they were met in.
-    out_pairs.par_sort_by(|x, y| x.a.cmp(&y.a).then(x.b.cmp(&y.b)));
+    // By name, as the JSON lists them; stable, so names that read alike keep
+    // the order they were met in.
+    let names: Vec<String> = files.par_iter().map(|f| f.display().to_string()).collect();
+    pairs.par_sort_by(|x, y| names[x.a as usize].cmp(&names[y.a as usize]).then_with(|| names[x.b as usize].cmp(&names[y.b as usize])));
 
     let failures: Vec<serde_json::Value> = items
         .iter()
@@ -1333,9 +1318,8 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
         })
         .collect();
     Found {
-        pairs: out_pairs,
+        pairs,
         grouping,
-        places,
         asked,
         actions,
         keeper,
@@ -1413,13 +1397,10 @@ fn suggest_content(
 #[derive(Default)]
 struct Found {
     /// Every stated pair, sorted by name.
-    pairs: Vec<OutPair>,
+    pairs: Vec<Pair>,
     /// The groups `group::find` makes of the stated pairs; `None` against a
     /// library, and for a walk that found nothing.
     grouping: Option<Vec<group::Group>>,
-    /// Where each group's representative lies in each of its members, by
-    /// (representative, member); see `placements`.
-    places: HashMap<(usize, usize), outcome::Place>,
     /// Against a library, each scanned file's pairs as its verdict reads
     /// them (`against::asked`); empty otherwise.
     asked: Vec<Asked>,
@@ -1529,7 +1510,7 @@ fn finish(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], mut fo
     let mut went = None;
     let stdout_taken = gui.is_some() || !args.list.is_empty();
     if !stdout_taken || args.output.as_deref().is_some_and(|p| p != stdout_path()) {
-        timed!(36, report::write_with(&target, &scan, args.suggest, Some(&pairs)))?;
+        timed!(36, report::write_with(&target, &scan, args.suggest, Some(report::Pairs { files, list: &pairs })))?;
         went = target.file();
     }
     if !args.list.is_empty() {
@@ -1564,11 +1545,11 @@ impl Numbers {
 /// What the run found, as everything after it reads it (`Outcome`), and its
 /// stated pairs, which only the JSON lists: the groups `grouping` makes, or
 /// with none, against a library, each scanned file.
-fn outcome(args: &Args, files: &[PathBuf], library: &[bool], grouping: Option<Vec<group::Group>>, library_files: usize, mut head: Head, found: Found) -> (Outcome, Vec<OutPair>) {
-    let Found { pairs, places, asked, actions, keeper, failures, dims, damaged, sizes, .. } = found;
+fn outcome(args: &Args, files: &[PathBuf], library: &[bool], grouping: Option<Vec<group::Group>>, library_files: usize, mut head: Head, found: Found) -> (Outcome, Vec<Pair>) {
+    let Found { pairs, asked, actions, keeper, failures, dims, damaged, sizes, .. } = found;
     head.failures = failures;
     let mut numbers = Numbers::default();
-    let groups = grouping.map(|g| numbered_groups(files, g, &pairs, &places, &mut numbers));
+    let groups = grouping.map(|g| numbered_groups(files, g, &pairs, &mut numbers));
     let against = groups.is_none().then(|| {
         let mut name = |m: Member| Member { file: numbers.name(m.file), ..m };
         // The scanned files first, in the run's order, then what each names.
@@ -1628,12 +1609,12 @@ fn outcome(args: &Args, files: &[PathBuf], library: &[bool], grouping: Option<Ve
 /// order. Paths are unique and no two representatives can hold the same
 /// members — the second would have had nothing left to account for — so the
 /// order is total and the output is reproducible.
-fn numbered_groups(files: &[PathBuf], grouping: Vec<group::Group>, pairs: &[OutPair], places: &HashMap<(usize, usize), outcome::Place>, numbers: &mut Numbers) -> Vec<Group> {
+fn numbered_groups(files: &[PathBuf], grouping: Vec<group::Group>, pairs: &[Pair], numbers: &mut Numbers) -> Vec<Group> {
     let names: Vec<Vec<String>> = grouping.iter().map(|g| g.members.iter().map(|&i| files[i].display().to_string()).collect()).collect();
     let mut order: Vec<usize> = (0..grouping.len()).collect();
     order.sort_by(|&a, &b| names[b].len().cmp(&names[a].len()).then_with(|| names[a].cmp(&names[b])));
     drop(names);
-    let mut want: HashMap<(usize, usize), Option<Evidence>> = HashMap::new();
+    let mut want: HashMap<(usize, usize), Option<&Pair>> = HashMap::new();
     let mut groups: Vec<(usize, Vec<usize>)> = Vec::with_capacity(order.len());
     for &k in &order {
         let g = &grouping[k];
@@ -1648,8 +1629,8 @@ fn numbered_groups(files: &[PathBuf], grouping: Vec<group::Group>, pairs: &[OutP
         groups.push((rep, members));
     }
     for p in pairs {
-        if let Some(e) = want.get_mut(&(p.ia.min(p.ib), p.ia.max(p.ib))) {
-            *e = Some(p.ev);
+        if let Some(e) = want.get_mut(&p.key()) {
+            *e = Some(p);
         }
     }
     groups
@@ -1657,43 +1638,13 @@ fn numbered_groups(files: &[PathBuf], grouping: Vec<group::Group>, pairs: &[OutP
         .map(|(rep, members)| Group {
             members: members
                 .into_iter()
-                .map(|i| Member {
-                    file: numbers.number[&i],
-                    with: (i != rep).then(|| want[&(i.min(rep), i.max(rep))].expect("a member's pair with its representative is stated")),
-                    at: places.get(&(i.min(rep), i.max(rep))).and_then(|p| if rep < i { Some(*p) } else { p.reversed() }),
+                .map(|i| {
+                    let p = (i != rep).then(|| want[&(i.min(rep), i.max(rep))].expect("a member's pair with its representative is stated"));
+                    Member { file: numbers.number[&i], with: p.map(|p| p.ev), at: p.and_then(|p| p.place_from(rep)) }
                 })
                 .collect(),
         })
         .collect()
-}
-
-/// Where the lower-numbered file of each pair of a representative and its
-/// member lies in the other, by (lower, higher): read off the verdicts while
-/// they are held, and turned round for a member numbered below its
-/// representative (`numbered_groups`).
-///
-/// Only these pairs: a group's member is shown beside its representative,
-/// and nothing else draws a pair. Carried in every stated pair instead, the
-/// transform made each of IMGS-ALL's 1.1 million report records 28 bytes
-/// larger, and the stable sort holds them twice: 65 MB more at the run's
-/// peak for 51,000 groups' members.
-fn placements(files: &[PathBuf], grouping: &[group::Group], stated: &[(usize, usize, Stated)], items: &[Item]) -> HashMap<(usize, usize), outcome::Place> {
-    let wanted: std::collections::HashSet<(usize, usize)> =
-        grouping.iter().flat_map(|g| g.members.iter().filter(|&&i| i != g.representative).map(|&i| (i.min(g.representative), i.max(g.representative)))).collect();
-    // The place, and the stated pair's first file. Two files stated both
-    // ways round give the member the evidence of the one whose first file's
-    // name sorts last (`numbered_groups` reads the pairs sorted by name, the
-    // later over the earlier), so the place is read from that one too.
-    let mut places: HashMap<(usize, usize), (Option<outcome::Place>, usize)> = HashMap::with_capacity(wanted.len());
-    for &(a, b, s) in stated {
-        let key = (a.min(b), a.max(b));
-        if !wanted.contains(&key) || places.get(&key).is_some_and(|&(_, was)| files[was].display().to_string() > files[a].display().to_string()) {
-            continue;
-        }
-        let place = outcome::Place::between(s.verdict().map(|v| &v.m), &items[a], &items[b]);
-        places.insert(key, (if a == key.0 { place } else { place.and_then(|p| p.reversed()) }, a));
-    }
-    places.into_iter().filter_map(|(k, (p, _))| Some((k, p?))).collect()
 }
 
 /// The settings a report records, which are the ones that decide its pairs.

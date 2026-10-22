@@ -27,6 +27,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::outcome::{Asked, Evidence, Match, Member, Outcome};
+use crate::stated::Pair;
 use crate::suggest::{self, Action, Lapse, Mode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize)]
@@ -72,29 +73,24 @@ pub struct Answer {
 }
 
 /// Each scanned file's pairs, as its verdict will read them. `asked` are
-/// the scanned files, `pairs` the stated ones (ends, evidence, clean), and
-/// `actions` and `keeper` `suggest::suggest_pinned`'s with the library
-/// pinned; all by the run's numbers.
-pub fn asked(asked: &[usize], library: &[bool], pairs: &[(usize, usize, Evidence, bool)], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<Asked> {
-    let mut of: Vec<Vec<usize>> = vec![Vec::new(); library.len()];
-    for (k, p) in pairs.iter().enumerate() {
-        of[p.0].push(k);
-        of[p.1].push(k);
+/// the scanned files, `pairs` the stated ones, and `actions` and `keeper`
+/// `suggest::suggest_pinned`'s with the library pinned; all by the run's
+/// numbers.
+pub fn asked(asked: &[usize], library: &[bool], pairs: &[Pair], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<Asked> {
+    let mut of: Vec<Vec<&Pair>> = vec![Vec::new(); library.len()];
+    for p in pairs {
+        of[p.a as usize].push(p);
+        of[p.b as usize].push(p);
     }
-    let other = |k: usize, f: usize| if pairs[k].0 == f { pairs[k].1 } else { pairs[k].0 };
     asked
         .iter()
         .map(|&f| {
             let holder = keeper[f].filter(|_| actions[f] == Some(Action::Delete)).map(|g| Member {
                 file: g,
-                with: of[f].iter().find(|&&k| other(k, f) == g).map(|&k| pairs[k].2),
+                with: of[f].iter().find(|p| p.other(f) == g).map(|p| p.ev),
                 at: None,
             });
-            let library = of[f]
-                .iter()
-                .filter(|&&k| library[other(k, f)])
-                .map(|&k| Match { file: other(k, f), with: pairs[k].2, clean: pairs[k].3 })
-                .collect();
+            let library = of[f].iter().filter(|p| library[p.other(f)]).map(|p| Match { file: p.other(f), with: p.ev, clean: p.clean }).collect();
             Asked { file: f, holder, library }
         })
         .collect()
@@ -171,13 +167,13 @@ mod tests {
     use crate::outcome::{Against, File, Head, Relation};
     use std::path::PathBuf;
 
-    fn pair(a: usize, b: usize, corr: f32, clean: bool) -> (usize, usize, Evidence, bool) {
+    fn pair(a: usize, b: usize, corr: f32, clean: bool) -> Pair {
         let ev = Evidence { relation: Relation::Direct, aligned_points: Some(40), frame_overlap: 1.0, pixel_correlation: corr, mirrored: false, inverted: false };
-        (a, b, ev, clean)
+        Pair { a: a as u32, b: b as u32, ev, scale: 1.0, place: None, clean }
     }
 
     /// A scan against `library`, its files numbered as the run's.
-    fn scan(library: &[bool], pairs: &[(usize, usize, Evidence, bool)], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Outcome {
+    fn scan(library: &[bool], pairs: &[Pair], actions: &[Option<Action>], keeper: &[Option<usize>]) -> Outcome {
         let n = library.len();
         let scanned: Vec<usize> = (0..n).filter(|&i| !library[i]).collect();
         let files = (0..n).map(|i| File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: None, bytes: Some(1), damaged: false, library: library[i] }).collect();
