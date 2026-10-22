@@ -648,6 +648,16 @@ pub struct Results {
     marks_pending: Cell<bool>,
     settings_button: gtk::Button,
     to_settings: RefCell<Option<Box<dyn Fn()>>>,
+    /// The large view while it is open (`preview`).
+    large: RefCell<Option<LargeView>>,
+}
+
+/// The large view's window, and how it looks again at the page.
+struct LargeView {
+    win: gtk::Window,
+    show: Rc<dyn Fn()>,
+    /// A look is waiting to run (`Results::large_changed`).
+    due: Rc<Cell<bool>>,
 }
 
 impl Results {
@@ -919,6 +929,7 @@ impl Results {
             marks_pending: Cell::new(false),
             settings_button: to_settings.clone(),
             to_settings: RefCell::new(None),
+            large: RefCell::new(None),
         });
 
         let weak = Rc::downgrade(&me);
@@ -984,6 +995,8 @@ impl Results {
             }
         });
         to_settings.connect_clicked(with(|me| {
+            // Its images are not the next scan's.
+            me.close_large();
             if let Some(f) = me.to_settings.borrow().as_ref() {
                 f();
             }
@@ -1715,6 +1728,10 @@ impl Results {
         // theirs as the page is scrolled to them.
         self.scroll.vadjustment().set_value(0.0);
         self.mosaic.show(&dims(&files));
+        // The large view, open, shows the first of them rather than nothing.
+        if self.large.borrow().is_some() {
+            self.select(Some(0));
+        }
         // At the sizes it will be shown at.
         if !ahead.is_empty() {
             let sizes = self.picture_sizes(&dims(&ahead));
@@ -2024,6 +2041,7 @@ impl Results {
         for a in self.image_actions.borrow().iter() {
             a.set_enabled(i.is_some());
         }
+        self.large_changed();
     }
 
     /// Select card `i`, clamped to the group, give it the keyboard, and show
@@ -2048,6 +2066,7 @@ impl Results {
     /// The bar: the image under the pointer or the selected one, whichever
     /// moved last, else the marks.
     fn refresh_bar(&self) {
+        self.large_changed();
         let pointer = if self.follow_pointer.get() { self.hovered.get() } else { None };
         let shown = if self.trashing.get() { None } else { pointer.or(self.selected.get()) };
         let member = shown.and_then(|i| self.shown.borrow().get(i).cloned());
@@ -2317,7 +2336,17 @@ impl Results {
 
     // ------------------------------------------------------------ large view
 
+    /// The large view of card `start`: a window of its own beside the page,
+    /// which it leaves usable. It shows the page's selected image, whatever
+    /// selects it (its own arrows, the page's, a click), and marks what the
+    /// page marks. Asked again while open, it moves to `start` and is raised.
     fn preview(self: &Rc<Self>, start: usize) {
+        let open = self.large.borrow().as_ref().map(|v| v.win.clone());
+        if let Some(win) = open {
+            self.move_to(start as i64);
+            win.present();
+            return;
+        }
         let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).vexpand(true).hexpand(true).build();
         // Beside it, when comparing, its group's reference image; over each,
         // the part it shows of the other (`Outline`).
@@ -2336,7 +2365,14 @@ impl Results {
         let pictures = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).homogeneous(true).vexpand(true).build();
         pictures.append(&reference_side);
         pictures.append(&side(&here, &this_caption));
-        let info = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
+        // The file, a line each: where it is; its size; how it matched and
+        // what is suggested.
+        let line = || gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
+        let (path_line, facts_line, why_line) = (line(), line(), line());
+        let info = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).valign(gtk::Align::Center).build();
+        for l in [&path_line, &facts_line, &why_line] {
+            info.append(l);
+        }
         let prev = gtk::Button::with_mnemonic(l::PREVIEW_PREV);
         prev.set_tooltip_text(Some("Left arrow"));
         let next = gtk::Button::with_mnemonic(l::PREVIEW_NEXT);
@@ -2351,7 +2387,9 @@ impl Results {
         bar.set_margin_end(12);
         bar.set_margin_top(8);
         bar.set_margin_bottom(12);
-        for w in [info.upcast_ref::<gtk::Widget>(), prev.upcast_ref(), next.upcast_ref(), compare.upcast_ref(), mark.upcast_ref(), close.upcast_ref()] {
+        bar.append(&info);
+        for w in [prev.upcast_ref::<gtk::Widget>(), next.upcast_ref(), compare.upcast_ref(), mark.upcast_ref(), close.upcast_ref()] {
+            w.set_valign(gtk::Align::Center);
             bar.append(w);
         }
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -2359,27 +2397,51 @@ impl Results {
         body.append(&bar);
         let win = gtk::Window::builder()
             .transient_for(&self.app.window)
-            .modal(true)
+            .destroy_with_parent(true)
             .default_width(1100)
             .default_height(800)
             .child(&body)
             .build();
 
-        let at = Rc::new(Cell::new(start));
         let quiet = Rc::new(Cell::new(false));
         let (latest, latest_reference) = (Latest::default(), Latest::default());
+        // The files the two pictures were last asked for: shown again as
+        // they are when nothing but the words changed (a mark, the pointer
+        // over the page), rather than blanked and decoded again.
+        let asked: Rc<RefCell<[Option<PathBuf>; 2]>> = Rc::default();
         let show = {
-            let (me, picture, reference, info, mark, win, at, quiet) = (Rc::downgrade(self), picture.clone(), reference.clone(), info.clone(), mark.clone(), win.clone(), at.clone(), quiet.clone());
+            let (me, picture, reference, mark, win, quiet) = (Rc::downgrade(self), picture.clone(), reference.clone(), mark.clone(), win.clone(), quiet.clone());
+            let (path_line, facts_line, why_line) = (path_line.clone(), facts_line.clone(), why_line.clone());
             let (here, there, compare, reference_side, this_caption, reference_caption) =
                 (here.clone(), there.clone(), compare.clone(), reference_side.clone(), this_caption.clone(), reference_caption.clone());
             Rc::new(move || {
                 let Some(me) = me.upgrade() else { return };
                 let cards = me.cards.borrow();
                 let n = cards.len();
-                let Some(card) = cards.get(at.get()) else { return };
+                let at = me.selected.get().filter(|_| !me.trashing.get());
+                let Some((at, card)) = at.and_then(|i| Some((i, cards.get(i)?))) else {
+                    // Nothing selected: between groups, or while the Trash runs.
+                    drop(cards);
+                    win.set_title(Some("No image selected"));
+                    for (p, l) in [(&picture, &latest), (&reference, &latest_reference)] {
+                        let _ = l.next();
+                        p.set_paintable(None::<&gdk::Paintable>);
+                    }
+                    *asked.borrow_mut() = [None, None];
+                    here.set(None);
+                    there.set(None);
+                    path_line.set_text("No image is selected.");
+                    path_line.set_tooltip_text(None);
+                    facts_line.set_text("");
+                    why_line.set_text("");
+                    reference_side.set_visible(false);
+                    this_caption.set_visible(false);
+                    mark.set_sensitive(false);
+                    return;
+                };
                 let path = card.path.clone();
                 let s = me.state.borrow();
-                let shown = me.shown.borrow().get(at.get()).cloned();
+                let shown = me.shown.borrow().get(at).cloned();
                 let member = shown.as_ref().map(|(m, _)| m.clone());
                 let marked = member.as_ref().is_some_and(|m| s.is_marked(m.id));
                 // What it is compared with: its group's reference image, while
@@ -2390,27 +2452,34 @@ impl Results {
                     let r = g.files.first().filter(|r| r.is_representative() && r.id != m.id)?;
                     Some((r.clone(), m.at?))
                 });
+                let said = member.as_ref().map(|m| s.said(m.id));
                 drop(s);
                 drop(shown);
                 drop(cards);
-                win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at.get() + 1)));
-                let text = match &member {
-                    Some(m) => {
-                        let said = me.state.borrow().said(m.id);
-                        format!("{}  ·  {}  ·  {}  ·  {}", path.display(), facts(m), evidence(m), said)
-                    }
-                    None => path.display().to_string(),
+                win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at + 1)));
+                let whole = path.display().to_string();
+                path_line.set_text(&whole);
+                path_line.set_tooltip_text(Some(&whole));
+                facts_line.set_text(&member.as_ref().map(facts).unwrap_or_default());
+                let why = match (&member, said) {
+                    (Some(m), Some(said)) => format!("{}  ·  {said}", evidence(m)),
+                    _ => String::new(),
                 };
-                info.set_text(&text);
-                info.set_tooltip_text(Some(&text));
+                why_line.set_text(&why);
+                why_line.set_tooltip_text(Some(&why).filter(|w| !w.is_empty()).map(|w| w.as_str()));
                 quiet.set(true);
+                mark.set_sensitive(true);
                 mark.set_active(marked);
                 quiet.set(false);
                 let scale = win.scale_factor().max(1) as u32;
                 // Every picture this view asks for is for the same widget, and
                 // the answers come back in whatever order they are decoded; only
                 // the one asked for last is shown. See `Latest`.
-                let ask = |p: &gtk::Picture, path: &Path, latest: &Latest| {
+                let ask = |p: &gtk::Picture, path: &Path, latest: &Latest, slot: usize| {
+                    if asked.borrow()[slot].as_deref() == Some(path) {
+                        return;
+                    }
+                    asked.borrow_mut()[slot] = Some(path.to_path_buf());
                     p.set_paintable(None::<&gdk::Paintable>);
                     let current = latest.next();
                     let pic = p.downgrade();
@@ -2421,11 +2490,11 @@ impl Results {
                     }));
                     me.thumbs.request(path, Size::within(LARGE * scale), shown, true);
                 };
-                ask(&picture, &path, &latest);
+                ask(&picture, &path, &latest, 0);
                 let comparing = compare.is_active();
                 match pair.filter(|_| comparing) {
                     Some((r, place)) => {
-                        ask(&reference, &r.path, &latest_reference);
+                        ask(&reference, &r.path, &latest_reference, 1);
                         let dims = member.as_ref().and_then(|m| m.dims);
                         let (on_this, on_reference) = overlays(&place, r.dims, dims);
                         here.set(Some(on_this));
@@ -2463,16 +2532,13 @@ impl Results {
             let show = show.clone();
             move |_| show()
         });
+        // Its arrows move the page's selection, which it then shows.
         let go = {
-            let (me, at, show) = (Rc::downgrade(self), at.clone(), show.clone());
-            Rc::new(move |by: i32| {
-                let Some(me) = me.upgrade() else { return };
-                let n = me.cards.borrow().len() as i32;
-                if n == 0 {
-                    return;
+            let me = Rc::downgrade(self);
+            Rc::new(move |by: i64| {
+                if let Some(me) = me.upgrade() {
+                    me.move_to(me.selected.get().map_or(0, |i| i as i64 + by));
                 }
-                at.set((at.get() as i32 + by).clamp(0, n - 1) as usize);
-                show();
             })
         };
         prev.connect_clicked({
@@ -2484,13 +2550,13 @@ impl Results {
             move |_| go(1)
         });
         mark.connect_toggled({
-            let (me, at, quiet) = (Rc::downgrade(self), at.clone(), quiet.clone());
+            let (me, quiet) = (Rc::downgrade(self), quiet.clone());
             move |c| {
                 if quiet.get() {
                     return;
                 }
-                if let Some(me) = me.upgrade() {
-                    me.set_marked(at.get(), c.is_active());
+                if let Some((me, i)) = me.upgrade().and_then(|me| Some((me.clone(), me.selected.get()?))) {
+                    me.set_marked(i, c.is_active());
                 }
             }
         });
@@ -2507,7 +2573,11 @@ impl Results {
                     Some(Large::Close) => win.close(),
                     Some(Large::Previous) => go(-1),
                     Some(Large::Next) => go(1),
-                    Some(Large::Mark) => mark.set_active(!mark.is_active()),
+                    Some(Large::Mark) => {
+                        if mark.is_sensitive() {
+                            mark.set_active(!mark.is_active());
+                        }
+                    }
                     Some(Large::Compare) => compare.set_active(!compare.is_active()),
                     None => return glib::Propagation::Proceed,
                 }
@@ -2516,19 +2586,42 @@ impl Results {
         });
         win.add_controller(keys);
         crate::keep_mnemonics_visible(&win);
-        // Back where the keyboard was, on the image last shown.
         win.connect_close_request({
-            let (me, at) = (Rc::downgrade(self), at.clone());
+            let me = Rc::downgrade(self);
             move |_| {
                 if let Some(me) = me.upgrade() {
-                    me.move_to(at.get() as i64);
+                    me.large.replace(None);
                 }
                 glib::Propagation::Proceed
             }
         });
+        *self.large.borrow_mut() = Some(LargeView { win: win.clone(), show: show.clone(), due: Rc::default() });
+        self.move_to(start as i64);
         show();
         win.present();
         next.grab_focus();
+    }
+
+    /// The page has changed what the large view shows (the selection, a
+    /// mark, a suggestion, the images): it looks again once the change is
+    /// done, so a run of them is one look.
+    fn large_changed(&self) {
+        let Some((show, due)) = self.large.borrow().as_ref().map(|v| (v.show.clone(), v.due.clone())) else { return };
+        if due.replace(true) {
+            return;
+        }
+        glib::idle_add_local_once(move || {
+            due.set(false);
+            show();
+        });
+    }
+
+    /// Close the large view, if open.
+    fn close_large(&self) {
+        let win = self.large.borrow().as_ref().map(|v| v.win.clone());
+        if let Some(win) = win {
+            win.close();
+        }
     }
 
     // ------------------------------------------------------------ the Trash

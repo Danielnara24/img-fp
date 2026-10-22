@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.62.0)
+## Status (0.62.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -442,6 +442,12 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   copies: every direction within 0.9°, origins within 0.6 px of the frame's
   middle (1.8 px on the landscape one), lengths within 1.5 px of half way
   to the clipped frame's side (the round cap).
+- 0.62.1 (window only): the large view no longer blocks the page. It
+  shows the page's selected image and follows it (its arrows, the page's,
+  a click on a tile), marks stay in step both ways, a group chosen on the
+  page shows its first image, and asking again raises it; the info is three
+  lines (path; size; evidence and suggestion). Checked under Xvfb; GUI
+  tests pass.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1190,6 +1196,13 @@ Do not retry without new evidence:
   image marked; animations off; mnemonics always underlined (Cinnamon grabs
   Alt); F1 lists keys; dark theme followed from the desktop's text colour;
   tree view by folder (`gui/folders.rs`).
+- The large view (`Results::preview`) is a window of its own, not modal
+  (transient, so it stays above the page): it shows the page's *selected*
+  image, so its arrows, the page's arrows and a click on a tile all move
+  the one selection, and it looks again (`large_changed`, coalesced on idle)
+  whenever `select` or `refresh_bar` runs; a new group selects its first
+  image while it is open. Pictures are asked again only when their file
+  changes. Info is three lines: path; size; evidence and suggestion.
 - Mnemonics live in `gui/labels.rs` with a clash test; add labels there.
 - Keys live in `gui/commands.rs`: a `Section` per part of the window
   (`WINDOW`, `SCAN`, `RESULTS`, `LARGE`), each `Row` a line of the F1 list
