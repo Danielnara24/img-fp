@@ -56,6 +56,7 @@ use crate::mosaic::Mosaic;
 use crate::still::Still;
 use crate::thumbs::{show_on, Key, Latest, Shown, Size, Thumbs};
 use crate::App;
+use img_fp::outcome::Place;
 use img_fp::{Action, Evidence, Lapse, Outcome, Relation, SuggestMode};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -124,6 +125,8 @@ pub struct Member {
     pub bytes: Option<u64>,
     pub damaged: bool,
     pub with: Option<Evidence>,
+    /// Where the reference image lies in it (`outcome::Member::at`).
+    pub at: Option<img_fp::outcome::Place>,
     /// What the scan suggested for it, by the content rule.
     pub suggested: Option<Action>,
 }
@@ -2316,11 +2319,30 @@ impl Results {
 
     fn preview(self: &Rc<Self>, start: usize) {
         let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).vexpand(true).hexpand(true).build();
+        // Beside it, when comparing, its group's reference image; over each,
+        // the part it shows of the other (`Outline`).
+        let reference = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).vexpand(true).hexpand(true).build();
+        let (here, there) = (Outline::over(&picture), Outline::over(&reference));
+        let caption = || gtk::Label::builder().xalign(0.5).ellipsize(gtk::pango::EllipsizeMode::Middle).visible(false).build();
+        let (this_caption, reference_caption) = (caption(), caption());
+        let side = |o: &Outline, c: &gtk::Label| {
+            let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            b.append(&o.overlay);
+            b.append(c);
+            b
+        };
+        let reference_side = side(&there, &reference_caption);
+        reference_side.set_visible(false);
+        let pictures = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).homogeneous(true).vexpand(true).build();
+        pictures.append(&reference_side);
+        pictures.append(&side(&here, &this_caption));
         let info = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
         let prev = gtk::Button::with_mnemonic(l::PREVIEW_PREV);
         prev.set_tooltip_text(Some("Left arrow"));
         let next = gtk::Button::with_mnemonic(l::PREVIEW_NEXT);
         next.set_tooltip_text(Some("Right arrow"));
+        let compare = gtk::ToggleButton::with_mnemonic(l::PREVIEW_COMPARE);
+        compare.set_tooltip_text(Some("C"));
         let mark = gtk::CheckButton::with_mnemonic(l::PREVIEW_MARK);
         mark.set_tooltip_text(Some("Space"));
         let close = gtk::Button::with_mnemonic(l::PREVIEW_CLOSE);
@@ -2329,11 +2351,11 @@ impl Results {
         bar.set_margin_end(12);
         bar.set_margin_top(8);
         bar.set_margin_bottom(12);
-        for w in [info.upcast_ref::<gtk::Widget>(), prev.upcast_ref(), next.upcast_ref(), mark.upcast_ref(), close.upcast_ref()] {
+        for w in [info.upcast_ref::<gtk::Widget>(), prev.upcast_ref(), next.upcast_ref(), compare.upcast_ref(), mark.upcast_ref(), close.upcast_ref()] {
             bar.append(w);
         }
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        body.append(&picture);
+        body.append(&pictures);
         body.append(&bar);
         let win = gtk::Window::builder()
             .transient_for(&self.app.window)
@@ -2345,9 +2367,11 @@ impl Results {
 
         let at = Rc::new(Cell::new(start));
         let quiet = Rc::new(Cell::new(false));
-        let latest = Latest::default();
+        let (latest, latest_reference) = (Latest::default(), Latest::default());
         let show = {
-            let (me, picture, info, mark, win, at, quiet) = (Rc::downgrade(self), picture.clone(), info.clone(), mark.clone(), win.clone(), at.clone(), quiet.clone());
+            let (me, picture, reference, info, mark, win, at, quiet) = (Rc::downgrade(self), picture.clone(), reference.clone(), info.clone(), mark.clone(), win.clone(), at.clone(), quiet.clone());
+            let (here, there, compare, reference_side, this_caption, reference_caption) =
+                (here.clone(), there.clone(), compare.clone(), reference_side.clone(), this_caption.clone(), reference_caption.clone());
             Rc::new(move || {
                 let Some(me) = me.upgrade() else { return };
                 let cards = me.cards.borrow();
@@ -2355,9 +2379,19 @@ impl Results {
                 let Some(card) = cards.get(at.get()) else { return };
                 let path = card.path.clone();
                 let s = me.state.borrow();
-                let member = me.shown.borrow().get(at.get()).map(|(m, _)| m.clone());
+                let shown = me.shown.borrow().get(at.get()).cloned();
+                let member = shown.as_ref().map(|(m, _)| m.clone());
                 let marked = member.as_ref().is_some_and(|m| s.is_marked(m.id));
+                // What it is compared with: its group's reference image, while
+                // that is still there, and where the scan placed one in the
+                // other (a scan kept before 0.62 did not keep that).
+                let pair = shown.as_ref().and_then(|(m, gi)| {
+                    let g = s.groups.get(*gi).filter(|g| !g.reference_gone)?;
+                    let r = g.files.first().filter(|r| r.is_representative() && r.id != m.id)?;
+                    Some((r.clone(), m.at?))
+                });
                 drop(s);
+                drop(shown);
                 drop(cards);
                 win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at.get() + 1)));
                 let text = match &member {
@@ -2372,21 +2406,63 @@ impl Results {
                 quiet.set(true);
                 mark.set_active(marked);
                 quiet.set(false);
-                picture.set_paintable(None::<&gdk::Paintable>);
                 let scale = win.scale_factor().max(1) as u32;
                 // Every picture this view asks for is for the same widget, and
                 // the answers come back in whatever order they are decoded; only
                 // the one asked for last is shown. See `Latest`.
-                let current = latest.next();
-                let pic = picture.downgrade();
-                let shown = Shown::Callback(Box::new(move |r| {
-                    if let (true, Some(p)) = (current(), pic.upgrade()) {
-                        show_on(&p, r);
+                let ask = |p: &gtk::Picture, path: &Path, latest: &Latest| {
+                    p.set_paintable(None::<&gdk::Paintable>);
+                    let current = latest.next();
+                    let pic = p.downgrade();
+                    let shown = Shown::Callback(Box::new(move |r| {
+                        if let (true, Some(p)) = (current(), pic.upgrade()) {
+                            show_on(&p, r);
+                        }
+                    }));
+                    me.thumbs.request(path, Size::within(LARGE * scale), shown, true);
+                };
+                ask(&picture, &path, &latest);
+                let comparing = compare.is_active();
+                match pair.filter(|_| comparing) {
+                    Some((r, place)) => {
+                        ask(&reference, &r.path, &latest_reference);
+                        let dims = member.as_ref().and_then(|m| m.dims);
+                        let (on_this, on_reference) = overlays(&place, r.dims, dims);
+                        here.set(Some(on_this));
+                        there.set(on_reference);
+                        reference_caption.set_text(&format!("Reference image: {}  ·  {}", file_name(&r.path), facts(&r)));
+                        // How the reference lies in it, in words, beside the arrows.
+                        let how = match (r.dims, dims) {
+                            (Some(from), Some(to)) => turned(&place, from, to),
+                            _ => String::new(),
+                        };
+                        let how = if how.is_empty() { how } else { format!("  ·  {how} from the reference") };
+                        this_caption.set_text(&format!("This image: {}{how}", member.as_ref().map(facts).unwrap_or_default()));
                     }
-                }));
-                me.thumbs.request(&path, Size::within(LARGE * scale), shown, true);
+                    None => {
+                        here.set(None);
+                        there.set(None);
+                        // Nothing to set beside it: say why, where the
+                        // reference would be.
+                        let why = match &member {
+                            _ if !comparing => "",
+                            Some(m) if m.is_representative() => "This is the reference image the others were matched against.",
+                            Some(m) if m.with.is_some() && m.at.is_none() => "Scan again to compare: this scan did not keep where the images lie in each other.",
+                            _ => "Its group's reference image has been moved to the Trash.",
+                        };
+                        this_caption.set_text(why);
+                    }
+                }
+                let both = comparing && here.shows();
+                reference_side.set_visible(both);
+                reference_caption.set_visible(both);
+                this_caption.set_visible(comparing && !this_caption.text().is_empty());
             })
         };
+        compare.connect_toggled({
+            let show = show.clone();
+            move |_| show()
+        });
         let go = {
             let (me, at, show) = (Rc::downgrade(self), at.clone(), show.clone());
             Rc::new(move |by: i32| {
@@ -2425,13 +2501,14 @@ impl Results {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed({
-            let (go, mark, win) = (go.clone(), mark.clone(), win.clone());
+            let (go, mark, compare, win) = (go.clone(), mark.clone(), compare.clone(), win.clone());
             move |_, key, _, mods| {
                 match commands::LARGE.find(key, mods) {
                     Some(Large::Close) => win.close(),
                     Some(Large::Previous) => go(-1),
                     Some(Large::Next) => go(1),
                     Some(Large::Mark) => mark.set_active(!mark.is_active()),
+                    Some(Large::Compare) => compare.set_active(!compare.is_active()),
                     None => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -2714,6 +2791,319 @@ fn held_by(file: &Path, kept: &Path) -> String {
     }
 }
 
+/// A picture, and over it the part of it another picture shows (`Overlay`).
+#[derive(Clone)]
+struct Outline {
+    overlay: gtk::Overlay,
+    area: gtk::DrawingArea,
+    shown: Rc<Cell<Option<Overlay>>>,
+}
+
+/// What is drawn over one picture of a pair: the other's frame, and the
+/// reference's axes as they lie in this picture.
+#[derive(Clone, Copy, Debug)]
+struct Overlay {
+    /// Where the other picture's frame lies in this one.
+    frame: Place,
+    /// Where one pixel step right (X) and down (Y) in the reference goes in
+    /// this picture's pixels, `[xx, yx, xy, yy]`: X is `(xx, xy)`, Y is
+    /// `(yx, yy)`. The reference's own are `IDENTITY`. `None` for a picture
+    /// whose size the scan does not know.
+    axes: Option<[f64; 4]>,
+}
+
+impl Overlay {
+    const IDENTITY: [f64; 4] = [1.0, 0.0, 0.0, 1.0];
+}
+
+/// How far each arrow reaches: this share of the way from its origin to the
+/// side of the frame it points at (of the frame's part on the picture), so
+/// it grows and shrinks with the frame; and no shorter than `AXIS_LEAST`
+/// screen pixels, so a small frame's arrows still show.
+const AXIS_REACH: f64 = 0.5;
+const AXIS_LEAST: f64 = 14.0;
+const AXIS_X: (f64, f64, f64) = (0.95, 0.22, 0.2);
+const AXIS_Y: (f64, f64, f64) = (0.2, 0.85, 0.3);
+
+impl Outline {
+    fn over(picture: &gtk::Picture) -> Outline {
+        let area = gtk::DrawingArea::builder().can_target(false).hexpand(true).vexpand(true).build();
+        let overlay = gtk::Overlay::builder().child(picture).vexpand(true).hexpand(true).build();
+        overlay.add_overlay(&area);
+        let shown: Rc<Cell<Option<Overlay>>> = Rc::default();
+        area.set_draw_func({
+            let (picture, shown) = (picture.downgrade(), shown.clone());
+            move |_, cr, w, h| {
+                let (Some(o), Some(picture)) = (shown.get(), picture.upgrade()) else { return };
+                let Some(p) = picture.paintable() else { return };
+                paint_overlay(cr, (w as f64, h as f64), (p.intrinsic_width() as f64, p.intrinsic_height() as f64), &o);
+            }
+        });
+        picture.connect_paintable_notify({
+            let area = area.downgrade();
+            move |_| {
+                if let Some(a) = area.upgrade() {
+                    a.queue_draw();
+                }
+            }
+        });
+        Outline { overlay, area, shown }
+    }
+
+    fn set(&self, shown: Option<Overlay>) {
+        self.shown.set(shown);
+        self.area.queue_draw();
+    }
+
+    fn shows(&self) -> bool {
+        self.shown.get().is_some()
+    }
+}
+
+/// What is drawn over a member and over its reference, given where the
+/// reference lies in the member and each one's size as shown: on each the
+/// other's frame, and the reference's axes on both, its own on it and where
+/// they go in the member.
+fn overlays(place: &Place, reference: Option<(u32, u32)>, member: Option<(u32, u32)>) -> (Overlay, Option<Overlay>) {
+    let axes = match (reference, member) {
+        (Some(from), Some(to)) => Some(axes_in(place, from, to)),
+        _ => None,
+    };
+    let on_reference = place.reversed().map(|frame| Overlay { frame, axes: reference.map(|_| Overlay::IDENTITY) });
+    (Overlay { frame: *place, axes }, on_reference)
+}
+
+/// Where `Contain` puts a picture of `pw` x `ph` in a widget of `w` x `h`:
+/// its left, top, width and height.
+fn contained((w, h): (f64, f64), (pw, ph): (f64, f64)) -> (f64, f64, f64, f64) {
+    let k = (w / pw).min(h / ph);
+    let (dw, dh) = (pw * k, ph * k);
+    ((w - dw) / 2.0, (h - dh) / 2.0, dw, dh)
+}
+
+/// The part of the other's frame on this picture, in fractions of it.
+fn shared_part(frame: &Place) -> Vec<(f32, f32)> {
+    clip_to_frame(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| frame.apply(x, y)))
+}
+
+/// The arrows' origin, in fractions of this picture: the middle (centroid)
+/// of the part of the other's frame on this picture. That is the frame's
+/// middle when all of it is on the picture, and the picture's when the
+/// frame holds all of it (a slide's frame, seen on the photo it shows).
+fn axes_origin(frame: &Place) -> Option<(f32, f32)> {
+    let p: Vec<(f64, f64)> = shared_part(frame).into_iter().map(|(x, y)| (x as f64, y as f64)).collect();
+    let (mut area, mut cx, mut cy) = (0.0, 0.0, 0.0);
+    for (i, &a) in p.iter().enumerate() {
+        let b = p[(i + 1) % p.len()];
+        let c = a.0 * b.1 - b.0 * a.1;
+        area += c;
+        cx += (a.0 + b.0) * c;
+        cy += (a.1 + b.1) * c;
+    }
+    (area.abs() > 1e-12).then(|| ((cx / (3.0 * area)) as f32, (cy / (3.0 * area)) as f32))
+}
+
+/// The two arrows, from `origin` inside the convex `frame`, all in screen
+/// pixels: each one's tip, X (the reference's right) then Y (its up, towards
+/// the top side of its frame). `None` for a map that flattens the picture.
+fn axis_tips(origin: (f64, f64), axes: &[f64; 4], frame: &[(f64, f64)]) -> Option<[(f64, f64); 2]> {
+    let [xx, yx, xy, yy] = *axes;
+    let det = (xx * yy - yx * xy).abs();
+    if !(det > 0.0) || !det.is_finite() {
+        return None;
+    }
+    let tip = |(dx, dy): (f64, f64)| {
+        let len = dx.hypot(dy);
+        let u = (dx / len, dy / len);
+        let reach = (AXIS_REACH * to_edge(frame, origin, u)).max(AXIS_LEAST);
+        (origin.0 + reach * u.0, origin.1 + reach * u.1)
+    };
+    // The axes say where a step down goes; up is the other way.
+    Some([tip((xx, xy)), tip((-yx, -yy))])
+}
+
+/// How far a ray from `origin` along the unit `u`, inside the convex
+/// polygon `poly`, goes before it meets the polygon's edge.
+fn to_edge(poly: &[(f64, f64)], origin: (f64, f64), u: (f64, f64)) -> f64 {
+    let cross = |a: (f64, f64), b: (f64, f64)| a.0 * b.1 - a.1 * b.0;
+    let mut nearest = f64::INFINITY;
+    for (i, &a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        let (e, w) = ((b.0 - a.0, b.1 - a.1), (a.0 - origin.0, a.1 - origin.1));
+        let d = cross(u, e);
+        if d.abs() < 1e-12 {
+            continue;
+        }
+        // origin + t u = a + s e
+        let (t, s) = (cross(w, e) / d, cross(w, u) / d);
+        if t > 1e-9 && (-1e-9..=1.0 + 1e-9).contains(&s) {
+            nearest = nearest.min(t);
+        }
+    }
+    if nearest.is_finite() { nearest } else { 0.0 }
+}
+
+/// Draw `o` over a picture of `pw` x `ph` shown `Contain` in `w` x `h`: the
+/// other picture's frame outlined and the rest of this one dimmed, and the
+/// reference's right (X) and up (Y) as arrows from the middle of the frame.
+fn paint_overlay(cr: &gtk::cairo::Context, (w, h): (f64, f64), (pw, ph): (f64, f64), o: &Overlay) {
+    if pw <= 0.0 || ph <= 0.0 {
+        return;
+    }
+    let (ox, oy, dw, dh) = contained((w, h), (pw, ph));
+    let on_screen = |(u, v): (f32, f32)| (ox + u as f64 * dw, oy + v as f64 * dh);
+    let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| on_screen(o.frame.apply(x, y)));
+    let path = |cr: &gtk::cairo::Context| {
+        cr.move_to(corners[0].0, corners[0].1);
+        for c in &corners[1..] {
+            cr.line_to(c.0, c.1);
+        }
+        cr.close_path();
+    };
+    let _ = cr.save();
+    cr.rectangle(ox, oy, dw, dh);
+    cr.clip();
+    cr.set_fill_rule(gtk::cairo::FillRule::EvenOdd);
+    cr.rectangle(ox, oy, dw, dh);
+    path(cr);
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+    let _ = cr.fill();
+    // Dark under the colour, so a line shows on any picture.
+    let stroke = |cr: &gtk::cairo::Context, (r, g, b): (f64, f64, f64), width: f64| {
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.8);
+        cr.set_line_width(width + 2.5);
+        let _ = cr.stroke_preserve();
+        cr.set_source_rgb(r, g, b);
+        cr.set_line_width(width);
+        let _ = cr.stroke();
+    };
+    path(cr);
+    stroke(cr, (1.0, 0.85, 0.2), 2.0);
+    let _ = cr.restore();
+    let (Some(axes), Some(origin)) = (o.axes, axes_origin(&o.frame)) else { return };
+    let origin = on_screen(origin);
+    let shared: Vec<(f64, f64)> = shared_part(&o.frame).into_iter().map(on_screen).collect();
+    let Some(tips) = axis_tips(origin, &axes, &shared) else { return };
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    let arrows = [(tips[0], AXIS_X, "X"), (tips[1], AXIS_Y, "Y")].map(|(tip, colour, name)| {
+        let (dx, dy) = (tip.0 - origin.0, tip.1 - origin.1);
+        let len = dx.hypot(dy);
+        // Thinner on a short arrow, so a small frame's do not crowd it.
+        (tip, colour, name, len, (dx / len, dy / len), (len / 30.0).clamp(1.5, 2.5))
+    });
+    let shaft = |cr: &gtk::cairo::Context, tip: (f64, f64), len: f64, (ux, uy): (f64, f64)| {
+        // The head: two strokes back from the tip, a quarter of the arrow
+        // long (within reason), either side of it.
+        let head = (len * 0.28).clamp(6.0, 14.0);
+        let (c, s) = (0.42f64.cos(), 0.42f64.sin());
+        cr.move_to(origin.0, origin.1);
+        cr.line_to(tip.0, tip.1);
+        cr.move_to(tip.0 - head * (ux * c - uy * s), tip.1 - head * (uy * c + ux * s));
+        cr.line_to(tip.0, tip.1);
+        cr.line_to(tip.0 - head * (ux * c + uy * s), tip.1 - head * (uy * c - ux * s));
+    };
+    // Both dark edges under both arrows, so neither hides where the other
+    // starts.
+    for &(tip, _, _, len, u, width) in &arrows {
+        shaft(cr, tip, len, u);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.8);
+        cr.set_line_width(width + 2.5);
+        let _ = cr.stroke();
+    }
+    for &(tip, (r, g, b), _, len, u, width) in &arrows {
+        shaft(cr, tip, len, u);
+        cr.set_source_rgb(r, g, b);
+        cr.set_line_width(width);
+        let _ = cr.stroke();
+    }
+    // Each axis's name, upright, past its tip: the colours alone do not tell
+    // them apart for everyone.
+    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+    cr.set_font_size(14.0);
+    for &(tip, colour, name, _, (ux, uy), _) in &arrows {
+        if let Ok(e) = cr.text_extents(name) {
+            let (lx, ly) = (tip.0 + ux * 12.0, tip.1 + uy * 12.0);
+            cr.move_to(lx - e.width() / 2.0 - e.x_bearing(), ly - e.height() / 2.0 - e.y_bearing());
+            cr.text_path(name);
+            stroke(cr, colour, 1.0);
+        }
+    }
+}
+
+/// Where one pixel step right and down in a picture of size `from` goes in
+/// one of size `to` (both as shown), by `place`: `[xx, yx, xy, yy]`, as
+/// `Overlay::axes`.
+fn axes_in(place: &Place, (fw, fh): (u32, u32), (tw, th): (u32, u32)) -> [f64; 4] {
+    let m = place.0.map(f64::from);
+    let (fw, fh, tw, th) = (fw as f64, fh as f64, tw as f64, th as f64);
+    [m[0] * tw / fw, m[1] * tw / fh, m[3] * th / fw, m[4] * th / fh]
+}
+
+/// The part of a quadrilateral, in fractions of a picture, that lies on the
+/// picture: clipped to the unit square edge by edge (Sutherland-Hodgman).
+fn clip_to_frame(poly: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut out = poly.to_vec();
+    // Each edge of the square: which side is inside, and where a segment
+    // crosses it.
+    let edges: [(fn((f32, f32)) -> f32, usize, f32); 4] = [(|p| p.0, 0, 0.0), (|p| -p.0, 0, 1.0), (|p| p.1, 1, 0.0), (|p| -p.1, 1, 1.0)];
+    for (side, axis, at) in edges {
+        let inside = |p: (f32, f32)| side(p) >= side(if axis == 0 { (at, p.1) } else { (p.0, at) });
+        let input = std::mem::take(&mut out);
+        for (i, &p) in input.iter().enumerate() {
+            let q = input[(i + 1) % input.len()];
+            let cross = |a: (f32, f32), b: (f32, f32)| {
+                let (ca, cb) = if axis == 0 { (a.0, b.0) } else { (a.1, b.1) };
+                let t = (at - ca) / (cb - ca);
+                (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
+            };
+            match (inside(p), inside(q)) {
+                (true, true) => out.push(q),
+                (true, false) => out.push(cross(p, q)),
+                (false, true) => {
+                    out.push(cross(p, q));
+                    out.push(q);
+                }
+                (false, false) => {}
+            }
+        }
+        if out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// How a picture of size `from` lies turned or flipped in one of size `to`
+/// (both as shown), by `place`: "" when it is the same way up.
+fn turned(place: &Place, from: (u32, u32), to: (u32, u32)) -> String {
+    // In pixels: how one pixel of `from` moves across `to`.
+    let j = axes_in(place, from, to);
+    let mirrored = j[0] * j[3] - j[1] * j[2] < 0.0;
+    // A mirror first, left to right, then a turn: y points down, so a
+    // positive angle is clockwise.
+    let (c, s) = if mirrored { (-j[0], -j[2]) } else { (j[0], j[2]) };
+    let deg = s.atan2(c).to_degrees();
+    // Whole degrees, and a quarter turn as one: the fit puts an exact copy's
+    // corners within 0.04% of the shared area's diagonal on IMGS-ALL's
+    // ground truth (median), a twentieth of a degree, so a turn of one
+    // degree is a turn.
+    let quarter = (deg / 90.0).round() * 90.0;
+    let deg = if (deg - quarter).abs() < 0.5 { quarter } else { deg.round() };
+    let turn = match deg as i64 {
+        0 => String::new(),
+        180 | -180 => "turned 180°".to_string(),
+        d if d > 0 => format!("turned {d}° clockwise"),
+        d => format!("turned {}° anticlockwise", -d),
+    };
+    match (mirrored, turn.as_str()) {
+        (false, t) => t.to_string(),
+        (true, "") => "mirrored".to_string(),
+        (true, "turned 180°") => "upside down".to_string(),
+        (true, t) => format!("mirrored, {t}"),
+    }
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -2828,7 +3218,7 @@ pub fn prepare(scan: Outcome) -> Prepared {
                 .iter()
                 .map(|m| {
                     let f = &scan.files[m.file];
-                    Member { id: m.file as u32, path: f.path.clone(), dims: f.dims, bytes: f.bytes, damaged: f.damaged, with: m.with, suggested: suggested[m.file] }
+                    Member { id: m.file as u32, path: f.path.clone(), dims: f.dims, bytes: f.bytes, damaged: f.damaged, with: m.with, at: m.at, suggested: suggested[m.file] }
                 })
                 .collect();
             GroupState { files, reference_gone: false }
@@ -2876,13 +3266,291 @@ fn facts(m: &Member) -> String {
 mod tests {
     use super::*;
 
+    /// What `paint_overlay` drew, read back from its pixels.
+    struct Drawn {
+        w: usize,
+        h: usize,
+        px: Vec<[u8; 3]>,
+    }
+
+    impl Drawn {
+        /// `o` over a picture of `pic` pixels, shown in a `w` x `h` widget,
+        /// on mid grey.
+        fn paint(w: i32, h: i32, pic: (u32, u32), o: &Overlay) -> Drawn {
+            let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::Rgb24, w, h).unwrap();
+            {
+                let cr = gtk::cairo::Context::new(&surface).unwrap();
+                cr.set_source_rgb(0.5, 0.5, 0.5);
+                cr.paint().unwrap();
+                paint_overlay(&cr, (w as f64, h as f64), (pic.0 as f64, pic.1 as f64), o);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            let px = (0..h as usize).flat_map(|y| (0..w as usize).map(move |x| (x, y))).map(|(x, y)| {
+                let i = y * stride + x * 4;
+                [data[i + 2], data[i + 1], data[i]]
+            });
+            Drawn { w: w as usize, h: h as usize, px: px.collect() }
+        }
+
+        /// Whether a pixel is of `colour`: an arrow's by its one strong
+        /// channel (a thin line blends with its dark edge), anything else
+        /// near the colour itself.
+        fn is(&self, x: usize, y: usize, colour: (f64, f64, f64)) -> bool {
+            let p = self.px[y * self.w + x].map(i32::from);
+            let strong = |k: usize| (0..3).all(|j| j == k || p[k] > p[j] + 60);
+            if colour == AXIS_X {
+                return strong(0);
+            }
+            if colour == AXIS_Y {
+                return strong(1);
+            }
+            let want = [colour.0, colour.1, colour.2].map(|c| (c * 255.0) as i32);
+            (0..3).all(|k| (p[k] - want[k]).abs() < 40)
+        }
+
+        fn of(&self, colour: (f64, f64, f64)) -> Vec<(f64, f64)> {
+            (0..self.h).flat_map(|y| (0..self.w).map(move |x| (x, y))).filter(|&(x, y)| self.is(x, y, colour)).map(|(x, y)| (x as f64 + 0.5, y as f64 + 0.5)).collect()
+        }
+
+        /// The direction an arrow of `colour` points from `origin`, in
+        /// degrees clockwise from the screen's right, and how long it is:
+        /// the centroid of its pixels clear of the other arrow at the
+        /// origin and short of its name past the tip (the head is
+        /// symmetric about the shaft), then how far along that its colour
+        /// runs unbroken.
+        fn arrow(&self, origin: (f64, f64), colour: (f64, f64, f64)) -> (f64, f64) {
+            let along = |a: f64, r: f64| ((origin.0 + r * a.cos()).floor() as usize, (origin.1 + r * a.sin()).floor() as usize);
+            let rough: Vec<(f64, f64)> = self.of(colour).into_iter().filter(|p| (4.0..12.0).contains(&(p.0 - origin.0).hypot(p.1 - origin.1))).collect();
+            assert!(rough.len() > 5, "an arrow is drawn: {} pixels", rough.len());
+            let n = rough.len() as f64;
+            let a = (rough.iter().map(|p| p.1).sum::<f64>() / n - origin.1).atan2(rough.iter().map(|p| p.0).sum::<f64>() / n - origin.0);
+            let mut len = 0.0;
+            let mut r = 4.0;
+            while r < len + 2.5 || len == 0.0 {
+                let (x, y) = along(a, r);
+                if x >= self.w || y >= self.h {
+                    break;
+                }
+                // A pixel either side: the rough direction drifts off a
+                // thin line along a long arrow.
+                let (nx, ny) = (-a.sin(), a.cos());
+                let near = [-1.0, 0.0, 1.0].iter().any(|&k: &f64| {
+                    let (x, y) = ((x as f64 + 0.5 + k * nx).floor(), (y as f64 + 0.5 + k * ny).floor());
+                    x >= 0.0 && y >= 0.0 && (x as usize) < self.w && (y as usize) < self.h && self.is(x as usize, y as usize, colour)
+                });
+                if near {
+                    len = r;
+                }
+                r += 0.5;
+            }
+            let shaft: Vec<(f64, f64)> = self.of(colour).into_iter().filter(|p| (4.0..len - 1.0).contains(&(p.0 - origin.0).hypot(p.1 - origin.1))).collect();
+            let n = shaft.len() as f64;
+            let (cx, cy) = (shaft.iter().map(|p| p.0).sum::<f64>() / n, shaft.iter().map(|p| p.1).sum::<f64>() / n);
+            ((cy - origin.1).atan2(cx - origin.0).to_degrees(), len)
+        }
+
+        /// How near to `at` the arrow of `colour` comes: where it starts.
+        fn nearest(&self, at: (f64, f64), colour: (f64, f64, f64)) -> f64 {
+            self.of(colour).iter().map(|p| (p.0 - at.0).hypot(p.1 - at.1)).fold(f64::MAX, f64::min)
+        }
+    }
+
+    fn angle_between(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    /// The reference's X and Y arrows, over the member and over the
+    /// reference, for every way one picture can lie in another: drawn
+    /// through `overlays` and `paint_overlay` as the window draws them, and
+    /// read back from the pixels. The expected directions are what each
+    /// edit does to the picture, not the formula: a quarter turn
+    /// anticlockwise takes the reference's top edge to the copy's left, so
+    /// its right (X) points up there and its up (Y) left, to the frame's
+    /// top side. Each arrow reaches half way to the side of the frame (as
+    /// far as it is on the picture) it points at: at twice its length is the
+    /// outline or the picture's edge.
+    #[test]
+    fn the_axes_are_drawn_where_and_as_the_transform_puts_them() {
+        const RIGHT: f64 = 0.0;
+        const DOWN: f64 = 90.0;
+        const LEFT: f64 = 180.0;
+        const UP: f64 = -90.0;
+        let r = (400, 300);
+        // Name, where the reference lies in the member (fractions), the
+        // member's size, and X and Y as they should point in the member.
+        let cases: &[(&str, [f32; 6], (u32, u32), f64, f64)] = &[
+            ("same", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], (400, 300), RIGHT, UP),
+            ("half the size", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], (200, 150), RIGHT, UP),
+            ("mirrored", [-1.0, 0.0, 1.0, 0.0, 1.0, 0.0], (400, 300), LEFT, UP),
+            ("upside down", [1.0, 0.0, 0.0, 0.0, -1.0, 1.0], (400, 300), RIGHT, DOWN),
+            ("turned 180", [-1.0, 0.0, 1.0, 0.0, -1.0, 1.0], (400, 300), LEFT, DOWN),
+            ("quarter anticlockwise", [0.0, 1.0, 0.0, -1.0, 0.0, 1.0], (300, 400), UP, LEFT),
+            ("quarter clockwise", [0.0, -1.0, 1.0, 1.0, 0.0, 0.0], (300, 400), DOWN, RIGHT),
+            ("transposed", [0.0, 1.0, 0.0, 1.0, 0.0, 0.0], (300, 400), DOWN, LEFT),
+            ("anti-transposed", [0.0, -1.0, 1.0, -1.0, 0.0, 1.0], (300, 400), UP, RIGHT),
+            ("centre crop", [2.0, 0.0, -0.5, 0.0, 2.0, -0.5], (200, 150), RIGHT, UP),
+            ("corner crop", [3.0, 0.0, 0.0, 0.0, 3.0, 0.0], (133, 100), RIGHT, UP),
+            ("squeezed", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], (200, 300), RIGHT, UP),
+            ("mirrored crop", [-2.0, 0.0, 1.5, 0.0, 2.0, -0.5], (200, 150), LEFT, UP),
+            ("embedded, turned", [0.0, 0.25, 0.4, -0.25, 0.0, 0.6], (1200, 1600), UP, LEFT),
+            ("embedded off centre", [0.3, 0.0, 0.1, 0.0, 0.3, 0.6], (400, 300), RIGHT, UP),
+            // A photo in a slide, off its middle: the slide's middle lies on
+            // the photo, but the arrows there start at the photo's.
+            ("in a slide", [0.4, 0.0, 0.4, 0.0, 0.35, 0.4], (1728, 972), RIGHT, UP),
+            ("embedded tiny", [0.04, 0.0, 0.48, 0.0, 0.04, 0.48], (4000, 3000), RIGHT, UP),
+        ];
+        let mut cases: Vec<(String, [f32; 6], (u32, u32), f64, f64)> = cases.iter().map(|c| (c.0.to_string(), c.1, c.2, c.3, c.4)).collect();
+        // Turned by small amounts either way, in pixels: a turn of t
+        // clockwise moves X t below the right and Y t past the down.
+        for t in [-30.0f64, -10.0, -2.0, 4.0, 15.0, 45.0] {
+            let (c, s) = (t.to_radians().cos() as f32, t.to_radians().sin() as f32);
+            // About the middle, in the reference's pixels, put back in
+            // fractions of a picture of the same size.
+            let (w, h) = (400.0f32, 300.0f32);
+            let m = [c, -s * h / w, 0.0, s * w / h, c, 0.0];
+            let (cx, cy) = (m[0] * 0.5 + m[1] * 0.5, m[3] * 0.5 + m[4] * 0.5);
+            let m = [m[0], m[1], 0.5 - cx, m[3], m[4], 0.5 - cy];
+            cases.push((format!("turned {t}"), m, (400, 300), t, t - 90.0));
+        }
+        for (name, m, member, x, y) in &cases {
+            let place = Place(*m);
+            let (on_member, on_reference) = overlays(&place, Some(r), Some(*member));
+            for (side, o, pic, x, y) in [("member", on_member, *member, *x, *y), ("reference", on_reference.unwrap(), r, RIGHT, UP)] {
+                let (w, h) = (360, 300);
+                let d = Drawn::paint(w, h, pic, &o);
+                let (ox, oy, dw, dh) = contained((w as f64, h as f64), (pic.0 as f64, pic.1 as f64));
+                let origin = axes_origin(&o.frame).unwrap();
+                let origin = (ox + origin.0 as f64 * dw, oy + origin.1 as f64 * dh);
+                // Where it starts: the frame's middle when it is all on the
+                // picture, the picture's when it holds all of the picture.
+                let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(u, v)| o.frame.apply(u, v));
+                let on_picture = |(u, v): (f32, f32)| (-1e-3..=1.0 + 1e-3).contains(&u) && (-1e-3..=1.0 + 1e-3).contains(&v);
+                let held = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].iter().all(|&(u, v)| {
+                    // A corner of the picture inside the frame: on the same
+                    // side of each of its edges.
+                    let side = |a: (f32, f32), b: (f32, f32)| (b.0 - a.0) * (v - a.1) - (b.1 - a.1) * (u - a.0);
+                    let s: Vec<f32> = (0..4).map(|i| side(corners[i], corners[(i + 1) % 4])).collect();
+                    s.iter().all(|&x| x >= -1e-4) || s.iter().all(|&x| x <= 1e-4)
+                });
+                let want = if corners.iter().all(|&c| on_picture(c)) {
+                    Some(o.frame.apply(0.5, 0.5))
+                } else if held {
+                    Some((0.5, 0.5))
+                } else {
+                    None
+                };
+                if let Some((fx, fy)) = want {
+                    let mid = (ox + fx as f64 * dw, oy + fy as f64 * dh);
+                    assert!((origin.0 - mid.0).hypot(origin.1 - mid.1) < 0.5, "{name}, {side}: starts at {origin:?}, not {mid:?}");
+                }
+                for colour in [AXIS_X, AXIS_Y] {
+                    assert!(d.nearest(origin, colour) < 4.0, "{name}, {side}: an arrow starts at {origin:?}");
+                }
+                let on_screen = |(u, v): (f32, f32)| (ox + u as f64 * dw, oy + v as f64 * dh);
+                let yellow = (1.0, 0.85, 0.2);
+                let outline = d.of(yellow);
+                // Where the frame is all on the picture, the middle of its
+                // right and top sides, seen from the reference's side.
+                let whole = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].iter().all(|&(u, v)| {
+                    let (u, v) = o.frame.apply(u, v);
+                    (-1e-3..=1.0 + 1e-3).contains(&u) && (-1e-3..=1.0 + 1e-3).contains(&v)
+                });
+                for (colour, want, label, side_mid) in [(AXIS_X, x, "X", (1.0, 0.5)), (AXIS_Y, y, "Y", (0.5, 0.0))] {
+                    let (got, len) = d.arrow(origin, colour);
+                    assert!(angle_between(got, want) < 3.0, "{name}, {side}: {label} points {got:.1}, not {want}");
+                    let a = got.to_radians();
+                    if len < AXIS_LEAST + 3.0 {
+                        // A small frame's arrow is drawn at the least length.
+                        assert!((len - AXIS_LEAST).abs() < 3.0, "{name}, {side}: {label} is {len:.1} long, not the least");
+                        continue;
+                    }
+                    let far = (origin.0 + 2.0 * len * a.cos(), origin.1 + 2.0 * len * a.sin());
+                    let on_edge = (far.0 - ox).abs().min((far.0 - ox - dw).abs()).min((far.1 - oy).abs()).min((far.1 - oy - dh).abs()) < 5.0;
+                    let on_outline = outline.iter().any(|p| (p.0 - far.0).hypot(p.1 - far.1) < 5.0);
+                    // The name, 12 px past the tip, covers the outline at
+                    // twice a short arrow's length.
+                    assert!(len < 24.0 || on_edge || on_outline, "{name}, {side}: {label} ({len:.1} long) is not half way to the frame's side at {far:?}");
+                    if side == "member" && whole {
+                        // The reference's own sides: X half way to its right
+                        // side's middle, Y to its top's.
+                        let mid = on_screen(o.frame.apply(0.5, 0.5));
+                        let end = on_screen(o.frame.apply(side_mid.0, side_mid.1));
+                        let want = (end.0 - mid.0).hypot(end.1 - mid.1) / 2.0;
+                        assert!((len - want).abs() < 3.0, "{name}, {side}: {label} is {len:.1} long, not {want:.1}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The outline is the other picture's frame: its corners where the
+    /// transform puts them.
+    #[test]
+    fn the_outline_is_the_other_frame() {
+        // A quarter-size crop at the reference's top left, seen over the
+        // reference: its frame is the reference's top-left quarter.
+        let o = Overlay { frame: Place([0.5, 0.0, 0.0, 0.0, 0.5, 0.0]), axes: None };
+        let d = Drawn::paint(400, 300, (400, 300), &o);
+        let yellow = (1.0, 0.85, 0.2);
+        let lit = d.of(yellow);
+        let near = |x: f64, y: f64| lit.iter().any(|p| (p.0 - x).hypot(p.1 - y) < 2.5);
+        for (x, y) in [(0.0f64, 0.0f64), (200.0, 0.0), (200.0, 150.0), (0.0, 150.0), (100.0, 150.0), (200.0, 75.0)] {
+            assert!(near(x.max(1.0), y.max(1.0)), "the outline passes ({x}, {y})");
+        }
+        assert!(!near(300.0, 150.0) && !near(200.0, 250.0), "and nowhere else");
+        // Outside it, dimmed; inside, the picture as it is.
+        let grey = |x: usize, y: usize| d.px[y * d.w + x][0] as i32;
+        assert!(grey(300, 200) < 80 && (grey(100, 75) - 128).abs() < 3);
+    }
+
+    /// A 400 x 300 reference, and copies of it in each orientation: the
+    /// words say how the copy lies, whatever its size.
+    #[test]
+    fn a_turn_or_flip_is_said_in_words() {
+        let at = |m: [f32; 6]| Place(m);
+        let r = (400, 300);
+        assert_eq!(turned(&at([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]), r, (200, 150)), "");
+        assert_eq!(turned(&at([-1.0, 0.0, 1.0, 0.0, 1.0, 0.0]), r, r), "mirrored");
+        assert_eq!(turned(&at([1.0, 0.0, 0.0, 0.0, -1.0, 1.0]), r, r), "upside down");
+        assert_eq!(turned(&at([-1.0, 0.0, 1.0, 0.0, -1.0, 1.0]), r, r), "turned 180°");
+        // A quarter turn clockwise: the reference's top edge is the copy's
+        // right edge, top to bottom; the copy is 300 x 400.
+        assert_eq!(turned(&at([0.0, -1.0, 1.0, 1.0, 0.0, 0.0]), r, (300, 400)), "turned 90° clockwise");
+        assert_eq!(turned(&at([0.0, 1.0, 0.0, -1.0, 0.0, 1.0]), r, (300, 400)), "turned 90° anticlockwise");
+        // A quarter turn and a mirror: the reference's top edge on the
+        // copy's left.
+        assert_eq!(turned(&at([0.0, 1.0, 0.0, 1.0, 0.0, 0.0]), r, (300, 400)), "mirrored, turned 90° anticlockwise");
+        // A small turn is said in degrees; the fit's noise near none is not.
+        let (c, s) = (10f32.to_radians().cos(), 10f32.to_radians().sin());
+        assert_eq!(turned(&at([c, -s * 0.75, 0.0, s / 0.75, c, 0.0]), r, r), "turned 10° clockwise");
+        let (c, s) = (2f32.to_radians().cos(), 2f32.to_radians().sin());
+        assert_eq!(turned(&at([c, -s * 0.75, 0.0, s / 0.75, c, 0.0]), r, r), "turned 2° clockwise");
+        let (c, s) = (0.2f32.to_radians().cos(), 0.2f32.to_radians().sin());
+        assert_eq!(turned(&at([c, -s * 0.75, 0.0, s / 0.75, c, 0.0]), r, r), "");
+    }
+
+    #[test]
+    fn the_shared_part_is_clipped_to_the_picture() {
+        let area = |p: &[(f32, f32)]| (0..p.len()).map(|i| p[i].0 * p[(i + 1) % p.len()].1 - p[(i + 1) % p.len()].0 * p[i].1).sum::<f32>().abs() / 2.0;
+        let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        assert_eq!(area(&clip_to_frame(&square)), 1.0);
+        // A reference four times a crop's size, around it: all of the crop.
+        assert_eq!(area(&clip_to_frame(&[(-1.0, -1.0), (3.0, -1.0), (3.0, 3.0), (-1.0, 3.0)])), 1.0);
+        // Half off the right edge.
+        assert_eq!(area(&clip_to_frame(&[(0.5, 0.0), (1.5, 0.0), (1.5, 1.0), (0.5, 1.0)])), 0.5);
+        assert!(clip_to_frame(&[(2.0, 2.0), (3.0, 2.0), (3.0, 3.0), (2.0, 3.0)]).is_empty());
+    }
+
     /// 0 the reference and kept original, 1 and 2 copies; the content rule
     /// says `content`, and deletes each DELETE for 0.
     fn state(content: [Option<Action>; 3]) -> State {
         use img_fp::outcome::{File, Group, Head, Member};
         let ev = Evidence { relation: Relation::Direct, aligned_points: Some(40), frame_overlap: 1.0, pixel_correlation: 0.99, mirrored: false, inverted: false };
         let files = (0..3).map(|i| File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false, library: false }).collect();
-        let members = (0..3).map(|i| Member { file: i, with: (i > 0).then_some(ev) }).collect();
+        let members = (0..3).map(|i| Member { file: i, with: (i > 0).then_some(ev), at: None }).collect();
         let kept = content.iter().map(|a| (*a == Some(Action::Delete)).then_some(0)).collect();
         let p = prepare(Outcome::new(Head::default(), 0.7, files, vec![Group { members }], content.to_vec(), kept));
         State { groups: p.groups, scan: p.scan, by_mode: p.by_mode, marked: vec![false; 3], ..Default::default() }

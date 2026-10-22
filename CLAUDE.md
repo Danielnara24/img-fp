@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.61.0)
+## Status (0.62.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -401,6 +401,47 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   identical but `runtime_seconds`; all 90 `pairs.py` reports and lists
   identical; per-symbol `ymm` counts identical. Code and test lines (no
   comments or blanks) in the files touched 8,242 -> 8,212.
+- 0.62.0 (compare view): the window's large view shows an image beside
+  its group's reference (`C`, *Compare with reference*), the part each shows
+  of the other outlined and the rest dimmed (`gui::results::Outline`). Drawn
+  from `outcome::Member::at`, a `Place`: the verdict's transform put in
+  fractions of each picture, four decimals, from representative to member;
+  made only for representative-member pairs (`pipeline::placements`, after
+  `group::find`, which moved from `finish` into the assembly). First built
+  in `Evidence`: every one of the 1.1 M report pairs grew 28 bytes and the
+  stable sort holds them twice, peak 640 / 643 -> 706 / 707 MB; now
+  base 624 / 624 vs new 627 / 634 (cached IMGS-ALL, ABBA), CPU within spread
+  (489-497 base at >= 2,200 MHz, 496-504 new). Kept scan 11.1 -> 13.6 MB
+  (51,289 members). Report byte-identical (less `runtime_seconds`); kept
+  scan identical less `at`. Checked against the generated truth (15,727
+  same-seed members with plain or `flip_h` geometry): corner error of the
+  shared area median 0.04% of its diagonal, p99 1.2%; 14 over 5%, each a
+  match the scan itself verified that way (a symmetric scene matched
+  unmirrored at 0.79-0.84, an Excel sheet one grid cell over). A scan kept
+  before has no places: the view says to scan again. Orientation: the
+  reference's right (X, red) and up (Y, green: towards its frame's top side)
+  as arrows from the centroid of the other's frame's part on the picture
+  (`axes_origin`: the frame's middle when all of it is on the picture, the
+  picture's when the frame holds it all; it was the frame's middle whenever
+  that was on the picture, so a slide's middle put a photo's arrows near
+  its top left), its own on the reference and through the
+  transform on the member (`overlays`, `axes_in`, `paint_overlay`), each
+  reaching half way to the side of the frame's part on the picture it
+  points at (`AXIS_REACH`, at least `AXIS_LEAST` px; `axis_tips`,
+  `to_edge`), 1.5-2.5 px thick by length, both dark edges drawn under both
+  arrows, and the caption in words (`turned`: whole
+  degrees, a quarter turn snapped within 0.5°; exact copies of a seed read
+  0.02-0.06° off, `rotate_small` 1.14°). Tested by rendering off screen and
+  reading the pixels back (`the_axes_are_drawn_where_and_as_the_transform_
+  puts_them`: 23 orientations, both sides, direction within 3°, origin
+  within 4 px, length half way to the outline or the picture's edge and,
+  for a frame wholly on the member, to its sides' middles within 3 px; it
+  fails with X/Y swapped, the matrix transposed, the origin moved, Y down,
+  a fixed length, a reach of 0.6, the frame unclipped, no least length or the old origin rule),
+  and on window screenshots of a seed's crop, mirror, 90°, 180° and 1.14°
+  copies: every direction within 0.9°, origins within 0.6 px of the frame's
+  middle (1.8 px on the landscape one), lengths within 1.5 px of half way
+  to the clipped frame's side (the round cap).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs

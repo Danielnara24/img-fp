@@ -137,7 +137,7 @@ mod tests {
             use img_fp::outcome::{File, Group, Head, Member};
             let ev = img_fp::Evidence { relation: img_fp::Relation::Identical, aligned_points: None, frame_overlap: 1.0, pixel_correlation: 1.0, mirrored: false, inverted: false };
             let files: Vec<File> = files.iter().map(|p| File { path: p.to_path_buf(), dims: None, bytes: None, damaged: false, library: false }).collect();
-            let members = (0..files.len()).map(|i| Member { file: i, with: (i > 0).then_some(ev) }).collect();
+            let members = (0..files.len()).map(|i| Member { file: i, with: (i > 0).then_some(ev), at: None }).collect();
             let head = Head { files_analysed: 7, ..Default::default() };
             let p = root.join(name);
             img_fp::Outcome::new(head, 0.7, files, vec![Group { members }], Vec::new(), Vec::new()).save(&p).unwrap();

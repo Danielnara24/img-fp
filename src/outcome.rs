@@ -86,6 +86,57 @@ pub struct Evidence {
     pub inverted: bool,
 }
 
+/// Where one picture lies in another: the affine map `[a, b, c, d, e, f]`
+/// taking a point (x, y) of the first, as fractions of its width and height
+/// as shown, to (a x + b y + c, d x + e y + f) in the second's. The window
+/// draws from it what the two share; it is the verdict's transform, which is
+/// fitted between working images, put in each picture's own frame.
+///
+/// Kept to four decimals, a tenth of a pixel on a 1,000-pixel side, since
+/// it is drawn, not checked: written in full, a member's six numbers were
+/// twice the length of everything else it says.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Place(pub [f32; 6]);
+
+impl Place {
+    /// The same map: two pictures that are one picture.
+    pub const SAME: Place = Place([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+
+    /// A transform between working images `a` (`aw` x `ah`) and `b`.
+    pub fn of(m: &[f32; 6], (aw, ah): (u32, u32), (bw, bh): (u32, u32)) -> Option<Place> {
+        let (aw, ah, bw, bh) = (aw as f32, ah as f32, bw as f32, bh as f32);
+        if aw <= 0.0 || ah <= 0.0 || bw <= 0.0 || bh <= 0.0 {
+            return None;
+        }
+        let n = [m[0] * aw / bw, m[1] * ah / bw, m[2] / bw, m[3] * aw / bh, m[4] * ah / bh, m[5] / bh];
+        Place::kept(n)
+    }
+
+    /// A verdict's transform from `a`'s working image to `b`'s, or the same
+    /// map for two that are one picture (`None`).
+    pub(crate) fn between(m: Option<&[f32; 6]>, a: &crate::Item, b: &crate::Item) -> Option<Place> {
+        match m {
+            Some(m) => Place::of(m, (a.feats.w, a.feats.h), (b.feats.w, b.feats.h)),
+            None => Some(Place::SAME),
+        }
+    }
+
+    /// The map back, from the second picture to the first.
+    pub fn reversed(&self) -> Option<Place> {
+        Place::kept(crate::verify::invert_affine(&self.0)?)
+    }
+
+    fn kept(m: [f32; 6]) -> Option<Place> {
+        m.iter().all(|v| v.is_finite()).then(|| Place(m.map(|v| (v * 1e4).round() / 1e4)))
+    }
+
+    /// Where a point of the first picture lands in the second.
+    pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        let m = &self.0;
+        (m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5])
+    }
+}
+
 impl Evidence {
     /// How well the two agree, as the group rules read it: 1 for one file.
     pub fn agreement(&self) -> f32 {
@@ -122,6 +173,11 @@ pub struct Member {
     pub file: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with: Option<Evidence>,
+    /// Where the representative lies in this file, for the window to show
+    /// what the two share. A group's alone: a holder or a library match
+    /// has none, nor a scan kept before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<Place>,
 }
 
 /// A representative, first, and the files that matched it.
@@ -393,6 +449,25 @@ mod tests {
         Some(Evidence { relation, aligned_points: None, frame_overlap: 1.0, pixel_correlation: corr, mirrored: false, inverted: false })
     }
 
+    /// A crop: B is the right half of A, at A's scale, working images 512
+    /// x 256 and 256 x 256 (the files' own sizes do not enter: the map is in
+    /// fractions of each picture).
+    #[test]
+    fn a_place_is_in_fractions_of_each_picture_and_reverses() {
+        let m = [1.0, 0.0, -256.0, 0.0, 1.0, 0.0];
+        let p = Place::of(&m, (512, 256), (256, 256)).unwrap();
+        assert_eq!(p.apply(0.5, 0.0), (0.0, 0.0), "A's middle top is B's corner");
+        assert_eq!(p.apply(1.0, 1.0), (1.0, 1.0));
+        let back = p.reversed().unwrap();
+        assert_eq!(back.apply(0.0, 0.0), (0.5, 0.0));
+        assert_eq!(back.apply(1.0, 1.0), (1.0, 1.0));
+        // A mirror stays one: B's left edge is A's right.
+        let flip = Place::of(&[-1.0, 0.0, 512.0, 0.0, 1.0, 0.0], (512, 256), (512, 256)).unwrap();
+        assert_eq!(flip.apply(0.0, 0.5), (1.0, 0.5));
+        assert_eq!(flip.reversed().unwrap(), flip);
+        assert_eq!(Place::of(&m, (0, 256), (256, 256)), None);
+    }
+
     fn file(i: usize) -> File {
         File { path: PathBuf::from(format!("/p/{i}.jpg")), dims: Some((8, 8)), bytes: Some(1), damaged: false, library: false }
     }
@@ -400,7 +475,7 @@ mod tests {
     /// 0 holds 1 and 2; 3 holds 4. The content rule deletes 1 and 2 for 0,
     /// and 4 for 3.
     fn outcome() -> Outcome {
-        let m = |file, with| Member { file, with };
+        let m = |file, with| Member { file, with, at: None };
         let groups = vec![
             Group { members: vec![m(0, None), m(1, ev(Relation::Identical, 1.0)), m(2, ev(Relation::Direct, 0.95))] },
             Group { members: vec![m(3, None), m(4, ev(Relation::Direct, 0.75))] },
@@ -443,7 +518,7 @@ mod tests {
     /// no suggestion.
     #[test]
     fn the_group_rules_judge_by_representatives_still_there() {
-        let m = |file, with| Member { file, with };
+        let m = |file, with| Member { file, with, at: None };
         // 0 holds 1 and 2 closely; 3 holds 1 loosely.
         let groups = vec![
             Group { members: vec![m(0, None), m(1, ev(Relation::Direct, 0.99)), m(2, ev(Relation::Direct, 0.99))] },

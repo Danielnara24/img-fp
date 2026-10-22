@@ -940,7 +940,7 @@ mod tests {
         let mut files = vec![file("/0.jpg"), file("/1.jpg"), file("/2;x.jpg")];
         (files[0].dims, files[0].bytes) = (Some((4032, 3024)), Some(3_250_000));
         let mirrored = Evidence { mirrored: true, ..ev(Relation::Direct) };
-        let members = vec![Member { file: 0, with: None }, Member { file: 1, with: Some(ev(Relation::Identical)) }, Member { file: 2, with: Some(mirrored) }];
+        let members = vec![Member { file: 0, with: None, at: None }, Member { file: 1, with: Some(ev(Relation::Identical)), at: None }, Member { file: 2, with: Some(mirrored), at: None }];
         let head = Head { config: serde_json::json!({}), files_enumerated: 3, files_analysed: 3, failures: vec![], runtime_seconds: 1.0 };
         Outcome::new(head, 0.7, files, vec![Group { members }], vec![Some(Action::Keep), Some(Action::Delete), Some(Action::Review)], vec![None, Some(0), None])
     }
@@ -1080,7 +1080,7 @@ mod tests {
         let corroborated = Evidence { relation: Relation::Corroborated, aligned_points: Some(9), pixel_correlation: 0.97, ..ev(Relation::Direct) };
         let mut files = vec![file("/s.jpg"), file("/l.jpg")];
         files[1].library = true;
-        let asked = vec![Asked { file: 0, holder: Some(Member { file: 1, with: Some(corroborated) }), library: vec![Match { file: 1, with: corroborated, clean: true }] }];
+        let asked = vec![Asked { file: 0, holder: Some(Member { file: 1, with: Some(corroborated), at: None }), library: vec![Match { file: 1, with: corroborated, clean: true }] }];
         let o = Outcome::of_against(Head::default(), 0.7, files, Against { library_files: 1, asked }, vec![Some(Action::Delete), Some(Action::Keep)], vec![Some(1), None]);
         let text = String::from_utf8(txt(&o)).unwrap();
         assert!(text.contains("\tREPEAT, -, 0B, /s.jpg\n\t        in library: -, -, corroborated, 9 points, overlap 0.99, correlation 0.97, /l.jpg\n"), "{text}");

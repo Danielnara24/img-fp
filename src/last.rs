@@ -381,7 +381,7 @@ mod tests {
         }
         let dims = [Some((640, 480)), Some((640, 480)), Some((320, 240)), None, Some((10, 10)), Some((8, 8))];
         let files: Vec<File> = paths.iter().enumerate().map(|(k, p)| File { path: p.clone(), dims: dims[k], bytes: Some(k as u64 + 1), damaged: k == 2, library: false }).collect();
-        let m = |file, with| Member { file, with };
+        let m = |file, with| Member { file, with, at: None };
         let mirrored = Some(Evidence { mirrored: true, ..ev(Relation::Propagated, 0.9).unwrap() });
         let inverted = Some(Evidence { inverted: true, ..ev(Relation::Corroborated, 0.6).unwrap() });
         let groups = vec![
@@ -426,7 +426,7 @@ mod tests {
             std::fs::write(f, b"x").unwrap();
         }
         let files = paths.iter().map(|p| File { path: p.clone(), dims: Some((8, 8)), bytes: Some(1), damaged: false, library: false }).collect();
-        let m = |file, with| Member { file, with };
+        let m = |file, with| Member { file, with, at: None };
         let groups = vec![Group { members: vec![m(0, None), m(1, ev(Relation::Direct, 0.99)), m(2, ev(Relation::Direct, 0.99))] }];
         let d = Some(Action::Delete);
         let scan = Outcome::new(Head::default(), 0.7, files, groups, vec![Some(Action::Keep), d, d], vec![None, Some(0), Some(0)]);

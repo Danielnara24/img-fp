@@ -350,6 +350,7 @@ pub enum Large {
     Previous,
     Next,
     Mark,
+    Compare,
     Close,
 }
 
@@ -367,6 +368,11 @@ pub static LARGE: Section<Large> = Section {
             ],
         },
         Row { keys: "Space or Delete", what: "Mark or unmark it", binds: &[Bind::Key(plain(&[K::space, K::Delete, K::KP_Delete]), Large::Mark)] },
+        Row {
+            keys: "C",
+            what: "Show it beside its group's reference image, with the part each shows of the other outlined",
+            binds: &[Bind::Key(plain(&[K::c, K::C]), Large::Compare)],
+        },
         Row { keys: "Escape", what: "Close", binds: &[Bind::Key(plain(&[K::Escape]), Large::Close)] },
     ],
 };
@@ -506,7 +512,7 @@ mod tests {
         for c in [Scan::Start, Scan::Cancel, Scan::Remove] {
             assert!(bound(&SCAN, c), "{c:?}");
         }
-        for c in [Large::Previous, Large::Next, Large::Mark, Large::Close] {
+        for c in [Large::Previous, Large::Next, Large::Mark, Large::Compare, Large::Close] {
             assert!(bound(&LARGE, c), "{c:?}");
         }
     }
@@ -589,6 +595,7 @@ mod tests {
             ("Large view", &[
                 ("Left, Right", "Previous or next image"),
                 ("Space or Delete", "Mark or unmark it"),
+                ("C", "Show it beside its group's reference image, with the part each shows of the other outlined"),
                 ("Escape", "Close"),
             ]),
         ];

@@ -88,6 +88,7 @@ pub fn asked(asked: &[usize], library: &[bool], pairs: &[(usize, usize, Evidence
             let holder = keeper[f].filter(|_| actions[f] == Some(Action::Delete)).map(|g| Member {
                 file: g,
                 with: of[f].iter().find(|&&k| other(k, f) == g).map(|&k| pairs[k].2),
+                at: None,
             });
             let library = of[f]
                 .iter()

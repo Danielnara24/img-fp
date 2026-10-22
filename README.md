@@ -246,7 +246,15 @@ Trash.
   Ctrl+Minus) make the images larger or smaller, and Ctrl+0 fits the group to
   the window again.
 - Click the circle on an image, or press Space, to mark it for the Trash.
-  Double click or Enter opens it large.
+  Double click or Enter opens it large. There, *Compare with reference* (or
+  C) shows it beside its group's reference image, with the part each shows
+  of the other outlined and the rest dimmed: where a crop lies in the photo,
+  or a photo in a slide. Two arrows from the middle of the outline (of the
+  part of it on the picture), X in red and Y in green, show the reference's
+  right and up (towards the top side of its outline): as they are on the
+  reference, and turned or reversed on a copy that is turned or mirrored.
+  Each reaches half way to the side of the outline it points at.
+  The caption says so in words too.
   Shift and a click marks or unmarks every image from the last one you
   marked or unmarked to the one clicked; Shift and an arrow key marks or
   unmarks each image it moves over the same way.
