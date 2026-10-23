@@ -180,6 +180,15 @@ impl Scope {
         }
         (0..n).filter(|&i| matched[i] && (rep[i] || (degree[i] < 2 && !(self.library[i] && degree[i] == 0)))).collect()
     }
+
+    /// Whether a matched file with `degree` anchors so far is past being
+    /// asked again whatever verification finds next (`re_askers`), which is
+    /// what the bar reads while it verifies. Anchors only add up, so two of
+    /// them settle a file in a plain scan; against a library a component's
+    /// best-connected member is asked however many it has.
+    fn settled(&self, degree: u32) -> bool {
+        !self.against && degree >= 2
+    }
 }
 
 /// One scan, from the paths asked for to the report: each stage below hands
@@ -377,7 +386,13 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     drop(direct);
 
     let found = assemble(&cx, &scope, gui, &files, &stats, analysed, claims);
-    finish(&cx, &scope, gui, &files, found, problems, started)
+    let done = finish(&cx, &scope, gui, &files, found, problems, started);
+    // What each stage took, which is what the bar's priors are read from
+    // (`progress::Stage::prior`).
+    for line in cx.progress.paces() {
+        stage!(cx, "{line}");
+    }
+    done
 }
 
 /// What the analysis hands on: every file's analysis, which files are one
@@ -406,15 +421,16 @@ fn analyse_all(
     problems: &mut Problems,
 ) -> Analysed {
     let (args, progress) = (cx.args, &cx.progress);
-    // The bar's first estimate of the whole run, from nothing but the file
-    // count; every stage below refines it as soon as it knows better.
-    progress.forecast(|f| {
-        f.files = files.len();
-        f.cache_bytes = cache_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
-        f.cache_write = cache_path.is_some();
-        f.candidates_per_query = args.candidates;
+    // What the bar knows of the run before anything is read; every stage
+    // below tells it more as soon as it has counted it.
+    progress.learn(|k| {
+        k.files = files.len();
+        k.cache_bytes = cache_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+        k.cache_write = cache_path.is_some();
+        k.work_size = args.work_size;
+        k.candidates = args.candidates;
         if args.skip_mirrored {
-            f.variants = Some(0);
+            k.ask_again = Some((0, 0));
         }
     });
 
@@ -430,6 +446,10 @@ fn analyse_all(
     let exact = timed!(33, exact_groups(files, stats, comparable));
     stage!(cx, "exact duplicates: {} groups", exact.len());
     let mut same = Same::of_bytes(files.len(), exact);
+    // A copy is answered by its original: the most there is to describe
+    // until the cache has said what it answers.
+    let originals = (0..files.len()).filter(|&i| !same.is_copy(i)).count();
+    progress.learn(|k| k.to_describe = Some(originals));
 
     // Decode and describe.
     let sp = sift::Params {
@@ -453,7 +473,17 @@ fn analyse_all(
         // Only this run's paths are unpacked; the rest of the machine's
         // cache is read for where it is, not for what it says. See
         // `cache::open`.
-        cache::open(p, settings, names.into_iter().zip(stats.iter().map(|s| s.key)).collect(), problems)
+        //
+        // Each original the cache is seen to answer as it reads is one less
+        // to describe, for the bar: on a rescan the read is the first tenth
+        // of the run, and until it ends every file was a file to describe.
+        let met: Vec<std::sync::atomic::AtomicBool> = (0..n).map(|_| Default::default()).collect();
+        let answered = |i: usize| {
+            if !met[same.original(i)].swap(true, Ordering::Relaxed) {
+                progress.learn(|k| k.to_describe = k.to_describe.map(|t| t.saturating_sub(1)));
+            }
+        };
+        cache::open(p, settings, names.into_iter().zip(stats.iter().map(|s| s.key)).collect(), &answered, problems)
     });
     // A cache another version of img-fp wrote is that version's, and this run
     // leaves it as it is; see `cache::MAGIC`.
@@ -504,22 +534,22 @@ fn analyse_all(
     // Whether the cache will have anything to write, as far as it can be
     // told yet.
     let rewrite = store.as_ref().is_some_and(|s| args.prune_cache || s.stale());
-    progress.forecast(|f| {
-        f.to_describe = Some(todo);
-        f.cache_write = rewrite;
+    progress.learn(|k| {
+        k.to_describe = Some(todo);
+        k.cache_write = rewrite;
     });
     let headers = progress.begin_counted(Stage::Headers, n as u64, n, "files");
     // The headers are kept as well: the decode claims its share of the
     // decode budget from them before it reads the file.
-    let (weight, header): (Vec<u64>, Vec<Option<decode::Probe>>) = (0..n)
+    let (cost, header): (Vec<progress::FileCost>, Vec<Option<decode::Probe>>) = (0..n)
         .into_par_iter()
         .map(|i| {
             headers.tick();
             if same.is_copy(i) || mine[i].is_some() {
-                return (0, None);
+                return Default::default();
             }
             let probe = decode::probe(&files[i]);
-            (progress::analysis_cost(probe.as_ref(), stats[i].len, args.work_size, sp.upsample_below), probe)
+            (progress::file_cost(probe.as_ref(), stats[i].len, args.work_size, sp.upsample_below), probe)
         })
         .unzip();
     stage!(cx, "{todo} files to analyse");
@@ -540,9 +570,7 @@ fn analyse_all(
     } else {
         say!(cx, "Found {}. Analysing...", count(n, found.0, found.1));
     }
-    let total_weight: u64 = weight.iter().sum();
-    progress.forecast(|f| f.describe = Some(total_weight));
-    let bar = progress.begin_counted(Stage::Describe, total_weight, todo, "images");
+    let bar = progress.begin_describe(&(0..n).filter(|&i| !same.is_copy(i) && mine[i].is_none()).map(|i| cost[i]).collect::<Vec<_>>());
     let planes = Planes::default();
     let made: Vec<Option<Item>> = mine
         .into_par_iter()
@@ -554,7 +582,8 @@ fn analyse_all(
             if let Some(rec) = rec {
                 return Some(Item::from(rec));
             }
-            let it = analysis::analyse(&files[i], args.work_size, &sp, header[i].as_ref(), &planes);
+            let t0 = Instant::now();
+            let (it, decode) = analysis::analyse(&files[i], args.work_size, &sp, header[i].as_ref(), &planes);
             // Each record goes into the cache file as soon as it is made,
             // which is what lets an interrupt keep the analysis without
             // writing anything; see `cache::Store`.
@@ -562,14 +591,14 @@ fn analyse_all(
                 s.append(i, it.dims, &it.traits, &it.feats, &it.thumb);
             }
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-            bar.add(weight[i]);
+            bar.done(&cost[i], decode, t0.elapsed());
             if d % 250 == 0 {
                 stage!(cx, "  described {d}");
             }
             Some(it)
         })
         .collect();
-    drop(weight);
+    drop(cost);
     drop(header);
     drop(planes);
     // A copy of a file that would not decode fails as its original did, and
@@ -596,10 +625,10 @@ fn analyse_all(
             problems.note(Note::Cache, "--prune-cache skipped: the walk was incomplete");
             false
         });
-    progress.forecast(|f| {
+    progress.learn(|k| {
         // What the matching stages will be handed: originals, not copies.
-        f.images = Some((0..n).filter(|&i| items[i].read.ok() && same.answers_for(i) == i).count());
-        f.descriptors = Some((0..n).filter(|&i| same.answers_for(i) == i).map(|i| items[i].feats.len()).sum());
+        k.images = Some((0..n).filter(|&i| items[i].read.ok() && same.answers_for(i) == i).count());
+        k.descriptors = Some((0..n).filter(|&i| same.answers_for(i) == i).map(|i| items[i].feats.len()).sum());
     });
     if let (Some(p), Some(store)) = (cache_path, store.as_mut()) {
         finish_cache(cx, p, store, prune, problems);
@@ -782,7 +811,6 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Index<'a> {
     // that picture twice in the sample and size the tree for words that are
     // not there.
     let vp = index::VocabParams::for_corpus(n_desc_match);
-    progress.forecast(|f| f.vocab_sample = Some(vp.sample.min(n_desc_match)));
     progress.begin(Stage::Vocabulary);
     let mut pool: Vec<&[u8; DESC_LEN]> = Vec::with_capacity(vp.sample.min(n_desc_match));
     timed!(34, {
@@ -803,7 +831,6 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Index<'a> {
     // Quantise. The word lists are built straight into the vector the inverted
     // file and every later stage read from: holding a second copy per image
     // costs as much again as the lists themselves.
-    progress.forecast(|f| f.live_words = Some(vocab.n_live_words()));
     let bar = progress.begin_counted(Stage::Quantise, n_desc_match as u64, n_match, "images");
     let lists: Vec<WordList> = (0..n)
         .into_par_iter()
@@ -835,13 +862,10 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     let (args, progress) = (cx.args, &cx.progress);
     let (items, matched) = (pass.items, pass.matched);
     let n = items.len();
-    let n_match = matched.iter().filter(|&&m| m).count();
-    let n_desc_match: usize = (0..n).filter(|&i| matched[i]).map(|i| items[i].feats.len()).sum();
     // Retrieval and verification are separate passes so that a pair proposed
     // from both sides is verified once. Containment scoring is asymmetric —
     // the crop finds the photograph much more readily than the reverse — so
     // both directions genuinely have to be asked.
-    let bar = progress.begin_counted(Stage::Candidates, n_desc_match as u64, n_match, "images");
     // Against a library, the scanned files ask first, and then the library
     // files they reach, round after round until none is new (`Scope::reached`).
     let mut asked = vec![false; n];
@@ -850,20 +874,24 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     let mut all_direct: Vec<Edge> = Vec::new();
     let mut verified = 0usize;
     let mut round = 0usize;
+    // Anchors each file has so far, and the files and descriptors they have
+    // put past the second look (`Scope::settled`): the bar's bound on it.
+    let mut degree = vec![0u32; n];
+    let mut settled = (0usize, 0usize);
     loop {
         for &i in ask.iter() {
             asked[i] = true;
         }
         let first = round == 0;
+        let descriptors: usize = ask.iter().map(|&i| items[i].feats.len()).sum();
+        let bar = progress.begin_counted(Stage::Candidates, descriptors as u64, ask.len(), "images");
         let mut cand_pairs: Vec<(u32, u32)> = ask
             .par_iter()
             .map_init(
                 || index.asking(),
                 |a, &i| {
                     let cands = index.candidates(i, &[&index.lists()[i]], args.candidates, a);
-                    if first {
-                        bar.add(items[i].feats.len() as u64);
-                    }
+                    bar.add(items[i].feats.len() as u64);
                     let i = i as u32;
                     cands.iter().map(|&(j, ..)| if j < i { (j, i) } else { (i, j) }).collect::<Vec<_>>()
                 },
@@ -881,11 +909,10 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         }
         if first {
             stage!(cx, "candidates: {} pairs", cand_pairs.len());
-            progress.forecast(|f| f.candidate_pairs = Some(cand_pairs.len()));
         } else {
             stage!(cx, "  library round {round}: {} library files asked, {} more candidates", ask.len(), cand_pairs.len());
         }
-        let vbar = first.then(|| progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs"));
+        let vbar = progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs");
         // Verified a slice of the candidates at a time, each slice's verdicts
         // appended to the one list as it finishes. A parallel `collect` of a
         // filtered stream gathers every worker's results into vectors of their
@@ -900,14 +927,21 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
             let part: Vec<Edge> = slice
                 .par_iter()
                 .map_init(Work::default, |work, &(i, j)| timed!(42, {
-                    if let Some(b) = &vbar {
-                        b.tick();
-                    }
+                    vbar.tick();
                     let (i, j) = (i as usize, j as usize);
                     pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j, Variant::SAME, work)
                 }))
                 .flatten()
                 .collect();
+            for e in anchors(&part, pass.policy) {
+                for i in [e.a(), e.b()] {
+                    degree[i] += 1;
+                    if matched[i] && degree[i] == 2 && scope.settled(degree[i]) {
+                        settled = (settled.0 + 1, settled.1 + items[i].feats.len());
+                    }
+                }
+            }
+            progress.learn(|k| k.settled = settled);
             all_direct.extend(part);
         }
         verified += cand_pairs.len();
@@ -920,6 +954,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     }
     let n_edges = anchors(&all_direct, pass.policy).count();
     stage!(cx, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
+    progress.learn(|k| k.anchors = Some(n_edges));
     (all_direct, verified)
 }
 
@@ -954,16 +989,8 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, mut index: Index, direct: &
     // not one false pair more.
     // What each re-asked file will cost the bar: three descents and three
     // queries, which scale with its descriptors, and up to `-k` verdicts.
-    let weight: Vec<u64> = {
-        let fc = progress.forecast_now();
-        askers.iter().map(|&i| fc.variant_cost(items[i].feats.len())).collect()
-    };
+    let weight: Vec<u64> = askers.iter().map(|&i| progress.ask_again_cost(items[i].feats.len())).collect();
     let total_weight: u64 = weight.iter().sum();
-    let n_edges = anchors(direct, policy).count();
-    progress.forecast(|f| {
-        f.variants = Some(total_weight);
-        f.edges = Some(n_edges);
-    });
     let bar = progress.begin_counted(Stage::Variants, total_weight, askers.len(), "images");
     index.turn(&askers);
     let index = &index;
@@ -1025,7 +1052,7 @@ fn cluster(
     // direct one, and on this corpus an inverted match between a 225-pixel
     // photograph of the Earth and a beach scene was the single edge that
     // merged two whole families into 3,002 false pairs.
-    progress.forecast(|f| f.edges = Some(all.len()));
+    progress.learn(|k| k.anchors = Some(all.len()));
     progress.begin(Stage::Propagate);
     // Clusters are made from clean anchors, and an anchor that is only an
     // anchor may add a file to one but never join two; see `claims::admit`.
@@ -1242,6 +1269,7 @@ fn write_dump(cx: &Ctx, to: &To, files: &[PathBuf], items: &[Item], direct: &[Ed
 /// suggestion, read off the same pairs.
 fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stats: &[walk::Stat], analysed: Analysed, claims: Vec<Claim>) -> Found {
     let args = cx.args;
+    cx.progress.begin(Stage::Assemble);
     let Analysed { items, same, store, not_asked, n_kps, .. } = analysed;
     // The pairs are the claim. `stated` collects every one of them, and
     // `group::find` reduces it to representatives — a representative plus the

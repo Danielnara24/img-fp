@@ -169,8 +169,9 @@ pub struct Record {
 /// record sits in the file.
 type Entry = (Key, Option<Record>, Span);
 
-/// Which paths this run walks, asked of every record as it is read.
-type Walked<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
+/// Which paths this run walks, asked of every record at this run's settings
+/// as it is read, with the record's key.
+type Walked<'a> = &'a (dyn Fn(&Path, Key) -> bool + Sync);
 
 /// What says a file is still the file a record describes: its size, its
 /// modification time and its change time, in nanoseconds.
@@ -813,10 +814,22 @@ pub enum Compacted {
 ///
 /// `files` are this run's, each by the name the cache knows it by and what
 /// the walk read of it: what the store answers for by number from here on.
-pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, problems: &mut Problems) -> Store {
+/// `met(i)` is said as the read meets a record of walked file `i` under its
+/// key (once or more): what the progress bar knows of the cache's answers
+/// before the read is done. A later record for the path may still replace it.
+pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, met: &(dyn Fn(usize) + Sync), problems: &mut Problems) -> Store {
     let (mut got, mut store) = {
-        let walked: std::collections::HashSet<&Path> = files.iter().map(|f| f.0.as_path()).collect();
-        read(path, want, &|p| walked.contains(p), problems)
+        let walked: HashMap<&Path, (usize, Option<Key>)> = files.iter().enumerate().map(|(i, f)| (f.0.as_path(), (i, f.1))).collect();
+        let walked = |p: &Path, k: Key| match walked.get(p) {
+            Some(&(i, key)) => {
+                if key == Some(k) {
+                    met(i);
+                }
+                true
+            }
+            None => false,
+        };
+        read(path, want, &walked, problems)
     };
     store.usable = got.len();
     store.asked = files
@@ -1614,7 +1627,7 @@ fn read_stream<R: Read + Skip>(
     let mut batch: Vec<(Head, Vec<u8>, Span)> = Vec::with_capacity(BATCH);
     loop {
         let at = r.pos;
-        match read_record(&mut r, |h| h.settings == want && walked(&h.path)) {
+        match read_record(&mut r, |h| h.settings == want && walked(&h.path, h.key)) {
             Ok(None) => break,
             Ok(Some((head, blob))) => {
                 tail.end = r.pos;
@@ -1684,7 +1697,7 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
     let done: Vec<Result<(PathBuf, Entry)>> = batch
         .par_iter()
         .map(|(h, blob, span)| {
-            if !walked(&h.path) {
+            if !walked(&h.path, h.key) {
                 return Ok((h.path.clone(), (h.key, None, *span)));
             }
             let (kps, desc, px) = unpack(blob, h.n, h.tw as u16, h.th as u16)?;
@@ -1980,7 +1993,7 @@ mod tests {
     fn reopen(path: &Path) -> (HashMap<PathBuf, Entry>, Store, bool) {
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = read(path, SETTINGS, &|_| true, &mut problems);
+        let (got, store) = read(path, SETTINGS, &|_, _| true, &mut problems);
         (got, store, problems.any())
     }
 
@@ -2001,7 +2014,7 @@ mod tests {
 
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, SETTINGS, &|p| p == Path::new("a.jpg"), &mut problems);
+        let (got, store) = read(&path, SETTINGS, &|p, _| p == Path::new("a.jpg"), &mut problems);
         assert!(!problems.any() && store.records() == 3 && got.len() == 2);
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f1.desc);
         let b = &got[Path::new("b.jpg")];
@@ -2208,7 +2221,7 @@ mod tests {
         drop(file);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, SETTINGS, &|p| !p.starts_with("other"), &mut problems);
+        let (got, store) = read(&path, SETTINGS, &|p, _| !p.starts_with("other"), &mut problems);
         assert!(problems.any(), "a damaged record is worth saying");
         let mut names: Vec<_> = got.keys().cloned().collect();
         names.sort();
@@ -2347,7 +2360,7 @@ mod tests {
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
         let files = vec![(a.clone(), Some(old)), (b.clone(), Some(old)), (c.clone(), Some(new))];
-        let mut store = open(&path, SETTINGS, files, &mut problems);
+        let mut store = open(&path, SETTINGS, files, &|_| (), &mut problems);
         assert_eq!(store.usable(), 5);
         assert!(store.take(0).is_some_and(|r| r.feats.desc == f.desc));
         assert!(store.take(0).is_none(), "taken once");
@@ -2372,7 +2385,7 @@ mod tests {
         drop(store);
 
         // Pruned: only what the run took or made.
-        let mut store = open(&path, SETTINGS, vec![(a.clone(), Some(old))], &mut problems);
+        let mut store = open(&path, SETTINGS, vec![(a.clone(), Some(old))], &|_| (), &mut problems);
         assert!(store.take(0).is_some() && !store.stale());
         let kept = store.finish(true);
         assert_eq!((kept.carried, kept.dropped), (0, 2));
@@ -2496,7 +2509,7 @@ mod tests {
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
         let other = Settings { work_size: 640, ..SETTINGS };
-        let (got, store) = read(&path, other, &|_| true, &mut problems);
+        let (got, store) = read(&path, other, &|_, _| true, &mut problems);
         assert!(got.is_empty() && !problems.any());
         assert_eq!((store.records(), others(&store)), (2, 2));
         let (f2, t2) = analysis(3, 9);
@@ -2518,7 +2531,7 @@ mod tests {
         drop(store);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, other, &|_| true, &mut problems);
+        let (got, store) = read(&path, other, &|_, _| true, &mut problems);
         assert_eq!((got.len(), store.records()), (1, 3));
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
         std::fs::remove_dir_all(&dir).ok();

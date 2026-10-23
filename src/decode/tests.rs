@@ -40,6 +40,19 @@ fn reduced(w: usize, h: usize, data: &[u8], layout: Layout, work: usize) -> Gray
     .0
 }
 
+/// `working_size` is the working plane the reduction makes, whatever the
+/// picture's shape: the progress bar costs a file by it.
+#[test]
+fn the_working_size_is_the_planes() {
+    for (w, h) in [(37, 23), (2000, 1500), (1500, 2000), (4000, 300), (300, 4000), (1025, 1), (1, 1025), (513, 384), (512, 384), (9, 7), (6000, 4000)] {
+        for work in [0, 64, 128, 512] {
+            let data = vec![128u8; w * h];
+            let g = reduced(w, h, &data, Layout::Grey, work);
+            assert_eq!((g.w, g.h), working_size(w, h, work), "{w}x{h}@{work}");
+        }
+    }
+}
+
 /// What a file says of itself, as `decode` reads it.
 fn facts_of(bytes: &[u8]) -> Facts {
     let kind = sniff::identify(bytes, Path::new("x")).expect("a picture");
@@ -1108,7 +1121,7 @@ fn line(path: &Path) -> String {
     let probe = guarded(|| probe(path)).ok().flatten();
     let len = std::fs::metadata(path).map_or(0, |m| m.len());
     out.push(match &probe {
-        Some(p) => format!("probe {}x{} cost {}", p.w, p.h, crate::progress::analysis_cost(Some(p), len, 512, 512)),
+        Some(p) => format!("probe {}x{} cost {:?}", p.w, p.h, crate::progress::file_cost(Some(p), len, 512, 512)),
         None => "probe none".into(),
     });
     for work in [512, 160] {

@@ -943,6 +943,18 @@ crate::simd::dispatched! {
     pub fn extract(g: &Gray, p: &Params) -> Features => extract_any;
 }
 
+/// How many times a picture `long` pixels on its long side is doubled
+/// before it is described: until one more doubling would pass
+/// `upsample_below`.
+#[inline]
+pub(crate) fn enlargement(long: usize, upsample_below: usize) -> usize {
+    let mut factor = 1usize;
+    while long * factor * 2 <= upsample_below.max(2) {
+        factor *= 2;
+    }
+    factor
+}
+
 /// `extract`, for whichever copy `dispatched!` chose; see `simd.rs`. Everything
 /// it calls that does real work is inlined into it under `cfg(dispatch)`, so
 /// that the x86-64-v3 copy is vectorised throughout.
@@ -959,10 +971,7 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
     // enlargement invents no detail, but it gives the octaves room, and
     // matching a thumbnail to the photograph it came from is most of what is
     // left to win on this corpus.
-    let mut factor = 1usize;
-    while g.w.max(g.h) * factor * 2 <= p.upsample_below.max(2) {
-        factor *= 2;
-    }
+    let factor = enlargement(g.w.max(g.h), p.upsample_below);
     // The base of the pyramid is the working image blurred up to `sigma`, or
     // an enlargement of it when the picture is small. Where no enlargement is
     // wanted the blur reads the working image where it lies: copying it first

@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.65.0)
+## Status (0.66.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -510,6 +510,35 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   arrows called `f64::hypot`, which made the window need `hypot@GLIBC_2.35`,
   and the release check refused it (`gui::results::length` now); 0.65.0 is
   the first release since 0.61.0.
+- 0.66.0 (the progress bar rebuilt, `progress.rs`; see *The progress
+  bar*): the bar is driven by the time left (each frame closes `dt / left`
+  of its distance to the end), and `left` is counted work at a measured
+  pace: the analysis timed file by file (decode by format, the rest by
+  pixels analysed at the size `decode::working_size` and
+  `sift::enlargement` give), the running stage by itself, a stage not yet
+  run by one prior per stage scaled by this run's measured speed. Before:
+  a `Forecast` of ~25 constants fitted to the found corpus (per-format ns
+  per pixel and byte, pairs per query 0.75, lonely 0.8, edges per image,
+  a second-look overhead), stretches fixed when a stage began, an
+  `analysis_cost` that sized the working plane itself and missed the area
+  rule, later library rounds and the assembly and suggestion in no stage.
+  Bar error, mean |bar - elapsed share|, alternating base/new runs on
+  first runs: found corpus 0.031 / 0.029 -> 0.009 / 0.013, `--against`
+  (IMGS-AGAINST/IMGS) 0.053 / 0.036 -> 0.018 / 0.015, IMGS-ELONG 0.061 /
+  0.053 -> 0.034 / 0.031, Desktop 0.090 / 0.100 -> 0.069 / 0.090, IMGS
+  0.040 / 0.069 -> 0.042 / 0.072 (scratchpad `bar.py`: the window worker's
+  frames, timestamped). Rescans, once the cache's answers and the second
+  look's askers are counted as they are decided and the disk stages left
+  out of the speed (three alternating rounds against the bar as first
+  built): IMGS 0.230 / 0.165 / 0.208 -> 0.117 / 0.112 / 0.116, the found
+  corpus 0.066 / 0.142 / 0.070 -> 0.042 / 0.037 / 0.047, Desktop (1 s)
+  ~0.21 -> ~0.20; first runs within their spread under 6.5 GB of swap.
+  Outputs: the full `ref.sh` battery, `last.sh` and `lastag.sh` identical
+  to 0.65.0 (but "N minutes ago"); `-v` and `--log-file` end with a
+  `pace:` line per stage, which is what the priors are read from. Per-symbol
+  `ymm` counts identical; glibc floor 2.34. Code lines (no comments, blanks
+  or tests) of `progress.rs` 397 -> 540, `pipeline.rs` 1,115 -> 1,105: the analysis's
+  per-format pace and the stage table are new, not smaller.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -861,6 +890,60 @@ its own way (`--dump - | head` exited 1), and the log was opened with
 **Adding an output**: a field of `Outputs`, set in `plan` with its entry in
 `Outputs::claims`; written through `To`. Not a check in `lib.rs` nor a
 stdout writer of its own.
+
+## The progress bar (`progress.rs`)
+
+The bar is the share of the run's time that has passed. Every frame the
+run works out the seconds it has left (`State::left`) and the bar closes
+`dt / left` of its distance to the end: in step with the clock when `left`
+is right, faster or slower from where it stands when it is revised, never
+a jump, a step back or 100% before the end. No stage is given a stretch of
+the bar in advance.
+
+`left` is counted work at a measured pace. Each stage's work is in its own
+unit (`Stage::unit`: files, bytes, descriptors, pairs; images plus direct
+anchors for propagation and assembly, which cost about the same each), as
+counted (`Known`, told by the pipeline with `progress.learn` when it has
+counted it) or until then the most the code allows (`FEATURES` descriptors
+an image, `-k` candidates, every file asked again by the second look, a
+square working plane per file). A bound tightens as the stage that decides
+it goes: while the cache is read, each original it is seen to hold under
+its file's key is one less to describe (`cache::open`'s `met`); while
+verification runs, a file anchored twice is past the second look
+(`Scope::settled`, the rule `re_askers` applies; not against a library,
+where a component's best-connected member is asked however many it has).
+"Every file asked again" is what a photo library is (97% of the found
+corpus is asked again) and far from a folder of copies (6% of IMGS), where
+the bar runs slow until verification and then catches up; half was tried:
+IMGS's first run 0.021-0.042 mean error, the found corpus's 0.083 (base
+0.031). The pace of a unit is measured: the running stage by itself,
+the analysis file by file (each file's decode timed against its source
+pixels by format, the rest against the pixels analysed: `Describing`), a
+stage that has run (later library rounds; the second look, priced by the
+quantising, querying and verifying it repeats) by what it took. Only a
+stage not yet run uses `Stage::prior`, its cost per unit on this machine
+(Ryzen 7 3700U, 8 threads), scaled by how fast this run's processor has
+been against the priors so far (`Paces::speed`; the analysis, read as it
+goes, past its decode, against `EXTRACT_PER_PIXEL`). Stages that wait on
+the disk (identical files, headers, the cache read and write:
+`Stage::computes`) time themselves but say nothing of the processor: read
+into the speed, a rescan's cache read (1.6-2.4x its prior under swap) had
+every stage after it expected at twice what it took. A stage that runs past
+its estimate is given `expected² / 4 secs` left (`overrun`), so the bar
+slows rather than reaching the end. To re-read the priors: `-v` ends with a
+`pace:` line per stage, `ns a unit on each of N threads`; each prior's
+comment gives the spread it was read from.
+
+Before 0.66.0 the bar gave each stage a stretch when it began, from a
+`Forecast` of about 25 constants fitted to the found corpus (pairs per
+query, files with no duplicate, keypoints per image, per-format ns per
+pixel and per byte, a second-look overhead) and an `analysis_cost` that
+sized the working plane itself and missed the area rule. Later library
+rounds and the assembly and suggestion were in no stage.
+
+**Adding a stage**: a `Stage` variant with its label, unit and prior, its
+units in `Known::units`, and a `begin` where it starts. Not a cost model of
+the stage's insides in `progress.rs`.
 
 ## A finished scan (`outcome.rs`)
 

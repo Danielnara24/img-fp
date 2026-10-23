@@ -47,7 +47,7 @@ mod tests;
 
 pub use jpeg::same_jpeg_coding;
 pub use measure::{chroma_distance, Chroma, Traits};
-pub use reduce::{area_factor, resize_area};
+pub use reduce::{area_factor, resize_area, working_size};
 pub use shown::fit_preview;
 pub use sniff::{is_a_picture, may_be_image, Kind, EXTENSIONS};
 

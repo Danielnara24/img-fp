@@ -12,7 +12,7 @@ use crate::verify::Thumb;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// One image's analysis.
 ///
@@ -99,12 +99,13 @@ pub(crate) fn enlarge_below(work: usize, upsample_below: usize) -> usize {
     if work == 0 { upsample_below } else { upsample_below.min(work) }
 }
 
-/// Decode and describe one file.
-pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> Item {
+/// Decode and describe one file, and how long the decode took.
+pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> (Item, Duration) {
     let t0 = Instant::now();
     let r = decode::decode_guarded(|| decode::decode_with(path, work, header));
-    T_DECODE.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
-    match r {
+    let decode = t0.elapsed();
+    T_DECODE.fetch_add(decode.as_micros() as u64, Ordering::Relaxed);
+    let item = match r {
         Ok(d) => {
             let t1 = Instant::now();
             let (feats, thumb) = planes.analysis(&d.work, || {
@@ -122,7 +123,8 @@ pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option
             let read = decode::refused(&e).map_or_else(|| Read::Failed(e.to_string()), Read::Refused);
             Item { read, ..Default::default() }
         }
-    }
+    };
+    (item, decode)
 }
 
 /// The mean grey (0..=255) of each cell of a 4x4 grid over a working plane,

@@ -100,8 +100,7 @@ impl Sink for Reduce {
 /// every claim smaller than the memory it stood for, which is the one thing a
 /// budget must not be.
 pub(super) fn working_bytes(w: usize, h: usize, work: usize) -> u64 {
-    let k = box_factor(w, h, work);
-    let (ow, oh) = ((w / k).max(1), (h / k).max(1));
+    let (ow, oh) = boxed(w, h, work);
     // What `Fit` holds: the vertical pass's rows at the reduction's width and
     // the output, or the reduction's plane when there is nothing to resample.
     let f = Fit::size(ow, oh, work);
@@ -141,6 +140,19 @@ pub(super) fn box_factor(w: usize, h: usize, work: usize) -> usize {
         return 1;
     }
     (long / (2 * work)).max(1)
+}
+
+/// The plane a `w` by `h` picture is box-reduced to before it is fitted.
+fn boxed(w: usize, h: usize, work: usize) -> (usize, usize) {
+    let k = box_factor(w, h, work);
+    ((w / k).max(1), (h / k).max(1))
+}
+
+/// The working plane a `w` by `h` picture is analysed at under `--work-size
+/// work`: box-reduced, then fitted (`Reducer`, `Fit`).
+pub fn working_size(w: usize, h: usize, work: usize) -> (usize, usize) {
+    let (ow, oh) = boxed(w, h, work);
+    Fit::size(ow, oh, work).unwrap_or((ow, oh))
 }
 
 /// BT.601 luma of one RGB pixel: the Y a JPEG stores, which is what
@@ -232,8 +244,7 @@ struct Reducer<const CH: usize, const ALPHA: bool> {
 impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
     fn new(w: usize, h: usize, work: usize, grey_of_colour: bool) -> Self {
         let k = box_factor(w, h, work);
-        let ow = (w / k).max(1);
-        let oh = (h / k).max(1);
+        let (ow, oh) = boxed(w, h, work);
         Reducer {
             w,
             h,
