@@ -1751,15 +1751,128 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
 /// file the next scan of anything else compacted them away: a photo library
 /// on an external disk, scanned and then unplugged, was analysed from scratch
 /// the next time it was plugged in. So a record whose file is missing is kept
-/// when the file lies on a volume that is not mounted (`unmounted`). Records
+/// when the file lies on a volume that is not mounted (`away`). Records
 /// made at other settings were asked `gone` alone, and lost there what the
 /// rest kept.
 fn carried(unasked: &[Unasked]) -> Vec<&Unasked> {
     let gone = gone(unasked.iter().map(|u| u.path.as_path()));
-    // Each volume asked once, however many of its records are missing.
+    if gone.is_empty() {
+        return unasked.iter().collect();
+    }
+    let mounts = Mounts::here();
+    // Each folder asked once, however many of its records are missing.
+    let mut folders: HashMap<&Path, bool> = HashMap::new();
     let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
-    let mut away = |path: &Path| volume_root(path).is_some_and(|root| *volumes.entry(root).or_insert_with_key(|r| unmounted(r)));
-    unasked.iter().filter(|u| !gone.contains(u.path.as_path()) || away(&u.path)).collect()
+    let mut kept = Vec::with_capacity(unasked.len());
+    for u in unasked {
+        if !gone.contains(u.path.as_path()) || u.path.parent().is_some_and(|f| *folders.entry(f).or_insert_with(|| away(&u.path, &mounts, &mut volumes))) {
+            kept.push(u);
+        }
+    }
+    kept
+}
+
+/// Whether a missing file, and so every missing file of its folder, lies on
+/// a volume that is not mounted, by any of three signs, each asked once a
+/// volume (`volumes`):
+///
+/// - it is where systems mount drives (`volume_root`), and nothing is there
+///   now (`unmounted`): udisks removes the folder it made, so this is the
+///   one sign left of a drive under `/media`;
+/// - it is under a mount point `/etc/fstab` names, and that is not mounted
+///   (when it is, the file is gone from it, and nothing else is asked);
+/// - the folder is not there, and the nearest folder above it that is, is
+///   empty and nothing is mounted on it: the mount point an sshfs, NFS or
+///   SMB share, or a disk mounted by hand, leaves behind (`~/nas`, `/srv`).
+///
+/// The first was all there was, so a share mounted anywhere else lost every
+/// record each time it was away. A folder that is there with the file gone
+/// from it is a deletion, whatever is above it.
+fn away(file: &Path, mounts: &Mounts, volumes: &mut HashMap<PathBuf, bool>) -> bool {
+    let Some(folder) = file.parent() else { return false };
+    let mut asked = |root: PathBuf, empty_too: bool| {
+        *volumes.entry(root).or_insert_with_key(|r| !mounts.mounted(r) && (!empty_too || unmounted(r)))
+    };
+    if volume_root(file).is_some_and(|r| asked(r, true)) {
+        return true;
+    }
+    if let Some(r) = mounts.configured(folder) {
+        return asked(r.to_path_buf(), false);
+    }
+    left_behind(folder).is_some_and(|r| asked(r, true))
+}
+
+/// The nearest folder above `folder` that is there, when `folder` is not;
+/// not `/`.
+fn left_behind(folder: &Path) -> Option<PathBuf> {
+    let missing = |p: &Path| matches!(std::fs::symlink_metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    if !missing(folder) {
+        return None;
+    }
+    let mut at = folder.parent()?;
+    while missing(at) {
+        at = at.parent()?;
+    }
+    (at.parent().is_some() && at.is_dir()).then(|| at.to_path_buf())
+}
+
+/// What is mounted now (`/proc/self/mountinfo`) and where `/etc/fstab` says
+/// something is mounted. Both empty where there is no such file.
+struct Mounts {
+    now: std::collections::HashSet<PathBuf>,
+    configured: Vec<PathBuf>,
+}
+
+impl Mounts {
+    fn here() -> Mounts {
+        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+        Mounts::of(&read("/proc/self/mountinfo"), &read("/etc/fstab"))
+    }
+
+    /// From the two files' text: mountinfo's fifth field, fstab's second,
+    /// each with its octal escapes (`\040` a space) read.
+    fn of(mountinfo: &str, fstab: &str) -> Mounts {
+        let field = |line: &str, n: usize| line.split_whitespace().nth(n).map(unescape);
+        let now = mountinfo.lines().filter_map(|l| field(l, 4)).collect();
+        let configured = fstab
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter_map(|l| field(l, 1))
+            .filter(|p| p.is_absolute() && p.parent().is_some())
+            .collect();
+        Mounts { now, configured }
+    }
+
+    fn mounted(&self, p: &Path) -> bool {
+        self.now.contains(p)
+    }
+
+    /// The deepest mount point `/etc/fstab` names that holds `p`.
+    fn configured(&self, p: &Path) -> Option<&Path> {
+        self.configured.iter().filter(|m| p.starts_with(m)).max_by_key(|m| m.components().count()).map(PathBuf::as_path)
+    }
+}
+
+/// A mount table's field, its `\NNN` octal escapes read.
+fn unescape(s: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let octal = b.get(i + 1..i + 4).filter(|d| b[i] == b'\\' && d.iter().all(|c| (b'0'..=b'7').contains(c)));
+        match octal {
+            Some(d) => {
+                out.push(d.iter().fold(0u32, |v, c| v * 8 + (c - b'0') as u32) as u8);
+                i += 4;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
 /// Which of `paths`, the files records name, are no longer there: the
@@ -1972,6 +2085,47 @@ mod tests {
         assert!(unmounted(&dir.join("not-there")));
         assert!(unmounted(&empty), "a mount point left behind");
         assert!(!unmounted(&full), "mounted, and the file is gone from it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Anywhere else, a share or disk is away when `/etc/fstab` names its
+    /// mount point and nothing is mounted there, or when the files' folder
+    /// is gone and the nearest folder above it is an empty one nothing is
+    /// mounted on. A folder still there, the file gone from it, is a
+    /// deletion.
+    #[test]
+    fn a_record_on_a_share_mounted_anywhere_is_kept_while_it_is_away() {
+        let m = Mounts::of(
+            "22 1 0:5 / / rw - ext4 /dev/sda1 rw\n40 22 0:9 / /srv/my\\040disk rw - ext4 /dev/sdb1 rw\n",
+            "# comment /nowhere\nUUID=a / ext4 defaults 0 1\nUUID=b /srv/my\\040disk ext4 noauto 0 2\nnas:/p /srv/nas nfs noauto 0 0\n/swapfile none swap sw 0 0\n",
+        );
+        assert!(m.mounted(Path::new("/srv/my disk")) && !m.mounted(Path::new("/srv/nas")));
+        assert_eq!(m.configured(Path::new("/srv/nas/2019")), Some(Path::new("/srv/nas")));
+        assert_eq!(m.configured(Path::new("/srv/my disk/a")), Some(Path::new("/srv/my disk")));
+        assert_eq!(m.configured(Path::new("/home/u")), None, "/ is no drive that comes and goes");
+        let mut volumes = HashMap::new();
+        assert!(away(Path::new("/srv/nas/2019/a.jpg"), &m, &mut volumes), "named in fstab, not mounted");
+        assert!(!away(Path::new("/srv/my disk/2019/a.jpg"), &m, &mut volumes), "mounted: the files are gone");
+
+        let dir = scratch("left-behind");
+        let (nas, here) = (dir.join("nas"), dir.join("here"));
+        std::fs::create_dir_all(&nas).unwrap();
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::write(here.join("other.jpg"), b"x").unwrap();
+        let none = Mounts::of("", "");
+        let mut volumes = HashMap::new();
+        assert!(away(&nas.join("photos/2019/a.jpg"), &none, &mut volumes), "an empty mount point left behind");
+        assert!(!away(&here.join("photos/a.jpg"), &none, &mut volumes), "a folder deleted from one that holds more");
+        assert!(!away(&here.join("a.jpg"), &none, &mut volumes), "the folder is there: the file was deleted");
+        let mounted = Mounts::of(&format!("1 1 0:1 / {} rw - fuse.sshfs h: rw\n", nas.display()), "");
+        assert!(!away(&nas.join("photos/a.jpg"), &mounted, &mut HashMap::new()), "an empty share mounted: the files are gone");
+        assert_eq!(left_behind(Path::new("/img-fp-not-there/a")), None, "never /");
+
+        // Carried through it, a file this run was not asked about.
+        let unasked = Unasked { path: nas.join("photos/a.jpg"), span: Span { at: 0, len: 0 }, here: true };
+        assert_eq!(carried(std::slice::from_ref(&unasked)).len(), 1);
+        std::fs::write(nas.join("lost.txt"), b"x").unwrap();
+        assert_eq!(carried(std::slice::from_ref(&unasked)).len(), 0, "something is there now, and the file is not");
         std::fs::remove_dir_all(&dir).ok();
     }
 

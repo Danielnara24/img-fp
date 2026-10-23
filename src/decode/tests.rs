@@ -566,8 +566,9 @@ fn png_of(w: u32, h: u32, color: ::png::ColorType, depth: ::png::BitDepth) -> Ve
 /// The streaming PNG path gives the general path's grey plane to the bit,
 /// or declines — over every layout, at sizes that take each branch of the
 /// reduction. (Interlaced files are declined by one test on the header;
-/// the encoder here cannot write one to check it with.) And a file it declines or cannot finish still decodes, or
-/// fails, exactly as the general path does.
+/// the encoder here cannot write one to check it with.) And a file it
+/// declines still decodes, or fails, exactly as the general path does; one
+/// cut off is `a_cut_off_png_decodes_and_says_it_is_damaged`.
 #[test]
 fn png_rows_decode_exactly_as_the_whole_picture_does() {
     use ::png::{BitDepth as D, ColorType as C};
@@ -597,18 +598,50 @@ fn png_rows_decode_exactly_as_the_whole_picture_does() {
             assert_eq!(got_traits, want_traits, "{tag}");
         }
     }
-    // Truncated anywhere — in the header, in the rows, in the last chunk —
-    // the result is the general path's, error message and all.
+    // Truncated in the header, the result is the general path's, error
+    // message and all.
     let bytes = png_of(300, 200, C::Rgb, D::Eight);
-    for cut in [40, 200, bytes.len() / 2, bytes.len() - 20, bytes.len() - 5] {
-        let got = analyse(64, |s| png::read(&bytes[..cut], s)).map(|r| r.0.px);
-        let want = analyse(64, |s| other::whole(&bytes[..cut], ImageFormat::Png, s)).map(|r| r.0.px);
-        match (got, want) {
-            (Ok(a), Ok(b)) => assert_eq!(a, b, "cut {cut}"),
-            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "cut {cut}"),
-            (a, b) => panic!("cut {cut}: {:?} against {:?}", a.is_ok(), b.is_ok()),
+    let got = analyse(64, |s| png::read(&bytes[..40], s)).map(|r| r.0.px);
+    let want = analyse(64, |s| other::whole(&bytes[..40], ImageFormat::Png, s)).map(|r| r.0.px);
+    assert_eq!(got.unwrap_err().to_string(), want.unwrap_err().to_string());
+}
+
+/// A PNG cut off in its rows or after them decodes at its size, the rows
+/// it holds as the whole file's and the rest mid-grey, and says it is
+/// damaged; the whole file, and one cut inside its `IEND`, do not.
+#[test]
+fn a_cut_off_png_decodes_and_says_it_is_damaged() {
+    use ::png::{BitDepth as D, ColorType as C};
+    let damaged = |b: &[u8]| {
+        let pic = png::open(b);
+        let read = pic.read;
+        let plane = analyse(0, |s| read(s)).map(|r| (r.0, r.1));
+        (plane, (pic.facts)().damaged)
+    };
+    let mut read_some = false;
+    for (color, depth) in [(C::Rgb, D::Eight), (C::Rgba, D::Eight), (C::Grayscale, D::Sixteen), (C::Indexed, D::Eight)] {
+        let bytes = png_of(300, 200, color, depth);
+        let (whole, why) = damaged(&bytes);
+        let (whole, size) = whole.unwrap();
+        assert!(why.is_none() && !png::cut_off(&bytes), "{color:?}");
+        assert_eq!(size, (300, 200));
+        for cut in [bytes.len() / 3, bytes.len() / 2, bytes.len() - 20] {
+            let (plane, why) = damaged(&bytes[..cut]);
+            let (plane, size) = plane.unwrap_or_else(|e| panic!("{color:?} cut {cut}: {e}"));
+            assert!(why.is_some(), "{color:?} cut {cut}");
+            assert_eq!((size, plane.w, plane.h), ((300, 200), whole.w, whole.h), "{color:?} cut {cut}");
+            // Row by row, the plane is the whole file's down to where the
+            // file stops, and then mid-grey.
+            fn row(p: &Gray, y: usize) -> &[f32] {
+                &p.px[y * p.w..(y + 1) * p.w]
+            }
+            let held = (0..plane.h).take_while(|&y| row(&plane, y) == row(&whole, y)).count();
+            assert!((held..plane.h).all(|y| row(&plane, y).iter().all(|&v| v == 128.0 / 255.0)), "{color:?} cut {cut}: {held} rows");
+            read_some |= held > 0 && held < plane.h;
         }
+        assert!(!png::cut_off(&bytes[..bytes.len() - 4]), "cut inside IEND: the pixels are all there");
     }
+    assert!(read_some, "some cut was read in part");
 }
 
 /// A TIFF read a strip at a time gives the general path's pixels and

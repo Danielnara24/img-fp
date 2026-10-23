@@ -539,6 +539,18 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   `ymm` counts identical; glibc floor 2.34. Code lines (no comments, blanks
   or tests) of `progress.rs` 397 -> 540, `pipeline.rs` 1,115 -> 1,105: the analysis's
   per-format pace and the stage table are new, not smaller.
+- 0.68.0 (audit fixes A-J, not measured on the corpora; `Foto 38622.png`,
+  IMGS's truncated `quadrant_rotate` trap of `car2`, is now analysed as
+  DAMAGED and forms no pair in its family): `--against` gives a file both
+  sides reach to the nearer root, and `-e` never covers a whole library
+  (a library inside the scanned folder was empty); empty files and files
+  of no picture format form no pair; failures say their cause
+  (`img_fp::why`); a cut-off PNG is analysed as far as it goes; the cache
+  keeps records of an fstab or left-behind mount point that is away; the
+  crate leaves out `flatpak/` and `.github/`, the Flatpak's local build
+  `repo-flatpak`, `.git`, `.claude`; the window's large view fits at the
+  largest monitor's size and has *Actual size* (1), and its texture budget
+  is in screens (`thumbs::keep_for`).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1169,6 +1181,10 @@ then library files it reached query in turn until none is new; candidates
 ranked by `both_ways`. The second look also re-asks the best-connected member
 of each clean-anchor component holding a scanned file. A scanned original
 whose library copy is a same-frame re-encode is `repeat` (user's decision).
+A file both sides reach is the side's whose root is nearer it, the scan's
+on a tie (`walk::settle`): an import folder inside the library is scanned, a
+library inside the scanned folder is the library (it was the scan's: an empty
+library, every file `new`). `--exclude` never covers a whole library root.
 Copy election: the first member of an exact group is the original, so cached
 and cold runs agree. Kept for `--last` like any scan (see *A finished scan*);
 `--last --list` lists it; the window does not open one.
@@ -1406,7 +1422,10 @@ Do not retry without new evidence:
   thumbnail cache used when current (`Thumb::MTime`, and `Thumb::Size` when
   written: mtime alone survives `cp -p`/`rsync -a`); HEIF/AVIF/JXL decode one
   at a time;
-  texture budget by bytes (`KEEP_BYTES`, `STRIP_KEEP`).
+  texture budget by bytes (`KEEP_BYTES`, `STRIP_KEEP`), in screens: scaled
+  by the largest monitor's pixels (`thumbs::keep_for`) and the strip's by
+  its scale factor squared; a texture over half the budget is shown, not
+  kept.
 - Mosaic (`gui/mosaic.rs`) is virtual and its tiles pooled; strip is a
   `ListView`; `still.rs` keeps texture arrival from relaying out the page;
   tooltips/classes set only on change. Marks are vectors by file number
@@ -1425,6 +1444,12 @@ Do not retry without new evidence:
   whenever `select` or `refresh_bar` runs; a new group selects its first
   image while it is open. Pictures are asked again only when their file
   changes. Info is three lines: path; size; evidence and suggestion.
+  Fitted, a picture is decoded at the largest monitor's size
+  (`thumbs::largest_screen`; was 1600 px whatever the screen); *Actual size*
+  (1) decodes it whole (up to `ACTUAL_PIXELS`) and shows it pixel for
+  pixel through `still::ActualSize` (a texture's size in the desktop's
+  units: GTK reads pixels as units, 2x at scale 2), each side in a
+  scroller, dragged to pan, centred when shown.
 - Mnemonics live in `gui/labels.rs` with a clash test; add labels there.
 - Keys live in `gui/commands.rs`: a `Section` per part of the window
   (`WINDOW`, `SCAN`, `RESULTS`, `LARGE`), each `Row` a line of the F1 list
@@ -1540,8 +1565,12 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   a byte-identical "image" pair), featureless images (were a problem: a
   folder with one plain backdrop exited 2 every run).
   Problems: undecodable, unreadable path, unresolved `--exclude`,
-  cut-off JPEG (`decode::jpeg::cut_off`; analysed, marked
-  `DAMAGED`, never cached), cache I/O failure.
+  cut-off JPEG or PNG (`decode::jpeg::cut_off`, `decode::png::cut_off`:
+  analysed, the PNG's missing rows mid-grey as the JPEG decoder fills them,
+  marked `DAMAGED`, never cached), cache I/O failure. A failure's text is
+  `img_fp::why` (the cause too; `{e}` of a context dropped "Permission
+  denied"). Empty files are in no byte group (`exact_groups`), and files
+  refused as no picture format are stated in no pair, whatever their name.
   **Adding a category**: a `problems::Note` variant, its arm in `Note::says`
   (skip or problem, log tag, summary label) and its place in `Note::ALL`;
   callers say `problems.note(Note::X, what)`. Not a counter of its own.
@@ -1557,9 +1586,12 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record. A run keeps
   what it took and made, and every record it was not asked about (a path it
-  did not walk, or other settings) while the file exists or its volume
-  (`/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) is unmounted
-  (`cache::carried`, `volume_root`). Appended as made; compacted only when
+  did not walk, or other settings) while the file exists or its volume is
+  away (`cache::carried`, `away`): a drive where systems mount them
+  (`volume_root`: `/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) with
+  nothing there, an `/etc/fstab` mount point not mounted, or a folder gone
+  whose nearest folder above is empty and not mounted (an sshfs/NFS mount
+  point left behind; was a re-analysis each time the share was away). Appended as made; compacted only when
   dead bytes reach a quarter. Runs sharing the file hold it with `flock`
   shared; compaction, header writing and torn-tail repair need it alone
   (`exclusive`, never waited for) and are skipped otherwise: a compaction

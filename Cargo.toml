@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.67.0"
+version = "0.68.0"
 edition = "2024"
 # The oldest compiler the dependencies build with (`image` and `jxl-oxide`'s
 # parts need 1.88). Said here so that an older one is told so by cargo,
@@ -14,8 +14,10 @@ readme = "README.md"
 keywords = ["image", "duplicate", "deduplication", "fingerprint", "cli"]
 categories = ["command-line-utilities", "multimedia::images"]
 # CLAUDE.md is internal design notes addressed to a coding agent; it is on
-# GitHub for contributors and has nothing to say to a crate consumer.
-exclude = ["CLAUDE.md"]
+# GitHub for contributors and has nothing to say to a crate consumer. The
+# Flatpak's manifest, crate list and screenshots (2.8 MB) and the release
+# workflow build from the repository, never from the crate.
+exclude = ["CLAUDE.md", "flatpak/", ".github/"]
 
 [dependencies]
 anyhow = "1.0.104"

@@ -120,7 +120,7 @@ pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option
             Item { feats, thumb, dims: d.size, read, traits }
         }
         Err(e) => {
-            let read = decode::refused(&e).map_or_else(|| Read::Failed(e.to_string()), Read::Refused);
+            let read = decode::refused(&e).map_or_else(|| Read::Failed(crate::why(&e)), Read::Refused);
             Item { read, ..Default::default() }
         }
     };

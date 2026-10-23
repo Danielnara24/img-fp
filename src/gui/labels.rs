@@ -82,6 +82,7 @@ pub const PREVIEW_NEXT: &str = "_Next";
 pub const PREVIEW_MARK: &str = "_Mark for Trash";
 pub const PREVIEW_CLOSE: &str = "_Close";
 pub const PREVIEW_COMPARE: &str = "Compare with _reference";
+pub const PREVIEW_ACTUAL: &str = "_Actual size";
 
 // The Trash confirmation.
 pub const CONFIRM_CANCEL: &str = "_Cancel";
@@ -137,7 +138,7 @@ mod tests {
             distinct(&format!("results, {view:?}"), &page.chain(menu).collect::<Vec<_>>());
         }
         assert_eq!(letter(TRASH), letter(&trash_n(2)));
-        distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE, PREVIEW_COMPARE]);
+        distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE, PREVIEW_COMPARE, PREVIEW_ACTUAL]);
         distinct("confirmation", &[CONFIRM_CANCEL, CONFIRM_TRASH]);
     }
 }

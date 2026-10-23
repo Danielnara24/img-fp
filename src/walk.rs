@@ -80,6 +80,9 @@ struct Found {
     link: bool,
     /// Reached from a `--against` root rather than from a root to scan.
     library: bool,
+    /// How deep the root it was reached from is: its canonical path's
+    /// components. See [`settle`].
+    depth: usize,
     stat: Stat,
 }
 
@@ -112,7 +115,7 @@ pub struct Listing {
     pub canonical: Vec<Option<PathBuf>>,
     pub stats: Vec<Stat>,
     /// Whether each file is the library's (`Request::library`). A file both
-    /// sides reach is the scan's: see [`settle`].
+    /// sides reach is the side's whose root is nearer it: see [`settle`].
     pub library: Vec<bool>,
 }
 
@@ -139,7 +142,7 @@ pub struct Listing {
 pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
     let excludes = resolve_excludes(req.exclude, problems);
     let set_aside = SetAside::here();
-    let depth = if req.recursive { usize::MAX } else { 1 };
+    let levels = if req.recursive { usize::MAX } else { 1 };
     let mut found = Vec::new();
     let sides = req.roots.iter().map(|r| (r, false)).chain(req.library.iter().map(|r| (r, true)));
     for (root, library) in sides {
@@ -154,10 +157,22 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
                 continue;
             }
         };
+        // A library is what the scan is compared with, and an exclude
+        // that holds all of it would leave nothing to compare with: the
+        // way to keep a library inside a scanned folder out of the scan was
+        // `-e`, and it took the library with it, so every file scanned was
+        // `new`. What an exclude holds of a library *below* its root is still
+        // left out. A file both sides reach is settled in [`settle`].
+        let excludes: Vec<PathBuf> = if library {
+            excludes.iter().filter(|ex| !canon.starts_with(ex)).cloned().collect()
+        } else {
+            excludes.clone()
+        };
         if is_excluded(&canon, &excludes) {
             problems.note(Note::Excluded, &shown);
             continue;
         }
+        let depth = canon.components().count();
         if meta.is_file() {
             let link = std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink());
             found.push(Found {
@@ -167,9 +182,11 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
                 canon: Some(canon),
                 link,
                 library,
+                depth,
             });
         } else if meta.is_dir() {
-            walk_dir(root, &canon, depth, library, req, &excludes, &set_aside, &mut found, problems);
+            let side = Side { library, depth };
+            walk_dir(root, &canon, levels, side, req, &excludes, &set_aside, &mut found, problems);
         } else {
             // A socket, a fifo, a device node: naming one is a mistake worth
             // hearing about rather than a file worth trying to decode.
@@ -179,11 +196,18 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
     settle(found, problems)
 }
 
+/// Which side a root is on, and how deep it is; see [`Found`].
+#[derive(Clone, Copy)]
+struct Side {
+    library: bool,
+    depth: usize,
+}
+
 fn walk_dir(
     root: &Path,
     canon: &Path,
-    depth: usize,
-    library: bool,
+    levels: usize,
+    side: Side,
     req: &Request,
     excludes: &[PathBuf],
     set_aside: &SetAside,
@@ -204,7 +228,7 @@ fn walk_dir(
     // below before anything is asked of it.
     let entries = WalkDir::new(root)
         .follow_links(follow)
-        .max_depth(depth)
+        .max_depth(levels)
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 || !e.file_type().is_dir() {
@@ -269,7 +293,8 @@ fn walk_dir(
             stat: Stat::of(&meta),
             link: entry.path_is_symlink(),
             canon: (!follow).then(|| beneath(entry.path())),
-            library,
+            library: side.library,
+            depth: side.depth,
             path: entry.into_path(),
         });
     }
@@ -411,10 +436,15 @@ impl SetAside {
 /// file and the same file through a linked folder) the smaller path wins,
 /// which makes the list, and so the run, independent of directory order.
 ///
-/// **A file the scan reaches is the scan's**, whatever the library also
-/// reaches: an import folder inside the library is the obvious way, and each
-/// of its files would otherwise be a library file and in the library already.
-/// That comes before the preference for a real name.
+/// **A file both sides reach is the side's whose root is nearer it**, and
+/// the scan's when the two are as near. An import folder inside the library
+/// (`-r ~/Pictures/inbox --against ~/Pictures`) is the scan's: each of its
+/// files would otherwise be a library file and in the library already. A
+/// library inside the folder scanned (`-r ~/Photos --against
+/// ~/Photos/archive`) is the library: it was the scan's, the library held
+/// nothing, and every file scanned was `new`, a copy of an archived one too.
+/// A file named outright is nearer than any folder holding it. That comes
+/// before the preference for a real name.
 ///
 /// Exactly one name is counted per collision either way.
 fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
@@ -430,8 +460,11 @@ fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
             kept.push(f);
             continue;
         };
-        let rank = |f: &Found| (f.library, f.link);
-        let dropped = if rank(&f) < rank(&kept[at]) { std::mem::replace(&mut kept[at], f).path } else { f.path };
+        let wins = |f: &Found, k: &Found| match f.library == k.library {
+            true => !f.link && k.link,
+            false => (f.depth, !f.library) > (k.depth, !k.library),
+        };
+        let dropped = if wins(&f, &kept[at]) { std::mem::replace(&mut kept[at], f).path } else { f.path };
         problems.note(Note::ListedTwice, dropped.display());
     }
     // A later real name may have displaced an earlier link.
@@ -630,6 +663,36 @@ mod tests {
         walk_complete: bool,
     }
 
+    /// Which side each file a scan `--against` a library is on: the side's
+    /// whose root is nearer it, the scan's when they are as near; and an
+    /// exclude holding a whole library leaves it be.
+    #[test]
+    fn a_file_both_sides_reach_is_the_nearer_roots() {
+        let s = Scratch::new();
+        let (inbox, archive) = (s.file("inbox/x.jpg"), s.file("archive/x.jpg"));
+        let named = s.file("archive/named.jpg");
+        let (wanted, _) = crate::extensions::normalize(&["jpg".to_string()]).unwrap();
+        let sides = |roots: &[PathBuf], library: &[PathBuf], exclude: &[PathBuf]| {
+            let log = Log::default();
+            let mut problems = Problems::new(&log);
+            let req = Request { roots, library, exclude, wanted: &wanted, recursive: true, follow_symlinks: false, hidden: false };
+            let l = walk(&req, &mut problems);
+            l.files.into_iter().zip(l.library).collect::<Vec<_>>()
+        };
+        let all = [(named.clone(), true), (archive.clone(), true), (inbox.clone(), false)];
+        // A library inside the folder scanned.
+        assert_eq!(sides(&[s.0.clone()], &[s.dir("archive")], &[]), all);
+        // An exclude of it, the way to keep it out of the scan, keeps it in
+        // the library.
+        assert_eq!(sides(&[s.0.clone()], &[s.dir("archive")], &[s.dir("archive")]), all);
+        // An import folder inside the library.
+        assert_eq!(sides(&[s.dir("inbox")], &[s.0.clone()], &[]), all.clone().map(|(p, _)| (p.clone(), p != inbox)));
+        // The same folder both ways, and a file named outright inside the
+        // library: the scan's.
+        assert!(sides(&[s.0.clone()], &[s.0.clone()], &[]).iter().all(|(_, lib)| !lib));
+        assert_eq!(sides(&[named.clone()], &[s.0.clone()], &[]), all.clone().map(|(p, _)| (p.clone(), p != named)));
+    }
+
     fn run(roots: &[PathBuf], exclude: &[PathBuf], recursive: bool, follow: bool) -> Run {
         run_hidden(roots, exclude, recursive, follow, false)
     }
@@ -803,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_both_sides_reach_is_the_scans() {
+    fn an_import_folder_inside_the_library_is_the_scans() {
         let s = Scratch::new();
         let shelf = s.file("lib/old.jpg");
         let fresh = s.file("lib/import/new.jpg");

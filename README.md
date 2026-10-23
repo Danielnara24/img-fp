@@ -210,8 +210,10 @@ new: 1 file
 
 The library's own duplicates are not reported. The library is walked with the
 same options as the scanned folders: add `-r` for one with subfolders. An
-image both reach, such as an import folder inside the library, counts as
-scanned.
+image both reach belongs to the nearer folder: an import folder inside the
+library is scanned, and a library inside the folder scanned is the library.
+`--exclude` leaves out what it covers inside a library, but never a whole
+library.
 
 `--list` prints just the paths with the verdicts you name, one per line (or
 NUL-separated with `-0`), in place of the report. The report is still written
@@ -254,7 +256,9 @@ Trash.
   right and up (towards the top side of its outline): as they are on the
   reference, and turned or reversed on a copy that is turned or mirrored.
   Each reaches half way to the side of the outline it points at.
-  The caption says so in words too.
+  The caption says so in words too. *Actual size* (or 1) shows the image
+  pixel for pixel, to tell a sharp copy from a softer one; drag it to move
+  around. Press it again to fit the image to the window.
   Shift and a click marks or unmarks every image from the last one you
   marked or unmarked to the one clicked; Shift and an arrow key marks or
   unmarks each image it moves over the same way.
@@ -387,8 +391,8 @@ A file has the same suggestion in every group it appears in. That is the
 default rule, `--suggest content`. Two simpler rules read only the groups:
 
 - `--suggest correlation`: each group's representative is `KEEP`. Another
-  file is `DELETE` when it agrees with a representative closely, from three
-  quarters of the way between `--min-pixel-correlation` and 1 (0.9 by
+  file is `DELETE` when it agrees with a representative closely, from two
+  thirds of the way between `--min-pixel-correlation` and 1 (0.9 by
   default), `KEEP` when it agrees less, and `REVIEW` below
   `--min-pixel-correlation`
 - `--suggest representative`: each group's representative is `KEEP` and
@@ -459,8 +463,9 @@ is in `-x`. Files with no extension are picked up only with `-x '*'` (or an
 exception such as `-x '!gif'`).
 TGA files have no signature and are recognised by the `.tga` extension.
 
-A JPEG that is cut off, such as an interrupted download, is still analysed as
-far as it goes, and is marked `DAMAGED` in the report.
+A JPEG or PNG that is cut off, such as an interrupted download, is still
+analysed as far as it goes, and is marked `DAMAGED` in the report. An empty
+file is never an identical copy of another.
 
 An animation (GIF, APNG, WebP, JPEG XL) or a TIFF of several pages is compared
 by its first picture. It is suggested for deletion only when another file

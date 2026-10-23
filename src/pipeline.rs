@@ -1292,11 +1292,14 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     // The files that are one file come first (`Same::pairs`). Two of the
     // same bytes that are not pictures at all — a pair of empty files, two
     // copies of a README — are identical, and are not a duplicate *image*,
-    // which is the only claim this tool makes; only a wildcard walk can bring
-    // such files in. A byte-identical pair of broken `.jpg`s is still stated:
-    // those did claim to be images. Two alike only in grey are the match they
-    // are, made here since no pass verified one.
-    let one_file = same.pairs(|i| !not_asked[i]);
+    // which is the only claim this tool makes. A wildcard walk brings such
+    // files in, and so does a list walk when they are named as pictures: an
+    // error page saved as `.jpg` is no picture format at all, and each copy
+    // is already told as "not an image". A byte-identical pair of broken
+    // `.jpg`s (a picture's head, a decode that failed) is still stated: those
+    // are images. Two alike only in grey are the match they are, made here
+    // since no pass verified one.
+    let one_file = same.pairs(|i| !not_asked[i] && !matches!(items[i].read, Read::Refused(Refused::NotAnImage)));
     let grey: Vec<Claim> = one_file
         .iter()
         .filter(|p| p.2 == same::Kind::SameGrey)

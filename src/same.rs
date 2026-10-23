@@ -420,9 +420,13 @@ fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
 /// Sets of byte-identical files, by index. `stats` is the walk's, for each
 /// file's size; `comparable` says whether a file is worth reading at all, and
 /// is asked only of files that share a size with another.
+///
+/// An empty file is in no set: it holds no picture to be a copy of, and a
+/// folder of failed downloads (empty `.jpg`s) was one group, every file but
+/// one of it DELETE, beside each file's own "not an image".
 pub(crate) fn exact_groups(files: &[PathBuf], stats: &[walk::Stat], comparable: impl Fn(usize) -> bool + Sync) -> Vec<Vec<usize>> {
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, st) in stats.iter().enumerate() {
+    for (i, st) in stats.iter().enumerate().filter(|(_, st)| st.len > 0) {
         by_size.entry(st.len).or_default().push(i);
     }
     // Files that share a size are told apart first by a few pieces of each,

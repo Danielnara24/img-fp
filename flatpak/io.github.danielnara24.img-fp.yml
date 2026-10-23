@@ -122,5 +122,8 @@ modules:
           - vendor
           - benchmark
           - build-flatpak
+          - repo-flatpak
           - .flatpak-builder
+          - .git
+          - .claude
       - cargo-sources.json

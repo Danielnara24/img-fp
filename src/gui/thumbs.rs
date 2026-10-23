@@ -25,11 +25,12 @@
 //!   ninety decoded at up to twice their size in RGBA, that was some 12 ms a
 //!   frame while pictures arrived, and four times the memory.
 //!
-//! What is kept is the textures most recently shown, up to a fixed number of
+//! What is kept is the textures most recently shown, up to a number of
 //! bytes, so paging back is instant. Bytes and not a count: a card's texture
 //! is a tenth of a megabyte and the large view's is seven or more, and a count
 //! of 160 that suited the cards held over a gigabyte once the large view had
-//! been paged through.
+//! been paged through. The bytes are screens' worth (`keep_for`), not a fixed
+//! number, since what one screen of pictures takes grows with the screen.
 
 use gtk::gdk;
 use gtk::glib;
@@ -40,9 +41,44 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Bytes of texture kept, on screen or not, by the group's loader: two or
-/// three groups of pictures at the size they are shown, or a few large views.
+/// Bytes of texture kept, on screen or not, by the group's loader, on a
+/// 1920 x 1080 screen (`keep_for` for others): two or three groups of
+/// pictures at the size they are shown, or a few large views; about six
+/// screens of pictures.
 const KEEP_BYTES: usize = 48 << 20;
+
+/// The screen `KEEP_BYTES` is for, in pixels.
+const KEPT_FOR: u64 = 1920 * 1080;
+
+/// The largest monitor, in its own pixels (its size in the desktop's units
+/// times its scale factor), and the largest scale factor; 1920 x 1080 at 1
+/// when there is none to ask.
+pub fn largest_screen() -> ((u32, u32), u32) {
+    let mut most = ((1920, 1080), 1);
+    let mut area = 0;
+    if let Some(display) = gdk::Display::default() {
+        let monitors = display.monitors();
+        for m in (0..monitors.n_items()).filter_map(|i| monitors.item(i)?.downcast::<gdk::Monitor>().ok()) {
+            let (g, scale) = (m.geometry(), m.scale_factor().max(1));
+            let (w, h) = ((g.width() * scale).max(1) as u32, (g.height() * scale).max(1) as u32);
+            if w as u64 * h as u64 > area {
+                area = w as u64 * h as u64;
+                most.0 = (w, h);
+            }
+            most.1 = most.1.max(scale as u32);
+        }
+    }
+    most
+}
+
+/// `KEEP_BYTES` for a screen of `w` x `h` pixels: as many screens of
+/// pictures as it holds of a 1920 x 1080 one, and never less. Fixed, one
+/// screen of a 3840 x 2160 display (some 33 MB of pictures) and the large
+/// view's picture (27 MB) were more than it held, so paging back to a group
+/// decoded it again.
+pub fn keep_for((w, h): (u32, u32)) -> usize {
+    KEEP_BYTES.max((KEEP_BYTES as u64 * (w as u64 * h as u64) / KEPT_FOR) as usize)
+}
 
 /// The place a picture is made for, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,7 +130,7 @@ pub struct Thumbs {
 
 impl Thumbs {
     pub fn new() -> Rc<Thumbs> {
-        Thumbs::with_workers(2, KEEP_BYTES)
+        Thumbs::with_workers(2, keep_for(largest_screen().0))
     }
 
     /// With at most `most` decoders and `keep` bytes of texture: the group
@@ -135,7 +171,7 @@ impl Thumbs {
                         Some(t) => Ok(t),
                         None => {
                             let _one = heavy(&key.0).then(|| HEAVY.lock().unwrap_or_else(|e| e.into_inner()));
-                            img_fp::preview_fit(&key.0, w, h, cover).map_err(|e| format!("{e:#}"))
+                            img_fp::preview_fit(&key.0, w, h, cover).map_err(|e| img_fp::why(&e))
                         }
                     },
                 }
@@ -238,6 +274,11 @@ impl Thumbs {
             deliver(s, r.clone());
         }
         let bytes = r.as_ref().map_or(0, |t| t.width() as usize * t.height() as usize * 4);
+        // A picture past half of what is kept (the large view at its actual
+        // size) is shown and not kept: kept, it would be all there is.
+        if !self.order.borrow().holds(bytes) {
+            return;
+        }
         self.done.borrow_mut().insert(key.clone(), r);
         for old in self.order.borrow_mut().insert(key, bytes) {
             self.done.borrow_mut().remove(&old);
@@ -473,6 +514,12 @@ impl<K: PartialEq> Budget<K> {
         dropped
     }
 
+    /// Whether a texture of `bytes` is one to keep: no more than half of
+    /// what is kept.
+    pub fn holds(&self, bytes: usize) -> bool {
+        bytes <= self.limit / 2
+    }
+
     pub fn remove_where(&mut self, gone: impl Fn(&K) -> bool) {
         let held = &mut self.held;
         self.order.retain(|(k, b)| {
@@ -553,6 +600,20 @@ mod tests {
         assert_eq!(b.held, 500);
         b.remove_where(|k| *k == "huge");
         assert_eq!(b.held, 0);
+        // Which the loader does not keep at all: past half, it would be all
+        // there is.
+        assert!(b.holds(50) && !b.holds(51));
+    }
+
+    /// What is kept is screens of pictures: as many of a larger screen as of
+    /// a 1920 x 1080 one, and never fewer bytes than for that one.
+    #[test]
+    fn what_is_kept_grows_with_the_screen() {
+        assert_eq!(keep_for((1920, 1080)), KEEP_BYTES);
+        assert_eq!(keep_for((1366, 768)), KEEP_BYTES);
+        assert_eq!(keep_for((3840, 2160)), 4 * KEEP_BYTES);
+        // One screen of a 4K display's pictures, and its large view's.
+        assert!(keep_for((3840, 2160)) / 2 > 3840 * 2160 * 4);
     }
 
     /// A PNG of `w` x `h` with the two texts the thumbnail spec asks for.

@@ -85,3 +85,67 @@ impl Still {
         self.update_property(&[gtk::accessible::Property::Label(text)]);
     }
 }
+
+/// A texture whose size is said in the desktop's units, not its pixels: at
+/// a scale factor of 2, a 4000-pixel picture is 2000 wide, so a picture
+/// shown at that size has one of its pixels on each pixel of the screen.
+/// GTK reads a texture's pixels as units, which is twice that.
+mod actual {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    pub struct ActualSize {
+        pub texture: RefCell<Option<gdk::Texture>>,
+        pub scale: Cell<i32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for ActualSize {
+        const NAME: &'static str = "ImgFpActualSize";
+        type Type = super::ActualSize;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for ActualSize {}
+
+    impl PaintableImpl for ActualSize {
+        fn flags(&self) -> gdk::PaintableFlags {
+            gdk::PaintableFlags::STATIC_SIZE | gdk::PaintableFlags::STATIC_CONTENTS
+        }
+
+        fn intrinsic_width(&self) -> i32 {
+            self.texture.borrow().as_ref().map_or(0, |t| (t.width() + self.scale.get().max(1) - 1) / self.scale.get().max(1))
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.texture.borrow().as_ref().map_or(0, |t| (t.height() + self.scale.get().max(1) - 1) / self.scale.get().max(1))
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            let (Some(t), Some(s)) = (self.texture.borrow().clone(), snapshot.downcast_ref::<gtk::Snapshot>()) else { return };
+            // Pixel for pixel, so nearest: a sharp copy beside a soft one is
+            // what this is looked at for.
+            s.append_scaled_texture(&t, gsk::ScalingFilter::Nearest, &graphene::Rect::new(0.0, 0.0, width as f32, height as f32));
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct ActualSize(ObjectSubclass<actual::ActualSize>) @implements gdk::Paintable;
+}
+
+impl ActualSize {
+    /// `t` shown at `scale` pixels of the screen to a unit of the desktop.
+    pub fn new(t: &gdk::Texture, scale: i32) -> ActualSize {
+        let a: ActualSize = glib::Object::new();
+        *a.imp().texture.borrow_mut() = Some(t.clone());
+        a.imp().scale.set(scale.max(1));
+        a
+    }
+
+    /// Its size in the desktop's units.
+    pub fn size(&self) -> (i32, i32) {
+        (self.intrinsic_width(), self.intrinsic_height())
+    }
+}

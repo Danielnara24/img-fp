@@ -123,7 +123,10 @@ struct Args {
     /// `review` (a weak match to the library, close enough to be an edited
     /// copy) or `new`. The library's own duplicates are not looked for. It is
     /// walked with the same options as the paths to scan, so a library of
-    /// subfolders needs `--recursive`. An image both reach counts as scanned.
+    /// subfolders needs `--recursive`. An image both reach belongs to the
+    /// nearer folder: an import folder inside the library is scanned, a
+    /// library inside a folder scanned is the library. `--exclude` never
+    /// leaves out a whole library.
     #[arg(long, value_name = "PATH")]
     against: Vec<PathBuf>,
 
@@ -788,6 +791,25 @@ where
 /// made for a place of a given size.
 pub use decode::{fit_preview, preview, preview_fit};
 
+/// Why something failed, cause and all: `{e}` of a context says only the
+/// context ("read photo.jpg", not that permission was denied). A cause the
+/// text so far already ends with is left out, as the `image` crate's errors
+/// say their own cause.
+pub fn why(e: &anyhow::Error) -> String {
+    let mut out = String::new();
+    for cause in e.chain() {
+        let t = cause.to_string();
+        if out.ends_with(&t) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(": ");
+        }
+        out.push_str(&t);
+    }
+    out
+}
+
 /// The only exit path.
 ///
 /// Both binaries' run ends here. `gui` is where the window wants its copy of
@@ -1016,6 +1038,18 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A failure says its cause, once: an OS error under a context, and not
+    /// the `image` crate's cause again after its own text.
+    #[test]
+    fn why_says_the_cause_once() {
+        use anyhow::Context;
+        let io: anyhow::Result<()> = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context("read e.jpg");
+        assert_eq!(super::why(&io.unwrap_err()), "read e.jpg: permission denied");
+        let png = image::load_from_memory_with_format(b"\x89PNG\r\n\x1a\nnot a png", image::ImageFormat::Png).unwrap_err();
+        let one = png.to_string();
+        assert_eq!(super::why(&anyhow::Error::new(png)), one);
+    }
+
     /// The vocabulary has to scale with the corpus, and the reason is a bug
     /// that a single-corpus benchmark could never have shown: with a fixed
     /// 65,536 words, a folder of eight images put every descriptor in a word

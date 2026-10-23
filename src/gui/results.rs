@@ -53,8 +53,8 @@ use crate::labels as l;
 use crate::last;
 use crate::mosaic::Mosaic;
 
-use crate::still::Still;
-use crate::thumbs::{show_on, Key, Latest, Shown, Size, Thumbs};
+use crate::still::{ActualSize, Still};
+use crate::thumbs::{self, show_on, Key, Latest, Shown, Size, Thumbs};
 use crate::App;
 use img_fp::outcome::Place;
 use img_fp::{Action, Evidence, Lapse, Outcome, Relation, SuggestMode};
@@ -66,14 +66,20 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Long side of the large view's picture.
-const LARGE: u32 = 1600;
+/// The most pixels the large view shows at its actual size: a larger
+/// picture is shown as near it as this allows. 100 megapixels is 400 MB of
+/// texture.
+const ACTUAL_PIXELS: f64 = 100e6;
+/// The long side asked for at the actual size of a picture whose size the
+/// scan does not know.
+const ACTUAL_SIDE: u32 = 16384;
 /// Cards of the next group decoded ahead, for paging.
 const AHEAD: usize = 16;
 /// A group's picture in the strip.
 const STRIP_W: i32 = 96;
 const STRIP_H: i32 = 72;
-/// Bytes of the strip's pictures kept: at 96 x 72, some six hundred groups.
+/// Bytes of the strip's pictures kept: at 96 x 72, some six hundred groups;
+/// times the square of the screen's scale factor, at which they are drawn.
 const STRIP_KEEP: usize = 16 << 20;
 /// The tree's width.
 const TREE_W: i32 = 280;
@@ -896,7 +902,7 @@ impl Results {
             root,
             app: app.clone(),
             thumbs: Thumbs::new(),
-            strip_thumbs: Thumbs::with_workers(1, STRIP_KEEP),
+            strip_thumbs: Thumbs::with_workers(1, STRIP_KEEP * (thumbs::largest_screen().1 as usize).pow(2)),
             state: RefCell::new(State::default()),
             strip,
             folders,
@@ -2352,19 +2358,75 @@ impl Results {
         // the part it shows of the other (`Outline`).
         let reference = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).vexpand(true).hexpand(true).build();
         let (here, there) = (Outline::over(&picture), Outline::over(&reference));
+        // Each in a scroller, which scrolls only at the actual size; dragged,
+        // the picture moves with the pointer. `centre` puts a picture just
+        // shown at its actual size in the middle, until it is moved.
+        let scroller = |o: &Outline| {
+            let sw = gtk::ScrolledWindow::builder().child(&o.overlay).hexpand(true).vexpand(true).build();
+            let centre = Rc::new(Cell::new(false));
+            for a in [sw.hadjustment(), sw.vadjustment()] {
+                let centre = centre.clone();
+                // Once the layout that changed it is done: the viewport sets
+                // its value while it lays out.
+                a.connect_changed(move |a| {
+                    if centre.get() {
+                        let (a, centre) = (a.clone(), centre.clone());
+                        glib::idle_add_local_once(move || {
+                            if centre.get() {
+                                a.set_value((a.upper() - a.page_size()) / 2.0);
+                            }
+                        });
+                    }
+                });
+            }
+            let drag = gtk::GestureDrag::new();
+            let from = Rc::new(Cell::new((0.0, 0.0)));
+            drag.connect_drag_begin({
+                let (sw, from, centre) = (sw.clone(), from.clone(), centre.clone());
+                move |_, _, _| {
+                    centre.set(false);
+                    from.set((sw.hadjustment().value(), sw.vadjustment().value()));
+                }
+            });
+            drag.connect_drag_update({
+                let (sw, from) = (sw.clone(), from.clone());
+                move |_, dx, dy| {
+                    let (x, y) = from.get();
+                    sw.hadjustment().set_value(x - dx);
+                    sw.vadjustment().set_value(y - dy);
+                }
+            });
+            sw.add_controller(drag);
+            let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+            wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+            wheel.connect_scroll_begin({
+                let centre = centre.clone();
+                move |_| centre.set(false)
+            });
+            wheel.connect_scroll({
+                let centre = centre.clone();
+                move |_, _, _| {
+                    centre.set(false);
+                    glib::Propagation::Proceed
+                }
+            });
+            sw.add_controller(wheel);
+            (sw, centre)
+        };
+        let ((this_scroll, this_centre), (reference_scroll, reference_centre)) = (scroller(&here), scroller(&there));
         let caption = || gtk::Label::builder().xalign(0.5).ellipsize(gtk::pango::EllipsizeMode::Middle).visible(false).build();
         let (this_caption, reference_caption) = (caption(), caption());
-        let side = |o: &Outline, c: &gtk::Label| {
+        let side = |sw: &gtk::ScrolledWindow, c: &gtk::Label| {
             let b = gtk::Box::new(gtk::Orientation::Vertical, 4);
-            b.append(&o.overlay);
+            b.append(sw);
             b.append(c);
             b
         };
-        let reference_side = side(&there, &reference_caption);
+        let reference_side = side(&reference_scroll, &reference_caption);
         reference_side.set_visible(false);
         let pictures = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).homogeneous(true).vexpand(true).build();
         pictures.append(&reference_side);
-        pictures.append(&side(&here, &this_caption));
+        pictures.append(&side(&this_scroll, &this_caption));
         // The file, a line each: where it is; its size; how it matched and
         // what is suggested.
         let line = || gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
@@ -2379,6 +2441,8 @@ impl Results {
         next.set_tooltip_text(Some("Right arrow"));
         let compare = gtk::ToggleButton::with_mnemonic(l::PREVIEW_COMPARE);
         compare.set_tooltip_text(Some("C"));
+        let actual = gtk::ToggleButton::with_mnemonic(l::PREVIEW_ACTUAL);
+        actual.set_tooltip_text(Some("1: a pixel of the image to a pixel of the screen; drag to move around it"));
         let mark = gtk::CheckButton::with_mnemonic(l::PREVIEW_MARK);
         mark.set_tooltip_text(Some("Space"));
         let close = gtk::Button::with_mnemonic(l::PREVIEW_CLOSE);
@@ -2388,7 +2452,7 @@ impl Results {
         bar.set_margin_top(8);
         bar.set_margin_bottom(12);
         bar.append(&info);
-        for w in [prev.upcast_ref::<gtk::Widget>(), next.upcast_ref(), compare.upcast_ref(), mark.upcast_ref(), close.upcast_ref()] {
+        for w in [prev.upcast_ref::<gtk::Widget>(), next.upcast_ref(), compare.upcast_ref(), actual.upcast_ref(), mark.upcast_ref(), close.upcast_ref()] {
             w.set_valign(gtk::Align::Center);
             bar.append(w);
         }
@@ -2405,15 +2469,17 @@ impl Results {
 
         let quiet = Rc::new(Cell::new(false));
         let (latest, latest_reference) = (Latest::default(), Latest::default());
-        // The files the two pictures were last asked for: shown again as
-        // they are when nothing but the words changed (a mark, the pointer
-        // over the page), rather than blanked and decoded again.
-        let asked: Rc<RefCell<[Option<PathBuf>; 2]>> = Rc::default();
+        // The files the two pictures were last asked for, and whether at
+        // their actual size: shown again as they are when nothing but the
+        // words changed (a mark, the pointer over the page), rather than
+        // blanked and decoded again.
+        let asked: Rc<RefCell<[Option<AskedFor>; 2]>> = Rc::default();
         let show = {
             let (me, picture, reference, mark, win, quiet) = (Rc::downgrade(self), picture.clone(), reference.clone(), mark.clone(), win.clone(), quiet.clone());
             let (path_line, facts_line, why_line) = (path_line.clone(), facts_line.clone(), why_line.clone());
             let (here, there, compare, reference_side, this_caption, reference_caption) =
                 (here.clone(), there.clone(), compare.clone(), reference_side.clone(), this_caption.clone(), reference_caption.clone());
+            let (actual, this_centre, reference_centre) = (actual.clone(), this_centre.clone(), reference_centre.clone());
             Rc::new(move || {
                 let Some(me) = me.upgrade() else { return };
                 let cards = me.cards.borrow();
@@ -2456,7 +2522,14 @@ impl Results {
                 drop(s);
                 drop(shown);
                 drop(cards);
-                win.set_title(Some(&format!("{} ({} of {n})", file_name(&path), at + 1)));
+                let full = actual.is_active();
+                let dims = member.as_ref().and_then(|m| m.dims);
+                let zoom = match dims.map(|(w, h)| (ACTUAL_PIXELS / (w as f64 * h as f64)).sqrt()) {
+                    _ if !full => String::new(),
+                    Some(k) if k < 1.0 => format!(" · {:.0}% (too large to show at its actual size)", 100.0 * k),
+                    _ => " · actual size".into(),
+                };
+                win.set_title(Some(&format!("{} ({} of {n}){zoom}", file_name(&path), at + 1)));
                 let whole = path.display().to_string();
                 path_line.set_text(&whole);
                 path_line.set_tooltip_text(Some(&whole));
@@ -2471,31 +2544,54 @@ impl Results {
                 mark.set_sensitive(true);
                 mark.set_active(marked);
                 quiet.set(false);
-                let scale = win.scale_factor().max(1) as u32;
+                let scale = win.scale_factor().max(1);
+                // Fitted, a picture is made at the size of the largest screen,
+                // which no window on it outgrows; at its actual size, whole.
+                let ((sw, sh), _) = thumbs::largest_screen();
+                for (o, centre) in [(&here, &this_centre), (&there, &reference_centre)] {
+                    let align = if full { gtk::Align::Center } else { gtk::Align::Fill };
+                    o.overlay.set_halign(align);
+                    o.overlay.set_valign(align);
+                    if !full {
+                        centre.set(false);
+                    }
+                }
                 // Every picture this view asks for is for the same widget, and
                 // the answers come back in whatever order they are decoded; only
                 // the one asked for last is shown. See `Latest`.
-                let ask = |p: &gtk::Picture, path: &Path, latest: &Latest, slot: usize| {
-                    if asked.borrow()[slot].as_deref() == Some(path) {
+                let ask = |p: &gtk::Picture, path: &Path, dims: Option<(u32, u32)>, latest: &Latest, slot: usize, centre: &Rc<Cell<bool>>| {
+                    let key = (path.to_path_buf(), full);
+                    if asked.borrow()[slot].as_ref() == Some(&key) {
                         return;
                     }
-                    asked.borrow_mut()[slot] = Some(path.to_path_buf());
+                    asked.borrow_mut()[slot] = Some(key);
                     p.set_paintable(None::<&gdk::Paintable>);
+                    p.set_size_request(-1, -1);
+                    centre.set(full);
                     let current = latest.next();
                     let pic = p.downgrade();
                     let shown = Shown::Callback(Box::new(move |r| {
-                        if let (true, Some(p)) = (current(), pic.upgrade()) {
-                            show_on(&p, r);
+                        let (true, Some(p)) = (current(), pic.upgrade()) else { return };
+                        match r {
+                            // Asked for at no more than its own size, and set
+                            // at the size that puts a pixel on a pixel.
+                            Ok(t) if full => {
+                                let a = ActualSize::new(&t, scale);
+                                let (w, h) = a.size();
+                                p.set_size_request(w, h);
+                                p.set_paintable(Some(&a));
+                            }
+                            r => show_on(&p, r),
                         }
                     }));
-                    me.thumbs.request(path, Size::within(LARGE * scale), shown, true);
+                    let size = if full { actual_size(dims) } else { Size { w: sw, h: sh, cover: false } };
+                    me.thumbs.request(path, size, shown, true);
                 };
-                ask(&picture, &path, &latest, 0);
+                ask(&picture, &path, dims, &latest, 0, &this_centre);
                 let comparing = compare.is_active();
                 match pair.filter(|_| comparing) {
                     Some((r, place)) => {
-                        ask(&reference, &r.path, &latest_reference, 1);
-                        let dims = member.as_ref().and_then(|m| m.dims);
+                        ask(&reference, &r.path, r.dims, &latest_reference, 1, &reference_centre);
                         let (on_this, on_reference) = overlays(&place, r.dims, dims);
                         here.set(Some(on_this));
                         there.set(on_reference);
@@ -2529,6 +2625,10 @@ impl Results {
             })
         };
         compare.connect_toggled({
+            let show = show.clone();
+            move |_| show()
+        });
+        actual.connect_toggled({
             let show = show.clone();
             move |_| show()
         });
@@ -2567,7 +2667,7 @@ impl Results {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed({
-            let (go, mark, compare, win) = (go.clone(), mark.clone(), compare.clone(), win.clone());
+            let (go, mark, compare, actual, win) = (go.clone(), mark.clone(), compare.clone(), actual.clone(), win.clone());
             move |_, key, _, mods| {
                 match commands::LARGE.find(key, mods) {
                     Some(Large::Close) => win.close(),
@@ -2579,6 +2679,7 @@ impl Results {
                         }
                     }
                     Some(Large::Compare) => compare.set_active(!compare.is_active()),
+                    Some(Large::Actual) => actual.set_active(!actual.is_active()),
                     None => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -2964,6 +3065,21 @@ fn overlays(place: &Place, reference: Option<(u32, u32)>, member: Option<(u32, u
     };
     let on_reference = place.reversed().map(|frame| Overlay { frame, axes: reference.map(|_| Overlay::IDENTITY) });
     (Overlay { frame: *place, axes }, on_reference)
+}
+
+/// A file the large view asked for, and whether at its actual size.
+type AskedFor = (PathBuf, bool);
+
+/// What the large view asks for to show a picture of `dims` at its actual
+/// size: no larger than it is, nor than `ACTUAL_PIXELS`.
+fn actual_size(dims: Option<(u32, u32)>) -> Size {
+    match dims {
+        Some((w, h)) => {
+            let k = (ACTUAL_PIXELS / (w as f64 * h as f64)).sqrt().min(1.0);
+            Size::within(((w.max(h) as f64 * k) as u32).max(1))
+        }
+        None => Size::within(ACTUAL_SIDE),
+    }
 }
 
 /// Where `Contain` puts a picture of `pw` x `ph` in a widget of `w` x `h`:

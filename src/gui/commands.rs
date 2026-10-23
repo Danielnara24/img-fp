@@ -351,6 +351,7 @@ pub enum Large {
     Next,
     Mark,
     Compare,
+    Actual,
     Close,
 }
 
@@ -372,6 +373,11 @@ pub static LARGE: Section<Large> = Section {
             keys: "C",
             what: "Show it beside its group's reference image, with the part each shows of the other outlined",
             binds: &[Bind::Key(plain(&[K::c, K::C]), Large::Compare)],
+        },
+        Row {
+            keys: "1",
+            what: "Show it at its actual size, a pixel of the image to a pixel of the screen, or fitted again; drag to move around it",
+            binds: &[Bind::Key(plain(&[K::_1, K::KP_1]), Large::Actual)],
         },
         Row { keys: "Escape", what: "Close", binds: &[Bind::Key(plain(&[K::Escape]), Large::Close)] },
     ],
@@ -596,6 +602,7 @@ mod tests {
                 ("Left, Right", "Previous or next image"),
                 ("Space or Delete", "Mark or unmark it"),
                 ("C", "Show it beside its group's reference image, with the part each shows of the other outlined"),
+                ("1", "Show it at its actual size, a pixel of the image to a pixel of the screen, or fitted again; drag to move around it"),
                 ("Escape", "Close"),
             ]),
         ];
