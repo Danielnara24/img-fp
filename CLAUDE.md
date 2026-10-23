@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.66.0)
+## Status (0.69.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -551,6 +551,67 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   `repo-flatpak`, `.git`, `.claude`; the window's large view fits at the
   largest monitor's size and has *Actual size* (1), and its texture budget
   is in screens (`thumbs::keep_for`).
+- 0.69.0 (audit fixes; cache format IMGFPC16):
+  - **Window, gone files**: before acting (*Mark suggested deletions*, the
+    Trash) and on showing results, the window looked only for files
+    *changed* since the scan (`look().1`); a kept copy deleted in another
+    program while the results were open left its DELETEs standing, and the
+    Trash took the last copy. Now `Results::check_changed` takes in gone
+    files too (`drop_gone`), and runs the `stat`s on another thread
+    (`Outcome::to_look`, a `Look` that is `Send`; `gio::spawn_blocking`):
+    on a share they were a round trip each on the GTK thread. An action
+    waits for the look (`Results::checked`); a look that returns after
+    another scan is shown is dropped (`showing_scan`). Checked under Xvfb:
+    the KEEP deleted with `rm`, Alt+D marked nothing, the copies read
+    "review: its kept copy is gone".
+  - **Window, no Trash**: files gio will not trash (`NotSupported`: system
+    mounts, shares with no `.Trash-$uid`) are offered for permanent deletion
+    in one second dialog (`Results::delete_instead`), each checked with
+    `changed_since` first. Before, they could only be reported as not moved.
+    Checked under Xvfb on `/dev/shm`.
+  - **Desktop entry**: no `MimeType=inode/directory`. Where the desktop sets
+    no default for folders, the XDG order made img-fp the folder opener (a
+    Flatpak's exports precede `/usr/share`; reproduced with `gio mime`). It
+    is still reached by "Open With Other Application".
+  - **Group head**: among files of equal reach, the content rule's KEEP,
+    then REVIEW, then lossless, pixels, bytes, then the lowest index
+    (`group::find`'s `better`; it was the lowest index, i.e. the path that
+    sorts first). Six copies were headed by `UPPER.JPG` (q80), and
+    `--suggest representative` deleted the lossless original. The content
+    rule is now worked out on every run, whatever `--suggest` shows. On
+    `derived/Desktop`: pairs and every action identical, 54 of 64 heads
+    changed, heads that are KEEP 25 -> 61. IMGS-ALL cold, 0.68.0 against
+    new: all 1,110,262 pairs and every action identical, groups 686 -> 687,
+    heads that are KEEP 373 -> 657; keep rule 16,763 DELETE, none lost,
+    295 / 304, 304 / 304 both (295, not 297, since 0.68.0 made `Foto
+    38622.png` DAMAGED; not recorded then).
+  - **Cache, moved files**: a walked file with no record under its name is
+    answered by another name's record whose key is its own to the
+    nanosecond (`Key::says_which_file`: ctime not a whole millisecond, so
+    not FAT/exFAT, whose coarse clocks can give two pictures one key). Such
+    records are unpacked during the read (`open`'s `by_key`), and the first
+    `take` appends the record's bytes again under the new name and key
+    (`Store::relabel`, no repacking); the old one goes with its path. A
+    renamed folder or a drive mounted elsewhere was analysed again whole. A
+    metadata-only change (chmod, a new hard link) still re-analyses: telling
+    it from a rewrite needs a content hash in the record. Report after a
+    rename identical to a cold run's.
+  - **Cache, emptied folders**: a record carries the device its file lay on
+    (`Key::dev`, not compared by `Key`'s `eq`), and `away`'s left-behind
+    mount point needs the empty folder to be on another device than the
+    files were: `rm -r photos/2019` from a `photos` holding nothing else
+    kept its records for good.
+  - **EXIF** is each format's `Facts::exif`: a JPEG's APP1 in its first
+    128 KB, a PNG's `eXIf` anywhere before IEND, a WebP's `EXIF` chunk
+    (after the picture, no `Exif\0\0` marker: no WebP had EXIF), a TIFF's
+    EXIF directory tag 34665 (none had), a HEIF's or JPEG XL's marker
+    anywhere in the file.
+  - **Describing is under the decode budget** (`decode::describing`, 56
+    bytes a pixel of the plane described, measured 47-58 at work sizes
+    2048, 4000 and 0): at `--work-size 0`, eight 24 MP photos at `-t 8`
+    peaked at 3.6-3.9 GB and took 200-365 s in swap; now 1.9-2.0 GB, 20 s,
+    report identical. At the default, `derived/Desktop` cold (ABBA) 44.1 /
+    47.5 CPU-s base, 44.8 / 46.7 new.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1056,7 +1117,9 @@ Each was measured; changing one needs a re-measure.
 - **Groups are a representative plus everything that matched it**
   (`group.rs`), not components (fragile, invent false pairs) and not cliques
   (thousands of groups). Groups overlap; members were not compared with each
-  other. The representative is not the file to keep.
+  other. The representative is not the file to keep, but among files of
+  equal reach it is the one the content rule keeps (`group::find`'s
+  `better`), which `--suggest representative` keeps.
 - **Vocabulary sized from the corpus** (`VocabParams::for_corpus`): occupancy
   held at ~3 descriptors/word by depth *and* narrowed branching (16^depth
   steps alone swung occupancy 16x and merged families at ordinary sizes).
@@ -1416,7 +1479,10 @@ Do not retry without new evidence:
 - The Trash leaves a file whose length differs from the scan's, or whose
   ctime is from the scan's start on (`Notes::changed_after`): written,
   replaced, renamed or chmod'ed since. Suggestions resting on such a file
-  turn REVIEW, as under `--last`.
+  turn REVIEW, as under `--last`. Files gone since are taken off the page
+  (`drop_gone`); both are looked for off the GTK thread before any action
+  (`Results::checked`). A file gio cannot trash is offered for permanent
+  deletion (`delete_instead`).
 - Rendered with cairo; textures premultiplied BGRA at drawn size
   (`thumbs::Size`); JPEG thumbnails via libjpeg scaled decode; freedesktop
   thumbnail cache used when current (`Thumb::MTime`, and `Thumb::Size` when
@@ -1582,16 +1648,19 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC15.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC16.bin`
   (named for its format, so upgrades start a new file). Records keyed by
-  canonical path + size + mtime + ctime, settings per record. A run keeps
+  canonical path + size + mtime + ctime, settings per record; a file under
+  another name is answered by a record whose key is its own to a sub-
+  millisecond ctime (moved folders, remounted drives; `Store::relabel`). A run keeps
   what it took and made, and every record it was not asked about (a path it
   did not walk, or other settings) while the file exists or its volume is
   away (`cache::carried`, `away`): a drive where systems mount them
   (`volume_root`: `/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) with
   nothing there, an `/etc/fstab` mount point not mounted, or a folder gone
-  whose nearest folder above is empty and not mounted (an sshfs/NFS mount
-  point left behind; was a re-analysis each time the share was away). Appended as made; compacted only when
+  whose nearest folder above is empty, not mounted, and on another device
+  than the record's file was (`Key::dev`; an sshfs/NFS mount point left
+  behind; was a re-analysis each time the share was away). Appended as made; compacted only when
   dead bytes reach a quarter. Runs sharing the file hold it with `flock`
   shared; compaction, header writing and torn-tail repair need it alone
   (`exclusive`, never waited for) and are skipped otherwise: a compaction

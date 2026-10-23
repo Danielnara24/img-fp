@@ -16,7 +16,8 @@ const CUT_OFF: &str = "the file ends before its image data does";
 
 pub(super) fn open(bytes: &[u8]) -> Picture<'_> {
     Picture::new(
-        move || Facts { damaged: cut_off(bytes).then_some(CUT_OFF), ..Facts::default() },
+        // APP1 is among the first segments.
+        move || Facts { damaged: cut_off(bytes).then_some(CUT_OFF), exif: super::exif_in(&bytes[..bytes.len().min(1 << 17)]), ..Facts::default() },
         move |sink| {
             if sink.grey() && luma(bytes, sink).is_some() {
                 return Ok(());

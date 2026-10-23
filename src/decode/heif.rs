@@ -12,7 +12,7 @@ pub(super) fn open(bytes: &[u8]) -> Result<Picture<'_>> {
     // libheif has limits of its own, but they are a fixed size and not this
     // machine's; the same refusal as every other decoder, from the header.
     too_large("heif", p.width(), p.height(), if p.has_alpha() { 8 } else { 6 }, max_alloc())?;
-    Ok(Picture::new(move || Facts { frames: sequence(bytes), ..Facts::default() }, move |sink| read(p, bytes, sink)))
+    Ok(Picture::new(move || Facts { frames: sequence(bytes), exif: super::exif_in(bytes), ..Facts::default() }, move |sink| read(p, bytes, sink)))
 }
 
 fn read(p: crate::heif::Primary<'_>, bytes: &[u8], sink: &mut dyn Sink) -> Result<()> {

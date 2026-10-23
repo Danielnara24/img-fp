@@ -146,7 +146,7 @@ impl Member {
 
 struct GroupState {
     files: Vec<Member>,
-    /// Its reference image has been moved to the Trash.
+    /// Its reference image is gone: to the Trash, or deleted another way.
     reference_gone: bool,
 }
 
@@ -248,13 +248,6 @@ impl State {
     /// What each rule suggests, asked of the scan again.
     fn suggest(&mut self) {
         self.by_mode = MODES.iter().map(|&m| self.scan.actions(m)).collect();
-    }
-
-    /// The files, of those not already known to have, that have changed since
-    /// the scan: another length, or a change time after it started
-    /// (`last::changed_since`). A `stat` each, on every thread.
-    fn changed_now(&self) -> Vec<usize> {
-        self.scan.look(self.changed_after).1
     }
 
     /// Take in that `ids` have changed since the scan, as `--last` does
@@ -650,6 +643,13 @@ pub struct Results {
     /// the first; New scan could replace the results the first was about to
     /// edit.
     trashing: Cell<bool>,
+    /// Which scan is shown, counted up by `show`: a look at the files
+    /// (`check_changed`) that comes back after another scan is shown is
+    /// about files that are no longer these.
+    showing_scan: Cell<u64>,
+    /// A look at the files is under way, for an action that waits on it
+    /// (`check_changed`); a second such action is not started meanwhile.
+    checking: Cell<bool>,
     /// A save of the marks is waiting to be written.
     marks_pending: Cell<bool>,
     settings_button: gtk::Button,
@@ -932,6 +932,8 @@ impl Results {
             follow_pointer: Cell::new(false),
             image_actions: RefCell::new(Vec::new()),
             trashing: Cell::new(false),
+            showing_scan: Cell::new(0),
+            checking: Cell::new(false),
             marks_pending: Cell::new(false),
             settings_button: to_settings.clone(),
             to_settings: RefCell::new(None),
@@ -1346,6 +1348,9 @@ impl Results {
                 ..State::default()
             };
         }
+        self.showing_scan.set(self.showing_scan.get() + 1);
+        // A look waited on for the last scan's results will not come back.
+        self.checking.set(false);
         self.marks_pending.set(false);
         self.thumbs.clear_queue();
         self.strip_thumbs.clear_queue();
@@ -1354,24 +1359,84 @@ impl Results {
         self.rebuild(0);
         // A file written while the scan ran, after it was read, is already
         // not the file it judged.
-        self.check_changed();
+        self.check_changed(|_| {});
     }
 
-    /// Look again for files changed since the scan, and take in any found
-    /// (`State::note_changed`). Asked when the results are shown, and again
-    /// before anything acts on the suggestions: a file can change while they
-    /// are on screen. Whether any suggestion moved.
-    fn check_changed(self: &Rc<Self>) -> bool {
-        let found = self.state.borrow().changed_now();
-        if !self.state.borrow_mut().note_changed(&found) {
-            return false;
+    /// Look again for files gone or changed since the scan, take in what is
+    /// found, and then do `then`. Asked when the results are shown, and again
+    /// before anything acts on the suggestions: a file can go or change while
+    /// they are on screen.
+    ///
+    /// **Gone as well as changed.** Only changes were looked for, so a kept
+    /// copy deleted outside the window while its results were open left the
+    /// deletions resting on it standing: *Mark suggested deletions* marked
+    /// them and the Trash took the last copy of the picture. A file gone is
+    /// taken off the page as the Trash takes one (`drop_gone`).
+    ///
+    /// **On another thread.** It is a `stat` of every file the scan found,
+    /// which on a network share is a round trip each: tens of thousands of
+    /// them held the window still for seconds whenever it was asked. `then`
+    /// runs on the window's thread once the answer is in, unless another scan
+    /// has been shown meanwhile.
+    fn check_changed(self: &Rc<Self>, then: impl FnOnce(&Rc<Self>) + 'static) {
+        let (look, after) = {
+            let s = self.state.borrow();
+            (s.scan.to_look(), s.changed_after)
+        };
+        let scan = self.showing_scan.get();
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(move || look.run(after)).await;
+            if me.showing_scan.get() != scan {
+                return;
+            }
+            if let Ok((gone, changed)) = found {
+                me.take_in(&gone, &changed);
+            }
+            then(&me);
+        });
+    }
+
+    /// Take in that files `gone` have gone and files `changed` have changed
+    /// since the scan, as `--last` does.
+    fn take_in(self: &Rc<Self>, gone: &[usize], changed: &[usize]) {
+        let moved = self.state.borrow_mut().note_changed(changed);
+        // Not those taken off already: the look began before a restore
+        // dropped what had gone while the window was closed.
+        let paths: HashSet<PathBuf> = {
+            let s = self.state.borrow();
+            gone.iter().filter(|&&id| !s.gone(id)).map(|&id| s.path(id).to_path_buf()).collect()
+        };
+        if !paths.is_empty() {
+            for p in &paths {
+                self.app.log_line(&format!("gone since the scan: {}", p.display()));
+            }
+            self.drop_gone(&paths);
+            self.update_status();
+            self.refresh_bar();
+        } else if moved {
+            let (current, selected) = (self.state.borrow().current, self.selected.get());
+            self.rebuild(current);
+            self.select(selected);
+            self.update_status();
+            self.refresh_bar();
         }
-        let (current, selected) = (self.state.borrow().current, self.selected.get());
-        self.rebuild(current);
-        self.select(selected);
-        self.update_status();
-        self.refresh_bar();
-        true
+    }
+
+    /// `check_changed` for an action that acts on the suggestions or the
+    /// marks: `then` once the files have been looked at. One at a time, and
+    /// none while files are being moved to the Trash.
+    fn checked(self: &Rc<Self>, then: impl FnOnce(&Rc<Self>) + 'static) {
+        if self.checking.get() || self.trashing.get() {
+            return;
+        }
+        self.checking.set(true);
+        self.status.set_text("Looking for files changed since the scan…");
+        self.check_changed(move |me| {
+            me.checking.set(false);
+            me.update_status();
+            then(me);
+        });
     }
 
     /// The scan kept from last time, as it was left: its groups and marks,
@@ -1707,7 +1772,7 @@ impl Results {
         let title = format!("Group {} of {} · {} images", gi + 1, n, files.len());
         let mut note = String::new();
         if reference_gone {
-            note.push_str("The image the others in this group were matched against has been moved to the Trash. The images left were not compared with each other. ");
+            note.push_str("The image the others in this group were matched against is gone. The images left were not compared with each other. ");
         }
         if problems {
             note.push_str("The scan had problems with some files; see the scan log.");
@@ -2249,7 +2314,10 @@ impl Results {
     /// suggests deleting is marked and every other mark goes, whoever made
     /// it, so a second rule replaces the first rather than adding to it.
     fn mark_suggested(self: &Rc<Self>) {
-        self.check_changed();
+        self.checked(|me| me.mark_suggested_now());
+    }
+
+    fn mark_suggested_now(self: &Rc<Self>) {
         let (off, on): (Vec<u32>, Vec<u32>) = {
             let s = self.state.borrow();
             let delete = |id: u32| s.action(id) == Some(Action::Delete);
@@ -2613,7 +2681,7 @@ impl Results {
                             _ if !comparing => "",
                             Some(m) if m.is_representative() => "This is the reference image the others were matched against.",
                             Some(m) if m.with.is_some() && m.at.is_none() => "Scan again to compare: this scan did not keep where the images lie in each other.",
-                            _ => "Its group's reference image has been moved to the Trash.",
+                            _ => "Its group's reference image is gone.",
                         };
                         this_caption.set_text(why);
                     }
@@ -2728,11 +2796,14 @@ impl Results {
     // ------------------------------------------------------------ the Trash
 
     fn confirm_trash(self: &Rc<Self>) {
+        // What the suggestions rest on, as it is now.
+        self.checked(|me| me.confirm_trash_now());
+    }
+
+    fn confirm_trash_now(self: &Rc<Self>) {
         if self.trashing.get() {
             return;
         }
-        // What the suggestions rest on, as it is now.
-        self.check_changed();
         let (paths, bytes, whole, changed_after, with_copy, kept_changed) = {
             let s = self.state.borrow();
             // With the length the scan found, which the move checks first.
@@ -2826,6 +2897,8 @@ impl Results {
         let n = paths.len();
         let mut gone: HashSet<PathBuf> = HashSet::new();
         let mut failed: Vec<String> = Vec::new();
+        // Files on a drive with no Trash, for `delete_instead`.
+        let mut no_trash: Vec<(PathBuf, u64)> = Vec::new();
         for (i, (p, scanned)) in paths.iter().enumerate() {
             self.status.set_text(&format!("Moving to the Trash: {} of {n}…", i + 1));
             // A file at that path that is not the length the scan found is
@@ -2851,14 +2924,21 @@ impl Results {
                 Err(e) if e.matches(gio::IOErrorEnum::NotFound) => {
                     gone.insert(p.clone());
                 }
+                // A drive or share with no Trash, or one this user cannot
+                // make there: "Trashing on system internal mounts is not
+                // supported", "Unable to find or create trash directory".
+                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => no_trash.push((p.clone(), *scanned)),
                 Err(e) => failed.push(format!("{}: {}", p.display(), e.message())),
             }
         }
-        self.trashing.set(false);
-        self.settings_button.set_sensitive(true);
         for p in &gone {
             self.app.log_line(&format!("moved to the Trash: {}", p.display()));
         }
+        if !no_trash.is_empty() {
+            self.delete_instead(no_trash, changed_after, &mut gone, &mut failed).await;
+        }
+        self.trashing.set(false);
+        self.settings_button.set_sensitive(true);
         self.drop_gone(&gone);
         if !failed.is_empty() {
             let more = failed.len().saturating_sub(10);
@@ -2872,6 +2952,58 @@ impl Results {
                 .modal(true)
                 .build();
             d.show(Some(&self.app.window));
+        }
+    }
+
+    /// Files the Trash could not take because their drive has none (a share,
+    /// a system mount): deleted for good if the person says so, which they
+    /// are asked once for all of them. Before, they could only be reported
+    /// as not moved, so a duplicate on a NAS could not be removed from the
+    /// window at all.
+    ///
+    /// Each is looked at again first, as the Trash looks: a file changed
+    /// since the scan is left where it is.
+    async fn delete_instead(self: &Rc<Self>, paths: Vec<(PathBuf, u64)>, changed_after: Option<u64>, gone: &mut HashSet<PathBuf>, failed: &mut Vec<String>) {
+        let n = paths.len();
+        let mut names: String = paths.iter().take(10).map(|(p, _)| format!("\n{}", p.display())).collect();
+        if n > 10 {
+            names.push_str(&format!("\n… and {} more", n - 10));
+        }
+        let dialog = gtk::AlertDialog::builder()
+            .message(format!("{n} image{} cannot be moved to the Trash", if n == 1 { "" } else { "s" }))
+            .detail(format!(
+                "{} on a drive that has no Trash. Delete {} permanently instead? This cannot be undone.\n{names}",
+                if n == 1 { "It is" } else { "They are" },
+                if n == 1 { "it" } else { "them" }
+            ))
+            .buttons([l::CONFIRM_KEEP, l::CONFIRM_DELETE])
+            .cancel_button(0)
+            .default_button(0)
+            .modal(true)
+            .build();
+        self.status.set_text(&format!("{n} image{} cannot be moved to the Trash", if n == 1 { "" } else { "s" }));
+        if !matches!(dialog.choose_future(Some(&self.app.window)).await, Ok(1)) {
+            failed.extend(paths.iter().map(|(p, _)| format!("{}: its drive has no Trash, so it was left where it is", p.display())));
+            return;
+        }
+        for (i, (p, scanned)) in paths.iter().enumerate() {
+            self.status.set_text(&format!("Deleting: {} of {n}…", i + 1));
+            if let Ok(md) = std::fs::metadata(p) {
+                if img_fp::last::changed_since(&md, *scanned, changed_after) {
+                    failed.push(format!("{}: changed since the scan, so it was left where it is", p.display()));
+                    continue;
+                }
+            }
+            match gio::File::for_path(p).delete_future(glib::Priority::DEFAULT).await {
+                Ok(()) => {
+                    self.app.log_line(&format!("deleted: {}", p.display()));
+                    gone.insert(p.clone());
+                }
+                Err(e) if e.matches(gio::IOErrorEnum::NotFound) => {
+                    gone.insert(p.clone());
+                }
+                Err(e) => failed.push(format!("{}: {}", p.display(), e.message())),
+            }
         }
     }
 

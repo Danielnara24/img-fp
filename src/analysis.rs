@@ -110,6 +110,10 @@ pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option
             let t1 = Instant::now();
             let (feats, thumb) = planes.analysis(&d.work, || {
                 let p = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
+                // The decode's claim is given back by now; this is the
+                // description's (`decode::describing`).
+                let up = sift::enlargement(d.work.w.max(d.work.h), p.upsample_below);
+                let _room = decode::describing((d.work.w * d.work.h * up * up) as u64);
                 let feats = sift::extract(&d.work, &p).spilled();
                 let thumb = timed!(4, Thumb::build(&d.work, ((THUMB_LONG as f64 * decode::area_factor(d.work.w, d.work.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
                 (feats.into(), thumb.spilled().into())
@@ -179,8 +183,10 @@ type Made = std::sync::Arc<std::sync::OnceLock<Analysis>>;
 impl Planes {
     /// The analysis of `g`: one already made from the same plane, or `make`'s.
     /// A twin that arrives while the first is still being described waits for
-    /// it rather than describing it again; `make` takes no lock and no part of
-    /// the decode budget, so nothing it waits on can be waiting on it.
+    /// it rather than describing it again. `make` takes no lock, and its
+    /// claim on the decode budget (`decode::describing`) waits only on
+    /// claims of decodes and descriptions, none of which waits on a twin: a
+    /// thread waiting here holds no claim.
     fn analysis(&self, g: &decode::Gray, make: impl FnOnce() -> Analysis) -> Analysis {
         use std::hash::BuildHasher;
         // SAFETY: an `f32` is four bytes with no padding, and every bit

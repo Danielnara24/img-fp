@@ -99,7 +99,12 @@ fn main() -> glib::ExitCode {
     few_arenas();
     quiet_theme_errors();
     // The folders on the command line are the ones to start with, which is
-    // what a file manager's "Open With" hands over.
+    // what a file manager's "Open With Other Application" hands over. The
+    // desktop entry names no MIME type, `inode/directory` least of all:
+    // where the desktop sets no default for folders, the first entry that
+    // claims them is the default, and a Flatpak's exports come before
+    // `/usr/share`, so every "show in folder" (this window's own included,
+    // where no file manager answers on D-Bus) opened img-fp.
     let app = gtk::Application::builder().application_id(APP_ID).flags(gio::ApplicationFlags::NON_UNIQUE).build();
     let folders = RefCell::new(Some(folders));
     app.connect_activate(move |app| {

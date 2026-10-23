@@ -39,6 +39,8 @@ pub(super) fn open_ico(bytes: &[u8]) -> Picture<'_> {
 fn facts(fmt: ImageFormat, b: &[u8]) -> Facts {
     let u16_at = |at: usize| b.get(at..at + 2).map(|v| u16::from_le_bytes([v[0], v[1]]));
     let u32_at = |at: usize| b.get(at..at + 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+    // A WebP's EXIF is a chunk of its own, after the picture.
+    let exif = fmt == ImageFormat::WebP && riff_chunks(b, b"EXIF") >= 1;
     let (lossless, frames) = match fmt {
         ImageFormat::WebP => (webp_lossless(b) == Some(true), riff_chunks(b, b"ANMF") >= 2),
         ImageFormat::Gif => (false, gif_frames(b) >= 2),
@@ -53,7 +55,7 @@ fn facts(fmt: ImageFormat, b: &[u8]) -> Facts {
         ImageFormat::Pnm | ImageFormat::Qoi | ImageFormat::Ico | ImageFormat::OpenExr | ImageFormat::Hdr | ImageFormat::Farbfeld => (true, false),
         _ => (false, false),
     };
-    Facts { lossless, frames, ..Facts::default() }
+    Facts { lossless, frames, exif, ..Facts::default() }
 }
 
 /// Any format `image` reads, decoded whole, into `sink`.

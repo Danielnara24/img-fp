@@ -175,6 +175,31 @@ impl Drop for Permit {
     }
 }
 
+/// What describing a plane holds at its peak, a pixel of the plane described
+/// (the working plane, enlarged where `sift::enlargement` enlarges it): the
+/// scale space's blurred levels and their differences in `f32`, the
+/// gradients, and the candidates. Measured on one 4000x6000 photograph at
+/// `-t 1`, peak resident memory less the decode's: 52 bytes a pixel at
+/// `--work-size 2048`, 58 at 4000, 47 at 0, 56 between 2048 and 4000.
+const DESCRIBE_PER_PIXEL: u64 = 56;
+
+/// A claim on the decode budget for describing a plane; given back when
+/// dropped.
+///
+/// **The budget was the decode's alone**, and a plane past a few megapixels
+/// costs more to describe than to decode: at `--work-size 0` two photographs
+/// of 24 and 13.5 megapixels peaked at 1.56 GB on two threads, and eight
+/// threads of camera photographs asked for more than the machine had. At the
+/// default working size a plane is some 200,000 pixels, 11 MB, and the claim
+/// waits only where memory is short. It bounds a transient, as every claim
+/// does: no file is described differently for it.
+pub struct Describing(#[allow(dead_code)] Permit);
+
+/// Wait for room to describe a plane of `pixels`.
+pub fn describing(pixels: u64) -> Describing {
+    Describing(reserve(pixels.saturating_mul(DESCRIBE_PER_PIXEL)))
+}
+
 /// Wait for room for `bytes` of decoded image. A request larger than the whole
 /// budget waits for the workers to empty and then proceeds: the alternative is
 /// refusing to read a file for being big.

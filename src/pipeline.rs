@@ -385,7 +385,7 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     // the assembly, which is where such a run peaks.
     drop(direct);
 
-    let found = assemble(&cx, &scope, gui, &files, &stats, analysed, claims);
+    let found = assemble(&cx, &scope, &files, &stats, analysed, claims);
     let done = finish(&cx, &scope, gui, &files, found, problems, started);
     // What each stage took, which is what the bar's priors are read from
     // (`progress::Stage::prior`).
@@ -1267,7 +1267,7 @@ fn write_dump(cx: &Ctx, to: &To, files: &[PathBuf], items: &[Item], direct: &[Ed
 /// From the run's claims to what its report states: every pair, stated once
 /// for every file either end answers for, and the content rule's
 /// suggestion, read off the same pairs.
-fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stats: &[walk::Stat], analysed: Analysed, claims: Vec<Claim>) -> Found {
+fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], analysed: Analysed, claims: Vec<Claim>) -> Found {
     let args = cx.args;
     cx.progress.begin(Stage::Assemble);
     let Analysed { items, same, store, not_asked, n_kps, .. } = analysed;
@@ -1322,14 +1322,11 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
     // What to do with each file, read off the same pairs. The other rules
     // read the groups, and are applied once those exist. Against a library,
     // its files are kept whatever the rest say, and each deletion names the
-    // file it rests on. The kept scan's suggestions are the content rule's
-    // whatever this run shows (`last`), so a scan kept is a scan that works
-    // them out.
-    let (actions, keeper) = if args.suggest != suggest::Mode::Content && !keeps_last(args, gui) {
-        (Vec::new(), Vec::new())
-    } else {
-        timed!(44, suggest_content(args, scope, files, &items, stats, &same, &stated, store.as_ref()))
-    };
+    // file it rests on. Worked out whatever rule this run shows: the kept
+    // scan's suggestions are the content rule's (`last`), and a group is
+    // headed, among files of equal reach, by the one it keeps (`group::find`),
+    // so that the groups do not depend on the rule shown.
+    let (actions, keeper) = timed!(44, suggest_content(args, scope, files, &items, stats, &same, &stated, store.as_ref()));
     // Every colour the suggestion measured is in the cache.
     drop(store);
     // What each pair says, which is all that is read of it from here on.
@@ -1344,7 +1341,22 @@ fn assemble(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], stat
         (None, against::asked(&scanned, &scope.library, &pairs, &actions, &keeper))
     } else {
         let graph: Vec<(usize, usize)> = pairs.iter().map(Pair::ends).collect();
-        (Some(timed!(28, group::find(files.len(), &graph))), Vec::new())
+        // Among files of equal reach: the one the content rule keeps, then
+        // one it leaves for a look, then one stored losslessly, then the most
+        // pixels, then the most bytes. What `--suggest representative` keeps,
+        // and the picture every other is shown against.
+        let better: Vec<_> = (0..files.len())
+            .map(|i| {
+                let said = match actions.get(i).copied().flatten() {
+                    Some(suggest::Action::Keep) => 2u8,
+                    Some(suggest::Action::Review) | None => 1,
+                    Some(suggest::Action::Delete) => 0,
+                };
+                let (w, h) = items[i].dims;
+                (said, items[i].traits.lossless, w as u64 * h as u64, stats[i].len)
+            })
+            .collect();
+        (Some(timed!(28, group::find(files.len(), &graph, &better))), Vec::new())
     };
     // By name, as the JSON lists them; stable, so names that read alike keep
     // the order they were met in.

@@ -45,6 +45,7 @@ mod tiff;
 #[cfg(test)]
 mod tests;
 
+pub use budget::describing;
 pub use jpeg::same_jpeg_coding;
 pub use measure::{chroma_distance, Chroma, Traits};
 pub use reduce::{area_factor, resize_area, working_size};
@@ -158,10 +159,10 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
         None => read(&mut sink),
     }?;
     let (work, size, mut traits) = sink.finish()?;
-    let Facts { lossless, frames, damaged } = (picture.facts)();
+    let Facts { lossless, frames, exif, damaged } = (picture.facts)();
     traits.lossless = lossless;
     traits.frames = frames;
-    traits.exif = has_exif(&bytes);
+    traits.exif = exif;
     Ok(Decoded { work, size, damaged: damaged.map(String::from), traits })
 }
 
@@ -179,12 +180,17 @@ fn prof_slot(kind: Kind) -> Option<usize> {
     }
 }
 
-/// Whether a file carries an EXIF block where formats put one: within its
-/// first 128 KB, as JPEG's APP1, WebP's and HEIF's `Exif\0\0`, or PNG's
-/// `eXIf` chunk.
-fn has_exif(bytes: &[u8]) -> bool {
-    let head = &bytes[..bytes.len().min(1 << 17)];
-    memchr::memmem::find(head, b"Exif\0\0").is_some() || memchr::memmem::find(head, b"eXIf").is_some()
+/// Whether `bytes` hold EXIF's own marker, `Exif\0\0`: how a JPEG's APP1
+/// begins (`jpeg::open` asks it of the file's head), and a HEIF's Exif item
+/// and a JPEG XL's `Exif` box, which may lie anywhere in the file. A PNG
+/// (`eXIf`), a WebP (`EXIF`) and a TIFF (the EXIF directory's tag) say it
+/// their own way, without the marker.
+///
+/// It used to be asked of every file's first 128 KB, which a WebP never
+/// answered: its `EXIF` chunk follows the picture and holds the TIFF header
+/// alone, so no WebP had EXIF, and a TIFF's was a directory entry.
+pub(super) fn exif_in(bytes: &[u8]) -> bool {
+    memchr::memmem::find(bytes, b"Exif\0\0").is_some()
 }
 
 /// What a file's header says, read without decoding anything: its format and

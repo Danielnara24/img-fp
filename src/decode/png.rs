@@ -24,6 +24,7 @@ pub(super) fn open(bytes: &[u8]) -> Picture<'_> {
         move || Facts {
             lossless: !indexed(bytes),
             frames: apng_animated(bytes),
+            exif: has_chunk(bytes, b"eXIf"),
             damaged: cut.get().then_some(CUT_OFF),
         },
         move |sink| {
@@ -254,6 +255,25 @@ fn png_turned(r: &mut std::io::BufReader<std::fs::File>) -> bool {
 /// IHDR, which is the first chunk.
 fn indexed(b: &[u8]) -> bool {
     b.get(12..16) == Some(b"IHDR") && b.get(25) == Some(&3)
+}
+
+/// Whether a PNG has a chunk of type `kind`, before its end or wherever it
+/// lies: `eXIf` may follow the image data.
+fn has_chunk(b: &[u8], kind: &[u8; 4]) -> bool {
+    let mut i = 8;
+    while i + 8 <= b.len() {
+        let n = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
+        match &b[i + 4..i + 8] {
+            t if t == kind => return true,
+            b"IEND" => return false,
+            _ => {}
+        }
+        i = match i.checked_add(12 + n) {
+            Some(j) => j,
+            None => return false,
+        };
+    }
+    false
 }
 
 /// Whether a PNG is an animation: an `acTL` chunk, with more than one frame

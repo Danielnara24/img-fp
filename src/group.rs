@@ -73,14 +73,23 @@ pub struct Group {
 /// The representative is chosen greedily: the file that still accounts for the
 /// most files nobody has grouped yet, which is a statement rather than a
 /// threshold, and is usually the original or a clean re-encode of it — the
-/// file most of the others matched. Ties go to the lowest index, so the result
-/// depends on the pairs and not on the order they arrived in.
+/// file most of the others matched. Ties go to the file `better` ranks
+/// highest, then to the lowest index, so the result depends on the pairs and
+/// not on the order they arrived in.
+///
+/// **A tie is the usual case, not an edge.** A family whose files all matched
+/// each other gives every one of them the same reach, and ties went to the
+/// lowest index, which is the path that sorts first: six copies of one
+/// picture were headed by `UPPER.JPG`, a q80 re-save, because capitals sort
+/// before lower case, and `--suggest representative` kept it and deleted the
+/// lossless original. The caller ranks by what a file is (`pipeline::assemble`
+/// puts the content rule's keeper first).
 ///
 /// Cost is `O(E log V)` with no worst case to defend against, which is the
 /// other reason to prefer this to clique enumeration: 9.5 ms against 43 ms on
 /// the benchmark corpus, and no budget, ceiling or abandonment path needed to
 /// bound it.
-pub fn find(n: usize, edges: &[(usize, usize)]) -> Vec<Group> {
+pub fn find<Q: Ord + Copy>(n: usize, edges: &[(usize, usize)], better: &[Q]) -> Vec<Group> {
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
     for &(a, b) in edges {
         if a != b {
@@ -109,16 +118,16 @@ pub fn find(n: usize, edges: &[(usize, usize)]) -> Vec<Group> {
         adj[v].iter().filter(|&&u| ungrouped[u as usize]).count() + ungrouped[v] as usize
     };
 
-    // Max by reach, ties to the lowest index. Every key is distinct, so the
-    // order is total and the whole greedy is reproducible.
-    let mut heap: BinaryHeap<(usize, std::cmp::Reverse<usize>)> = (0..n)
+    // Max by reach, then by `better`, then to the lowest index. Every key is
+    // distinct, so the order is total and the whole greedy is reproducible.
+    let mut heap: BinaryHeap<(usize, Q, std::cmp::Reverse<usize>)> = (0..n)
         .filter(|&v| ungrouped[v])
-        .map(|v| (adj[v].len() + 1, std::cmp::Reverse(v)))
+        .map(|v| (adj[v].len() + 1, better[v], std::cmp::Reverse(v)))
         .collect();
 
     let mut out: Vec<Group> = Vec::new();
     while left > 0 {
-        let Some((claimed, std::cmp::Reverse(r))) = heap.pop() else { break };
+        let Some((claimed, rank, std::cmp::Reverse(r))) = heap.pop() else { break };
         // Lazy evaluation: earlier groups have covered files this entry still
         // counts. A stale entry goes back with the truth rather than being
         // trusted, which is what keeps the greedy exact without touching every
@@ -126,7 +135,7 @@ pub fn find(n: usize, edges: &[(usize, usize)]) -> Vec<Group> {
         let real = reach(r, &ungrouped);
         if real < claimed {
             if real > 0 {
-                heap.push((real, std::cmp::Reverse(r)));
+                heap.push((real, rank, std::cmp::Reverse(r)));
             }
             continue;
         }
@@ -167,7 +176,7 @@ mod tests {
 
     fn groups_of(n: usize, edges: &[(usize, usize)]) -> Vec<(usize, Vec<usize>)> {
         let mut g: Vec<(usize, Vec<usize>)> =
-            find(n, edges).into_iter().map(|x| (x.representative, x.members)).collect();
+            find(n, edges, &vec![(); n]).into_iter().map(|x| (x.representative, x.members)).collect();
         g.sort();
         g
     }
@@ -179,7 +188,7 @@ mod tests {
         let edges = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 0), (0, 2), (5, 6), (6, 7)];
         let present: std::collections::HashSet<(usize, usize)> =
             edges.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
-        for g in find(8, &edges) {
+        for g in find(8, &edges, &[(); 8]) {
             for &m in g.members.iter() {
                 if m == g.representative {
                     continue;
@@ -215,7 +224,7 @@ mod tests {
         let g = groups_of(5, &[(0, 1), (0, 2), (0, 3), (3, 4)]);
         assert_eq!(g, vec![(0, vec![0, 1, 2, 3]), (3, vec![0, 3, 4])]);
         // 3 is in both, which is how 4 is reported at all.
-        assert_eq!(membership(&find(5, &[(0, 1), (0, 2), (0, 3), (3, 4)]))[&3], vec![0, 1]);
+        assert_eq!(membership(&find(5, &[(0, 1), (0, 2), (0, 3), (3, 4)], &[(); 5]))[&3], vec![0, 1]);
     }
 
     /// Nothing that matched something is left out.
@@ -223,7 +232,7 @@ mod tests {
     fn every_matched_file_lands_in_a_group() {
         let edges = [(0, 1), (1, 2), (3, 4), (5, 6), (6, 7), (7, 8), (8, 5)];
         let covered: std::collections::HashSet<usize> =
-            find(9, &edges).iter().flat_map(|g| g.members.iter().copied()).collect();
+            find(9, &edges, &[(); 9]).iter().flat_map(|g| g.members.iter().copied()).collect();
         for v in 0..9 {
             assert!(covered.contains(&v), "{v} matched something and was dropped");
         }
@@ -231,7 +240,7 @@ mod tests {
 
     #[test]
     fn unmatched_files_are_in_no_group() {
-        assert!(find(5, &[]).is_empty());
+        assert!(find(5, &[], &[(); 5]).is_empty());
         assert_eq!(groups_of(5, &[(3, 4)]), vec![(3, vec![3, 4])]);
     }
 
@@ -245,7 +254,7 @@ mod tests {
     fn a_complete_component_is_one_group() {
         let n = 400;
         let edges: Vec<(usize, usize)> = (0..n).flat_map(|i| (i + 1..n).map(move |j| (i, j))).collect();
-        let g = find(n, &edges);
+        let g = find(n, &edges, &vec![(); n]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].members.len(), n);
         assert_eq!(g[0].representative, 0);
@@ -260,7 +269,7 @@ mod tests {
             .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
             .filter(|&(i, j)| !(i % 2 == 0 && j == i + 1))
             .collect();
-        let g = find(n, &edges);
+        let g = find(n, &edges, &vec![(); n]);
         assert!(g.len() <= 3, "{} groups", g.len());
         let covered: std::collections::HashSet<usize> =
             g.iter().flat_map(|x| x.members.iter().copied()).collect();
@@ -276,5 +285,16 @@ mod tests {
         shuffled.rotate_left(3);
         assert_eq!(groups_of(6, &edges), groups_of(6, &shuffled));
     }
-}
 
+    /// Among files of equal reach the one ranked best heads the group, the
+    /// lowest index only among equals.
+    #[test]
+    fn a_tie_goes_to_the_better_file() {
+        let edges = [(0, 1), (0, 2), (1, 2)];
+        assert_eq!(find(3, &edges, &[0, 2, 1])[0].representative, 1);
+        assert_eq!(find(3, &edges, &[1, 1, 0])[0].representative, 0);
+        // Reach still comes first: 1 matched three, the others one each.
+        let star = [(1, 0), (1, 2), (1, 3)];
+        assert_eq!(find(4, &star, &[9, 0, 9, 9])[0].representative, 1);
+    }
+}

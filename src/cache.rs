@@ -129,7 +129,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// TIFF or PNG is read as `image` read it but a row at a time.
 /// 15: `Traits::lossless` is said of a TGA, an HDR and a farbfeld file as
 /// of the other lossless formats; a record of 14 called them lossy.
-const MAGIC: &[u8; 8] = b"IMGFPC15";
+/// 16: a record carries the device its file lay on (`Key::dev`), which tells
+/// a mount point left behind from a folder emptied by hand (`away`); and
+/// `Traits::exif` is said of a WebP, a PNG whose `eXIf` follows its pixels, a
+/// TIFF and a HEIF or JPEG XL whose EXIF lies past the first 128 KB, which a
+/// record of 15 said had none.
+const MAGIC: &[u8; 8] = b"IMGFPC16";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -185,14 +190,42 @@ type Walked<'a> = &'a (dyn Fn(&Path, Key) -> bool + Sync);
 /// in userspace sets it back. What it costs is a re-analysis after a chmod, a
 /// rename or a new hard link, and every record after a backup restore: a few
 /// milliseconds an image, against reporting a pair that is not there.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// **The device is not part of it.** It is where the file lay when the
+/// record was made, which says nothing of whether the file changed; `away`
+/// reads it.
+#[derive(Clone, Copy, Debug)]
 pub struct Key {
     pub len: u64,
     pub mtime: i64,
     pub ctime: i64,
+    pub dev: u64,
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC15.bin`.
+impl PartialEq for Key {
+    fn eq(&self, o: &Key) -> bool {
+        (self.len, self.mtime, self.ctime) == (o.len, o.mtime, o.ctime)
+    }
+}
+
+impl Key {
+    /// Whether a record with this key may answer for a file found under
+    /// another name (`open`): the file moved, or its drive was mounted
+    /// elsewhere, and kept its times, which a move does. Only with a change
+    /// time finer than a millisecond, where no two files' coincide: a
+    /// filesystem that keeps it to the second (FAT, some shares) or to ten
+    /// milliseconds (exFAT) can give two pictures of one length one key.
+    fn says_which_file(&self) -> bool {
+        self.ctime % 1_000_000 != 0
+    }
+
+    /// What `eq` compares, to look a key up by.
+    fn of(&self) -> (u64, i64, i64) {
+        (self.len, self.mtime, self.ctime)
+    }
+}
+
+/// The default cache file's name, which carries the format: `analysis-IMGFPC16.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -271,7 +304,7 @@ pub fn key_from(md: &std::fs::Metadata) -> Option<Key> {
     use std::os::unix::fs::MetadataExt;
     let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as i64;
     let ctime = md.ctime().checked_mul(1_000_000_000)?.checked_add(md.ctime_nsec())?;
-    Some(Key { len: md.len(), mtime, ctime })
+    Some(Key { len: md.len(), mtime, ctime, dev: md.dev() })
 }
 
 // ------------------------------------------------------------ packing
@@ -473,6 +506,7 @@ fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), tr: &Traits, f: &F
     b.u64(k.len)?;
     b.i64(k.mtime)?;
     b.i64(k.ctime)?;
+    b.u64(k.dev)?;
     b.u32(dims.0)?;
     b.u32(dims.1)?;
     for v in tr.detail.iter().chain([&tr.colour]).chain(tr.grid.iter()) {
@@ -749,12 +783,17 @@ struct Asked {
     /// That record's analysis, when its key is the file's and it has not
     /// been taken.
     record: Option<Record>,
+    /// Where `record` is when it is another name's: the file moved (`open`),
+    /// and the record is written again under this one when it is taken.
+    moved: Option<Span>,
 }
 
 /// A record this run was not asked about; see `Store::unasked`.
 struct Unasked {
     path: PathBuf,
     span: Span,
+    /// The device its file lay on (`Key::dev`).
+    dev: u64,
     /// Made at this run's settings, for a file it did not walk.
     here: bool,
 }
@@ -817,9 +856,19 @@ pub enum Compacted {
 /// `met(i)` is said as the read meets a record of walked file `i` under its
 /// key (once or more): what the progress bar knows of the cache's answers
 /// before the read is done. A later record for the path may still replace it.
+///
+/// **A file found under another name than its record's is still answered**
+/// when the record's key is the file's and says which file it is
+/// (`Key::says_which_file`): a folder renamed or moved, or a drive mounted at
+/// another point (`/media/u/DISK1` beside a second `DISK`), keeps every
+/// file's length and times, and its records were all thrown away for their
+/// path, the whole folder analysed again. The record is written again under
+/// the new name when it is taken (`take`); the old one goes with its path.
 pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, met: &(dyn Fn(usize) + Sync), problems: &mut Problems) -> Store {
     let (mut got, mut store) = {
         let walked: HashMap<&Path, (usize, Option<Key>)> = files.iter().enumerate().map(|(i, f)| (f.0.as_path(), (i, f.1))).collect();
+        let by_key: HashMap<(u64, i64, i64), usize> =
+            files.iter().enumerate().filter_map(|(i, f)| f.1.filter(Key::says_which_file).map(|k| (k.of(), i))).collect();
         let walked = |p: &Path, k: Key| match walked.get(p) {
             Some(&(i, key)) => {
                 if key == Some(k) {
@@ -827,22 +876,41 @@ pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, met
                 }
                 true
             }
-            None => false,
+            // Another name's record, unpacked when it may be a walked file's.
+            None => match by_key.get(&k.of()) {
+                Some(&i) if k.says_which_file() => {
+                    met(i);
+                    true
+                }
+                _ => false,
+            },
         };
         read(path, want, &walked, problems)
     };
     store.usable = got.len();
-    store.asked = files
+    let mut asked: Vec<Asked> = files
         .into_iter()
         .map(|(name, key)| match got.remove(&name) {
-            Some((k, record, span)) => Asked { record: record.filter(|_| key == Some(k)), name, key, found: Some(span) },
-            None => Asked { name, key, found: None, record: None },
+            Some((k, record, span)) => Asked { record: record.filter(|_| key == Some(k)), name, key, found: Some(span), moved: None },
+            None => Asked { name, key, found: None, record: None, moved: None },
         })
         .collect();
-    store.live = Mutex::new(vec![None; store.asked.len()]);
     // What is left is every record at this run's settings for a path it did
-    // not walk.
-    store.unasked.extend(got.into_iter().map(|(path, e)| Unasked { path, span: e.2, here: true }));
+    // not walk, and those unpacked are another name's for a walked file.
+    let mut moved: HashMap<(u64, i64, i64), (Record, Span)> = HashMap::new();
+    for (path, (k, record, span)) in got {
+        if let Some(r) = record {
+            moved.insert(k.of(), (r, span));
+        }
+        store.unasked.push(Unasked { path, span, dev: k.dev, here: true });
+    }
+    for a in asked.iter_mut().filter(|a| a.record.is_none()) {
+        if let Some((r, span)) = a.key.filter(Key::says_which_file).and_then(|k| moved.remove(&k.of())) {
+            (a.record, a.moved) = (Some(r), Some(span));
+        }
+    }
+    store.asked = asked;
+    store.live = Mutex::new(vec![None; store.asked.len()]);
     store
 }
 
@@ -1099,8 +1167,37 @@ impl Store {
     pub fn take(&mut self, i: usize) -> Option<Record> {
         let a = &mut self.asked[i];
         let record = a.record.take()?;
-        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = a.found;
+        let span = match a.moved.take() {
+            Some(from) => self.relabel(i, from),
+            None => a.found,
+        };
+        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = span;
         Some(record)
+    }
+
+    /// The record at `from`, another name's, appended again under walked
+    /// file `i`'s name and key: its bytes after the path are the analysis,
+    /// which is the file's wherever it is, so they are copied, not packed
+    /// again. Where it went, or `None` when it could not be.
+    fn relabel(&self, i: usize, from: Span) -> Option<Span> {
+        let (a, file) = (&self.asked[i], self.file.as_ref()?);
+        let key = a.key?;
+        let mut raw = vec![0u8; usize::try_from(from.len).ok()?];
+        file.read_exact_at(&mut raw, from.at).ok()?;
+        let old = usize::try_from(u64::from_le_bytes(raw.get(..8)?.try_into().ok()?)).ok()?;
+        // The settings, then the key and the device, which are this file's.
+        let rest = raw.get(8 + old..)?;
+        let (settings, after) = (rest.get(..12)?, rest.get(12 + 32..)?);
+        let name = a.name.as_os_str().as_bytes();
+        let mut b = Buf(Vec::with_capacity(8 + name.len() + rest.len()));
+        b.bytes(name).ok()?;
+        b.0.extend_from_slice(settings);
+        b.u64(key.len).ok()?;
+        b.i64(key.mtime).ok()?;
+        b.i64(key.ctime).ok()?;
+        b.u64(key.dev).ok()?;
+        b.0.extend_from_slice(after);
+        self.write(b.0)
     }
 
     /// Put walked file `i`'s analysis into the file, as soon as it is made,
@@ -1187,11 +1284,26 @@ impl Store {
     /// Put one analysis into the file, and say where it went. The packing
     /// runs outside the lock, and only the write is inside it.
     fn put(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) -> Option<Span> {
+        self.file.as_ref()?;
+        if self.broken.load(Ordering::Relaxed) {
+            return None;
+        }
+        match record(path.as_ref(), self.settings, key, dims, traits, f, t) {
+            Ok(rec) => self.write(rec),
+            Err(e) => {
+                self.broke(e);
+                None
+            }
+        }
+    }
+
+    /// Append one record's bytes, and say where they went.
+    fn write(&self, rec: Vec<u8>) -> Option<Span> {
         let file = self.file.as_ref()?;
         if self.broken.load(Ordering::Relaxed) {
             return None;
         }
-        let wrote = record(path.as_ref(), self.settings, key, dims, traits, f, t).and_then(|rec| {
+        let wrote = (|| -> Result<Span> {
             let _held = lock(&WRITING);
             let mut w = file;
             w.write_all(&rec)?;
@@ -1200,7 +1312,7 @@ impl Store {
             // appending to the same file has done meanwhile.
             let end = w.stream_position()?;
             Ok(Span { at: end - rec.len() as u64, len: rec.len() as u64 })
-        });
+        })();
         match wrote {
             Ok(span) => {
                 lock_any(&self.mine).insert(span.at);
@@ -1209,11 +1321,17 @@ impl Store {
                 Some(span)
             }
             Err(e) => {
-                if !self.broken.swap(true, Ordering::Relaxed) {
-                    *self.failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
-                }
+                self.broke(e);
                 None
             }
+        }
+    }
+
+    /// The first append that fails is kept to be said; the rest are not
+    /// attempted.
+    fn broke(&self, e: anyhow::Error) {
+        if !self.broken.swap(true, Ordering::Relaxed) {
+            *self.failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
         }
     }
 
@@ -1372,8 +1490,8 @@ impl Store {
         };
         let name = path.as_os_str().as_bytes();
         // The path's length and the path, then settings (12), key (24),
-        // size (8) and detail (24), and the colour.
-        let field = at + 8 + name.len() as u64 + 12 + 24 + 8 + 24;
+        // device (8), size (8) and detail (24), and the colour.
+        let field = at + 8 + name.len() as u64 + 12 + 24 + 8 + 8 + 24;
         if field + 4 > at + span.len {
             return;
         }
@@ -1569,7 +1687,7 @@ where
     r.need(len as u64)?;
     let path = PathBuf::from(OsString::from_vec(r.take(len)?));
     let settings = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
-    let key = Key { len: r.u64()?, mtime: r.i64()?, ctime: r.i64()? };
+    let key = Key { len: r.u64()?, mtime: r.i64()?, ctime: r.i64()?, dev: r.u64()? };
     let dims = (r.u32()?, r.u32()?);
     let mut traits = Traits::default();
     for v in traits.detail.iter_mut().chain([&mut traits.colour]).chain(traits.grid.iter_mut()) {
@@ -1651,9 +1769,12 @@ fn read_stream<R: Read + Skip>(
                 if s != want {
                     let span = Span { at, len: r.pos - at };
                     match other_at.entry((head.path, s)) {
-                        std::collections::hash_map::Entry::Occupied(e) => others[*e.get()].span = span,
+                        std::collections::hash_map::Entry::Occupied(e) => {
+                            let u = &mut others[*e.get()];
+                            (u.span, u.dev) = (span, head.key.dev);
+                        }
                         std::collections::hash_map::Entry::Vacant(e) => {
-                            others.push(Unasked { path: e.key().0.clone(), span, here: false });
+                            others.push(Unasked { path: e.key().0.clone(), span, dev: head.key.dev, here: false });
                             e.insert(others.len() - 1);
                         }
                     }
@@ -1765,7 +1886,7 @@ fn carried(unasked: &[Unasked]) -> Vec<&Unasked> {
     let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
     let mut kept = Vec::with_capacity(unasked.len());
     for u in unasked {
-        if !gone.contains(u.path.as_path()) || u.path.parent().is_some_and(|f| *folders.entry(f).or_insert_with(|| away(&u.path, &mounts, &mut volumes))) {
+        if !gone.contains(u.path.as_path()) || u.path.parent().is_some_and(|f| *folders.entry(f).or_insert_with(|| away(&u.path, u.dev, &mounts, &mut volumes))) {
             kept.push(u);
         }
     }
@@ -1788,7 +1909,14 @@ fn carried(unasked: &[Unasked]) -> Vec<&Unasked> {
 /// The first was all there was, so a share mounted anywhere else lost every
 /// record each time it was away. A folder that is there with the file gone
 /// from it is a deletion, whatever is above it.
-fn away(file: &Path, mounts: &Mounts, volumes: &mut HashMap<PathBuf, bool>) -> bool {
+///
+/// **The third asks the device the file lay on (`dev`, the record's).** An
+/// empty folder is also what deleting the one folder another held leaves
+/// (`rm -r photos/2019` from a `photos` holding nothing else), and those
+/// records were kept as a share's, on every run, for good. A share's files
+/// lay on another device than the folder it was mounted on; deleted files
+/// lay on the folder's own.
+fn away(file: &Path, dev: u64, mounts: &Mounts, volumes: &mut HashMap<PathBuf, bool>) -> bool {
     let Some(folder) = file.parent() else { return false };
     let mut asked = |root: PathBuf, empty_too: bool| {
         *volumes.entry(root).or_insert_with_key(|r| !mounts.mounted(r) && (!empty_too || unmounted(r)))
@@ -1799,7 +1927,8 @@ fn away(file: &Path, mounts: &Mounts, volumes: &mut HashMap<PathBuf, bool>) -> b
     if let Some(r) = mounts.configured(folder) {
         return asked(r.to_path_buf(), false);
     }
-    left_behind(folder).is_some_and(|r| asked(r, true))
+    use std::os::unix::fs::MetadataExt;
+    left_behind(folder).is_some_and(|r| std::fs::metadata(&r).is_ok_and(|m| m.dev() != dev) && asked(r, true))
 }
 
 /// The nearest folder above `folder` that is there, when `folder` is not;
@@ -2052,7 +2181,7 @@ mod tests {
         let here = dir.join("here.jpg");
         std::fs::write(&here, b"x").unwrap();
         let gone = dir.join("gone.jpg");
-        let unasked = |path: &Path, here: bool| Unasked { path: path.to_path_buf(), span: Span { at: 0, len: 0 }, here };
+        let unasked = |path: &Path, here: bool| Unasked { path: path.to_path_buf(), span: Span { at: 0, len: 0 }, dev: 0, here };
         // And a drive that is not plugged in, which `volume_root` reads off
         // where systems mount them; nothing is mounted at this one.
         let away = Path::new("/media/img-fp-test-nobody/Photos/a.jpg");
@@ -2104,8 +2233,8 @@ mod tests {
         assert_eq!(m.configured(Path::new("/srv/my disk/a")), Some(Path::new("/srv/my disk")));
         assert_eq!(m.configured(Path::new("/home/u")), None, "/ is no drive that comes and goes");
         let mut volumes = HashMap::new();
-        assert!(away(Path::new("/srv/nas/2019/a.jpg"), &m, &mut volumes), "named in fstab, not mounted");
-        assert!(!away(Path::new("/srv/my disk/2019/a.jpg"), &m, &mut volumes), "mounted: the files are gone");
+        assert!(away(Path::new("/srv/nas/2019/a.jpg"), 0, &m, &mut volumes), "named in fstab, not mounted");
+        assert!(!away(Path::new("/srv/my disk/2019/a.jpg"), 0, &m, &mut volumes), "mounted: the files are gone");
 
         let dir = scratch("left-behind");
         let (nas, here) = (dir.join("nas"), dir.join("here"));
@@ -2114,15 +2243,20 @@ mod tests {
         std::fs::write(here.join("other.jpg"), b"x").unwrap();
         let none = Mounts::of("", "");
         let mut volumes = HashMap::new();
-        assert!(away(&nas.join("photos/2019/a.jpg"), &none, &mut volumes), "an empty mount point left behind");
-        assert!(!away(&here.join("photos/a.jpg"), &none, &mut volumes), "a folder deleted from one that holds more");
-        assert!(!away(&here.join("a.jpg"), &none, &mut volumes), "the folder is there: the file was deleted");
+        assert!(away(&nas.join("photos/2019/a.jpg"), 0, &none, &mut volumes), "an empty mount point left behind");
+        assert!(!away(&here.join("photos/a.jpg"), 0, &none, &mut volumes), "a folder deleted from one that holds more");
+        assert!(!away(&here.join("a.jpg"), 0, &none, &mut volumes), "the folder is there: the file was deleted");
         let mounted = Mounts::of(&format!("1 1 0:1 / {} rw - fuse.sshfs h: rw\n", nas.display()), "");
-        assert!(!away(&nas.join("photos/a.jpg"), &mounted, &mut HashMap::new()), "an empty share mounted: the files are gone");
+        assert!(!away(&nas.join("photos/a.jpg"), 0, &mounted, &mut HashMap::new()), "an empty share mounted: the files are gone");
         assert_eq!(left_behind(Path::new("/img-fp-not-there/a")), None, "never /");
+        // An empty folder whose own device the files lay on: the folder they
+        // were in was deleted from it, and nothing was mounted there.
+        use std::os::unix::fs::MetadataExt;
+        let own = std::fs::metadata(&nas).unwrap().dev();
+        assert!(!away(&nas.join("photos/2019/a.jpg"), own, &none, &mut HashMap::new()), "a folder deleted, its parent left empty");
 
         // Carried through it, a file this run was not asked about.
-        let unasked = Unasked { path: nas.join("photos/a.jpg"), span: Span { at: 0, len: 0 }, here: true };
+        let unasked = Unasked { path: nas.join("photos/a.jpg"), span: Span { at: 0, len: 0 }, dev: 0, here: true };
         assert_eq!(carried(std::slice::from_ref(&unasked)).len(), 1);
         std::fs::write(nas.join("lost.txt"), b"x").unwrap();
         assert_eq!(carried(std::slice::from_ref(&unasked)).len(), 0, "something is there now, and the file is not");
@@ -2151,6 +2285,51 @@ mod tests {
         (got, store, problems.any())
     }
 
+    /// A file found under another name than its record's — its folder moved
+    /// — is answered by that record when the key is the file's to the
+    /// nanosecond, and the record is written again under the new name; a key
+    /// a coarse clock could give two files answers for no other name.
+    #[test]
+    fn a_moved_file_keeps_its_record() {
+        let dir = scratch("moved");
+        let path = dir.join(file_name());
+        let (old_a, new_a) = (dir.join("before/a.jpg"), dir.join("after/a.jpg"));
+        let (old_b, new_b) = (dir.join("before/b.jpg"), dir.join("after/b.jpg"));
+        std::fs::create_dir_all(dir.join("after")).unwrap();
+        for f in [&new_a, &new_b] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let (f, t) = analysis(6, 4);
+        let fine = Key { len: 10, mtime: 7, ctime: 1_700_000_000_123_456_789, dev: 3 };
+        let coarse = Key { len: 11, mtime: 7, ctime: 1_700_000_000_000_000_000, dev: 3 };
+        let (_, store, _) = reopen(&path);
+        store.put(&old_a, fine, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put(&old_b, coarse, (320, 240), &Traits::default(), &f, &t).unwrap();
+        drop(store);
+
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let here = Key { dev: 9, ..fine };
+        let met = Mutex::new(std::collections::BTreeSet::new());
+        let mut store = open(&path, SETTINGS, vec![(new_a.clone(), Some(here)), (new_b.clone(), Some(coarse))], &|i| {
+            lock_any(&met).insert(i);
+        }, &mut problems);
+        assert_eq!(lock_any(&met).iter().copied().collect::<Vec<_>>(), [0], "the read knew it would answer for a, and only a");
+        assert!(store.take(0).is_some_and(|r| r.feats.desc == f.desc), "a moved is answered");
+        assert!(store.take(1).is_none(), "b's key could be another file's");
+        let kept = store.finish(false);
+        assert_eq!(kept.dropped, 2, "both old names are gone");
+        drop(store);
+
+        let (got, _, bad) = reopen(&path);
+        assert!(!bad);
+        let (key, record, _) = &got[&new_a];
+        assert_eq!((*key, key.dev), (here, 9), "written under the new name, with the device it is on now");
+        assert_eq!(record.as_ref().unwrap().feats.desc, f.desc);
+        assert_eq!(record.as_ref().unwrap().dims, (320, 240));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A record for a path the run does not walk is read for its key and its
     /// span, and not unpacked — and a later one still supersedes an earlier.
     #[test]
@@ -2160,9 +2339,9 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
         let (all, _, _) = reopen(&path);
 
@@ -2187,9 +2366,9 @@ mod tests {
         assert!(got.is_empty() && !bad);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("a.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("a.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         assert_eq!(store.records(), 3);
         drop(store);
 
@@ -2215,9 +2394,9 @@ mod tests {
         let (f, t) = analysis(3, 1);
         let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
         let png = Traits { colour: 7.5, ..Default::default() };
-        let a = store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &jpeg, &f, &t).unwrap();
-        let b = store.put("b.png", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &png, &f, &t).unwrap();
-        let c = store.put("c.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &jpeg, &f, &t).unwrap();
+        let a = store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &jpeg, &f, &t).unwrap();
+        let b = store.put("b.png", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &png, &f, &t).unwrap();
+        let c = store.put("c.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &jpeg, &f, &t).unwrap();
         let measured = kept_colour(12.345);
         assert_eq!(kept_colour(measured), measured, "the same value through any number of rounds");
         store.write_colour(a, Path::new("a.jpg"), measured);
@@ -2256,9 +2435,9 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("a.jpg", Key { len: 2, mtime: 2, ctime: 2 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("a.jpg", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
         drop(store);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
         let (got, store, bad) = reopen(&path);
@@ -2279,8 +2458,8 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         for cut in [1, 9, b.len / 2, b.len - 1] {
             let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -2290,7 +2469,7 @@ mod tests {
             assert!(!bad, "a torn tail is not a damaged cache");
             assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
-            store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+            store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
             drop(store);
             let (got, _, bad) = reopen(&path);
             assert!(!bad && got.len() == 2);
@@ -2301,10 +2480,10 @@ mod tests {
     /// Where a record's packed length sits: after its path, its settings, the
     /// key, the picture's size and the six fields of its shape.
     /// The bytes of a record's head before its keypoint count: the path,
-    /// the settings, the key, the dimensions and the traits.
+    /// the settings, the key, the device, the dimensions and the traits.
     const TRAITS: u64 = 23 * 4 + 4;
     fn packed_len_at(s: Span, path: &str) -> u64 {
-        s.at + 8 + path.len() as u64 + 12 + 24 + 8 + TRAITS + 6 * 4
+        s.at + 8 + path.len() as u64 + 12 + 24 + 8 + 8 + TRAITS + 6 * 4
     }
 
     /// A length damaged into something the file cannot hold is a torn tail,
@@ -2317,9 +2496,9 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
@@ -2339,8 +2518,8 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(4, 3);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         // A path length past `MAX_PATH` but inside the file's size.
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -2361,17 +2540,17 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(40, 3);
-        store.put("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let shape = store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let shape = store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         // b's first stream: its length is intact, its deflate is not.
         let body = packed_len_at(b, "b.jpg") + 8 + 8;
         file.write_all_at(&[0xff; 24], body).unwrap();
         // c claims more keypoints than a run of these settings describes.
-        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 12 + 24 + 8 + TRAITS + 8).unwrap();
+        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 12 + 24 + 8 + 8 + TRAITS + 8).unwrap();
         drop(file);
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
@@ -2398,7 +2577,7 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f, _) = analysis(10, 2);
         let t = Thumb::new(400, 30, 0.125, vec![2; 400 * 30]);
-        store.put("wide.jpg", Key { len: 1, mtime: 1, ctime: 1 }, (3200, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("wide.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (3200, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad, "a wide thumbnail is not damage");
@@ -2416,7 +2595,7 @@ mod tests {
         let (f, t) = analysis(20, 5);
         let names: Vec<String> = (0..8).map(|i| format!("{i}.jpg")).collect();
         let spans: Vec<Span> =
-            names.iter().map(|p| store.put(p, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f, &t).unwrap()).collect();
+            names.iter().map(|p| store.put(p, Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap()).collect();
         let keeping = |k: usize| -> Vec<(&Path, Span)> { (0..k).map(|i| (Path::new(names[i].as_str()), spans[i])).collect() };
         assert!(!store.worth_compacting(&keeping(8), false), "nothing unused");
         assert!(!store.worth_compacting(&keeping(7), false), "one record of eight is not a quarter");
@@ -2434,7 +2613,7 @@ mod tests {
         let dir = scratch("two-runs");
         let path = dir.join(file_name());
         let (f, t) = analysis(20, 5);
-        let key = Key { len: 1, mtime: 1, ctime: 1 };
+        let key = Key { len: 1, mtime: 1, ctime: 1, dev: 0 };
         let (_, mut a, _) = reopen(&path);
         let (_, b, _) = reopen(&path);
         a.put("old.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -2463,8 +2642,8 @@ mod tests {
         let path = dir.join(file_name());
         let (f, t) = analysis(20, 5);
         let (f2, t2) = analysis(20, 6);
-        let key = Key { len: 1, mtime: 1, ctime: 1 };
-        let newer = Key { len: 2, mtime: 2, ctime: 2 };
+        let key = Key { len: 1, mtime: 1, ctime: 1, dev: 0 };
+        let newer = Key { len: 2, mtime: 2, ctime: 2, dev: 0 };
         let (_, mut a, _) = reopen(&path);
         let mine = a.put("mine.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
         a.put("dead.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
@@ -2504,7 +2683,7 @@ mod tests {
         let (f, t) = analysis(6, 4);
         let (f2, t2) = analysis(3, 9);
         let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
-        let (old, new) = (Key { len: 1, mtime: 1, ctime: 1 }, Key { len: 2, mtime: 2, ctime: 2 });
+        let (old, new) = (Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, Key { len: 2, mtime: 2, ctime: 2, dev: 0 });
         let (_, store, _) = reopen(&path);
         for p in [&a, &b, &c, &other, &gone] {
             store.put(p, old, (320, 240), &jpeg, &f, &t).unwrap();
@@ -2580,8 +2759,8 @@ mod tests {
         let f = locked.join("a.jpg");
         std::fs::write(&f, b"x").unwrap();
         let m = [
-            Unasked { path: f.clone(), span: Span { at: 8, len: 10 }, here: true },
-            Unasked { path: dir.join("deleted.jpg"), span: Span { at: 18, len: 10 }, here: false },
+            Unasked { path: f.clone(), span: Span { at: 8, len: 10 }, dev: 0, here: true },
+            Unasked { path: dir.join("deleted.jpg"), span: Span { at: 18, len: 10 }, dev: 0, here: false },
         ];
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let reachable = std::fs::metadata(&f).is_ok();
@@ -2614,7 +2793,7 @@ mod tests {
         let (f, t) = analysis(6, 4);
         let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
             .iter()
-            .map(|p| store.put(p, Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap())
+            .map(|p| store.put(p, Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap())
             .collect();
         let mut store = store;
         let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
@@ -2637,7 +2816,7 @@ mod tests {
             assert!(got.is_empty() && !bad && store.records() == 0);
             assert_eq!(store.other_version(), Some(std::str::from_utf8(other).unwrap()));
             let (f, t) = analysis(6, 4);
-            assert!(store.put("d.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).is_none());
+            assert!(store.put("d.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).is_none());
             assert!(!store.worth_compacting(&[], true));
             drop(store);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "the file is not touched");
@@ -2656,8 +2835,8 @@ mod tests {
         let path = dir.join(file_name());
         let (_, store, _) = reopen(&path);
         let (f, t) = analysis(6, 4);
-        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("b.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("b.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
         drop(store);
 
         let log = crate::problems::Log::default();
@@ -2667,7 +2846,7 @@ mod tests {
         assert!(got.is_empty() && !problems.any());
         assert_eq!((store.records(), others(&store)), (2, 2));
         let (f2, t2) = analysis(3, 9);
-        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
 
         // Back at the first size: its two records, and the 640 one carried.
@@ -2705,8 +2884,8 @@ mod tests {
         let (_, store, _) = reopen(&path);
         let (f1, t1) = analysis(3, 1);
         let (f2, t2) = analysis(5, 2);
-        store.put(&fe, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put(&ff, Key { len: 1, mtime: 1, ctime: 1 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        store.put(&fe, Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
+        store.put(&ff, Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
         drop(store);
         let (got, _, bad) = reopen(&path);
         assert!(!bad);

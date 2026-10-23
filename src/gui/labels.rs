@@ -87,6 +87,9 @@ pub const PREVIEW_ACTUAL: &str = "_Actual size";
 // The Trash confirmation.
 pub const CONFIRM_CANCEL: &str = "_Cancel";
 pub const CONFIRM_TRASH: &str = "_Move to Trash";
+// When the Trash cannot take them.
+pub const CONFIRM_KEEP: &str = "_Leave in place";
+pub const CONFIRM_DELETE: &str = "_Delete permanently";
 
 /// The letter a label's mnemonic is on, in lower case.
 pub fn letter(label: &str) -> char {
@@ -140,5 +143,6 @@ mod tests {
         assert_eq!(letter(TRASH), letter(&trash_n(2)));
         distinct("preview", &[PREVIEW_PREV, PREVIEW_NEXT, PREVIEW_MARK, PREVIEW_CLOSE, PREVIEW_COMPARE, PREVIEW_ACTUAL]);
         distinct("confirmation", &[CONFIRM_CANCEL, CONFIRM_TRASH]);
+        distinct("no trash", &[CONFIRM_KEEP, CONFIRM_DELETE]);
     }
 }

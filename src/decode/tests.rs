@@ -1209,3 +1209,70 @@ fn fingerprints() {
     lines.sort();
     std::fs::write(out, lines.join("\n") + "\n").unwrap();
 }
+
+/// Each format's EXIF is found where the format keeps it: a JPEG's APP1, a
+/// PNG's `eXIf` (after the pixels too), a WebP's `EXIF` chunk after the
+/// picture, which holds the TIFF header without EXIF's own marker, and a
+/// TIFF's EXIF directory. Before, every file's first 128 KB were searched
+/// for the marker, and no WebP or TIFF ever had EXIF.
+#[test]
+fn exif_is_found_where_each_format_keeps_it() {
+    let tiff_header = b"II*\0\x08\0\0\0";
+    // A PNG, with and without an `eXIf` chunk before IEND.
+    let mut png = Vec::new();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([90, 120, 30])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    assert!(!facts_of(&png).exif);
+    let iend = png.len() - 12;
+    let mut chunk = (tiff_header.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(tiff_header);
+    chunk.extend_from_slice(&[0; 4]);
+    png.splice(iend..iend, chunk);
+    assert!(facts_of(&png).exif, "an eXIf after the image data");
+
+    // A WebP: a picture chunk, then EXIF.
+    let riff = |chunks: &[(&[u8; 4], &[u8])]| {
+        let mut body = b"WEBP".to_vec();
+        for (id, data) in chunks {
+            body.extend_from_slice(*id);
+            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            body.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut b = b"RIFF".to_vec();
+        b.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        b.extend_from_slice(&body);
+        b
+    };
+    let picture: &[u8] = &[0x2f; 301];
+    assert!(!facts_of(&riff(&[(b"VP8L", picture)])).exif);
+    assert!(facts_of(&riff(&[(b"VP8X", &[0; 10]), (b"VP8L", picture), (b"EXIF", tiff_header)])).exif);
+
+    // A TIFF whose first directory points to an EXIF directory (34665), and
+    // one that does not.
+    let tiff = |tag: u16| {
+        let mut b = tiff_header.to_vec();
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&tag.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&26u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b
+    };
+    assert!(super::tiff::Head::of(&tiff(34665)).exif);
+    assert!(!super::tiff::Head::of(&tiff(305)).exif);
+
+    // A JPEG's APP1.
+    let mut jpeg = Vec::new();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([90, 120, 30])).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+    assert!(!facts_of(&jpeg).exif);
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend_from_slice(&((2 + 6 + tiff_header.len()) as u16).to_be_bytes());
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(tiff_header);
+    jpeg.splice(2..2, app1);
+    assert!(facts_of(&jpeg).exif);
+}

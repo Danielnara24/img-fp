@@ -273,8 +273,14 @@ Trash.
   scanning again. Nothing is marked for you: *Mark suggested deletions* marks
   exactly the images suggested for deletion, replacing any marks already made.
 - The Trash button moves the marked images to the Trash, where they can be
-  restored. *Scan settings* goes back to the folders and options, keeping the
+  restored. Images on a drive that has no Trash, such as some network
+  shares, can be deleted permanently instead, after a second question.
+  *Scan settings* goes back to the folders and options, keeping the
   results.
+- Images deleted or changed in another program while the results are open
+  are noticed before anything is marked or moved: a deleted one leaves its
+  group, and an image suggested for deletion because a deleted or changed
+  one shows all of it becomes `REVIEW`.
 - The results of the last scan are kept in `~/.cache/img-fp/last-scan/` and
   shown again the next time the window opens, with the images you marked still
   marked and without the images already moved to the Trash. The next scan to
@@ -297,8 +303,8 @@ flatpak install --user img-fp-x86_64.flatpak
 flatpak run io.github.danielnara24.img-fp
 ```
 
-It appears in the applications menu as img-fp, and file managers offer it
-under "Open With" for a folder. Flatpak itself is installed on Fedora, Linux
+It appears in the applications menu as img-fp, and a file manager can open
+a folder with it through "Open With Other Application". Flatpak itself is installed on Fedora, Linux
 Mint and most other desktops already; on Ubuntu, `sudo apt install flatpak`
 first, then add Flathub as [its setup page](https://flathub.org/setup) shows.
 
@@ -359,7 +365,10 @@ install -Dm644 icons/io.github.danielnara24.img-fp.svg \
 Folders given on its command line are the ones to scan, in place of the ones
 remembered from last time: `img-fp-gui ~/Pictures`. It then opens on the scan
 settings, with the last scan's results one click away. With the desktop entry
-installed, file managers offer it under "Open With" for a folder.
+installed, a file manager can open a folder with it through "Open With Other
+Application". It does not register itself as an application for folders,
+since on a desktop that names no default one for them, that could make it
+the program every folder opens in.
 
 ## Output
 
@@ -442,7 +451,7 @@ to stderr.
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC15.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC16.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -478,11 +487,14 @@ Byte-identical copies of them are still found.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC15.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC15.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC16.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC16.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
-and entries for deleted files are dropped automatically. Use `--clear-cache`
-to start over.
+and entries for deleted files are dropped automatically. A folder that is
+renamed or moved, or a drive mounted at another place, keeps its entries,
+except on a FAT or exFAT drive such as a memory card, whose clock is too
+coarse to tell its files apart that way.
+Use `--clear-cache` to start over.
 
 The part of the name after `analysis-` is the cache format, which changes
 between some versions. Each format has its own default file, so two versions

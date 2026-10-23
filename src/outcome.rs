@@ -379,24 +379,43 @@ impl Outcome {
     /// (`last::changed_since`, against `after`). A `stat` each, on every
     /// thread.
     pub fn look(&self, after: Option<u64>) -> (Vec<usize>, Vec<usize>) {
-        let seen: Vec<Option<Lapse>> = (0..self.files.len())
-            .into_par_iter()
-            .map(|i| {
-                if self.lapsed(i).is_some() {
-                    return None;
-                }
-                let f = &self.files[i];
-                match std::fs::metadata(&f.path) {
-                    Ok(md) => crate::last::changed_since(&md, f.bytes.unwrap_or(0), after).then_some(Lapse::Changed),
-                    Err(_) if std::fs::symlink_metadata(&f.path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => Some(Lapse::Gone),
-                    Err(_) => None,
-                }
-            })
-            .collect();
-        let of = |why| seen.iter().enumerate().filter(|(_, s)| **s == Some(why)).map(|(i, _)| i).collect();
-        (of(Lapse::Gone), of(Lapse::Changed))
+        self.to_look().run(after)
     }
 
+    /// What `look` asks the filesystem about, apart from the scan: for a
+    /// window, which must not wait on a `stat` of every file (a share's
+    /// round trip each) on the thread that draws it, and asks on another.
+    pub fn to_look(&self) -> Look {
+        Look { files: (0..self.files.len()).filter(|&i| self.lapsed(i).is_none()).map(|i| (i, self.files[i].path.clone(), self.files[i].bytes.unwrap_or(0))).collect() }
+    }
+}
+
+/// The files of a scan not yet known to have lapsed, by number, each with the
+/// length the scan found: `Outcome::look`'s question, held apart from the
+/// scan so that it can be asked on any thread.
+pub struct Look {
+    files: Vec<(usize, PathBuf, u64)>,
+}
+
+impl Look {
+    /// `Outcome::look`'s answer: the files gone, and those changed since
+    /// `after`.
+    pub fn run(&self, after: Option<u64>) -> (Vec<usize>, Vec<usize>) {
+        let seen: Vec<Option<Lapse>> = self
+            .files
+            .par_iter()
+            .map(|(_, path, bytes)| match std::fs::metadata(path) {
+                Ok(md) => crate::last::changed_since(&md, *bytes, after).then_some(Lapse::Changed),
+                Err(_) if std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => Some(Lapse::Gone),
+                Err(_) => None,
+            })
+            .collect();
+        let of = |why| self.files.iter().zip(&seen).filter(|(_, s)| **s == Some(why)).map(|(f, _)| f.0).collect();
+        (of(Lapse::Gone), of(Lapse::Changed))
+    }
+}
+
+impl Outcome {
     /// The groups as a report states them: without the files gone since,
     /// and none left with fewer than two files, or without the file every
     /// other was compared with, whose rows would claim nothing about each

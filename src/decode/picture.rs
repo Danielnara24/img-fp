@@ -25,6 +25,8 @@ pub(super) struct Facts {
     pub lossless: bool,
     /// Holds more than one picture; see `Traits::frames`.
     pub frames: bool,
+    /// Carries an EXIF block where its format keeps one; see `Traits::exif`.
+    pub exif: bool,
     /// What was wrong with a file that decoded only in part; see
     /// `Decoded::damaged`.
     pub damaged: Option<&'static str>,

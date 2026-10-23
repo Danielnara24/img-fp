@@ -22,6 +22,7 @@ pub(super) fn open(bytes: &[u8]) -> Result<Picture<'_>> {
         move || Facts {
             lossless: head.compression.is_none_or(|c| !LOSSY.contains(&c)),
             frames: head.pictures >= 2,
+            exif: head.exif,
             ..Facts::default()
         },
         move |sink| {
@@ -50,6 +51,9 @@ pub(super) struct Head {
     pub raw: bool,
     /// The first directory's compression (tag 259), where it says.
     pub compression: Option<u16>,
+    /// The first directory points to an EXIF directory (tag 34665), which is
+    /// where a TIFF keeps EXIF.
+    pub exif: bool,
 }
 
 impl Head {
@@ -98,6 +102,7 @@ impl Head {
                     259 if k == 0 && head.compression.is_none() => head.compression = at(o + 4 + value_len, 2).map(|c| c as u16),
                     271 => make = true,
                     330 => subifds = true,
+                    34665 if k == 0 => head.exif = true,
                     50706 => dng = true,
                     _ => {}
                 }
