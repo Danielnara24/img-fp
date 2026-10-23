@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.danielnara24.img-fp</id>
+  <name>img-fp</name>
+  <summary>Find duplicate and near-duplicate images</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="io.github.danielnara24">
+    <name>Danielnara24</name>
+  </developer>
+
+  <description>
+    <p>
+      img-fp finds copies of the same picture, even when they are not the same
+      file. It compares images by their local features rather than by one hash
+      of the whole picture, so it still finds a match after an image has been
+      re-encoded, resized, cropped, rotated, recoloured, or placed inside a
+      slide, collage or screenshot. Every match is checked against the pixels
+      before it is shown.
+    </p>
+    <p>It finds:</p>
+    <ul>
+      <li>Exact copies under different names or in different folders</li>
+      <li>The same image saved again at a different size, quality or format</li>
+      <li>Crops, including small ones</li>
+      <li>Rotated, mirrored or colour-adjusted versions</li>
+      <li>An image inside a larger one: a slide, a collage, a page, a screenshot</li>
+    </ul>
+    <p>
+      Pick folders and start the scan, then go through the groups and choose
+      which images to move to the Trash. For each image the scan suggests
+      whether to keep or delete it, never deleting the only copy of what a
+      picture shows; nothing is marked until you ask. A copy can be compared
+      with its group's reference, with the part each shows of the other
+      outlined.
+    </p>
+    <p>
+      JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, AVIF, JPEG XL and more are read.
+      The command-line tool is included as well:
+      flatpak run --command=img-fp io.github.danielnara24.img-fp --help
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.danielnara24.img-fp.desktop</launchable>
+  <provides>
+    <binary>img-fp</binary>
+    <binary>img-fp-gui</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/Danielnara24/img-fp</url>
+  <url type="bugtracker">https://github.com/Danielnara24/img-fp/issues</url>
+  <url type="vcs-browser">https://github.com/Danielnara24/img-fp</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>One photograph and its copies: resized, cropped, recoloured, and placed in slides</caption>
+      <image>https://raw.githubusercontent.com/Danielnara24/img-fp/main/flatpak/screenshots/results.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A mirrored crop beside its reference, with the part they share outlined</caption>
+      <image>https://raw.githubusercontent.com/Danielnara24/img-fp/main/flatpak/screenshots/compare.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Folders and options, after a scan of 5,460 images</caption>
+      <image>https://raw.githubusercontent.com/Danielnara24/img-fp/main/flatpak/screenshots/setup.png</image>
+    </screenshot>
+  </screenshots>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>duplicate</keyword>
+    <keyword>duplicates</keyword>
+    <keyword>images</keyword>
+    <keyword>photos</keyword>
+    <keyword>pictures</keyword>
+  </keywords>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#9fd3f7</color>
+    <color type="primary" scheme_preference="dark">#1f4e6e</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.67.0" date="2026-10-22">
+      <description>
+        <p>The progress bar follows the time left, measured as the scan goes.</p>
+      </description>
+    </release>
+  </releases>
+</component>

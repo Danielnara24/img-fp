@@ -276,8 +276,66 @@ fn follow_dark_text(window: &gtk::ApplicationWindow) {
     let c = window.color();
     let light_text = 0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue() > 0.5;
     if named_dark || light_text {
-        settings.set_gtk_application_prefer_dark_theme(true);
+        // GTK 4.20 has a colour scheme in its place, and says so on stderr
+        // each start the old setting is used.
+        if gtk::check_version(4, 20, 0).is_some() || !set_by_nick(&settings, "gtk-interface-color-scheme", "GtkInterfaceColorScheme", "dark") {
+            settings.set_gtk_application_prefer_dark_theme(true);
+        }
     }
+}
+
+/// Draw text as the desktop's font settings say.
+///
+/// From GTK 4.16, `gtk-font-rendering` is "automatic" unless the desktop
+/// sets it, which Cinnamon, MATE and Xfce do not: GTK then leaves out the
+/// hinting and subpixel antialiasing the desktop asks for (`Xft/HintStyle`,
+/// `Xft/RGBA`), and draws metrics unhinted. Next to a GTK 4.14 build of the
+/// same window, the Flatpak's (GTK 4.24) text was soft and grey and its
+/// underlines thinner. "Manual" is GTK 4.14's behaviour: those settings, as
+/// set.
+fn follow_desktop_fonts() {
+    if gtk::check_version(4, 16, 0).is_none()
+        && let Some(settings) = gtk::Settings::default()
+    {
+        set_by_nick(&settings, "gtk-font-rendering", "GtkFontRendering", "manual");
+    }
+}
+
+/// Load the desktop's own GTK 4 stylesheet inside a Flatpak.
+///
+/// GTK reads `$XDG_CONFIG_HOME/gtk-4.0/gtk.css`, and in a Flatpak that is the
+/// app's own folder under `~/.var/app`, which holds none: the window was
+/// GTK's plain default theme, where Mint, Cinnamon and others put their whole
+/// theme in the desktop's file. Flathub refuses the permission that maps the
+/// folder in (`xdg-config/gtk-4.0`), but the app can read the home folder
+/// anyway, so it loads the desktop's file itself, at the priority GTK gives
+/// it. Outside a Flatpak the two are one file and GTK has loaded it.
+fn desktop_stylesheet() {
+    let own = std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("gtk-4.0/gtk.css"));
+    let Some(desktop) = img_fp::desktop_dir("XDG_CONFIG_HOME", ".config").map(|d| d.join("gtk-4.0/gtk.css")) else { return };
+    if own.as_ref() == Some(&desktop) || own.as_ref().is_some_and(|o| o.exists()) || !desktop.is_file() {
+        return;
+    }
+    let Some(display) = gtk::gdk::Display::default() else { return };
+    let provider = gtk::CssProvider::new();
+    // What GTK cannot read in it is the stylesheet's, as `quiet_theme_errors`
+    // says of GTK's own loading of it.
+    provider.connect_parsing_error(|_, _, _| {});
+    provider.load_from_path(&desktop);
+    #[allow(deprecated)]
+    gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_USER);
+}
+
+/// Set an enum property of `GtkSettings` newer than the GTK this is built
+/// against, by its value's nick; whether it was.
+fn set_by_nick(settings: &gtk::Settings, property: &str, type_name: &str, nick: &str) -> bool {
+    let Some(class) = glib::Type::from_name(type_name).and_then(glib::EnumClass::with_type) else { return false };
+    let Some(value) = class.to_value_by_nick(nick) else { return false };
+    if settings.find_property(property).is_none() {
+        return false;
+    }
+    settings.set_property_from_value(property, &value);
+    true
 }
 
 /// Escape closes a secondary window, as it does a dialog.
@@ -329,6 +387,8 @@ fn build(app: &gtk::Application, start: Vec<PathBuf>) {
         }
         settings.folders = folders;
     }
+    follow_desktop_fonts();
+    desktop_stylesheet();
     follow_dark_text(&window);
     // No animations: the theme's transitions on focus and hover are frames
     // drawn for nothing a person needs to see.

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- the tile -->
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="#241f31" stroke="#5e5c64" stroke-width="2"/>
+  <!-- a mountain, and its copy mirrored in the water below -->
+  <path d="M22 70 L58 30 L82 56 L92 46 L106 70Z" fill="#62a0ea"/>
+  <path d="M22 70 L58 110 L82 84 L92 94 L106 70Z" fill="#405a86"/>
+  <rect x="14" y="69" width="100" height="3" fill="#5e5c64"/>
+  <!-- the sun -->
+  <circle cx="88" cy="28" r="9" fill="#f8e45c"/>
+</svg>

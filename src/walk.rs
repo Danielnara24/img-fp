@@ -295,6 +295,29 @@ fn is_hidden(dir: &Path) -> bool {
     dir.file_name().is_some_and(|n| n.as_bytes().first() == Some(&b'.'))
 }
 
+/// The user's XDG folder `var` (`$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, ...), or
+/// `~/under_home` when it is not set, as the desktop has it.
+///
+/// Inside a Flatpak these variables name the app's own folders under
+/// `~/.var/app/<id>`, not the desktop's: the Trash the file manager empties
+/// and the thumbnail cache it fills are where the host's variables say
+/// (`$HOST_XDG_DATA_HOME`, which Flatpak sets only when the host had it) or
+/// at the defaults under the home folder, which is the same in both.
+pub fn desktop_dir(var: &str, under_home: &str) -> Option<PathBuf> {
+    user_dir(&|k: &str| std::env::var_os(k), sandboxed(), var, under_home)
+}
+
+/// Whether this process runs inside a Flatpak, which puts `/.flatpak-info`
+/// at the root of every sandbox.
+fn sandboxed() -> bool {
+    Path::new("/.flatpak-info").exists()
+}
+
+fn user_dir(env: &dyn Fn(&str) -> Option<std::ffi::OsString>, sandboxed: bool, var: &str, under_home: &str) -> Option<PathBuf> {
+    let set = if sandboxed { env(&format!("HOST_{var}")) } else { env(var) };
+    set.map(PathBuf::from).filter(|p| p.is_absolute()).or_else(|| env("HOME").map(|h| PathBuf::from(h).join(under_home)))
+}
+
 /// Folders a walk does not go into, because what is in them is not the
 /// library: a Trash, and a thumbnail cache. (And, unless `--hidden` asks,
 /// any hidden folder; see `is_hidden`. These are set aside even then.)
@@ -328,18 +351,21 @@ struct SetAside {
 
 impl SetAside {
     fn here() -> SetAside {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let xdg = |var: &str, under_home: &str| {
-            std::env::var_os(var)
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-                .or_else(|| home.as_ref().map(|h| h.join(under_home)))
-        };
-        let places = [xdg("XDG_DATA_HOME", ".local/share").map(|d| d.join("Trash")), xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("thumbnails"))]
+        let env = |k: &str| std::env::var_os(k);
+        // The desktop's, and inside a Flatpak the app's own as well (its
+        // `$XDG_DATA_HOME` is under `~/.var/app`, and a scan of the home
+        // folder walks into it); outside one they are the same folder.
+        let mut places: Vec<PathBuf> = [false, true]
             .into_iter()
+            .flat_map(|desktop| {
+                let sandboxed = desktop && sandboxed();
+                [user_dir(&env, sandboxed, "XDG_DATA_HOME", ".local/share").map(|d| d.join("Trash")), user_dir(&env, sandboxed, "XDG_CACHE_HOME", ".cache").map(|d| d.join("thumbnails"))]
+            })
             .flatten()
             .filter_map(|p| std::fs::canonicalize(p).ok())
             .collect();
+        places.sort();
+        places.dedup();
         SetAside { places }
     }
 
@@ -728,6 +754,18 @@ mod tests {
         }
         let other = s.dir("home/Pictures/thumbnails");
         assert!(!set.holds(&other, &other, false), "a folder of that name elsewhere is a folder");
+    }
+
+    #[test]
+    fn inside_a_flatpak_the_desktops_folders_are_the_hosts() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| std::ffi::OsString::from(v));
+        let sandbox = vars(&[("HOME", "/home/u"), ("XDG_DATA_HOME", "/home/u/.var/app/x/data")]);
+        assert_eq!(user_dir(&sandbox, false, "XDG_DATA_HOME", ".local/share"), Some(PathBuf::from("/home/u/.var/app/x/data")), "the app's own");
+        assert_eq!(user_dir(&sandbox, true, "XDG_DATA_HOME", ".local/share"), Some(PathBuf::from("/home/u/.local/share")), "the desktop's default");
+        let host_set = vars(&[("HOME", "/home/u"), ("XDG_DATA_HOME", "/home/u/.var/app/x/data"), ("HOST_XDG_DATA_HOME", "/data/u")]);
+        assert_eq!(user_dir(&host_set, true, "XDG_DATA_HOME", ".local/share"), Some(PathBuf::from("/data/u")), "the host's own setting");
+        let relative = vars(&[("HOME", "/home/u"), ("XDG_CACHE_HOME", "cache")]);
+        assert_eq!(user_dir(&relative, false, "XDG_CACHE_HOME", ".cache"), Some(PathBuf::from("/home/u/.cache")), "a relative path is ignored, as the spec says");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::App;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -351,7 +351,14 @@ impl Setup {
         report_path.set_placeholder_text(Some("results.txt, results.csv or results.json"));
         let report_choose = gtk::Button::with_mnemonic(l::REPORT_CHOOSE);
         let cache_path = entry();
-        cache_path.set_placeholder_text(Some(&format!("the default: ~/.cache/img-fp/{}", img_fp::cache_file_name())));
+        // Where it really is: inside a Flatpak, the app's own cache folder.
+        let default = img_fp::default_cache();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let shown = match home.as_deref().and_then(|h| default.strip_prefix(h).ok()) {
+            Some(rest) => Path::new("~").join(rest),
+            None => default,
+        };
+        cache_path.set_placeholder_text(Some(&format!("the default: {}", shown.display())));
         let cache_choose = gtk::Button::with_mnemonic(l::CACHE_CHOOSE);
         let log_path = entry();
         let log_choose = gtk::Button::with_mnemonic(l::LOG_CHOOSE);

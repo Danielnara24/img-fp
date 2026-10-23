@@ -359,13 +359,9 @@ fn jpeg_scaled(path: &Path, size: Size) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// The desktop's thumbnail cache: `$XDG_CACHE_HOME/thumbnails`, or
-/// `~/.cache/thumbnails`.
+/// `~/.cache/thumbnails`; the host's, inside a Flatpak (`desktop_dir`).
 fn thumbnail_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("thumbnails"))
+    Some(img_fp::desktop_dir("XDG_CACHE_HOME", ".cache")?.join("thumbnails"))
 }
 
 /// A picture from the freedesktop thumbnail cache under `dir`, made for

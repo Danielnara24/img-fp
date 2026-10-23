@@ -1,0 +1,126 @@
+# The desktop app as a Flatpak: GTK 4 from the GNOME runtime, libheif and its
+# HEVC decoder bundled, so it runs the same on every distribution whatever
+# its own GTK and libheif are.
+#
+# Build and install it locally from the repository's root:
+#
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#     --install-deps-from=flathub build-flatpak flatpak/io.github.danielnara24.img-fp.yml
+#
+# The build has no network: the crates come from cargo-sources.json, made
+# from Cargo.lock by flatpak-builder-tools' flatpak-cargo-generator.py, and
+# made again whenever Cargo.lock changes:
+#
+#   python3 flatpak-cargo-generator.py Cargo.lock -o flatpak/cargo-sources.json
+id: io.github.danielnara24.img-fp
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: img-fp-gui
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # A duplicate finder is pointed at any folder: the home folder, a second
+  # disk under /mnt or /media, a camera card under /run/media. It reads the
+  # desktop's thumbnail cache (~/.cache/thumbnails) to draw its cards and
+  # moves what the user chooses to the Trash, through the Trash portal. And
+  # it loads the desktop's GTK 4 stylesheet from there itself
+  # (`main::desktop_stylesheet`).
+  - --filesystem=host
+modules:
+  # The HEVC decoder HEIC photographs need. The runtime's libheif reads AVIF
+  # (dav1d, aom) but has no HEVC decoder.
+  - name: libde265
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_ENCODER=OFF
+      - -DENABLE_SDL=OFF
+    cleanup:
+      - /bin
+      - /include
+      - /lib/pkgconfig
+      - /lib/cmake
+    sources:
+      - type: archive
+        url: https://github.com/strukturag/libde265/releases/download/v1.1.3/libde265-1.1.3.tar.gz
+        sha256: 554228bd17788c99a7e63b37ab5634722190e6e2bf60c1dcb01cef328e133905
+
+  # libheif with libde265 built in, and dav1d for AVIF from the runtime.
+  # Decoders only: img-fp writes no HEIF. In /app/lib, so it is the one
+  # src/heif.rs loads, ahead of the runtime's.
+  - name: libheif
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_TESTING=OFF
+      - -DBUILD_DOCUMENTATION=OFF
+      - -DWITH_EXAMPLES=OFF
+      - -DWITH_GDK_PIXBUF=OFF
+      - -DENABLE_PLUGIN_LOADING=OFF
+      - -DWITH_LIBDE265=ON
+      - -DWITH_LIBDE265_PLUGIN=OFF
+      - -DWITH_DAV1D=ON
+      - -DWITH_DAV1D_PLUGIN=OFF
+      - -DWITH_AOM_DECODER=OFF
+      - -DWITH_AOM_ENCODER=OFF
+      - -DWITH_X265=OFF
+      - -DWITH_KVAZAAR=OFF
+      - -DWITH_RAV1E=OFF
+      - -DWITH_SvtEnc=OFF
+      - -DWITH_X264=OFF
+      - -DWITH_OpenH264_DECODER=OFF
+      - -DWITH_OpenH264_ENCODER=OFF
+      - -DWITH_JPEG_DECODER=OFF
+      - -DWITH_JPEG_ENCODER=OFF
+      - -DWITH_OpenJPEG_DECODER=OFF
+      - -DWITH_OpenJPEG_ENCODER=OFF
+      - -DWITH_OPENJPH_DECODER=OFF
+      - -DWITH_OPENJPH_ENCODER=OFF
+      - -DWITH_FFMPEG_DECODER=OFF
+      - -DWITH_UVG266=OFF
+      - -DWITH_VVDEC=OFF
+      - -DWITH_VVENC=OFF
+      - -DWITH_LIBSHARPYUV=OFF
+    cleanup:
+      - /bin
+      - /include
+      - /lib/pkgconfig
+      - /lib/cmake
+      - /share
+    sources:
+      - type: archive
+        url: https://github.com/strukturag/libheif/releases/download/v1.23.6/libheif-1.23.6.tar.gz
+        sha256: 4484346dc5995319dbc11e3a1c35d0a2ec46511ce370900869337fd2c7033125
+
+  - name: img-fp
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/img-fp/cargo
+        # Plain x86-64, as the released binaries are: the hot loops are
+        # compiled for AVX2 as well and chosen when the program starts.
+        RUSTFLAGS: -C target-cpu=x86-64
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release --locked --features gui
+      - install -Dm755 target/release/img-fp /app/bin/img-fp
+      - install -Dm755 target/release/img-fp-gui /app/bin/img-fp-gui
+      - install -Dm644 io.github.danielnara24.img-fp.desktop /app/share/applications/io.github.danielnara24.img-fp.desktop
+      - install -Dm644 flatpak/io.github.danielnara24.img-fp.svg /app/share/icons/hicolor/scalable/apps/io.github.danielnara24.img-fp.svg
+      - install -Dm644 flatpak/io.github.danielnara24.img-fp.metainfo.xml /app/share/metainfo/io.github.danielnara24.img-fp.metainfo.xml
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - vendor
+          - benchmark
+          - build-flatpak
+          - .flatpak-builder
+      - cargo-sources.json

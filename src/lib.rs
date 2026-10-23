@@ -60,6 +60,12 @@ mod table;
 pub use outcome::{Evidence, Outcome, Relation};
 pub use suggest::{Action, Lapse, Mode as SuggestMode};
 pub use cache::file_name as cache_file_name;
+pub use walk::desktop_dir;
+
+/// The cache file a run uses when `--cache` does not say.
+pub fn default_cache() -> PathBuf {
+    cache::locate(None)
+}
 mod verify;
 mod walk;
 

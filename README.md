@@ -280,6 +280,42 @@ Trash.
 Every control can be reached from the keyboard. Underlined letters are Alt
 shortcuts, the menu shows its own, and F1 lists every key.
 
+### As a Flatpak
+
+The Flatpak runs on any distribution with Flatpak, Ubuntu 22.04 included, and
+reads HEIC and AVIF files with nothing else installed. Download
+`img-fp-x86_64.flatpak` from the
+[latest release](https://github.com/Danielnara24/img-fp/releases/latest) and
+install it:
+
+```bash
+flatpak install --user img-fp-x86_64.flatpak
+flatpak run io.github.danielnara24.img-fp
+```
+
+It appears in the applications menu as img-fp, and file managers offer it
+under "Open With" for a folder. Flatpak itself is installed on Fedora, Linux
+Mint and most other desktops already; on Ubuntu, `sudo apt install flatpak`
+first, then add Flathub as [its setup page](https://flathub.org/setup) shows.
+
+The command line comes with it. To start either by its short name from a
+terminal, add these lines to `~/.bashrc` (or your shell's own file):
+
+```bash
+alias img-fp='flatpak run --command=img-fp io.github.danielnara24.img-fp'
+alias img-fp-gui='flatpak run io.github.danielnara24.img-fp'
+```
+
+Then `img-fp ~/Pictures` scans from the terminal and `img-fp-gui ~/Pictures`
+opens the window on that folder.
+
+The Flatpak keeps its cache, settings and last scan in
+`~/.var/app/io.github.danielnara24.img-fp/`, apart from those of an `img-fp`
+installed otherwise, so the window shows the last scan of the command line
+above, not of another `img-fp`.
+
+### As a binary
+
 It has the same requirements as `img-fp`, plus GTK 4.10 or newer (Ubuntu
 24.04+, Debian 13+, Fedora 38+, RHEL 9+, openSUSE Tumbleweed and Leap 15.6+,
 Arch):
@@ -306,12 +342,14 @@ sudo zypper install gtk4-devel pkg-config              # openSUSE
 cargo install img-fp --locked --features gui
 ```
 
-To add it to the applications menu, install the desktop entry from the extras
-archive (or from this repository):
+To add it to the applications menu, install the desktop entry and its icon
+from the extras archive:
 
 ```bash
 install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
   ~/.local/share/applications/io.github.danielnara24.img-fp.desktop
+install -Dm644 icons/io.github.danielnara24.img-fp.svg \
+  ~/.local/share/icons/hicolor/scalable/apps/io.github.danielnara24.img-fp.svg
 ```
 
 Folders given on its command line are the ones to scan, in place of the ones
@@ -471,4 +509,5 @@ for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
 
 The released binary loads the system's `libheif` (LGPL-3.0) at run time when
-it is installed; it is not bundled.
+it is installed; it is not bundled. The Flatpak bundles libheif and libde265 (both
+LGPL-3.0), unmodified, as shared libraries.
