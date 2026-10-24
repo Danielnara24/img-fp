@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.69.0)
+## Status (0.70.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -595,7 +595,8 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     renamed folder or a drive mounted elsewhere was analysed again whole. A
     metadata-only change (chmod, a new hard link) still re-analyses: telling
     it from a rewrite needs a content hash in the record. Report after a
-    rename identical to a cold run's.
+    rename identical to a cold run's. **Reverted after 0.69.0** (see the
+    next entry and *Tried and rejected*): the key does not say which file.
   - **Cache, emptied folders**: a record carries the device its file lay on
     (`Key::dev`, not compared by `Key`'s `eq`), and `away`'s left-behind
     mount point needs the empty folder to be on another device than the
@@ -612,6 +613,59 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     peaked at 3.6-3.9 GB and took 200-365 s in swap; now 1.9-2.0 GB, 20 s,
     report identical. At the default, `derived/Desktop` cold (ABBA) 44.1 /
     47.5 CPU-s base, 44.8 / 46.7 new.
+- 0.70.0 (audit fixes; cache format IMGFPC17; `out/v38-carries`). IMGS-ALL
+  cold against 0.69.0: all 1,110,262 pairs and every action identical (0
+  lost, 295 / 304, 304 / 304). `pairs.py`: only `strip_metadata` moves,
+  originals deleted for their stripped copy 244 -> 113, stripped copies 55
+  -> 186; loss 24 both. (With `carries_more` on every twin, not only proven
+  ones: 95 / 204, and IMGS-ALL 292 / 304, see `bw3` below.)
+  - **A moved file is analysed again** (intended). 0.69.0's moved-file
+    records are gone (`by_key`, `Store::relabel`, `Key::says_which_file`);
+    `Key::dev` stays for `away`. Why: ctime is the kernel's coarse clock
+    (a tick), so files written or `touch`ed together share (length, mtime,
+    ctime) to the nanosecond: 16 of 20 files `touch -d`'d at once had one
+    key. Six same-size BMPs touched together, scanned as `z/sub1` and
+    `z/sub2` in two runs: `sub2/p3` took `sub1/p1`'s analysis, and a scan
+    of `z` reported them "same pixels", one DELETE. No rename was needed.
+  - **Same pixels are not the same file** (`suggest::Ctx::carries_more`):
+    of twins *proven* the same pixels (`Link::Exact`: the same bytes, or two
+    JPEGs of one coded picture, `same::Kind::SameCoding`, a proof the colour
+    check already made) the keeper is the one carrying most besides its
+    pixels, then the smallest (was the smallest alone, before EXIF was ever
+    asked), and a twin is not deleted for one lacking what it carries
+    (`Refusal::Held`): more than eight bits a sample (`Traits::deep`), a
+    colour profile (`Traits::profile`), EXIF. A camera JPEG lost to its
+    EXIF-stripped copy before. Twins only read alike (`Link::Twin`: one
+    analysis and one colour) are chosen by size as before, by the user's
+    decision: applied to them, IMGS2 `bw3`'s posterized PNG (up to 18 levels
+    off, carrying the profile) was kept over its lossless WebP. So an Adobe
+    RGB PNG still loses to its untagged copy, and a 16-bit master (64,352
+    tones) to its 8-bit PNG export: nothing proves those twins' pixels the
+    same without decoding them. A JPEG whose MPF index holds more than one picture
+    (Ultra HDR gain map, MPO second eye) has `Traits::frames`, so it is no
+    twin and is deleted only for its bytes (both it and its stripped copy
+    are KEEP: a held file deletes nothing). Profiles are compared by
+    presence, not content: two files with different profiles are still
+    twins. HEIF says no depth. `derived/Desktop` of IMGS, IMGS3, IMGS4:
+    pairs identical; one action pair moved (IMGS4 `aerial2` `to_png`, which
+    keeps the seed's iCCP, now KEEP over its `webp_lossless` twin).
+  - **`away`**: an `/etc/fstab` mount point that is mounted no longer ends
+    the question: the left-behind sign is still asked, so an sshfs share
+    under a `/home` partition (Fedora's default layout lists `/home`) keeps
+    its records while it is away. Probe: away=false before, true now.
+  - **`suggest_score.py` strict lines**: the same losses and families with
+    no composite and no mirror image or rotation counting as a holder.
+    `holds` lets either stand in for a deleted original, IMGS-ALL has dozens
+    a family and a real library rarely has one. 0.69.0: 0 losses by the old
+    line, 56 by the strict one; families whose picture survives only in a
+    composite, a mirror/rotation or an edit, 4 (`b&w2`, `document1`, `logo`,
+    `bw1`: originals deleted for `temperature` or `jpeg_low`). Their
+    lossless copies (`to_png`, `to_tiff`, `webp_lossless`) went with the
+    original for the same edit, so `own_pixels` does not see them: it looks
+    as if pixel twins stand as one lossy file there. Not yet checked.
+  - **No output is named as a picture** (`outputs::plan`, by extension):
+    `-o report.png` wrote a text report, and every later scan of its folder
+    counted it a picture that would not open (exit 2).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1211,7 +1265,10 @@ its first frame is Modular without XYB (a recompressed JPEG is VarDCT).
 A lossless file is not deleted for a file of its frame and size whose
 pixels are not its own (`own_pixels`): another lossless file makes an
 undecided pair, a lossy one does not stand in for it. A file of several
-pictures (`Traits::frames`) is deleted only for its bytes. Files refused by
+pictures (`Traits::frames`, a JPEG's MPF pictures too) is deleted only for
+its bytes. Of pixel-identical twins the keeper carries most besides its
+pixels (`Traits::deep`, `profile`, `exif`), and none is deleted for a twin
+lacking what it carries (`carries_more`). Files refused by
 either are KEEP and **delete nothing themselves** (`Refusal::Held`, unlike
 `SOFT_GAP`'s `Refusal::Softer`): spreading from them let a kept posterize
 edit delete its original.
@@ -1424,6 +1481,13 @@ Measurement tools:
 ### Tried and rejected (numbers in `git show 5de81bc:CLAUDE.md`)
 
 Do not retry without new evidence:
+- Answering a moved file with another name's record whose key (length,
+  mtime, ctime to the nanosecond) is its own (0.69.0, reverted): the
+  kernel's ctime is a clock tick's, shared by files written or touched
+  together, so same-size files took each other's analysis and different
+  pictures were reported "same pixels" with a DELETE. Moved files are
+  analysed again; that is intended. A fix needs a content hash, not a
+  better key.
 - `TAU` less one shift of every cell alike, up to half a grey level (for
   a 16-bit master against its 8-bit export): a posterize edit, whose tones
   move nearly uniformly, came into the keep candidates, was chosen, and
@@ -1640,7 +1704,8 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   **Adding a category**: a `problems::Note` variant, its arm in `Note::says`
   (skip or problem, log tag, summary label) and its place in `Note::ALL`;
   callers say `problems.note(Note::X, what)`. Not a counter of its own.
-- `-o`, `--dump`, `--log-file` may not name a picture, each other, the
+- `-o`, `--dump`, `--log-file` may not name a picture or a name with a
+  picture's extension, each other, the
   cache or the kept scan; at most one output may be stdout, none under the
   window (`outputs::plan`, see *Where a run's output goes*). Reports and
   the dump are written whole or not at all (`outputs::write_whole`: beside
@@ -1648,16 +1713,16 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC16.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC17.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record; a file under
-  another name is answered by a record whose key is its own to a sub-
-  millisecond ctime (moved folders, remounted drives; `Store::relabel`). A run keeps
+  another name is analysed again (intended: see *Tried and rejected*). A run keeps
   what it took and made, and every record it was not asked about (a path it
   did not walk, or other settings) while the file exists or its volume is
   away (`cache::carried`, `away`): a drive where systems mount them
   (`volume_root`: `/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) with
-  nothing there, an `/etc/fstab` mount point not mounted, or a folder gone
+  nothing there, an `/etc/fstab` mount point not mounted, or (whether or not
+  under a mounted fstab mount point, such as `/home`) a folder gone
   whose nearest folder above is empty, not mounted, and on another device
   than the record's file was (`Key::dev`; an sshfs/NFS mount point left
   behind; was a re-analysis each time the share was away). Appended as made; compacted only when

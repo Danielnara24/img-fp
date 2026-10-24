@@ -17,7 +17,17 @@ const CUT_OFF: &str = "the file ends before its image data does";
 pub(super) fn open(bytes: &[u8]) -> Picture<'_> {
     Picture::new(
         // APP1 is among the first segments.
-        move || Facts { damaged: cut_off(bytes).then_some(CUT_OFF), exif: super::exif_in(&bytes[..bytes.len().min(1 << 17)]), ..Facts::default() },
+        move || {
+            let head = Head::of(bytes);
+            Facts {
+                damaged: cut_off(bytes).then_some(CUT_OFF),
+                exif: super::exif_in(&bytes[..bytes.len().min(1 << 17)]),
+                frames: head.pictures >= 2,
+                deep: head.precision > 8,
+                profile: head.profile,
+                ..Facts::default()
+            }
+        },
         move |sink| {
             if sink.grey() && luma(bytes, sink).is_some() {
                 return Ok(());
@@ -230,6 +240,72 @@ pub(super) fn cut_off(b: &[u8]) -> bool {
     }
 }
 
+/// What a JPEG's segments before its first scan say of it.
+#[derive(Default, Debug, PartialEq)]
+pub(super) struct Head {
+    /// The frame header's bits a sample: 8, or 12 (or 16, lossless).
+    pub precision: u8,
+    /// An APP2 `ICC_PROFILE` segment.
+    pub profile: bool,
+    /// The pictures an APP2 `MPF` segment says the file holds (its
+    /// `NumberOfImages`): an Ultra HDR photograph's gain map, a stereo
+    /// camera's second eye (MPO), a large preview. They follow the first
+    /// picture's end, which is all a decoder reads, so a copy with them cut
+    /// away decodes to the same pixels and is not the same file. 0 without
+    /// one.
+    pub pictures: u32,
+}
+
+impl Head {
+    pub fn of(b: &[u8]) -> Head {
+        let mut head = Head::default();
+        if !b.starts_with(&[0xFF, 0xD8]) {
+            return head;
+        }
+        let mut i = 2;
+        loop {
+            while b.get(i) == Some(&0xFF) && b.get(i + 1) == Some(&0xFF) {
+                i += 1;
+            }
+            if b.get(i) != Some(&0xFF) {
+                return head;
+            }
+            let Some(&m) = b.get(i + 1) else { return head };
+            let Some(len) = b.get(i + 2..i + 4).map(|l| u16::from_be_bytes([l[0], l[1]]) as usize) else { return head };
+            let Some(seg) = b.get(i + 4..(i + 2 + len).min(b.len())) else { return head };
+            match m {
+                0xDA | 0xD9 => return head,
+                // Frame headers, not DHT, JPG or DAC.
+                0xC0..=0xCF if !matches!(m, 0xC4 | 0xC8 | 0xCC) => head.precision = seg.first().copied().unwrap_or(0),
+                0xE2 if seg.starts_with(b"ICC_PROFILE\0") => head.profile = true,
+                0xE2 if seg.starts_with(b"MPF\0") => head.pictures = mpf_pictures(&seg[4..]).unwrap_or(0),
+                _ => {}
+            }
+            if len < 2 {
+                return head;
+            }
+            i += 2 + len;
+        }
+    }
+}
+
+/// `NumberOfImages` (tag 0xB001) of an MPF segment's index directory,
+/// which follows a TIFF header in either byte order.
+fn mpf_pictures(t: &[u8]) -> Option<u32> {
+    let le = match t.get(..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let at = |o: usize, n: usize| -> Option<u32> {
+        let s = t.get(o..o.checked_add(n)?)?;
+        Some(if le { s.iter().rev().fold(0u32, |v, &x| v << 8 | x as u32) } else { s.iter().fold(0u32, |v, &x| v << 8 | x as u32) })
+    };
+    let ifd = at(4, 4)? as usize;
+    let n = at(ifd, 2)? as usize;
+    (0..n.min(64)).map(|e| ifd + 2 + e * 12).find(|&o| at(o, 2) == Some(0xB001)).and_then(|o| at(o + 8, 4))
+}
+
 /// Whether two JPEGs hold the same coded picture and differ only in their
 /// metadata: the same bytes once every APPn and COM segment is left out of
 /// each. Such files decode alike in every channel, which is the common way
@@ -273,5 +349,30 @@ pub(super) fn jpeg_coding(b: &[u8]) -> Option<Vec<u8>> {
             out.extend_from_slice(&b[i..end]);
         }
         i = end;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A JPEG's facts from its segments: its precision, a profile, and the
+    /// pictures an MPF index says it holds, in either byte order.
+    #[test]
+    fn a_jpegs_head_says_its_depth_profile_and_pictures() {
+        let seg = |m: u8, body: &[u8]| [&[0xFF, m][..], &((body.len() + 2) as u16).to_be_bytes(), body].concat();
+        let mpf = |le: bool, n: u32| {
+            let (u16b, u32b): (fn(u16) -> [u8; 2], fn(u32) -> [u8; 4]) = if le { (u16::to_le_bytes, u32::to_le_bytes) } else { (u16::to_be_bytes, u32::to_be_bytes) };
+            let entry = |tag: u16, ty: u16, v: [u8; 4]| [&u16b(tag)[..], &u16b(ty), &u32b(1), &v].concat();
+            [&b"MPF\0"[..], if le { b"II*\0" } else { b"MM\0*" }, &u32b(8), &u16b(2), &entry(0xB000, 7, *b"0100"), &entry(0xB001, 4, u32b(n)), &u32b(0)].concat()
+        };
+        let sof = |bits: u8| seg(0xC0, &[bits, 0, 8, 0, 8, 1, 1, 0x11, 0]);
+        let file = |parts: &[Vec<u8>]| [&[0xFF, 0xD8][..], &parts.concat(), &[0xFF, 0xDA, 0, 2]].concat();
+        assert_eq!(Head::of(&file(&[sof(8)])), Head { precision: 8, profile: false, pictures: 0 });
+        assert_eq!(Head::of(&file(&[seg(0xE2, b"ICC_PROFILE\0\x01\x01"), sof(12)])), Head { precision: 12, profile: true, pictures: 0 });
+        for le in [true, false] {
+            assert_eq!(Head::of(&file(&[seg(0xE2, &mpf(le, 2)), sof(8)])).pictures, 2, "le {le}");
+        }
+        assert_eq!(Head::of(&file(&[seg(0xE2, b"MPF\0MM\0*"), sof(8)])).pictures, 0, "an index that is not there");
     }
 }

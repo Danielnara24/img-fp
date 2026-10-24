@@ -23,6 +23,8 @@ pub(super) fn open(bytes: &[u8]) -> Result<Picture<'_>> {
             lossless: head.compression.is_none_or(|c| !LOSSY.contains(&c)),
             frames: head.pictures >= 2,
             exif: head.exif,
+            deep: head.bits > 8,
+            profile: head.profile,
             ..Facts::default()
         },
         move |sink| {
@@ -54,6 +56,10 @@ pub(super) struct Head {
     /// The first directory points to an EXIF directory (tag 34665), which is
     /// where a TIFF keeps EXIF.
     pub exif: bool,
+    /// The first directory's bits a sample (tag 258), its first sample's.
+    pub bits: u64,
+    /// The first directory carries an ICC profile (tag 34675).
+    pub profile: bool,
 }
 
 impl Head {
@@ -103,6 +109,13 @@ impl Head {
                     271 => make = true,
                     330 => subifds = true,
                     34665 if k == 0 => head.exif = true,
+                    34675 if k == 0 => head.profile = true,
+                    // SHORTs: in the value when they fit, else where it points.
+                    258 if k == 0 => {
+                        let n = at(o + 4, value_len).unwrap_or(1);
+                        let first = if n * 2 <= value_len as u64 { Some((o + 4 + value_len) as u64) } else { at(o + 4 + value_len, value_len) };
+                        head.bits = first.and_then(|p| at(p as usize, 2)).unwrap_or(0);
+                    }
                     50706 => dng = true,
                     _ => {}
                 }

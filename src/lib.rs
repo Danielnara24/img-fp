@@ -327,8 +327,10 @@ struct Args {
 //
 // `--work-size` has no floor, deliberately. Swept from 1 to 384 on both
 // corpora, a working image under 8 pixels a side describes to no features at
-// all, and the run says so — exit 2, every file listed as featureless — so it
-// is never silent. Above that nothing is a threshold: 96 merged no families
+// all, and the run says so: every file is listed among the skips as an image
+// with no detail to match. It exits 0, since a featureless file is a skip
+// and not a problem (a folder holding one plain backdrop exited 2 on every
+// run). Above that nothing is a threshold: 96 merged no families
 // where 128 and 192 each merged one, and a floor anywhere would be a guess.
 
 /// `--min-frame-overlap` and `--min-pixel-correlation`: both are fractions.

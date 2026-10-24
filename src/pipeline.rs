@@ -1310,6 +1310,7 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
         let s = match kind {
             same::Kind::Identical => Stated::Identical,
             same::Kind::SamePixels => Stated::SamePixels,
+            same::Kind::SameCoding => Stated::SameCoding,
             same::Kind::SameGrey => Stated::Claim(grey.next().expect("one claim per grey pair")),
         };
         (a, b, s)

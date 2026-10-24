@@ -451,7 +451,7 @@ to stderr.
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC16.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC17.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -487,13 +487,12 @@ Byte-identical copies of them are still found.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC16.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC16.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC17.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC17.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
-and entries for deleted files are dropped automatically. A folder that is
-renamed or moved, or a drive mounted at another place, keeps its entries,
-except on a FAT or exFAT drive such as a memory card, whose clock is too
-coarse to tell its files apart that way.
+and entries for deleted files are dropped automatically. Images in a folder
+that is renamed or moved, or on a drive mounted at another place, are
+analysed again.
 Use `--clear-cache` to start over.
 
 The part of the name after `analysis-` is the cache format, which changes

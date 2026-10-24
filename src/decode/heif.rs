@@ -12,7 +12,9 @@ pub(super) fn open(bytes: &[u8]) -> Result<Picture<'_>> {
     // libheif has limits of its own, but they are a fixed size and not this
     // machine's; the same refusal as every other decoder, from the header.
     too_large("heif", p.width(), p.height(), if p.has_alpha() { 8 } else { 6 }, max_alloc())?;
-    Ok(Picture::new(move || Facts { frames: sequence(bytes), exif: super::exif_in(bytes), ..Facts::default() }, move |sink| read(p, bytes, sink)))
+    // A profile is a `colr` box of type `prof` or `rICC`.
+    let profile = move || [b"colrprof", b"colrrICC"].iter().any(|t| memchr::memmem::find(bytes, *t).is_some());
+    Ok(Picture::new(move || Facts { frames: sequence(bytes), exif: super::exif_in(bytes), profile: profile(), ..Facts::default() }, move |sink| read(p, bytes, sink)))
 }
 
 fn read(p: crate::heif::Primary<'_>, bytes: &[u8], sink: &mut dyn Sink) -> Result<()> {

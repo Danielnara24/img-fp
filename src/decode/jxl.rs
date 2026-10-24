@@ -11,7 +11,15 @@ use std::io::Cursor;
 /// are pictures of their own.
 pub(super) fn open(bytes: &[u8]) -> Result<Picture<'_>> {
     let image = image(bytes, max_alloc())?;
-    let facts = Facts { lossless: lossless(&image), frames: image.image_header().metadata.animation.is_some(), exif: super::exif_in(bytes), ..Facts::default() };
+    let meta = &image.image_header().metadata;
+    let facts = Facts {
+        lossless: lossless(&image),
+        frames: meta.animation.is_some(),
+        exif: super::exif_in(bytes),
+        deep: meta.bit_depth.bits_per_sample() > 8,
+        profile: meta.colour_encoding.want_icc() || !meta.colour_encoding.is_srgb(),
+        ..Facts::default()
+    };
     Ok(Picture::new(move || facts, move |sink| read(image, bytes, sink)))
 }
 

@@ -174,6 +174,12 @@ pub fn by_group(mode: Mode, n: usize, seats: impl IntoIterator<Item = Seat>, min
 }
 
 /// What the suggestion reads of one file.
+/// What a file may carry besides the pixels the analysis reads; see
+/// `Ctx::carries_more`.
+fn besides(t: &Traits) -> [bool; 3] {
+    [t.deep, t.profile, t.exif]
+}
+
 #[derive(Clone, Copy)]
 pub struct Picture<'a> {
     /// The picture's own size, and its working image's.
@@ -186,8 +192,13 @@ pub struct Picture<'a> {
 
 /// One stated pair.
 pub enum Link<'a> {
-    /// The same bytes, or the same decoded pixels.
+    /// The same bytes, or the same decoded pixels, proven: two JPEGs of one
+    /// coded picture.
     Exact,
+    /// The same pixels as far as the run can tell (one analysis, one
+    /// colour), not proven: read as `Exact`, except that what a file carries
+    /// besides its pixels decides nothing (`Ctx::carries_more`).
+    Twin,
     /// A verified match: its verdict, the transform from the first file's
     /// working image to the second's, and whether one is the other's negative.
     Edge(&'a Verdict, Affine, bool),
@@ -339,6 +350,8 @@ struct Side {
     /// Whether `f` is the link's first file.
     forward: bool,
     exact: bool,
+    /// `exact` and proven so (`Link::Exact`), not merely read alike.
+    proven: bool,
     /// All of `f`'s frame lands in `to`'s, and the reverse.
     f_in: bool,
     in_f: bool,
@@ -389,9 +402,10 @@ pub fn suggest_pinned(
         };
         let k = shrink(pa) / shrink(pb);
         let (fwd, back) = match link {
-            Link::Exact => {
+            Link::Exact | Link::Twin => {
                 let ls = k.max(1e-6).log2();
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: true, f_in: true, in_f: true, sx: ls, sy: ls, f_out: 0.0, clean: true };
+                let proven = matches!(link, Link::Exact);
+                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: true, proven, f_in: true, in_f: true, sx: ls, sy: ls, f_out: 0.0, clean: true };
                 (s, Side { to: *a as u32, forward: false, sx: -ls, sy: -ls, ..s })
             }
             Link::Edge(v, m, inverted) => {
@@ -413,14 +427,14 @@ pub fn suggest_pinned(
                 let deletes = !mirrored(m) && v.blk >= min_correlation && (clean || v.blk >= WEAK_DELETES);
                 let mutual = deletes && !a_in_b && !b_in_a && a_out <= CROPS && b_out <= CROPS;
                 let (a_in_b, b_in_a) = (a_in_b || mutual, b_in_a || mutual);
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, f_in: a_in_b, in_f: b_in_a, sx, sy, f_out: a_out, clean };
+                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, sx, sy, f_out: a_out, clean };
                 (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, sx: -sx, sy: -sy, f_out: b_out, ..s })
             }
         };
         all_sides[*a].push(fwd);
         all_sides[*b].push(back);
         let usable = match link {
-            Link::Exact => true,
+            Link::Exact | Link::Twin => true,
             // A mirror image settles nothing either way, as a negative does
             // not. It shows all of the picture, turned the other way round,
             // and which of the two is the right way round is not something a
@@ -709,6 +723,21 @@ impl Ctx<'_> {
             && self.same(k, d)
     }
 
+    /// `d` carries something besides its pixels that `k` does not: more
+    /// than eight bits a sample, a colour profile, EXIF (`besides`).
+    ///
+    /// **Same pixels are not the same file.** The analysis reads eight bits
+    /// and no profile, so a 16-bit master and its 8-bit export, a photograph
+    /// and its copy stripped of its Adobe RGB profile, a camera's JPEG and
+    /// one stripped of its EXIF are each one picture to it, and the smallest
+    /// was kept: the stripped copy, every time. Nothing here is measured or
+    /// trusted: a file either holds the thing or does not, and the one that
+    /// does is a superset of the one that does not.
+    fn carries_more(&self, k: usize, d: usize) -> bool {
+        let (a, b) = (besides(&self.pics[k].traits), besides(&self.pics[d].traits));
+        a.iter().zip(&b).any(|(&k, &d)| d && !k)
+    }
+
     /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
     /// besides `d` holds no picture.
     ///
@@ -778,7 +807,7 @@ impl Ctx<'_> {
     fn transform(&self, f: usize, g: usize) -> Option<Affine> {
         let e = self.side(f, g)?;
         match &self.links[e.link as usize].2 {
-            Link::Exact => None,
+            Link::Exact | Link::Twin => None,
             Link::Edge(_, m, _) => if e.forward { Some(*m) } else { invert_affine(m) },
         }
     }
@@ -925,12 +954,19 @@ impl Ctx<'_> {
         if !sharp.is_empty() {
             t = sharp;
         }
-        // Pixel-identical files stand as one: the smallest of them.
+        // Pixel-identical files stand as one: the smallest of them, or of
+        // those proven its pixels, the one that carries most besides them
+        // (`carries_more`).
         let twins = |f: usize| -> Vec<usize> {
             c.iter().copied().filter(|&g| g == f || self.side(f, g).is_some_and(|e| e.exact)).collect()
         };
-        let mut reps: Vec<usize> =
-            t.iter().map(|&f| twins(f).into_iter().min_by_key(|&g| (self.pics[g].bytes, g)).unwrap()).collect();
+        let carried = |g: usize| std::cmp::Reverse(besides(&self.pics[g].traits).iter().filter(|&&b| b).count());
+        let stands_for = |f: usize| -> usize {
+            let small = twins(f).into_iter().min_by_key(|&g| (self.pics[g].bytes, g)).unwrap();
+            let proven = twins(f).into_iter().filter(|&g| g == small || self.side(small, g).is_some_and(|e| e.proven));
+            proven.min_by_key(|&g| (carried(g), self.pics[g].bytes, g)).unwrap()
+        };
+        let mut reps: Vec<usize> = t.iter().map(|&f| stands_for(f)).collect();
         reps.sort_unstable();
         reps.dedup();
         let lossless = |f: usize| twins(f).iter().any(|&g| self.pics[g].traits.lossless);
@@ -1049,6 +1085,14 @@ impl<'c, 'a> Component<'c, 'a> {
         // A file of several pictures shows more than the first, which is
         // all any match was made on: only a copy of its bytes holds it.
         if x.pics[d].traits.frames && !x.side(d, k).is_some_and(|e| e.exact) {
+            return Some(Refusal::Held);
+        }
+        // Nor is a file deleted for the same pixels without what it carries
+        // besides them (`carries_more`), where the pixels are proven the same:
+        // read alike only, the file that carries more may be the one whose
+        // pixels are not the original's (a posterized PNG with the profile,
+        // against a lossless WebP without it).
+        if x.side(d, k).is_some_and(|e| e.proven) && x.carries_more(k, d) {
             return Some(Refusal::Held);
         }
         // In a set with no picture copied at its own frame — a photograph
@@ -1445,6 +1489,29 @@ mod tests {
         let got = suggest(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
         // The same pixels: the smaller file is kept.
         assert_eq!(got, [Some(Action::Delete), Some(Action::Keep)]);
+    }
+
+    /// Of the same pixels, proven, the file that carries more besides them
+    /// (more bits, a colour profile, EXIF) is kept, however large; two that
+    /// each carry what the other lacks are both kept. Read alike only, size
+    /// decides as before.
+    #[test]
+    fn of_the_same_pixels_the_file_that_carries_more_is_kept() {
+        let t = thumb();
+        let plain = colourful();
+        fn pic<'a>(t: &'a Thumb, traits: &'a Traits, bytes: u64) -> Picture<'a> {
+            Picture { dims: (128, 96), work: (128, 96), thumb: t, traits, bytes }
+        }
+        for richer in [Traits { deep: true, ..colourful() }, Traits { profile: true, ..colourful() }, Traits { exif: true, ..colourful() }] {
+            let got = suggest(&[pic(&t, &richer, 9_000), pic(&t, &plain, 1_000)], &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
+            assert_eq!(got, [Some(Action::Keep), Some(Action::Delete)]);
+        }
+        // Read alike but not proven the same pixels, the smaller is kept.
+        let got = suggest(&[pic(&t, &Traits { profile: true, ..colourful() }, 9_000), pic(&t, &plain, 1_000)], &[(0, 1, Link::Twin)], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Delete), Some(Action::Keep)]);
+        let (tagged, dated) = (Traits { profile: true, ..colourful() }, Traits { exif: true, ..colourful() });
+        let got = suggest(&[pic(&t, &tagged, 2_000), pic(&t, &dated, 1_000)], &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Keep)]);
     }
 
     /// An original among several softer copies of its size is not deleted

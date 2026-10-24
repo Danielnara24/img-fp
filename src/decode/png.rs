@@ -25,6 +25,9 @@ pub(super) fn open(bytes: &[u8]) -> Picture<'_> {
             lossless: !indexed(bytes),
             frames: apng_animated(bytes),
             exif: has_chunk(bytes, b"eXIf"),
+            // IHDR's bit depth.
+            deep: bytes.get(24) == Some(&16),
+            profile: has_chunk(bytes, b"iCCP"),
             damaged: cut.get().then_some(CUT_OFF),
         },
         move |sink| {

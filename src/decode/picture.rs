@@ -27,6 +27,10 @@ pub(super) struct Facts {
     pub frames: bool,
     /// Carries an EXIF block where its format keeps one; see `Traits::exif`.
     pub exif: bool,
+    /// More than eight bits a sample; see `Traits::deep`.
+    pub deep: bool,
+    /// Carries a colour profile; see `Traits::profile`.
+    pub profile: bool,
     /// What was wrong with a file that decoded only in part; see
     /// `Decoded::damaged`.
     pub damaged: Option<&'static str>,

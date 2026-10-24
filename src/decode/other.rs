@@ -39,8 +39,16 @@ pub(super) fn open_ico(bytes: &[u8]) -> Picture<'_> {
 fn facts(fmt: ImageFormat, b: &[u8]) -> Facts {
     let u16_at = |at: usize| b.get(at..at + 2).map(|v| u16::from_le_bytes([v[0], v[1]]));
     let u32_at = |at: usize| b.get(at..at + 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
-    // A WebP's EXIF is a chunk of its own, after the picture.
+    // A WebP's EXIF is a chunk of its own, after the picture; so is its
+    // profile, before it.
     let exif = fmt == ImageFormat::WebP && riff_chunks(b, b"EXIF") >= 1;
+    let profile = fmt == ImageFormat::WebP && riff_chunks(b, b"ICCP") >= 1;
+    // Float pictures, farbfeld's sixteen bits, a PNM past 255.
+    let deep = match fmt {
+        ImageFormat::OpenExr | ImageFormat::Hdr | ImageFormat::Farbfeld => true,
+        ImageFormat::Pnm => pnm_max(b).is_some_and(|v| v > 255),
+        _ => false,
+    };
     let (lossless, frames) = match fmt {
         ImageFormat::WebP => (webp_lossless(b) == Some(true), riff_chunks(b, b"ANMF") >= 2),
         ImageFormat::Gif => (false, gif_frames(b) >= 2),
@@ -55,7 +63,21 @@ fn facts(fmt: ImageFormat, b: &[u8]) -> Facts {
         ImageFormat::Pnm | ImageFormat::Qoi | ImageFormat::Ico | ImageFormat::OpenExr | ImageFormat::Hdr | ImageFormat::Farbfeld => (true, false),
         _ => (false, false),
     };
-    Facts { lossless, frames, exif, ..Facts::default() }
+    Facts { lossless, frames, exif, deep, profile, ..Facts::default() }
+}
+
+/// A PNM's largest sample value: the third number after a `P2`, `P3`, `P5`
+/// or `P6` (comments skipped), or a PAM's `MAXVAL`.
+fn pnm_max(b: &[u8]) -> Option<u32> {
+    let head = std::str::from_utf8(b.get(..b.len().min(512))?).unwrap_or_else(|e| std::str::from_utf8(&b[..e.valid_up_to()]).unwrap_or(""));
+    if let Some(rest) = head.strip_prefix("P7") {
+        return rest.lines().find_map(|l| l.trim().strip_prefix("MAXVAL")).and_then(|v| v.trim().parse().ok());
+    }
+    if !matches!(head.get(..2)?, "P2" | "P3" | "P5" | "P6") {
+        return None;
+    }
+    let words = head[2..].lines().map(|l| l.split('#').next().unwrap_or("")).flat_map(str::split_whitespace);
+    words.skip(2).next()?.parse().ok()
 }
 
 /// Any format `image` reads, decoded whole, into `sink`.
@@ -209,4 +231,15 @@ pub(super) fn gif_frames(b: &[u8]) -> usize {
         }
     }
     frames
+}
+
+#[cfg(test)]
+mod pnm_tests {
+    #[test]
+    fn a_pnms_largest_value_is_read_past_comments() {
+        assert_eq!(super::pnm_max(b"P6\n# made by hand\n4 3\n65535\n\0\0"), Some(65535));
+        assert_eq!(super::pnm_max(b"P5 4 3 255 xx"), Some(255));
+        assert_eq!(super::pnm_max(b"P7\nWIDTH 4\nHEIGHT 3\nDEPTH 3\nMAXVAL 1023\nENDHDR\n"), Some(1023));
+        assert_eq!(super::pnm_max(b"P4\n4 3\n"), None);
+    }
 }

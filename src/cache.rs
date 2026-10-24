@@ -134,7 +134,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// `Traits::exif` is said of a WebP, a PNG whose `eXIf` follows its pixels, a
 /// TIFF and a HEIF or JPEG XL whose EXIF lies past the first 128 KB, which a
 /// record of 15 said had none.
-const MAGIC: &[u8; 8] = b"IMGFPC16";
+/// 17: a record says whether its file has more than eight bits a sample
+/// (`Traits::deep`) and carries a colour profile (`Traits::profile`), and a
+/// JPEG holding further pictures (MPF) has `Traits::frames`: the keep rule
+/// reads all three, and a record of 16 says none.
+const MAGIC: &[u8; 8] = b"IMGFPC17";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -208,24 +212,7 @@ impl PartialEq for Key {
     }
 }
 
-impl Key {
-    /// Whether a record with this key may answer for a file found under
-    /// another name (`open`): the file moved, or its drive was mounted
-    /// elsewhere, and kept its times, which a move does. Only with a change
-    /// time finer than a millisecond, where no two files' coincide: a
-    /// filesystem that keeps it to the second (FAT, some shares) or to ten
-    /// milliseconds (exFAT) can give two pictures of one length one key.
-    fn says_which_file(&self) -> bool {
-        self.ctime % 1_000_000 != 0
-    }
-
-    /// What `eq` compares, to look a key up by.
-    fn of(&self) -> (u64, i64, i64) {
-        (self.len, self.mtime, self.ctime)
-    }
-}
-
-/// The default cache file's name, which carries the format: `analysis-IMGFPC16.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC17.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -512,7 +499,7 @@ fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), tr: &Traits, f: &F
     for v in tr.detail.iter().chain([&tr.colour]).chain(tr.grid.iter()) {
         b.f32(*v)?;
     }
-    b.u32(tr.lossless as u32 | (tr.exif as u32) << 1 | (tr.frames as u32) << 2)?;
+    b.u32(tr.lossless as u32 | (tr.exif as u32) << 1 | (tr.frames as u32) << 2 | (tr.deep as u32) << 3 | (tr.profile as u32) << 4)?;
     b.u32(f.w)?;
     b.u32(f.h)?;
     b.u32(f.kps.len() as u32)?;
@@ -783,9 +770,6 @@ struct Asked {
     /// That record's analysis, when its key is the file's and it has not
     /// been taken.
     record: Option<Record>,
-    /// Where `record` is when it is another name's: the file moved (`open`),
-    /// and the record is written again under this one when it is taken.
-    moved: Option<Span>,
 }
 
 /// A record this run was not asked about; see `Store::unasked`.
@@ -857,18 +841,18 @@ pub enum Compacted {
 /// key (once or more): what the progress bar knows of the cache's answers
 /// before the read is done. A later record for the path may still replace it.
 ///
-/// **A file found under another name than its record's is still answered**
-/// when the record's key is the file's and says which file it is
-/// (`Key::says_which_file`): a folder renamed or moved, or a drive mounted at
-/// another point (`/media/u/DISK1` beside a second `DISK`), keeps every
-/// file's length and times, and its records were all thrown away for their
-/// path, the whole folder analysed again. The record is written again under
-/// the new name when it is taken (`take`); the old one goes with its path.
+/// **A file found under another name than its record's is analysed again.**
+/// 0.69.0 answered it with another name's record whose key (length, mtime,
+/// ctime to the nanosecond) was its own, so a renamed folder or a drive
+/// mounted elsewhere kept its analysis. The key does not say which file it
+/// is: the kernel's change time is coarse (a clock tick), and files written
+/// or `touch`ed together share it, so same-size BMPs copied as one folder
+/// all had one key. Scanned in two runs, one took the other's analysis and
+/// the two different pictures were reported "same pixels", one DELETE. A
+/// moved file costs its analysis again; that is what is intended.
 pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, met: &(dyn Fn(usize) + Sync), problems: &mut Problems) -> Store {
     let (mut got, mut store) = {
         let walked: HashMap<&Path, (usize, Option<Key>)> = files.iter().enumerate().map(|(i, f)| (f.0.as_path(), (i, f.1))).collect();
-        let by_key: HashMap<(u64, i64, i64), usize> =
-            files.iter().enumerate().filter_map(|(i, f)| f.1.filter(Key::says_which_file).map(|k| (k.of(), i))).collect();
         let walked = |p: &Path, k: Key| match walked.get(p) {
             Some(&(i, key)) => {
                 if key == Some(k) {
@@ -876,40 +860,21 @@ pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, met
                 }
                 true
             }
-            // Another name's record, unpacked when it may be a walked file's.
-            None => match by_key.get(&k.of()) {
-                Some(&i) if k.says_which_file() => {
-                    met(i);
-                    true
-                }
-                _ => false,
-            },
+            None => false,
         };
         read(path, want, &walked, problems)
     };
     store.usable = got.len();
-    let mut asked: Vec<Asked> = files
+    store.asked = files
         .into_iter()
         .map(|(name, key)| match got.remove(&name) {
-            Some((k, record, span)) => Asked { record: record.filter(|_| key == Some(k)), name, key, found: Some(span), moved: None },
-            None => Asked { name, key, found: None, record: None, moved: None },
+            Some((k, record, span)) => Asked { record: record.filter(|_| key == Some(k)), name, key, found: Some(span) },
+            None => Asked { name, key, found: None, record: None },
         })
         .collect();
     // What is left is every record at this run's settings for a path it did
-    // not walk, and those unpacked are another name's for a walked file.
-    let mut moved: HashMap<(u64, i64, i64), (Record, Span)> = HashMap::new();
-    for (path, (k, record, span)) in got {
-        if let Some(r) = record {
-            moved.insert(k.of(), (r, span));
-        }
-        store.unasked.push(Unasked { path, span, dev: k.dev, here: true });
-    }
-    for a in asked.iter_mut().filter(|a| a.record.is_none()) {
-        if let Some((r, span)) = a.key.filter(Key::says_which_file).and_then(|k| moved.remove(&k.of())) {
-            (a.record, a.moved) = (Some(r), Some(span));
-        }
-    }
-    store.asked = asked;
+    // not walk.
+    store.unasked.extend(got.into_iter().map(|(path, (k, _, span))| Unasked { path, span, dev: k.dev, here: true }));
     store.live = Mutex::new(vec![None; store.asked.len()]);
     store
 }
@@ -1167,37 +1132,8 @@ impl Store {
     pub fn take(&mut self, i: usize) -> Option<Record> {
         let a = &mut self.asked[i];
         let record = a.record.take()?;
-        let span = match a.moved.take() {
-            Some(from) => self.relabel(i, from),
-            None => a.found,
-        };
-        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = span;
+        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = a.found;
         Some(record)
-    }
-
-    /// The record at `from`, another name's, appended again under walked
-    /// file `i`'s name and key: its bytes after the path are the analysis,
-    /// which is the file's wherever it is, so they are copied, not packed
-    /// again. Where it went, or `None` when it could not be.
-    fn relabel(&self, i: usize, from: Span) -> Option<Span> {
-        let (a, file) = (&self.asked[i], self.file.as_ref()?);
-        let key = a.key?;
-        let mut raw = vec![0u8; usize::try_from(from.len).ok()?];
-        file.read_exact_at(&mut raw, from.at).ok()?;
-        let old = usize::try_from(u64::from_le_bytes(raw.get(..8)?.try_into().ok()?)).ok()?;
-        // The settings, then the key and the device, which are this file's.
-        let rest = raw.get(8 + old..)?;
-        let (settings, after) = (rest.get(..12)?, rest.get(12 + 32..)?);
-        let name = a.name.as_os_str().as_bytes();
-        let mut b = Buf(Vec::with_capacity(8 + name.len() + rest.len()));
-        b.bytes(name).ok()?;
-        b.0.extend_from_slice(settings);
-        b.u64(key.len).ok()?;
-        b.i64(key.mtime).ok()?;
-        b.i64(key.ctime).ok()?;
-        b.u64(key.dev).ok()?;
-        b.0.extend_from_slice(after);
-        self.write(b.0)
     }
 
     /// Put walked file `i`'s analysis into the file, as soon as it is made,
@@ -1703,6 +1639,8 @@ where
     traits.lossless = flags & 1 != 0;
     traits.exif = flags & 2 != 0;
     traits.frames = flags & 4 != 0;
+    traits.deep = flags & 8 != 0;
+    traits.profile = flags & 16 != 0;
     let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
     let (tw, th) = (r.u32()?, r.u32()?);
     let scale = r.f32()?;
@@ -1900,8 +1838,10 @@ fn carried(unasked: &[Unasked]) -> Vec<&Unasked> {
 /// - it is where systems mount drives (`volume_root`), and nothing is there
 ///   now (`unmounted`): udisks removes the folder it made, so this is the
 ///   one sign left of a drive under `/media`;
-/// - it is under a mount point `/etc/fstab` names, and that is not mounted
-///   (when it is, the file is gone from it, and nothing else is asked);
+/// - it is under a mount point `/etc/fstab` names, and that is not mounted;
+///   when it is, the third sign is still asked, since a share can be
+///   mounted inside it (`~/nas` on a `/home` partition: Fedora's default
+///   layout lists `/home`, and such a share's records were dropped);
 /// - the folder is not there, and the nearest folder above it that is, is
 ///   empty and nothing is mounted on it: the mount point an sshfs, NFS or
 ///   SMB share, or a disk mounted by hand, leaves behind (`~/nas`, `/srv`).
@@ -1924,8 +1864,8 @@ fn away(file: &Path, dev: u64, mounts: &Mounts, volumes: &mut HashMap<PathBuf, b
     if volume_root(file).is_some_and(|r| asked(r, true)) {
         return true;
     }
-    if let Some(r) = mounts.configured(folder) {
-        return asked(r.to_path_buf(), false);
+    if mounts.configured(folder).is_some_and(|r| asked(r.to_path_buf(), false)) {
+        return true;
     }
     use std::os::unix::fs::MetadataExt;
     left_behind(folder).is_some_and(|r| std::fs::metadata(&r).is_ok_and(|m| m.dev() != dev) && asked(r, true))
@@ -2234,7 +2174,6 @@ mod tests {
         assert_eq!(m.configured(Path::new("/home/u")), None, "/ is no drive that comes and goes");
         let mut volumes = HashMap::new();
         assert!(away(Path::new("/srv/nas/2019/a.jpg"), 0, &m, &mut volumes), "named in fstab, not mounted");
-        assert!(!away(Path::new("/srv/my disk/2019/a.jpg"), 0, &m, &mut volumes), "mounted: the files are gone");
 
         let dir = scratch("left-behind");
         let (nas, here) = (dir.join("nas"), dir.join("here"));
@@ -2254,6 +2193,17 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let own = std::fs::metadata(&nas).unwrap().dev();
         assert!(!away(&nas.join("photos/2019/a.jpg"), own, &none, &mut HashMap::new()), "a folder deleted, its parent left empty");
+        // A drive fstab names, mounted: the files are gone from it.
+        let disk = dir.join("my disk");
+        std::fs::create_dir_all(disk.join("other")).unwrap();
+        let on = Mounts::of(&format!("40 22 0:9 / {} rw - ext4 /dev/sdb1 rw\n", disk.display()), &format!("UUID=b {} ext4 noauto 0 2\n", disk.display()));
+        assert!(!away(&disk.join("2019/a.jpg"), 0, &on, &mut HashMap::new()), "mounted: the files are gone");
+        // The same share's mount point on a partition fstab names and that
+        // is mounted, as `/home` is.
+        let tmp = std::env::temp_dir();
+        let home = Mounts::of(&format!("22 1 0:5 / {} rw - ext4 /dev/sda2 rw\n", tmp.display()), &format!("UUID=h {} ext4 defaults 0 2\n", tmp.display()));
+        assert!(away(&nas.join("photos/2019/a.jpg"), 0, &home, &mut HashMap::new()), "a share left behind inside a mounted partition");
+        assert!(!away(&here.join("photos/a.jpg"), 0, &home, &mut HashMap::new()), "and a folder deleted there is still deleted");
 
         // Carried through it, a file this run was not asked about.
         let unasked = Unasked { path: nas.join("photos/a.jpg"), span: Span { at: 0, len: 0 }, dev: 0, here: true };
@@ -2290,49 +2240,6 @@ mod tests {
     /// nanosecond, and the record is written again under the new name; a key
     /// a coarse clock could give two files answers for no other name.
     #[test]
-    fn a_moved_file_keeps_its_record() {
-        let dir = scratch("moved");
-        let path = dir.join(file_name());
-        let (old_a, new_a) = (dir.join("before/a.jpg"), dir.join("after/a.jpg"));
-        let (old_b, new_b) = (dir.join("before/b.jpg"), dir.join("after/b.jpg"));
-        std::fs::create_dir_all(dir.join("after")).unwrap();
-        for f in [&new_a, &new_b] {
-            std::fs::write(f, b"x").unwrap();
-        }
-        let (f, t) = analysis(6, 4);
-        let fine = Key { len: 10, mtime: 7, ctime: 1_700_000_000_123_456_789, dev: 3 };
-        let coarse = Key { len: 11, mtime: 7, ctime: 1_700_000_000_000_000_000, dev: 3 };
-        let (_, store, _) = reopen(&path);
-        store.put(&old_a, fine, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put(&old_b, coarse, (320, 240), &Traits::default(), &f, &t).unwrap();
-        drop(store);
-
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let here = Key { dev: 9, ..fine };
-        let met = Mutex::new(std::collections::BTreeSet::new());
-        let mut store = open(&path, SETTINGS, vec![(new_a.clone(), Some(here)), (new_b.clone(), Some(coarse))], &|i| {
-            lock_any(&met).insert(i);
-        }, &mut problems);
-        assert_eq!(lock_any(&met).iter().copied().collect::<Vec<_>>(), [0], "the read knew it would answer for a, and only a");
-        assert!(store.take(0).is_some_and(|r| r.feats.desc == f.desc), "a moved is answered");
-        assert!(store.take(1).is_none(), "b's key could be another file's");
-        let kept = store.finish(false);
-        assert_eq!(kept.dropped, 2, "both old names are gone");
-        drop(store);
-
-        let (got, _, bad) = reopen(&path);
-        assert!(!bad);
-        let (key, record, _) = &got[&new_a];
-        assert_eq!((*key, key.dev), (here, 9), "written under the new name, with the device it is on now");
-        assert_eq!(record.as_ref().unwrap().feats.desc, f.desc);
-        assert_eq!(record.as_ref().unwrap().dims, (320, 240));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A record for a path the run does not walk is read for its key and its
-    /// span, and not unpacked — and a later one still supersedes an earlier.
-    #[test]
     fn records_this_run_does_not_walk_are_framed_not_unpacked() {
         let dir = scratch("walked");
         let path = dir.join(file_name());
@@ -2353,6 +2260,26 @@ mod tests {
         let b = &got[Path::new("b.jpg")];
         assert!(b.1.is_none());
         assert_eq!((b.0.len, b.2.at, b.2.len), (3, all[Path::new("b.jpg")].2.at, all[Path::new("b.jpg")].2.len));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file under another name than its record's is analysed again, even
+    /// when the record's key is its own to the nanosecond: files written
+    /// together share one (see `open`).
+    #[test]
+    fn another_names_record_is_not_taken_whatever_its_key() {
+        let dir = scratch("other-name");
+        let path = dir.join(file_name());
+        let (f, t) = analysis(6, 4);
+        let key = Key { len: 10, mtime: 7, ctime: 1_700_000_000_123_456_789, dev: 3 };
+        let (_, store, _) = reopen(&path);
+        store.put(dir.join("sub1/p1.bmp"), key, (320, 240), &Traits::default(), &f, &t).unwrap();
+        drop(store);
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let mut store = open(&path, SETTINGS, vec![(dir.join("sub2/p3.bmp"), Some(key))], &|_| panic!("nothing answers for it"), &mut problems);
+        assert!(store.take(0).is_none());
+        drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }
 

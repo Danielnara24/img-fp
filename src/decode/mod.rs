@@ -159,10 +159,12 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
         None => read(&mut sink),
     }?;
     let (work, size, mut traits) = sink.finish()?;
-    let Facts { lossless, frames, exif, damaged } = (picture.facts)();
+    let Facts { lossless, frames, exif, deep, profile, damaged } = (picture.facts)();
     traits.lossless = lossless;
     traits.frames = frames;
     traits.exif = exif;
+    traits.deep = deep;
+    traits.profile = profile;
     Ok(Decoded { work, size, damaged: damaged.map(String::from), traits })
 }
 

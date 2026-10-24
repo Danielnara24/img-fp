@@ -31,6 +31,8 @@ pub(crate) enum Stated<'a> {
     Identical,
     /// Not the same bytes, the same picture; see `same::Kind`.
     SamePixels,
+    /// Not the same bytes, the same coded picture: proven the same pixels.
+    SameCoding,
     /// A verified pair.
     Claim(&'a Claim),
 }
@@ -47,7 +49,8 @@ impl<'a> Stated<'a> {
     pub(crate) fn link(&self) -> suggest::Link<'a> {
         match self {
             Stated::Claim(c) => suggest::Link::Edge(&c.e.v, c.e.v.m, c.e.inverted()),
-            _ => suggest::Link::Exact,
+            Stated::SamePixels => suggest::Link::Twin,
+            Stated::Identical | Stated::SameCoding => suggest::Link::Exact,
         }
     }
 
@@ -56,7 +59,7 @@ impl<'a> Stated<'a> {
         let v = self.verdict();
         let relation = match self {
             Stated::Identical => Relation::Identical,
-            Stated::SamePixels => Relation::SamePixels,
+            Stated::SamePixels | Stated::SameCoding => Relation::SamePixels,
             Stated::Claim(c) => match c.how {
                 How::Direct => Relation::Direct,
                 How::Propagated => Relation::Propagated,

@@ -31,8 +31,14 @@ use std::path::{Path, PathBuf};
 pub(crate) enum Kind {
     /// The same bytes.
     Identical,
-    /// Not the same bytes, the same pixels.
+    /// Not the same bytes, the same pixels as far as the run can tell: one
+    /// analysis and one colour. Not proven: the analysis is the working
+    /// plane's, and a lossless file and its posterized copy read alike.
     SamePixels,
+    /// Not the same bytes, the same coded picture: two JPEGs that differ
+    /// only in their metadata (`decode::same_jpeg_coding`), so the same
+    /// pixels, proven.
+    SameCoding,
     /// One analysis, and not the same colour: the same picture in grey,
     /// which is a match as perfect as a match is (`Verdict::perfect`).
     SameGrey,
@@ -54,6 +60,27 @@ pub(crate) struct Same {
     /// Each file's colour head: the first file of its analysis that is also
     /// of its colour.
     colour: Vec<usize>,
+    /// Each file's coding head: its colour head when the two are proven the
+    /// same pixels (`Alike::Coding`), else its byte original. Two files of
+    /// one coding head are `Kind::SameCoding`.
+    coded: Vec<usize>,
+}
+
+/// How two files analysed alike are alike in colour, if they are; see
+/// `same_colour`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Alike {
+    No,
+    /// Their colour reads the same.
+    Colour,
+    /// Two JPEGs of one coded picture: the same pixels, proven.
+    Coding,
+}
+
+impl From<bool> for Alike {
+    fn from(b: bool) -> Alike {
+        if b { Alike::Colour } else { Alike::No }
+    }
 }
 
 impl Same {
@@ -76,7 +103,7 @@ impl Same {
             at.insert(g[0], k);
         }
         let classes = groups.iter().map(|g| (g[0], g.clone())).collect();
-        Same { analysis: bytes.clone(), colour: bytes.clone(), bytes, groups, at, classes }
+        Same { analysis: bytes.clone(), colour: bytes.clone(), coded: bytes.clone(), bytes, groups, at, classes }
     }
 
     /// The file whose bytes `i` is: the one described for it.
@@ -117,13 +144,14 @@ impl Same {
     /// document whose first page is a picture), so it is matched as any
     /// other file is, and stated as no more than a match. A byte copy is
     /// answered for by its original, and is its original's colour.
-    fn settle(&mut self, items: &[Item], same_colour: impl Fn(usize, usize) -> bool + Sync) {
+    fn settle(&mut self, items: &[Item], same_colour: impl Fn(usize, usize) -> Alike + Sync) {
         let n = self.bytes.len();
         let pixel_of =
             same_analysis(items, |i| !self.is_copy(i) && items[i].read.ok() && items[i].feats.len() > 0 && !items[i].traits.frames);
-        let head = colour_heads(&pixel_of, same_colour);
+        let (head, proven) = colour_heads(&pixel_of, same_colour);
         self.analysis = (0..n).map(|i| pixel_of[self.bytes[i]]).collect();
         self.colour = (0..n).map(|i| head[self.bytes[i]]).collect();
+        self.coded = (0..n).map(|i| if proven[self.bytes[i]] { head[self.bytes[i]] } else { self.bytes[i] }).collect();
         let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, &o) in self.analysis.iter().enumerate() {
             if o != i {
@@ -196,7 +224,14 @@ impl Same {
             for (w, &a) in class.iter().enumerate() {
                 for &b in &class[w + 1..] {
                     if self.bytes[a] != self.bytes[b] {
-                        out.push((a, b, if self.colour[a] == self.colour[b] { Kind::SamePixels } else { Kind::SameGrey }));
+                        let kind = if self.coded[a] == self.coded[b] {
+                            Kind::SameCoding
+                        } else if self.colour[a] == self.colour[b] {
+                            Kind::SamePixels
+                        } else {
+                            Kind::SameGrey
+                        };
+                        out.push((a, b, kind));
                     }
                 }
             }
@@ -298,7 +333,10 @@ fn same_analysis(items: &[Item], candidate: impl Fn(usize) -> bool + Sync) -> Ve
 /// counted the other and stopped the second look: 0.07 points of recall on
 /// IMGS-ALL); it is stated as the perfect match it is in grey, and the keep
 /// rule's colour over grey decides between them.
-fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync) -> Vec<usize> {
+///
+/// Beside each file's head, whether it was found alike to it by proof
+/// (`Alike::Coding`); a head is its own proof.
+fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> Alike + Sync) -> (Vec<usize>, Vec<bool>) {
     let mut classes: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, &o) in of.iter().enumerate() {
         if o != i {
@@ -306,7 +344,7 @@ fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync)
         }
     }
     // On every thread, since the colour may have to be decoded.
-    let answered: Vec<(usize, usize)> = classes
+    let answered: Vec<(usize, usize, bool)> = classes
         .into_values()
         .collect::<Vec<_>>()
         .into_par_iter()
@@ -315,8 +353,11 @@ fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync)
             let mut heads: Vec<usize> = Vec::new();
             let mut out = Vec::new();
             for i in class {
-                match heads.iter().find(|&&h| same_colour(h, i)) {
-                    Some(&h) => out.push((i, h)),
+                match heads.iter().find_map(|&h| match same_colour(h, i) {
+                    Alike::No => None,
+                    alike => Some((h, alike == Alike::Coding)),
+                }) {
+                    Some((h, proven)) => out.push((i, h, proven)),
                     None => heads.push(i),
                 }
             }
@@ -324,10 +365,12 @@ fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync)
         })
         .collect();
     let mut head: Vec<usize> = (0..of.len()).collect();
-    for (i, h) in answered {
+    let mut proven = vec![true; of.len()];
+    for (i, h, p) in answered {
         head[i] = h;
+        proven[i] = p;
     }
-    head
+    (head, proven)
 }
 
 /// Whether two files analysed alike are alike in colour too; see
@@ -341,14 +384,14 @@ fn colour_heads(of: &[usize], same_colour: impl Fn(usize, usize) -> bool + Sync)
 /// the most colour codec noise gives a grey picture, so it is the most two
 /// encodings of one picture's colour can differ by and still be noise. A
 /// colour photograph against its grey copy differs by its own colour.
-fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<HashMap<usize, Option<decode::Chroma>>>, a: usize, b: usize) -> bool {
+fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<HashMap<usize, Option<decode::Chroma>>>, a: usize, b: usize) -> Alike {
     let (ca, cb) = (items[a].traits.colour, items[b].traits.colour);
     if ca >= 0.0 && ca.to_bits() == cb.to_bits() {
-        return true;
+        return Alike::Colour;
     }
     // Both JPEGs with colour planes, which a decode to grey does not measure.
     if ca < 0.0 && cb < 0.0 && decode::same_jpeg_coding(&files[a], &files[b]) == Some(true) {
-        return true;
+        return Alike::Coding;
     }
     let of = |i: usize| -> Option<decode::Chroma> {
         if let Some(&c) = chroma.lock().unwrap().get(&i) {
@@ -359,8 +402,8 @@ fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<Hash
         c
     };
     match (of(a), of(b)) {
-        (Some(x), Some(y)) => decode::chroma_distance(&x, &y) <= suggest::COLOURFUL,
-        _ => false,
+        (Some(x), Some(y)) => (decode::chroma_distance(&x, &y) <= suggest::COLOURFUL).into(),
+        _ => Alike::No,
     }
 }
 
@@ -601,10 +644,13 @@ mod tests {
         assert_eq!(of, vec![0, 1, 0, 3, 4, 5, 6]);
         // Alike in grey and in colour, the same pixels; alike in grey only,
         // as a grey copy of a colour JPEG is, its own colour.
-        assert_eq!(colour_heads(&of, |_, _| true), vec![0, 1, 0, 3, 4, 5, 6]);
-        assert_eq!(colour_heads(&of, |a, b| (a, b) != (0, 2)), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(colour_heads(&of, |_, _| Alike::Colour).0, vec![0, 1, 0, 3, 4, 5, 6]);
+        assert_eq!(colour_heads(&of, |a, b| ((a, b) != (0, 2)).into()).0, vec![0, 1, 2, 3, 4, 5, 6]);
         let of = vec![0, 1, 0, 3, 0];
-        assert_eq!(colour_heads(&of, |a, b| (a, b) != (0, 2) && (a, b) != (0, 4)), vec![0, 1, 2, 3, 2], "the first file of its colour");
+        assert_eq!(colour_heads(&of, |a, b| ((a, b) != (0, 2) && (a, b) != (0, 4)).into()).0, vec![0, 1, 2, 3, 2], "the first file of its colour");
+        // Proven alike, or read alike: which, for each file and its head.
+        let coding = |a: usize, b: usize| if (a, b) == (0, 2) { Alike::Coding } else { Alike::Colour };
+        assert_eq!(colour_heads(&of, coding), (vec![0, 1, 0, 3, 0], vec![true, true, true, true, false]));
     }
 
     /// A pair between originals is stated for every copy of either, each
@@ -657,7 +703,7 @@ mod tests {
         // 1 is 0's bytes, 4 is 3's, 7 and 8 are one file and no picture.
         let mut same = Same::of_bytes(items.len(), vec![vec![0, 1], vec![3, 4], vec![7, 8]]);
         // 3 is not the others' colour.
-        same.settle(&items, |a, b| a != 3 && b != 3);
+        same.settle(&items, |a, b| (a != 3 && b != 3).into());
         assert_eq!((0..9).map(|i| same.answers_for(i)).collect::<Vec<_>>(), [0, 0, 0, 0, 0, 5, 6, 7, 7]);
         assert_eq!(same.identical_to(4), [3, 4]);
         assert_eq!(same.identical_to(2), [2]);
@@ -680,6 +726,11 @@ mod tests {
         // A match of 0's is a match of every file it answers for.
         let out = same.expand(vec![Claim { e: Edge::new(0, 5, Verdict::default()), how: How::Direct }]);
         assert_eq!(out.iter().map(|c| c.e.ends()).collect::<Vec<_>>(), [(0, 5), (1, 5), (2, 5), (3, 5), (4, 5)]);
+        // 2 proven 0's coded picture, so 0's byte copy 1's too.
+        let mut same = Same::of_bytes(items.len(), vec![vec![0, 1], vec![3, 4], vec![7, 8]]);
+        same.settle(&items, |a, b| if (a, b) == (0, 2) { Alike::Coding } else { (a != 3 && b != 3).into() });
+        let kinds: Vec<(usize, usize, Kind)> = same.pairs(|i| i != 8).into_iter().filter(|p| p.2 != SameGrey).collect();
+        assert_eq!(kinds, [(0, 1, Identical), (3, 4, Identical), (0, 2, SameCoding), (1, 2, SameCoding)]);
     }
 
     /// The hash read a piece at a time is the hash of the whole: every length

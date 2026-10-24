@@ -39,6 +39,16 @@ pub struct Traits {
     /// made on, so the suggestion deletes such a file only for a copy of its
     /// bytes.
     pub frames: bool,
+    /// More than eight bits a sample: a 16-bit PNG or TIFF, a 12-bit JPEG,
+    /// a JPEG XL of more bits, a float picture (EXR, HDR), farbfeld, a PNM
+    /// whose largest value is past 255. The analysis reads eight, so an
+    /// 8-bit export of such a master is the same pixels to it, and the
+    /// master holds what the export lost. Not said of HEIF.
+    pub deep: bool,
+    /// Carries a colour profile (an ICC profile; for JPEG XL, colours that
+    /// are not sRGB): the same values are other colours under it, and a copy
+    /// stripped of it is the same pixels shown wrong.
+    pub profile: bool,
 }
 
 /// `Traits::detail` and `colour` as they are summed over one picture's rows:

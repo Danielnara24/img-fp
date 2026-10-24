@@ -156,9 +156,16 @@ pub fn plan(args: &Args, window: bool) -> Result<Outputs> {
     // representative. A glob gets there (`img-fp -o *.jpg` is `-o` the first
     // JPEG and a scan of the rest), and the log is the worst, truncated
     // before anything else has run.
+    //
+    // Nor does it write a file named as one: `-o report.png` wrote a text
+    // report there, and every later scan of that folder took it for a
+    // picture that would not open, a problem and exit 2 each time.
     for (flag, p) in &named {
         if crate::decode::is_a_picture(p) {
             anyhow::bail!("{flag} {} is a picture, and img-fp will not write over one; name another file", p.display());
+        }
+        if crate::extensions::names_an_image(p) {
+            anyhow::bail!("{flag} {} is named as a picture, and scans would read it as one; name a .txt, .csv or .json file", p.display());
         }
     }
     outputs_are_distinct(args, &named)?;
@@ -498,6 +505,23 @@ mod tests {
             assert_eq!(Report::new(To::Path(name.into()), None).format, f, "{name}");
         }
         assert_eq!(Report::new(To::Path("r.bak".into()), Some(Format::Json)).format, Format::Json);
+    }
+
+    /// No output is named as a picture, whether one is there or not: the
+    /// next scan of its folder would take it for one.
+    #[test]
+    fn no_output_is_named_as_a_picture() {
+        let dir = std::env::temp_dir().join(format!("img-fp-named-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for flag in ["-o", "--dump", "--log-file"] {
+            for name in ["r.png", "r.JPG", "r.heic"] {
+                let p = dir.join(name);
+                let e = plan(&args(&[flag, p.to_str().unwrap()]), false).unwrap_err().to_string();
+                assert!(e.contains("named as a picture"), "{flag} {name}: {e}");
+            }
+        }
+        assert!(plan(&args(&["-o", dir.join("r.json").to_str().unwrap()]), false).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The kept scan beside the cache is one of the files no output may name,

@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "img-fp"
-version = "0.69.0"
+version = "0.70.0"
 dependencies = [
  "anyhow",
  "async-channel",
