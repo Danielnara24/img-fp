@@ -363,6 +363,9 @@ struct Side {
     f_out: f32,
     /// The pair is clean: no block of its overlap disagrees.
     clean: bool,
+    /// Each frame is in the other only as two crops of one picture are,
+    /// each missing a strip the other has (`CROPS`): not the same frame.
+    mutual: bool,
 }
 
 /// The action for every file in a pair, by index; `None` for the rest.
@@ -405,7 +408,7 @@ pub fn suggest_pinned(
             Link::Exact | Link::Twin => {
                 let ls = k.max(1e-6).log2();
                 let proven = matches!(link, Link::Exact);
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: true, proven, f_in: true, in_f: true, sx: ls, sy: ls, f_out: 0.0, clean: true };
+                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: true, proven, f_in: true, in_f: true, sx: ls, sy: ls, f_out: 0.0, clean: true, mutual: false };
                 (s, Side { to: *a as u32, forward: false, sx: -ls, sy: -ls, ..s })
             }
             Link::Edge(v, m, inverted) => {
@@ -427,7 +430,7 @@ pub fn suggest_pinned(
                 let deletes = !mirrored(m) && v.blk >= min_correlation && (clean || v.blk >= WEAK_DELETES);
                 let mutual = deletes && !a_in_b && !b_in_a && a_out <= CROPS && b_out <= CROPS;
                 let (a_in_b, b_in_a) = (a_in_b || mutual, b_in_a || mutual);
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, sx, sy, f_out: a_out, clean };
+                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, sx, sy, f_out: a_out, clean, mutual };
                 (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, sx: -sx, sy: -sy, f_out: b_out, ..s })
             }
         };
@@ -1010,9 +1013,6 @@ struct Component<'c, 'a> {
     /// Classes: files of one frame, each holding the other.
     class: HashMap<usize, usize>,
     classes: Vec<Vec<usize>>,
-    /// How many different pictures each class holds: its files, each set
-    /// of the same bytes or the same pixels counted once.
-    distinct: Vec<usize>,
     /// `whole_worst` by (keeper, deleted), and the blurs it read.
     whole: RefCell<HashMap<(usize, usize), f32>>,
     blurs: RefCell<Blurs>,
@@ -1060,11 +1060,25 @@ impl<'c, 'a> Component<'c, 'a> {
             list.sort_unstable();
             classes.push(list);
         }
-        let distinct = classes
-            .iter()
-            .map(|c| c.iter().enumerate().filter(|&(i, &f)| !c[..i].iter().any(|&g| ctx.side(f, g).is_some_and(|e| e.exact))).count())
-            .collect();
-        Component { ctx, plain, part, any_plain, class, classes, distinct, whole: Default::default(), blurs: Default::default() }
+        Component { ctx, plain, part, any_plain, class, classes, whole: Default::default(), blurs: Default::default() }
+    }
+
+    /// How many different pictures of the frame `k` and `d` share class `c`
+    /// holds, a set of the same bytes or pixels counted once. Of two files of
+    /// one frame, the two and each other file that is that frame to both,
+    /// not a crop of it each misses a strip of (`mutual`): counting the class
+    /// whole, a crop from the other side made a third picture, and a q92
+    /// file was deleted for its own q88 re-encode, which beside each other
+    /// alone were undecided. Of two such crops, the class whole, as before:
+    /// counted the narrow way, every pair of slight crops of one photograph
+    /// was undecided, and kept from deletion what the original would delete
+    /// (200 files of IMGS-ALL, `rotate_small`, `print_scan`, `crop_slight`).
+    fn pictures_of_one_frame(&self, c: usize, k: usize, d: usize) -> usize {
+        let x = self.ctx;
+        let strict = |f: usize, g: usize| x.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f && !e.mutual));
+        let narrow = strict(k, d);
+        let of = self.classes[c].iter().copied().filter(|&g| !narrow || g == k || g == d || (strict(g, k) && strict(g, d))).collect::<Vec<_>>();
+        of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| x.side(f, g).is_some_and(|e| e.exact))).count()
     }
 
     /// The whole-frame check of deleting `d` for `k` (`whole_worst`).
@@ -1111,7 +1125,7 @@ impl<'c, 'a> Component<'c, 'a> {
         // pinned file is kept whatever it is, so against a library the
         // question is not asked.
         if !x.is_pinned(k)
-            && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.distinct[c] < 3)
+            && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.pictures_of_one_frame(c, k, d) < 3)
             && x.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
             && !x.more(k, d)
             && !x.more(d, k)

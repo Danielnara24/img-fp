@@ -27,8 +27,9 @@ shows each group and moves the images you choose to the Trash.
 
 ## Requirements
 
-Linux on x86_64 with glibc 2.34 or newer: Ubuntu 22.04+, Debian 12+, Fedora
-35+, Arch, openSUSE Tumbleweed and Leap 15.4+, RHEL 9+ and its rebuilds.
+Linux on x86_64 with glibc 2.28 or newer: Ubuntu 20.04+, Debian 10+, Fedora
+29+, Arch, openSUSE Tumbleweed and Leap 15.3+, RHEL 8+ and its rebuilds. The
+desktop app needs a newer system; see below.
 img-fp runs on any x86_64 CPU and uses AVX2 when the CPU has it (Intel Haswell
 or newer, any AMD Zen).
 
@@ -451,7 +452,7 @@ to stderr.
 | `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC17.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC18.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -487,8 +488,8 @@ Byte-identical copies of them are still found.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC17.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC17.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC18.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC18.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Images in a folder
 that is renamed or moved, or on a drive mounted at another place, are

@@ -138,7 +138,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// (`Traits::deep`) and carries a colour profile (`Traits::profile`), and a
 /// JPEG holding further pictures (MPF) has `Traits::frames`: the keep rule
 /// reads all three, and a record of 16 says none.
-const MAGIC: &[u8; 8] = b"IMGFPC17";
+/// 18: `Traits::frames` is said of a JPEG holding a video or another JPEG
+/// after its picture (a Motion Photo), and not of one whose MPF index adds
+/// only a large thumbnail; a record of 17 says the opposite of both.
+const MAGIC: &[u8; 8] = b"IMGFPC18";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -212,7 +215,7 @@ impl PartialEq for Key {
     }
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC17.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC18.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -997,6 +1000,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
             // Replaced by an empty one, unless another run is using it.
             Found::Unusable => {
                 if exclusive(&f, path) {
+                    heads::remove(path);
                     match replace_with(path, |f| Buf(f).header()) {
                         Ok(f) => store.file = Some(f),
                         Err(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display())),
@@ -1091,7 +1095,30 @@ fn read_file(
     // buffer was 0.25 s; this is 0.40-0.51 against 0.70-0.75 before, and
     // cold 1.35-1.61. What would read only the heads is an index, which
     // the format does not have.
-    match read_stream(std::io::BufReader::with_capacity(1 << 20, f), size, want, walked, out, others) {
+    let index = heads::load(f, path, size);
+    let covered = index.as_ref().map_or(0, |i| i.end);
+    let mut seen = Vec::new();
+    let read = match index.and_then(|i| read_indexed(f, size, i, want, walked, out, others, &mut seen)) {
+        Some(read) => read,
+        None => {
+            // No index, or one this file does not bear out: read it whole.
+            out.clear();
+            others.clear();
+            seen.clear();
+            (|| {
+                let mut r = Rd { r: std::io::BufReader::with_capacity(1 << 20, f), pos: 0, size, ended: false };
+                (&*f).rewind().map_err(|e| Reject::Damaged(e.into()))?;
+                let mut reading = Reading::new(want, walked, out, others, &mut seen);
+                reading.magic(&mut r)?;
+                reading.stream(&mut r);
+                Ok(reading.done())
+            })()
+        }
+    };
+    if let Ok(tail) = &read {
+        heads::refresh(f, path, covered, tail, &seen);
+    }
+    match read {
         Ok(tail) => {
             if let Some(why) = &tail.broken_at {
                 problems.note(Note::Cache, format_args!(
@@ -1364,9 +1391,15 @@ impl Store {
             b.header()?;
             let mut buf = Vec::new();
             let mut to = MAGIC.len() as u64;
-            for &(_, s) in entries.iter() {
+            for &(p, s) in entries.iter() {
                 buf.resize(s.len as usize, 0);
                 src.read_exact_at(&mut buf, s.at)?;
+                // A span is where a record of its path begins; anything else
+                // would copy the middle of one.
+                let name = p.as_os_str().as_bytes();
+                if buf.get(..8) != Some(&(name.len() as u64).to_le_bytes()[..]) || buf.get(8..8 + name.len()) != Some(name) {
+                    bail!("a record is not where it was read");
+                }
                 b.0.write_all(&buf)?;
                 moved.insert(s.at, to);
                 to += s.len;
@@ -1374,6 +1407,7 @@ impl Store {
             b.0.flush()?;
             Ok(())
         })?;
+        heads::remove(&self.path);
         self.moved = Some(moved);
         self.read_end = new.metadata().map_or(u64::MAX, |m| m.len());
         self.file = Some(new);
@@ -1658,88 +1692,409 @@ where
     Ok(Some((head, blob)))
 }
 
-fn read_stream<R: Read + Skip>(
-    r: R,
+/// Reading the file's records, in the order they were written, wherever
+/// they are read from: the whole file in order (`stream`), or the heads the
+/// index holds and the bodies this run unpacks (`read_indexed`).
+struct Reading<'a, 'o> {
+    want: Settings,
+    walked: Walked<'a>,
+    out: &'o mut HashMap<PathBuf, Entry>,
+    others: &'o mut Vec<Unasked>,
+    /// The latest record for each path made at other settings, and where it
+    /// is in `others`.
+    other_at: HashMap<(PathBuf, Settings), usize>,
+    tail: Tail,
+    batch: Vec<(Head, Vec<u8>, Span)>,
+    /// Every record met, for the index (`heads::refresh`).
+    seen: &'o mut Vec<heads::Entry>,
+}
+
+impl<'a, 'o> Reading<'a, 'o> {
+    fn new(want: Settings, walked: Walked<'a>, out: &'o mut HashMap<PathBuf, Entry>, others: &'o mut Vec<Unasked>, seen: &'o mut Vec<heads::Entry>) -> Self {
+        let tail = Tail { end: MAGIC.len() as u64, count: 0, truncated: false, damaged: 0, broken_at: None };
+        Reading { want, walked, out, others, other_at: HashMap::new(), tail, batch: Vec::with_capacity(BATCH), seen }
+    }
+
+    /// The header: this format's, or the reason not to read on.
+    fn magic<R: Read>(&mut self, r: &mut Rd<R>) -> Result<(), Reject> {
+        let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
+        if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
+            return Err(anyhow!("not a cache file").into());
+        }
+        if &magic != MAGIC {
+            // A cache this build cannot read, written by a build that could. See
+            // the note on MAGIC: that is the format changing, not a damaged file.
+            return Err(Reject::OtherVersion(String::from_utf8_lossy(&magic).into_owned()));
+        }
+        Ok(())
+    }
+
+    /// Whether a record's body is unpacked: made at this run's settings, for
+    /// a path it walks.
+    fn wants(&self, settings: Settings, path: &Path, key: Key) -> bool {
+        settings == self.want && (self.walked)(path, key)
+    }
+
+    /// Every record from where `r` stands to the end of the file.
+    fn stream<R: Read + Skip>(&mut self, r: &mut Rd<R>) {
+        loop {
+            let at = r.pos;
+            let (want, walked) = (self.want, self.walked);
+            match read_record(r, |h| h.settings == want && walked(&h.path, h.key)) {
+                Ok(None) => break,
+                Ok(Some((head, blob))) => {
+                    self.tail.end = r.pos;
+                    let span = Span { at, len: r.pos - at };
+                    self.seen.push(heads::Entry::of(&head, span));
+                    self.record(head, blob, span);
+                }
+                Err(_) if r.ended => {
+                    self.tail.truncated = true;
+                    break;
+                }
+                // The framing is damaged, so nothing after this point can be
+                // found. Everything before it is still good, and it used to be
+                // thrown away with the rest: the whole file was rejected and
+                // replaced, taking every other folder's records with it.
+                Err(e) => {
+                    self.tail.truncated = true;
+                    self.tail.broken_at = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    /// One record framed whole, and its body if `wants` asked for it.
+    fn record(&mut self, head: Head, blob: Vec<u8>, span: Span) {
+        self.tail.count += 1;
+        // A record framed whole whose shape its own settings cannot
+        // produce: its own bytes are damaged, and the records around
+        // it are not. It is counted, so that the run sees the file
+        // holds something to compact away, and not kept.
+        if misshapen(&head) {
+            self.tail.damaged += 1;
+            return;
+        }
+        // Made at other settings: kept where it is, for whichever run
+        // asks at those settings next.
+        let s = head.settings;
+        if s != self.want {
+            self.other(head.path, s, span, head.key.dev);
+            return;
+        }
+        self.batch.push((head, blob, span));
+        if self.batch.len() == BATCH {
+            self.tail.damaged += unpack_batch(&mut self.batch, self.walked, self.out);
+        }
+    }
+
+    fn other(&mut self, path: PathBuf, s: Settings, span: Span, dev: u64) {
+        match self.other_at.entry((path, s)) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let u = &mut self.others[*e.get()];
+                (u.span, u.dev) = (span, dev);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                self.others.push(Unasked { path: e.key().0.clone(), span, dev, here: false });
+                e.insert(self.others.len() - 1);
+            }
+        }
+    }
+
+    fn done(mut self) -> Tail {
+        self.tail.damaged += unpack_batch(&mut self.batch, self.walked, self.out);
+        self.tail
+    }
+}
+
+/// A record whose shape its own settings cannot produce. A thumbnail's side
+/// may pass the setting on a picture wider than 4:3 (`decode::area_factor`),
+/// but never its area, nor `lib::THUMB_MAX_SIDES` times it.
+fn misshapen(head: &Head) -> bool {
+    let s = head.settings;
+    let (tw, th) = (head.tw as u64, head.th as u64);
+    let (thumb, sides) = (s.thumb as u64, s.thumb as u64 * crate::THUMB_MAX_SIDES as u64);
+    head.n > s.features as usize || tw * th > thumb * thumb || tw.max(th) > sides
+}
+
+/// The file read through its index (`heads`): the heads of the records it
+/// covers from the index, the bodies this run unpacks by `pread`, and what
+/// was appended after it in order. `None` where the file does not bear the
+/// index out, and it is read whole instead.
+///
+/// **Only the bodies this run unpacks are read.** Read in order, a scan of
+/// four files against a 529 MB cache read all 529 MB, page cache cold, to
+/// learn the paths and keys in the heads: 0.65 s against 0.10 s without the
+/// cache, and on a spinning disk with a cache of a few gigabytes, tens of
+/// seconds for any scan at all. A smaller buffer made the skips seeks, and
+/// the chain of small reads defeated readahead (twice as slow cold). Where
+/// this run unpacks most of the file anyway, it is read in order as before.
+#[allow(clippy::too_many_arguments)]
+fn read_indexed(
+    f: &File,
     size: u64,
+    index: heads::Index,
     want: Settings,
     walked: Walked,
     out: &mut HashMap<PathBuf, Entry>,
     others: &mut Vec<Unasked>,
-) -> Result<Tail, Reject> {
-    let mut r = Rd { r, pos: 0, size, ended: false };
-    let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
-    if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
-        return Err(anyhow!("not a cache file").into());
-    }
+    seen: &mut Vec<heads::Entry>,
+) -> Option<Result<Tail, Reject>> {
+    let mut magic = [0u8; 8];
+    f.read_exact_at(&mut magic, 0).ok()?;
     if &magic != MAGIC {
-        // A cache this build cannot read, written by a build that could. See
-        // the note on MAGIC: that is the format changing, not a damaged file.
-        return Err(Reject::OtherVersion(String::from_utf8_lossy(&magic).into_owned()));
+        return None;
     }
-    // The latest record for each path made at other settings, and where it
-    // is in `others`.
-    let mut other_at: HashMap<(PathBuf, Settings), usize> = HashMap::new();
-    let mut tail = Tail { end: r.pos, count: 0, truncated: false, damaged: 0, broken_at: None };
-    let mut batch: Vec<(Head, Vec<u8>, Span)> = Vec::with_capacity(BATCH);
-    loop {
-        let at = r.pos;
-        match read_record(&mut r, |h| h.settings == want && walked(&h.path, h.key)) {
-            Ok(None) => break,
-            Ok(Some((head, blob))) => {
-                tail.end = r.pos;
-                tail.count += 1;
-                // A record framed whole whose shape its own settings cannot
-                // produce: its own bytes are damaged, and the records around
-                // it are not. It is counted, so that the run sees the file
-                // holds something to compact away, and not kept.
-                // A thumbnail's side may pass the setting on a picture wider
-                // than 4:3 (`decode::area_factor`), but never its area, nor
-                // `lib::THUMB_MAX_SIDES` times it.
-                let s = head.settings;
-                let (tw, th) = (head.tw as u64, head.th as u64);
-                let (thumb, sides) = (s.thumb as u64, s.thumb as u64 * crate::THUMB_MAX_SIDES as u64);
-                if head.n > s.features as usize || tw * th > thumb * thumb || tw.max(th) > sides {
-                    tail.damaged += 1;
-                    continue;
-                }
-                // Made at other settings: kept where it is, for whichever run
-                // asks at those settings next.
-                if s != want {
-                    let span = Span { at, len: r.pos - at };
-                    match other_at.entry((head.path, s)) {
-                        std::collections::hash_map::Entry::Occupied(e) => {
-                            let u = &mut others[*e.get()];
-                            (u.span, u.dev) = (span, head.key.dev);
-                        }
-                        std::collections::hash_map::Entry::Vacant(e) => {
-                            others.push(Unasked { path: e.key().0.clone(), span, dev: head.key.dev, here: false });
-                            e.insert(others.len() - 1);
-                        }
-                    }
-                    continue;
-                }
-                batch.push((head, blob, Span { at, len: r.pos - at }));
-                if batch.len() == BATCH {
-                    tail.damaged += unpack_batch(&mut batch, walked, out);
-                }
+    let mut reading = Reading::new(want, walked, out, others, seen);
+    let wanted: Vec<&heads::Entry> = index.entries.iter().filter(|e| !e.misshapen && reading.wants(e.settings, &e.path, e.key)).collect();
+    if wanted.iter().map(|e| e.span.len).sum::<u64>() * 2 > size {
+        return None;
+    }
+    // The bodies, a run of neighbours at a time, checked against the index
+    // as they are read: a head that is not the index's ends the reading.
+    let mut bodies: HashMap<u64, (Head, Vec<u8>)> = HashMap::with_capacity(wanted.len());
+    let mut k = 0;
+    while k < wanted.len() {
+        let from = wanted[k].span.at;
+        let mut to = k + 1;
+        while to < wanted.len() && wanted[to].span.at == wanted[to - 1].span.at + wanted[to - 1].span.len && wanted[to].span.at - from < 8 << 20 {
+            to += 1;
+        }
+        let end = wanted[to - 1].span.at + wanted[to - 1].span.len;
+        let mut buf = vec![0u8; (end - from) as usize];
+        f.read_exact_at(&mut buf, from).ok()?;
+        let mut r = Rd { r: std::io::Cursor::new(&buf[..]), pos: from, size: end, ended: false };
+        for e in &wanted[k..to] {
+            let (head, blob) = read_record(&mut r, |_| true).ok()??;
+            if head.path != e.path || head.key != e.key || head.key.dev != e.key.dev || head.settings != e.settings || r.pos != e.span.at + e.span.len {
+                return None;
             }
-            Err(_) if r.ended => {
-                tail.truncated = true;
-                break;
+            bodies.insert(e.span.at, (head, blob));
+        }
+        k = to;
+    }
+    for e in &index.entries {
+        reading.seen.push(e.clone());
+        reading.tail.end = e.span.at + e.span.len;
+        if e.misshapen {
+            reading.tail.count += 1;
+            reading.tail.damaged += 1;
+            continue;
+        }
+        match bodies.remove(&e.span.at) {
+            Some((head, blob)) => reading.record(head, blob, e.span),
+            None if e.settings != want => {
+                reading.tail.count += 1;
+                reading.other(e.path.clone(), e.settings, e.span, e.key.dev);
             }
-            // The framing is damaged, so nothing after this point can be
-            // found. Everything before it is still good, and it used to be
-            // thrown away with the rest: the whole file was rejected and
-            // replaced, taking every other folder's records with it.
-            Err(e) => {
-                tail.truncated = true;
-                tail.broken_at = Some(e.to_string());
-                break;
+            // At this run's settings for a path it does not walk: its key
+            // and where it is, which `unpack_batch` keeps of such a record.
+            None => {
+                reading.tail.count += 1;
+                reading.out.insert(e.path.clone(), (e.key, None, e.span));
             }
         }
     }
-    tail.damaged += unpack_batch(&mut batch, walked, out);
-    Ok(tail)
+    // What was appended after the index was written.
+    if index.end < size {
+        let mut b = std::io::BufReader::with_capacity(1 << 20, f);
+        b.seek(std::io::SeekFrom::Start(index.end)).ok()?;
+        let mut r = Rd { r: b, pos: index.end, size, ended: false };
+        reading.stream(&mut r);
+    }
+    Some(Ok(reading.done()))
+}
+
+impl Skip for std::io::Cursor<&[u8]> {
+    fn skip(&mut self, n: u64) -> std::io::Result<()> {
+        self.seek_relative(i64::try_from(n).map_err(std::io::Error::other)?)
+    }
+}
+
+/// The index beside a cache file: the head of every record it covers (path,
+/// settings, key, where it lies), so that a run reads the bodies it unpacks
+/// and nothing else (`read_indexed`).
+///
+/// **The cache file is what is true; the index is a hint it must bear
+/// out.** It is not written as records are appended, and so needs no lock
+/// and no order with the appends of other runs: a run that read past what
+/// the index covers by `WORTH` writes a new one, beside it and renamed into
+/// place, covering the records it read. It is used only when it names the
+/// file as it is — the same device, inode and birth time, no shorter than
+/// what it covers, and the last 4 KB it covers as they were — and every
+/// body read through it must have the head the index gives, or the file is
+/// read whole as it was before there was one. A compaction removes it.
+pub(crate) mod heads {
+    use super::{Head, Key, Settings, Span, Tail, MAGIC};
+    use std::fs::File;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::{FileExt, MetadataExt};
+    use std::path::{Path, PathBuf};
+
+    const INDEX_MAGIC: &[u8; 8] = b"IMGFPH01";
+
+    /// How far past what an index covers a run reads before it writes a new
+    /// one. Below it the file is read whole in about the time an index takes
+    /// to write; a cache of a few hundred photographs never has one.
+    const WORTH: u64 = 16 << 20;
+
+    /// The bytes before the end of what an index covers that it holds a hash
+    /// of, as a check that they are still the file's.
+    const CHECKED: u64 = 4096;
+
+    #[derive(Clone, Debug)]
+    pub(super) struct Entry {
+        pub(super) span: Span,
+        pub(super) settings: Settings,
+        pub(super) key: Key,
+        pub(super) path: PathBuf,
+        /// `super::misshapen`, which a head alone says.
+        pub(super) misshapen: bool,
+    }
+
+    impl Entry {
+        pub(super) fn of(h: &Head, span: Span) -> Entry {
+            Entry { span, settings: h.settings, key: h.key, path: h.path.clone(), misshapen: super::misshapen(h) }
+        }
+    }
+
+    pub(super) struct Index {
+        pub(super) entries: Vec<Entry>,
+        /// Where the last record it covers ends.
+        pub(super) end: u64,
+    }
+
+    /// The index beside the cache file `cache`.
+    pub fn path_of(cache: &Path) -> PathBuf {
+        let mut p = cache.as_os_str().to_owned();
+        p.push(".heads");
+        PathBuf::from(p)
+    }
+
+    /// Remove the index beside `cache`: after a compaction, which moves every
+    /// record, or with the cache itself.
+    pub fn remove(cache: &Path) {
+        let _ = std::fs::remove_file(path_of(cache));
+    }
+
+    /// FNV-1a: stable across builds, which a std hasher is not promised to be.
+    fn hash(b: &[u8]) -> u64 {
+        b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    fn birth(m: &std::fs::Metadata) -> i64 {
+        m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i64)
+    }
+
+    /// The hash of what `f` holds just before `end`.
+    fn checked(f: &File, end: u64) -> Option<u64> {
+        let from = end.saturating_sub(CHECKED).max(MAGIC.len() as u64);
+        let mut b = vec![0u8; end.checked_sub(from)? as usize];
+        f.read_exact_at(&mut b, from).ok()?;
+        Some(hash(&b))
+    }
+
+    /// The index beside `cache`, if it is one for `f` (of `size` bytes) as
+    /// `f` is now; see the module's note.
+    pub(super) fn load(f: &File, cache: &Path, size: u64) -> Option<Index> {
+        let b = std::fs::read(path_of(cache)).ok()?;
+        let (body, sum) = b.split_at_checked(b.len().checked_sub(8)?)?;
+        if hash(body).to_le_bytes() != sum {
+            return None;
+        }
+        let mut r = Bytes { b: body, at: 0 };
+        if r.take(8)? != INDEX_MAGIC || r.take(8)? != MAGIC {
+            return None;
+        }
+        let m = f.metadata().ok()?;
+        let (dev, ino, born, end, check) = (r.u64()?, r.u64()?, r.u64()? as i64, r.u64()?, r.u64()?);
+        if (dev, ino, born) != (m.dev(), m.ino(), birth(&m)) || end > size || checked(f, end)? != check {
+            return None;
+        }
+        let n = r.u64()? as usize;
+        let mut entries = Vec::with_capacity(n.min(body.len() / 64));
+        let mut next = MAGIC.len() as u64;
+        for _ in 0..n {
+            let span = Span { at: r.u64()?, len: r.u64()? };
+            let settings = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
+            let key = Key { len: r.u64()?, mtime: r.u64()? as i64, ctime: r.u64()? as i64, dev: r.u64()? };
+            let misshapen = r.take(1)? != [0];
+            let len = r.u32()? as usize;
+            let path = PathBuf::from(std::ffi::OsString::from_vec(r.take(len)?.to_vec()));
+            // The records it covers lie end to end from the header.
+            if span.at != next || span.len == 0 {
+                return None;
+            }
+            next = span.at + span.len;
+            entries.push(Entry { span, settings, key, path, misshapen });
+        }
+        (next == end && r.at == body.len()).then_some(Index { entries, end })
+    }
+
+    /// Write a new index for `f` when this run read past what the old one
+    /// covered (`covered`, 0 for none) by `WORTH`, covering what it read
+    /// (`seen`, every record to `tail.end`). Nothing is said when it cannot
+    /// be written: the next run reads the file whole, as without one.
+    pub(super) fn refresh(f: &File, cache: &Path, covered: u64, tail: &Tail, seen: &[Entry]) {
+        if tail.broken_at.is_some() || tail.end < covered.max(MAGIC.len() as u64) + WORTH {
+            return;
+        }
+        let Some(m) = f.metadata().ok() else { return };
+        let mut next = MAGIC.len() as u64;
+        if seen.iter().any(|e| std::mem::replace(&mut next, e.span.at + e.span.len) != e.span.at) || next != tail.end {
+            return;
+        }
+        let Some(check) = checked(f, tail.end) else { return };
+        let mut b = Vec::with_capacity(64 + seen.len() * 96);
+        b.extend_from_slice(INDEX_MAGIC);
+        b.extend_from_slice(MAGIC);
+        for v in [m.dev(), m.ino(), birth(&m) as u64, tail.end, check, seen.len() as u64] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for e in seen {
+            for v in [e.span.at, e.span.len] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [e.settings.work_size, e.settings.features, e.settings.thumb] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [e.key.len, e.key.mtime as u64, e.key.ctime as u64, e.key.dev] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            b.push(e.misshapen as u8);
+            let name = e.path.as_os_str().as_bytes();
+            b.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            b.extend_from_slice(name);
+        }
+        b.extend_from_slice(&hash(&b).to_le_bytes());
+        let to = path_of(cache);
+        let mut tmp = to.as_os_str().to_owned();
+        tmp.push(format!(".{}", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        if std::fs::write(&tmp, &b).and_then(|()| std::fs::rename(&tmp, &to)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    struct Bytes<'a> {
+        b: &'a [u8],
+        at: usize,
+    }
+
+    impl<'a> Bytes<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            let s = self.b.get(self.at..self.at.checked_add(n)?)?;
+            self.at += n;
+            Some(s)
+        }
+        fn u64(&mut self) -> Option<u64> {
+            Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+        }
+        fn u32(&mut self) -> Option<u32> {
+            Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+        }
+    }
 }
 
 /// Unpacking is deflate plus a thumbnail's mip pyramid, which is real work on

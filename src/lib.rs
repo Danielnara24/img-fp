@@ -41,6 +41,7 @@ mod group;
 mod heif;
 mod index;
 pub mod last;
+mod matched;
 pub mod outcome;
 mod outputs;
 mod pipeline;

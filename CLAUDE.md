@@ -10,7 +10,7 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.70.0)
+## Status (0.71.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -666,6 +666,36 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   - **No output is named as a picture** (`outputs::plan`, by extension):
     `-o report.png` wrote a text report, and every later scan of its folder
     counted it a picture that would not open (exit 2).
+- 0.71.0 (audit fixes B-H; cache format IMGFPC18;
+  `out/v39-audit`). IMGS-ALL cold against 0.70.0 (`v38-carries/all-new2`):
+  all 1,110,262 pairs and 687 groups identical; 0 lost, 295 / 304, 304 / 304;
+  DELETE 16,763 -> 16,697, REVIEW 3,074 -> 3,156 (E, below). `pairs.py`
+  identical to the row (352 originals deleted, loss 24, REVIEW 29,391).
+  - **B** a JPEG holding a video or another JPEG after its picture (Google /
+    Samsung Motion Photo, a gain map with no MPF) has `Traits::frames`
+    (`jpeg::end`, `holds_media`): its still copy was "same pixels", smaller,
+    and the Motion Photo DELETE.
+  - **F** an MPF index counts its MP entries less large thumbnails (types
+    0x010001/2): many cameras list one, and every such JPEG was a file of
+    several pictures, so a copy differing in a tag was a 444-point match and
+    both KEEP, not "same pixels".
+  - **C** `Note::EmptyLibrary`: a `--against` path that puts no image in the
+    library is a problem (was "against 0 library images", all `new`, exit 0).
+  - **D** the cache's index of heads (`cache::heads`; see *The analysis and
+    the cache*).
+  - **E** the undecided rule between two files of exactly one frame counts
+    only files of that frame (`Component::pictures_of_one_frame`): a crop from
+    the other side was a third picture, so a q92 file was deleted for its own
+    q88 re-encode, which alone were undecided. Between two mutual crops the
+    class is counted whole as before (counted narrowly, 200 deletions of
+    slight crops went to REVIEW). Cost on IMGS-ALL: 66 DELETE -> REVIEW, all
+    derivatives (`rotate_small` 30, `print_scan` 21) whose original stays.
+  - **G** `matched.rs`: an unchanged rescan takes the last run's matching.
+  - **H** the CLI ships built on glibc 2.28 (see *Speed and memory*).
+  - Not done (user's call): **A**, a quarter or half turn deletes like a
+    plain copy, so in a family of three a q95 upside-down copy was KEEP and
+    the upright q87 original DELETE, and `--against` called an upright photo
+    a `repeat` of a sideways library copy; a mirror deletes nothing.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -762,7 +792,9 @@ src/
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
   cache.rs      on-disk analysis cache: answers for a run's files by number,
-                and decides what the file keeps (`Store::finish`)
+                and decides what the file keeps (`Store::finish`); its
+                index of heads (`heads`)
+  matched.rs    the last run's matching, taken by a run with nothing changed
   outcome.rs    a finished scan (groups by number, or against a library each
                 scanned file's pairs; evidence, content rule's suggestions),
                 as the report, --last and the window read it
@@ -930,6 +962,31 @@ this run's taken and made records, plus every record it was not asked
 about whose file is there (`carried`), plus what another run appended
 meanwhile; compacted when the rest is a quarter. `stale()` is only the
 progress bar's guess at whether it will write.
+
+Beside the file, `<cache>.heads` (`cache::heads`) holds every record's
+head (path, settings, key, span) up to where it was written: a run reads the
+heads from it, `pread`s only the bodies it unpacks (`read_indexed`), and
+reads what was appended after it in order; one that unpacks more than half
+the file reads it whole, as before. It is a hint the file must bear out:
+used only for the same device, inode and birth time, no shorter than it
+covers, the last 4 KB it covers unchanged, and every body read through it
+with the head it gives; otherwise the file is read whole. Written (beside
+and renamed, no lock) by a run that read 16 MB (`WORTH`) past what it
+covered; removed by a compaction, which also checks each span starts with
+its path before copying it. Before 0.71.0 every run read the whole file to
+learn the heads: four files against a 529 MB cache read all of it, 0.81 s
+cold against 0.10 s now (648 blocks against 1,036,216). A smaller buffer
+was tried and lost cold (readahead); the index is what the code had said
+was missing.
+
+`<cache>.matched` (`matched.rs`) is the last run's matching: its claims and
+its console notes, under a `Fingerprint` of everything the matching reads
+(this program's bytes, the bars, `-k`, `--skip-mirrored`, the work size, the
+thread count, and each file's path, key, read state and side). A run with
+the same fingerprint takes it after the analysis and goes on to the
+assembly, which is worked out as always (groups, keep rule, report with its
+`pairs`); not with `--dump`, nor a file with no key. IMGS3 unchanged rescan
+26 s -> 10-13 s, reports identical to a cold run's.
 
 **Adding a record kind or a reason to keep one**: a field of `Asked` or
 `Unasked` and a condition in `finish` / `carried`. Not bookkeeping in the
@@ -1443,7 +1500,16 @@ generic `extend`) silently runs the plain copy; check with `objdump`, counting
 `ymm` per symbol. Test both copies agree:
 `RUSTFLAGS="-C target-cpu=x86-64" cargo test --release --lib`.
 
-glibc floor is **2.34**; `release.yml` fails if it moves. f32 and f64 libm functions
+glibc floor is **2.28** for the CLI and **2.34** for the window; `release.yml` fails if
+either moves. A binary asks for the glibc it was linked against, not what
+Rust's std needs (2.17): built on the ubuntu-24.04 runner the CLI asked for
+2.34 (`__libc_start_main`, the pthread functions), which shut out RHEL 8,
+Debian 11 and Ubuntu 20.04 for nothing. Since 0.71.0 the CLI that ships is
+built in `quay.io/pypa/manylinux_2_28_x86_64` (AlmaLinux 8); checked: it runs
+on AlmaLinux 8, Debian 11 and Ubuntu 20.04 and writes reports identical to
+the host build's, which those refuse (`GLIBC_2.34 not found`). It also needs
+`libdl.so.2` and `libpthread.so.0` (separate from libc before 2.34). The
+window needs GTK 4.10, so a newer system anyway. f32 and f64 libm functions
 (`hypotf` and `hypot` are 2.35; 0.34-0.35 and 0.62-0.64 were never released
 for it) can raise it, in either binary: run the workflow's "Verify the
 binaries" step on a `RUSTFLAGS="-C target-cpu=x86-64"` build of both before
@@ -1701,6 +1767,8 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   `img_fp::why` (the cause too; `{e}` of a context dropped "Permission
   denied"). Empty files are in no byte group (`exact_groups`), and files
   refused as no picture format are stated in no pair, whatever their name.
+  A `--against` path that puts no image in the library is a problem
+  (`EmptyLibrary`): every file was `new` and the run exited 0.
   **Adding a category**: a `problems::Note` variant, its arm in `Note::says`
   (skip or problem, log tag, summary label) and its place in `Note::ALL`;
   callers say `problems.note(Note::X, what)`. Not a counter of its own.
@@ -1713,7 +1781,7 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC17.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC18.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime, settings per record; a file under
   another name is analysed again (intended: see *Tried and rejected*). A run keeps

@@ -264,6 +264,9 @@ pub struct Known {
     /// Until then, the files and descriptors verification has already put
     /// past being asked again (`Scope::settled`), which only grows.
     pub settled: (usize, usize),
+    /// The matching is the last run's, taken whole (`matched.rs`): its
+    /// stages have nothing to do.
+    pub matched_before: bool,
 }
 
 impl Known {
@@ -287,6 +290,9 @@ impl Known {
     fn units(&self, s: Stage) -> f64 {
         let (files, images, desc) = (self.files as f64, self.images(), self.descriptors());
         let to_describe = self.to_describe.map_or(files, |n| n as f64);
+        if self.matched_before && !matches!(s, Stage::Identical | Stage::CacheRead | Stage::Headers | Stage::Describe | Stage::CacheWrite | Stage::Assemble) {
+            return 0.0;
+        }
         match s {
             Stage::Identical => files,
             Stage::CacheRead => self.cache_bytes as f64,

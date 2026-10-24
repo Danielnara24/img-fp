@@ -19,10 +19,11 @@ pub(super) fn open(bytes: &[u8]) -> Picture<'_> {
         // APP1 is among the first segments.
         move || {
             let head = Head::of(bytes);
+            let end = end(bytes);
             Facts {
-                damaged: cut_off(bytes).then_some(CUT_OFF),
+                damaged: (end == End::Cut).then_some(CUT_OFF),
                 exif: super::exif_in(&bytes[..bytes.len().min(1 << 17)]),
-                frames: head.pictures >= 2,
+                frames: head.pictures >= 2 || matches!(end, End::At(e) if holds_media(&bytes[e..])),
                 deep: head.precision > 8,
                 profile: head.profile,
                 ..Facts::default()
@@ -193,33 +194,49 @@ pub(super) fn size(r: &mut std::io::BufReader<std::fs::File>) -> Option<(u32, u3
 ///
 /// A header this cannot read is the decoder's to judge, and is not called cut
 /// off here.
+#[cfg(test)]
 pub(super) fn cut_off(b: &[u8]) -> bool {
+    end(b) == End::Cut
+}
+
+/// Where a JPEG's first picture ends, as `cut_off` reads its structure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum End {
+    /// Just past its EOI marker: what follows is a trailer, not the picture.
+    At(usize),
+    /// The file ends first.
+    Cut,
+    /// A header this cannot read.
+    Unread,
+}
+
+pub(super) fn end(b: &[u8]) -> End {
     let mut i = 2;
     loop {
         // A marker, after any fill.
         if i >= b.len() {
-            return true;
+            return End::Cut;
         }
         if b[i] != 0xFF {
-            return false;
+            return End::Unread;
         }
         while i < b.len() && b[i] == 0xFF {
             i += 1;
         }
-        let Some(&m) = b.get(i) else { return true };
+        let Some(&m) = b.get(i) else { return End::Cut };
         i += 1;
         match m {
-            0xD9 => return false,
+            0xD9 => return End::At(i),
             0x01 | 0xD0..=0xD8 => continue,
             _ => {}
         }
-        let Some(len) = b.get(i..i + 2).map(|l| u16::from_be_bytes([l[0], l[1]]) as usize) else { return true };
+        let Some(len) = b.get(i..i + 2).map(|l| u16::from_be_bytes([l[0], l[1]]) as usize) else { return End::Cut };
         if len < 2 {
-            return false;
+            return End::Unread;
         }
         i += len;
         if i > b.len() {
-            return true;
+            return End::Cut;
         }
         if m != 0xDA {
             continue;
@@ -227,17 +244,31 @@ pub(super) fn cut_off(b: &[u8]) -> bool {
         // Image data, to the next marker that is not part of it.
         loop {
             match memchr::memchr(0xFF, &b[i..]) {
-                None => return true,
+                None => return End::Cut,
                 Some(k) => i += k,
             }
             match b.get(i + 1) {
-                None => return true,
+                None => return End::Cut,
                 Some(0x00) | Some(0xD0..=0xD7) => i += 2,
                 Some(0xFF) => i += 1,
                 Some(_) => break,
             }
         }
     }
+}
+
+/// Whether what follows a JPEG's picture holds another picture or a video:
+/// a JPEG (`FF D8 FF`: an Ultra HDR gain map with no MPF index, a depth map)
+/// or an ISO BMFF file (`ftyp`: the video of a Google or Samsung Motion
+/// Photo, which is appended after the photograph). A copy with it cut away
+/// decodes to the same pixels and has lost it. Padding and the small
+/// metadata trailers some cameras append are neither.
+fn holds_media(trailer: &[u8]) -> bool {
+    let jpeg = memchr::memmem::find(trailer, &[0xFF, 0xD8, 0xFF]).is_some();
+    let video = memchr::memmem::find_iter(trailer, b"ftyp").any(|p| {
+        p >= 4 && (8..=4096).contains(&u32::from_be_bytes([trailer[p - 4], trailer[p - 3], trailer[p - 2], trailer[p - 1]]))
+    });
+    jpeg || video
 }
 
 /// What a JPEG's segments before its first scan say of it.
@@ -247,12 +278,15 @@ pub(super) struct Head {
     pub precision: u8,
     /// An APP2 `ICC_PROFILE` segment.
     pub profile: bool,
-    /// The pictures an APP2 `MPF` segment says the file holds (its
-    /// `NumberOfImages`): an Ultra HDR photograph's gain map, a stereo
-    /// camera's second eye (MPO), a large preview. They follow the first
-    /// picture's end, which is all a decoder reads, so a copy with them cut
-    /// away decodes to the same pixels and is not the same file. 0 without
-    /// one.
+    /// The pictures an APP2 `MPF` segment says the file holds, previews
+    /// aside: an Ultra HDR photograph's gain map, a stereo camera's second
+    /// eye (MPO). They follow the first picture's end, which is all a decoder
+    /// reads, so a copy with them cut away decodes to the same pixels and is
+    /// not the same file. A large thumbnail (MP type 0x010001 or 0x010002),
+    /// which many cameras write, is a smaller copy of the first picture and
+    /// is not counted: counted, every such camera JPEG was a file of several
+    /// pictures, and a copy of it differing only in a tag was never a twin.
+    /// 0 without one.
     pub pictures: u32,
 }
 
@@ -289,8 +323,10 @@ impl Head {
     }
 }
 
-/// `NumberOfImages` (tag 0xB001) of an MPF segment's index directory,
-/// which follows a TIFF header in either byte order.
+/// The pictures of an MPF segment's index directory, which follows a TIFF
+/// header in either byte order: its MP entries (tag 0xB002, 16 bytes each,
+/// the type in the low 24 bits of the first word) less the large
+/// thumbnails, or its `NumberOfImages` (tag 0xB001) without entries.
 fn mpf_pictures(t: &[u8]) -> Option<u32> {
     let le = match t.get(..2)? {
         b"II" => true,
@@ -303,7 +339,16 @@ fn mpf_pictures(t: &[u8]) -> Option<u32> {
     };
     let ifd = at(4, 4)? as usize;
     let n = at(ifd, 2)? as usize;
-    (0..n.min(64)).map(|e| ifd + 2 + e * 12).find(|&o| at(o, 2) == Some(0xB001)).and_then(|o| at(o + 8, 4))
+    let tag = |id: u32| (0..n.min(64)).map(|e| ifd + 2 + e * 12).find(|&o| at(o, 2) == Some(id));
+    const LARGE_THUMBNAILS: [u32; 2] = [0x01_0001, 0x01_0002];
+    let entries = tag(0xB002).and_then(|o| {
+        let (count, from) = (at(o + 4, 4)? as usize / 16, at(o + 8, 4)? as usize);
+        (0..count.min(64)).map(|e| at(from.checked_add(e * 16)?, 4)).collect::<Option<Vec<u32>>>()
+    });
+    match entries {
+        Some(e) if !e.is_empty() => Some(e.iter().filter(|&&a| !LARGE_THUMBNAILS.contains(&(a & 0x00FF_FFFF))).count() as u32),
+        _ => tag(0xB001).and_then(|o| at(o + 8, 4)),
+    }
 }
 
 /// Whether two JPEGs hold the same coded picture and differ only in their
@@ -374,5 +419,42 @@ mod tests {
             assert_eq!(Head::of(&file(&[seg(0xE2, &mpf(le, 2)), sof(8)])).pictures, 2, "le {le}");
         }
         assert_eq!(Head::of(&file(&[seg(0xE2, b"MPF\0MM\0*"), sof(8)])).pictures, 0, "an index that is not there");
+    }
+
+    /// With MP entries, a large thumbnail is not a picture of its own; a
+    /// gain map (type 0) or a second eye is.
+    #[test]
+    fn an_mpf_large_thumbnail_is_not_another_picture() {
+        let index = |le: bool, types: &[u32]| {
+            let (u16b, u32b): (fn(u16) -> [u8; 2], fn(u32) -> [u8; 4]) = if le { (u16::to_le_bytes, u32::to_le_bytes) } else { (u16::to_be_bytes, u32::to_be_bytes) };
+            let entry = |tag: u16, ty: u16, n: u32, v: [u8; 4]| [&u16b(tag)[..], &u16b(ty), &u32b(n), &v].concat();
+            let at = 8 + 2 + 3 * 12 + 4;
+            let entries: Vec<u8> = types.iter().flat_map(|&t| [u32b(t), u32b(0), u32b(0), u32b(0)].concat()).collect();
+            let ifd = [&u16b(3)[..], &entry(0xB000, 7, 4, *b"0100"), &entry(0xB001, 4, 1, u32b(types.len() as u32)), &entry(0xB002, 7, 16 * types.len() as u32, u32b(at)), &u32b(0)].concat();
+            [if le { &b"II*\0"[..] } else { b"MM\0*" }, &u32b(8), &ifd, &entries].concat()
+        };
+        for le in [true, false] {
+            assert_eq!(mpf_pictures(&index(le, &[0x2003_0000, 0x0001_0001])), Some(1), "le {le}: primary and a large thumbnail");
+            assert_eq!(mpf_pictures(&index(le, &[0x2003_0000, 0x0001_0002])), Some(1), "le {le}: full-HD thumbnail");
+            assert_eq!(mpf_pictures(&index(le, &[0x2003_0000, 0x0000_0000])), Some(2), "le {le}: a gain map");
+            assert_eq!(mpf_pictures(&index(le, &[0x2002_0002, 0x0002_0002])), Some(2), "le {le}: two eyes");
+        }
+    }
+
+    /// What follows a JPEG's end: a video or another JPEG is more than the
+    /// picture, padding and a short trailer are not.
+    #[test]
+    fn a_motion_photos_video_is_held_after_the_picture() {
+        let pic = [&[0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02][..], &[1, 2, 0xFF, 0x00, 3], &[0xFF, 0xD9]].concat();
+        assert_eq!(end(&pic), End::At(pic.len()));
+        assert_eq!(end(&pic[..pic.len() - 2]), End::Cut);
+        let mp4 = [&[0, 0, 0, 0x18][..], b"ftypmp42", &[0; 12]].concat();
+        let with = |t: &[u8]| { let b = [&pic[..], t].concat(); matches!(end(&b), End::At(e) if holds_media(&b[e..])) };
+        assert!(with(&mp4), "a Motion Photo's video");
+        assert!(with(&[b"MotionPhoto_Data".as_slice(), &mp4].concat()), "Samsung's");
+        assert!(with(&[0xFF, 0xD8, 0xFF, 0xE0]), "a second JPEG");
+        assert!(!with(&[0; 64]), "padding");
+        assert!(!with(b"SEFHImage_UTC_Data1700000000000SEFT"), "a metadata trailer");
+        assert!(!with(b""), "nothing");
     }
 }

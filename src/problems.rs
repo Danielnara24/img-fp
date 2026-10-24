@@ -186,6 +186,12 @@ pub enum Note {
     /// difference between this and an image that failed: there is no telling
     /// how many files it should have contributed.
     Unscannable,
+    /// A `--against` folder or file that put no image in the library: an
+    /// empty folder, one whose pictures are all in subfolders without
+    /// `--recursive`, or one every file of which the scan holds. Every file
+    /// scanned against it is `new`, a copy of one of its pictures too, and
+    /// the run used to say only "against 0 library images" and exit 0.
+    EmptyLibrary,
     /// An image that would not decode. It is in `files_enumerated` and not in
     /// `files_analysed`, and it is listed in the JSON output's `failures` with
     /// the same message.
@@ -214,11 +220,11 @@ enum Weight {
 
 impl Note {
     /// Every category, in the order the summary lists them.
-    const ALL: [Note; 16] = {
+    const ALL: [Note; 17] = {
         use Note::*;
         [
             NotAnImage, SetAside, Hidden, NotImageContent, Symlink, SymlinkLoop, ListedTwice, Excluded,
-            MacMetadata, CameraRaw, Featureless, UnresolvedExclude, Unscannable, Unreadable, Damaged, Cache,
+            MacMetadata, CameraRaw, Featureless, UnresolvedExclude, Unscannable, EmptyLibrary, Unreadable, Damaged, Cache,
         ]
     };
 
@@ -241,6 +247,7 @@ impl Note {
             Note::Featureless => (Skip, "skip/featureless", "image(s) with no detail to match, such as a blank picture: only an identical copy can match one"),
             Note::UnresolvedExclude => (Problem, "problem/unresolved-exclude", "--exclude path(s) could not be resolved; nothing was excluded for them"),
             Note::Unscannable => (Problem, "problem/unscannable", "path(s) could not be scanned"),
+            Note::EmptyLibrary => (Problem, "problem/empty-library", "--against path(s) put no image in the library (a library of subfolders needs --recursive)"),
             Note::Unreadable => (Problem, "problem/unreadable", "image(s) could not be read"),
             Note::Damaged => (Problem, "problem/damaged", "image(s) are cut off and were analysed as far as they could be read"),
             Note::Cache => (Problem, "problem/cache", "cache problem(s)"),

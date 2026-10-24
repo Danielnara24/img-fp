@@ -6,9 +6,13 @@
 # Everything is pure Rust except HEIC/HEIF/AVIF, which go through the system's
 # libheif, LOADED AT RUN TIME (src/heif.rs) the first time such a file is met,
 # not linked: the binary starts without it, and any libheif from 1.12 serves.
-# The CLI's glibc floor is what Rust's std asks for, 2.34 (Ubuntu 22.04,
-# Debian 12, RHEL 9), whatever the runner's glibc is; "Verify the binaries"
-# holds it there.
+# A binary asks for the glibc it was linked against, not the one Rust's std
+# needs (2.17): built on this runner (glibc 2.39) the CLI asked for 2.34
+# (`__libc_start_main`, the pthread functions merged into libc then), which
+# left out RHEL 8 and its rebuilds, Debian 11 and Ubuntu 20.04. So the CLI is
+# built in AlmaLinux 8 (the manylinux_2_28 image, glibc 2.28) and the window,
+# which needs GTK 4.10 and so a newer system anyway, here; "Verify the
+# binaries" holds each to its floor.
 #
 # Each release publishes:
 #   img-fp-<version>-x86_64-linux-gnu  -> archival, one per release
@@ -103,6 +107,19 @@ jobs:
           # modern machine, where the kernels are compiled in directly.
           RUSTFLAGS="-C target-cpu=x86-64-v3" CARGO_TARGET_DIR=target/v3 cargo test --release --locked --lib
 
+      - name: Build the CLI that ships, on glibc 2.28
+        # The same sources and flags as the Build above, whose binary the
+        # tests ran; only the glibc it is linked against differs. Into a
+        # target folder of its own, owned by the runner's user afterwards.
+        run: |
+          docker run --rm -v "$PWD":/src -w /src -e RUSTFLAGS -e CARGO_TARGET_DIR=/src/target/glibc228 \
+            quay.io/pypa/manylinux_2_28_x86_64 bash -c '
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+              . "$HOME/.cargo/env"
+              cargo build --release --locked --bin img-fp'
+          sudo chown -R "$(id -u):$(id -g)" target/glibc228
+          target/glibc228/release/img-fp --version
+
       - name: Build the window
         # Only the img-fp-gui target: target/release/img-fp stays the CLI
         # built above, without the feature. Its tests are the mnemonic-clash
@@ -135,16 +152,27 @@ jobs:
           glibc_floor() {
             NEWEST="$(objdump -T "$1" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
             echo "$1 newest glibc symbol: $NEWEST"
-            if [ "$(printf '%s\nGLIBC_2.34\n' "$NEWEST" | sort -V | tail -1)" != "GLIBC_2.34" ]; then
-              echo "::error::$1 needs $NEWEST; the README promises glibc 2.34"
+            if [ "$(printf '%s\nGLIBC_%s\n' "$NEWEST" "$2" | sort -V | tail -1)" != "GLIBC_$2" ]; then
+              echo "::error::$1 needs $NEWEST; the README promises glibc $2"
               exit 1
             fi
           }
-          target/release/img-fp --version
-          check target/release/img-fp "$BASE"
-          glibc_floor target/release/img-fp
+          CLI=target/glibc228/release/img-fp
+          "$CLI" --version
+          # Linked against glibc 2.28, which still kept libdl and libpthread
+          # apart from libc.
+          check "$CLI" "$BASE|libdl\.so\.2|libpthread\.so\.0"
+          glibc_floor "$CLI" 2.28
+          # The binary that ships finds what the tested one finds.
+          mkdir -p "$RUNNER_TEMP/pics"
+          printf 'P5\n64 64\n255\n' > "$RUNNER_TEMP/pics/a.pgm"
+          head -c 4096 /dev/urandom >> "$RUNNER_TEMP/pics/a.pgm"
+          cp "$RUNNER_TEMP/pics/a.pgm" "$RUNNER_TEMP/pics/b.pgm"
+          "$CLI" --no-cache --no-last "$RUNNER_TEMP/pics" -o "$RUNNER_TEMP/old.csv"
+          target/release/img-fp --no-cache --no-last "$RUNNER_TEMP/pics" -o "$RUNNER_TEMP/new.csv"
+          cmp "$RUNNER_TEMP/old.csv" "$RUNNER_TEMP/new.csv"
           check target/release/img-fp-gui "$BASE|$GTK"
-          glibc_floor target/release/img-fp-gui
+          glibc_floor target/release/img-fp-gui 2.34
           # The window's scan runs without a display, so it can be smoke
           # tested: an empty folder is a clean run that finds nothing.
           mkdir -p "$RUNNER_TEMP/empty"
@@ -153,7 +181,7 @@ jobs:
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          BIN=target/release/img-fp
+          BIN=target/glibc228/release/img-fp
           mkdir -p dist
           # Same binary, two names: a versioned copy for history and a stable
           # copy so the /releases/latest/download/ URL never changes.
@@ -190,8 +218,8 @@ jobs:
             ```
 
             Runs on any x86_64 CPU, and uses AVX2 when the CPU has it. Needs
-            glibc 2.34 or newer (Ubuntu 22.04+, Debian 12+, Fedora 35+,
-            RHEL 9+). HEIC and AVIF files are read through the system's
+            glibc 2.28 or newer (Ubuntu 20.04+, Debian 10+, Fedora 29+,
+            RHEL 8+). HEIC and AVIF files are read through the system's
             libheif (1.12 or newer) and its decoder plugins when they are
             installed, for example
             `sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d`;

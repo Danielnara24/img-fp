@@ -257,6 +257,8 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     if args.clear_cache {
         if let Some(p) = &cache_path {
             say!(cx, "Clearing all cache at {}...", p.display());
+            cache::heads::remove(p);
+            let _ = std::fs::remove_file(matched::path_beside(p));
             match std::fs::remove_file(p) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -311,6 +313,13 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     if scope.against {
         let lib = scope.library.iter().filter(|&&l| l).count();
         stage!(cx, "against: {} scanned, {lib} in the library", files.len() - lib);
+        // A library root that is there (one that is not was said by the
+        // walk) and gave the library nothing: every file would be `new`.
+        for root in args.against.iter().filter(|r| std::fs::metadata(r).is_ok()) {
+            if !files.iter().zip(&scope.library).any(|(f, &l)| l && f.starts_with(root)) {
+                problems.note(Note::EmptyLibrary, root.display());
+            }
+        }
     }
     if files.is_empty() {
         // Still a finished run, and its report says so. Returning without one
@@ -344,6 +353,58 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     }
 
     say!(cx, "Analysis complete. Matching {}...", count(analysed.n_ok, "image", "images"));
+    // A run whose every input is the last run's takes its matching
+    // (`matched.rs`); a dump records every verdict, and matches again.
+    let kept_at = cache_path.as_deref().filter(|_| args.dump.is_none()).map(matched::path_beside);
+    let asked = matched::Asked {
+        work_size: args.work_size,
+        candidates: args.candidates,
+        points: aligned_points(args),
+        overlap: args.min_frame_overlap,
+        correlation: args.min_pixel_correlation,
+        skip_mirrored: args.skip_mirrored,
+    };
+    let keys: Vec<_> = stats.iter().map(|s| s.key).collect();
+    let fingerprint = kept_at.as_ref().and_then(|_| matched::Fingerprint::of(&asked, &files, &keys, items, &scope.library));
+    let kept = kept_at.as_deref().zip(fingerprint).and_then(|(p, fp)| matched::load(p, fp));
+    let claims = match kept {
+        Some(kept) => {
+            stage!(cx, "matching: nothing has changed since the last run, whose {} pairs are taken", kept.claims.len());
+            cx.progress.learn(|k| k.matched_before = true);
+            for it in items.iter_mut() {
+                it.feats = std::sync::Arc::new(Features { w: it.feats.w, h: it.feats.h, ..Default::default() });
+            }
+            for note in &kept.notes {
+                say!(cx, "{note}");
+            }
+            kept.claims
+        }
+        None => {
+            let m = match_all(&cx, &scope, &files, items, &matched, outputs)?;
+            for note in &m.notes {
+                say!(cx, "{note}");
+            }
+            if let (Some(p), Some(fp)) = (&kept_at, fingerprint) {
+                matched::save(p, fp, &m);
+            }
+            m.claims
+        }
+    };
+
+    let found = assemble(&cx, &scope, &files, &stats, analysed, claims);
+    let done = finish(&cx, &scope, gui, &files, found, problems, started);
+    // What each stage took, which is what the bar's priors are read from
+    // (`progress::Stage::prior`).
+    for line in cx.progress.paces() {
+        stage!(cx, "{line}");
+    }
+    done
+}
+
+/// Every file matched against the rest: the index, the direct pass, the
+/// second look and the claim graph, and the dump if one is asked for.
+fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], matched: &[bool], outputs: &Outputs) -> Result<matched::Matched> {
+    let args = cx.args;
     let policy = verify::Policy::new(aligned_points(args), args.min_frame_overlap, args.min_pixel_correlation);
     // What a verdict must already have before its pixels are worth reading:
     // what the lowest standing asks (`Policy::gate`), or everything a dump
@@ -356,10 +417,10 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     let mut dump = args.dump.is_some().then(Dump::default);
     let gate = policy.gate();
     let gate = if dump.is_some() { (gate.0.min(3), gate.1.min(0.2)) } else { gate };
-    let pass = Pass { items, matched: &matched, policy: &policy, gate, dumping: dump.is_some() };
-    let index = index_all(&cx, &scope, &pass);
-    let (mut direct, verified) = retrieve_and_verify(&cx, &scope, &pass, &index);
-    let turned = second_look(&cx, &scope, &pass, index, &direct);
+    let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some() };
+    let index = index_all(cx, scope, &pass);
+    let (mut direct, verified) = retrieve_and_verify(cx, scope, &pass, &index);
+    let turned = second_look(cx, scope, &pass, index, &direct);
     direct.extend(turned);
 
     // Nothing after this point matches a descriptor against another. What is
@@ -376,23 +437,16 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     timed!(37, release_memory());
     stage!(cx, "released the index and the descriptors");
 
-    let claims = cluster(&cx, items, &policy, &direct, verified, dump.as_mut());
+    let mut notes = Vec::new();
+    let claims = cluster(cx, items, &policy, &direct, verified, dump.as_mut(), &mut notes);
     if let (Some(to), Some(dump)) = (&outputs.dump, dump) {
-        write_dump(&cx, to, &files, items, &direct, dump)?;
+        write_dump(cx, to, files, items, &direct, dump)?;
     }
     // Every verdict the matching made, and what the dump alone reads: nothing
     // below does. Held to the end, they were 65 MB on 27,000 pictures through
     // the assembly, which is where such a run peaks.
     drop(direct);
-
-    let found = assemble(&cx, &scope, &files, &stats, analysed, claims);
-    let done = finish(&cx, &scope, gui, &files, found, problems, started);
-    // What each stage took, which is what the bar's priors are read from
-    // (`progress::Stage::prior`).
-    for line in cx.progress.paces() {
-        stage!(cx, "{line}");
-    }
-    done
+    Ok(matched::Matched { claims, notes })
 }
 
 /// What the analysis hands on: every file's analysis, which files are one
@@ -1035,6 +1089,7 @@ fn cluster(
     direct: &[Edge],
     prop_budget: usize,
     dump: Option<&mut Dump>,
+    notes: &mut Vec<String>,
 ) -> Vec<Claim> {
     let progress = &cx.progress;
     let n = items.len();
@@ -1149,12 +1204,11 @@ fn cluster(
     // the tool's recall.
     if !still_starred.is_empty() {
         let files: usize = still_starred.values().sum();
-        say!(
-            cx,
+        notes.push(format!(
             "Note: {} cluster(s) ({files} files in all) are too large to compare every pair inside; their files \
              were compared with the cluster's best-connected file.",
             still_starred.len()
-        );
+        ));
     }
     drop(hypotheses);
     drop(row_of);

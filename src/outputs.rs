@@ -232,10 +232,13 @@ fn outputs_are_distinct(args: &Args, named: &[(&str, &Path)]) -> Result<()> {
     let cache = (!args.no_cache).then(|| crate::cache::locate(args.cache.as_deref()));
     let kept = (!args.no_cache && !args.no_last).then(|| crate::last::dir(args.cache.as_deref()));
     let kept = kept.iter().flat_map(|d| [d.join(crate::last::REPORT), d.join(crate::last::NOTES)]).collect::<Vec<_>>();
+    // And the two files beside the cache: its index and the last matching.
+    let beside = cache.iter().flat_map(|c| [crate::cache::heads::path_of(c), crate::matched::path_beside(c)]).collect::<Vec<_>>();
     let all: Vec<(&str, &Path)> = named
         .iter()
         .copied()
         .chain(cache.as_deref().map(|p| ("the cache", p)))
+        .chain(beside.iter().map(|p| ("the cache", p.as_path())))
         .chain(kept.iter().map(|p| ("the kept scan", p.as_path())))
         .collect();
     for (i, (fa, a)) in all.iter().enumerate() {
