@@ -131,6 +131,11 @@ pub enum Note {
     /// A hidden folder met during a walk without `--hidden`, and not gone
     /// into. See `is_hidden` in `walk.rs`.
     Hidden,
+    /// A folder inside a folder scanned without `--recursive`, and not gone
+    /// into. A photo library is folders of folders, and pointed at one, a
+    /// scan said "No images found." and exited 0, with nothing to say what
+    /// it had passed over or that `-r` was what it needed.
+    Subfolder,
     /// A file a wildcard walk (`-x '*'`, `-x '!gif'`) handed over whose bytes
     /// are no picture format at all. It never claimed to be an image, so
     /// nothing was asked of it and nothing failed — which is what separates it
@@ -220,10 +225,10 @@ enum Weight {
 
 impl Note {
     /// Every category, in the order the summary lists them.
-    const ALL: [Note; 17] = {
+    const ALL: [Note; 18] = {
         use Note::*;
         [
-            NotAnImage, SetAside, Hidden, NotImageContent, Symlink, SymlinkLoop, ListedTwice, Excluded,
+            NotAnImage, SetAside, Hidden, Subfolder, NotImageContent, Symlink, SymlinkLoop, ListedTwice, Excluded,
             MacMetadata, CameraRaw, Featureless, UnresolvedExclude, Unscannable, EmptyLibrary, Unreadable, Damaged, Cache,
         ]
     };
@@ -236,6 +241,7 @@ impl Note {
             Note::NotAnImage => (Skip, "skip/not-an-image", "file(s) whose extension is not searched, or with none (see -x)"),
             Note::SetAside => (Skip, "skip/trash-or-thumbnails", "Trash, thumbnail or snapshot folder(s), not gone into (name one to scan it)"),
             Note::Hidden => (Skip, "skip/hidden-folder", "hidden folder(s), not gone into (see --hidden)"),
+            Note::Subfolder => (Skip, "skip/subfolder", "subfolder(s), not gone into (see --recursive)"),
             Note::NotImageContent => (Skip, "skip/not-image-content", "file(s) that are not images (reached by a wildcard -x)"),
             Note::Symlink => (Skip, "skip/symlink", "symlink(s), which are not followed (see --follow-symlinks)"),
             Note::SymlinkLoop => (Skip, "skip/symlink-loop", "symlink(s) leading back into a folder already being walked"),

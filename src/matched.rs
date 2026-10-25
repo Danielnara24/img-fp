@@ -13,14 +13,18 @@
 //! groups, the keep rule and the report are the same code over the same
 //! claims, so the same bytes.
 //!
-//! What the fingerprint holds: this program's own bytes (another build may
-//! match otherwise, and a version number does not change between two builds
-//! of one), the settings the matching reads, the thread count, and for every
-//! file in the order it is numbered its path, its key, what reading it came
-//! to and which side of `--against` it is on. A file without a key (a
-//! modification time before 1970) is not vouched for by anything, and a run
-//! holding one keeps nothing. One run is kept, the last; a run with `--dump`,
-//! which records every verdict, neither reads nor keeps one.
+//! What the fingerprint holds: the build (`IMGFP_BUILD`, a hash of every
+//! source file, the compiler and its flags, made by `build.rs`: another build
+//! may match otherwise, and a version number does not change between two
+//! builds of one; `img-fp` and `img-fp-gui` of one build share it), the
+//! settings the matching reads, and for every file in the order it is
+//! numbered its path, its key, what reading it came to and which side of
+//! `--against` it is on. Not the thread count: the claims are the same at any
+//! (IMGS-ALL, cached, at `-t 3` and `-t 8`: the same report to the byte), and
+//! with it a run at another `-t` matched everything again. A file without a
+//! key is not vouched for by anything, and a run holding one keeps nothing.
+//! One run is kept, the last; a run with `--dump`, which records every
+//! verdict, neither reads nor keeps one.
 
 use crate::analysis::{Item, Read};
 use crate::claims::{Claim, Edge, How};
@@ -74,25 +78,13 @@ pub struct Asked {
 
 impl Fingerprint {
     /// `None` where nothing can vouch for the run's inputs: a file with no
-    /// key, or this program's bytes that cannot be read.
+    /// key.
     pub fn of(asked: &Asked, files: &[PathBuf], keys: &[Option<crate::cache::Key>], items: &[Item], library: &[bool]) -> Option<Fingerprint> {
         use std::os::unix::ffi::OsStrExt;
         let mut h = Hash::new();
         h.bytes(MAGIC);
-        let exe = std::fs::read("/proc/self/exe").ok()?;
-        h.u64(exe.len() as u64);
-        // Words rather than bytes: the program is megabytes.
-        let mut w = (Hash::new().0, Hash::new().1);
-        for c in exe.chunks(8) {
-            let mut v = [0u8; 8];
-            v[..c.len()].copy_from_slice(c);
-            let v = u64::from_le_bytes(v);
-            w.0 = (w.0 ^ v).wrapping_mul(0x0100_0000_01b3);
-            w.1 = (w.1 ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
-        }
-        h.u64(w.0);
-        h.u64(w.1);
-        for v in [asked.work_size as u64, asked.candidates as u64, asked.points as u64, asked.overlap.to_bits() as u64, asked.correlation.to_bits() as u64, asked.skip_mirrored as u64, rayon::current_num_threads() as u64, files.len() as u64] {
+        h.bytes(env!("IMGFP_BUILD").as_bytes());
+        for v in [asked.work_size as u64, asked.candidates as u64, asked.points as u64, asked.overlap.to_bits() as u64, asked.correlation.to_bits() as u64, asked.skip_mirrored as u64, files.len() as u64] {
             h.u64(v);
         }
         for (i, f) in files.iter().enumerate() {
@@ -251,6 +243,109 @@ impl<'a> Bytes<'a> {
     }
 }
 
+/// The file beside `cache` the files the last run proved byte-identical are
+/// kept in (`proven_identical`).
+pub fn identical_beside(cache: &Path) -> PathBuf {
+    let mut p = cache.as_os_str().to_owned();
+    p.push(".same");
+    PathBuf::from(p)
+}
+
+const SAME_MAGIC: &[u8; 8] = b"IMGFPS01";
+
+/// The pairs of this run's files (by number, from `names` and `keys`, a
+/// file's canonical name and key) that the last run compared byte for byte
+/// and found identical, where neither has changed since: each a file and the
+/// one it was found the same as.
+///
+/// **A rescan read every copy whole again.** The byte pass (`same::exact_groups`)
+/// runs before the cache is asked, and it is a byte comparison, by design: a
+/// shared hash is a reason to compare, not a verdict. So a folder of 47
+/// duplicate photographs, nothing changed, was 251 MB read on every run, 0.66
+/// s of a 0.72 s rescan on this machine's SSD, and a share's worth of minutes.
+/// The comparison is still what proves two files the same; what is kept is
+/// that it was made, and it holds while both files are as they were when it
+/// was, by the key the analysis cache already trusts (size, modification and
+/// change time to the nanosecond, under the canonical name). One run is kept,
+/// the last, as for the matching.
+pub fn proven_identical(path: &Path, names: &[PathBuf], keys: &[Option<crate::cache::Key>]) -> Vec<(usize, usize)> {
+    use std::os::unix::ffi::OsStrExt;
+    let Some(kept) = load_identical(path) else { return Vec::new() };
+    let by_name: std::collections::HashMap<&[u8], usize> = names.iter().enumerate().map(|(i, n)| (n.as_os_str().as_bytes(), i)).collect();
+    let now = |name: &[u8], key: (u64, i64, i64)| {
+        let &i = by_name.get(name)?;
+        let k = keys[i]?;
+        ((k.len, k.mtime, k.ctime) == key).then_some(i)
+    };
+    kept.iter().filter_map(|(a, ka, b, kb)| Some((now(a, *ka)?, now(b, *kb)?))).filter(|(a, b)| a != b).collect()
+}
+
+type Kept = (Vec<u8>, (u64, i64, i64), Vec<u8>, (u64, i64, i64));
+
+fn load_identical(path: &Path) -> Option<Vec<Kept>> {
+    let b = std::fs::read(path).ok()?;
+    let (body, sum) = b.split_at_checked(b.len().checked_sub(16)?)?;
+    let mut h = Hash::new();
+    h.bytes(body);
+    if [h.0.to_le_bytes(), h.1.to_le_bytes()].concat() != sum {
+        return None;
+    }
+    let mut r = Bytes { b: body, at: 0 };
+    if r.take(8)? != SAME_MAGIC {
+        return None;
+    }
+    let n = r.u64()? as usize;
+    let mut out = Vec::with_capacity(n.min(body.len() / 64));
+    let file = |r: &mut Bytes| -> Option<(Vec<u8>, (u64, i64, i64))> {
+        let len = r.u32()? as usize;
+        let name = r.take(len)?.to_vec();
+        Some((name, (r.u64()?, r.u64()? as i64, r.u64()? as i64)))
+    };
+    for _ in 0..n {
+        let (a, ka) = file(&mut r)?;
+        let (b, kb) = file(&mut r)?;
+        out.push((a, ka, b, kb));
+    }
+    (r.at == body.len()).then_some(out)
+}
+
+/// Keep this run's sets of byte-identical files (`groups`, by number) for
+/// the next (`proven_identical`), in place of the last run's: each file but
+/// the first of a set, beside the first. Written beside and renamed; one
+/// that cannot be written is the next run comparing again, and is not said.
+pub fn keep_identical(path: &Path, groups: &[Vec<usize>], names: &[PathBuf], keys: &[Option<crate::cache::Key>]) {
+    use std::os::unix::ffi::OsStrExt;
+    let mut entries = Vec::new();
+    for g in groups {
+        let Some((&head, rest)) = g.split_first() else { continue };
+        let Some(kh) = keys[head] else { continue };
+        entries.extend(rest.iter().filter_map(|&i| Some((i, keys[i]?, head, kh))));
+    }
+    let mut b = Vec::with_capacity(16 + entries.len() * 128);
+    b.extend_from_slice(SAME_MAGIC);
+    b.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for (i, ki, j, kj) in entries {
+        for (f, k) in [(i, ki), (j, kj)] {
+            let name = names[f].as_os_str().as_bytes();
+            b.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            b.extend_from_slice(name);
+            for v in [k.len, k.mtime as u64, k.ctime as u64] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    let mut h = Hash::new();
+    h.bytes(&b);
+    b.extend_from_slice(&h.0.to_le_bytes());
+    b.extend_from_slice(&h.1.to_le_bytes());
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    if std::fs::write(&tmp, &b).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +392,27 @@ mod tests {
         b[20] ^= 1;
         std::fs::write(&p, b).unwrap();
         assert!(load(&p, fp).is_none(), "damaged");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The sets kept are given back for the files whose names and keys are
+    /// as they were, and nothing for a file changed since.
+    #[test]
+    fn identical_files_are_kept_for_as_long_as_neither_changes() {
+        use crate::cache::Key;
+        let dir = std::env::temp_dir().join(format!("img-fp-same-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("c.same");
+        let key = |n: i64| Some(Key { len: 10, mtime: n, ctime: n, dev: 0 });
+        let names: Vec<PathBuf> = ["/x/a", "/x/b", "/x/c", "/y/d"].iter().map(PathBuf::from).collect();
+        keep_identical(&p, &[vec![0, 1, 2]], &names, &[key(1), key(2), key(3), key(4)]);
+        // The next run numbers its files otherwise, and c has changed.
+        let next: Vec<PathBuf> = ["/x/c", "/x/a", "/x/b"].iter().map(PathBuf::from).collect();
+        let mut got = proven_identical(&p, &next, &[key(9), key(1), key(2)]);
+        got.sort();
+        assert_eq!(got, vec![(2, 1)]);
+        std::fs::write(&p, b"IMGFPS01 damaged").unwrap();
+        assert!(proven_identical(&p, &next, &[key(9), key(1), key(2)]).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

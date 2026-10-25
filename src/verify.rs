@@ -19,7 +19,8 @@
 //!    keypoint with two dominant orientations is one piece of evidence.
 //! 3. **Pixels.** The overlap is resampled from both thumbnails through the
 //!    transform and compared blockwise. Blocks that are flat in both images
-//!    abstain rather than agreeing for free.
+//!    abstain rather than agreeing for free; flat in one only, they agree by
+//!    as much contrast as they share.
 
 use crate::decode::Gray;
 use crate::sift::{Features, Keypoint, DESC_LEN};
@@ -1582,7 +1583,10 @@ mod wide {
 /// Returns (agreement, comparable blocks, whole-overlap correlation).
 ///
 /// Blocks flat in both images abstain: a white margin matching a white margin
-/// is not evidence of anything. Correlation is signed-absolute per block so a
+/// is not evidence of anything. A block flat in one image only counts, at its
+/// |r| times the share of contrast the two sides have in common (SSIM's
+/// contrast term): detail the other picture does not have reads near 0, two
+/// sides either side of the flatness bar read as what they are. Correlation is signed-absolute per block so a
 /// contrast inversion inside one region does not fail an otherwise exact
 /// match, while the block *positions* still have to line up — which is what
 /// the shuffled-tiling trap gets wrong.
@@ -1781,14 +1785,35 @@ fn pixel_check_with(
             let vara = saa - sa * sa / nf;
             let varb = sbb - sb * sb / nf;
             let flat = 4.0 * 4.0 * nf;
-            if vara < flat || varb < flat {
+            let (flat_a, flat_b) = (vara < flat, varb < flat);
+            if flat_a && flat_b {
                 // A block with no detail on either side cannot disagree, so
                 // counting it as agreement is counting nothing as evidence.
                 // It abstains: out of the numerator and out of the
-                // denominator both. This is what stops a thumbnail matched
-                // into a tenth of a large image — where the large side
-                // resolves to a smear — from scoring a confident agreement on
-                // blur alone.
+                // denominator both.
+                continue;
+            }
+            if flat_a || flat_b {
+                // Flat on one side only: detail the other picture does not
+                // have (a person painted onto a plain wall, a logo taken
+                // out), or a block whose two sides lie either side of the
+                // flatness bar (variance 10.2 against 16.1 at a bar of 16 on
+                // a slight crop's sky). Abstaining, as it did until 0.72.0,
+                // let the first agree at 0.9 a block; r = 0 read the second
+                // as a disagreement, though measured it correlates at
+                // 0.994-0.999, and a crop went to REVIEW. Measured r alone
+                // is not safe either: a near-flat ramp on one side
+                // correlates with stripes on the other (|r| 0.88 seen).
+                // So r times SSIM's contrast term, 2 sqrt(va vb) / (va + vb),
+                // which is 2 |cov| / (va + vb): 1 for equal contrast, near
+                // 0 when one side has a fraction of the other's. No new
+                // constant. IMGS-ALL at 0.7: recall 94.04% (r = 0) ->
+                // 94.56% (0.71.0: 95.43%), IMGS5 merges 5 both (0.71.0: 8),
+                // `pairs.py` copies deleted 4,849 -> 5,024 (0.71.0: 5,043).
+                let r = (2.0 * (sab - sa * sb / nf).abs() / (vara + varb)) as f32;
+                total += 1;
+                agree += r;
+                worst = worst.min(r);
                 continue;
             }
             total += 1;

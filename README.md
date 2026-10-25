@@ -125,7 +125,8 @@ img-fp ~/Pictures -r -o dupes.csv
 img-fp ~/Pictures -r --work-size 640
 ```
 
-By default the scan is **not** recursive. Add `-r` to include subfolders.
+By default the scan is **not** recursive. Add `-r` to include subfolders. The
+summary at the end counts the subfolders a scan without `-r` passed over.
 
 Individual files can be named alongside folders. A list of paths can be read
 from stdin with `-`, or from a file with `--from-file`:
@@ -217,8 +218,10 @@ library is scanned, and a library inside the folder scanned is the library.
 library.
 
 `--list` prints just the paths with the verdicts you name, one per line (or
-NUL-separated with `-0`), in place of the report. The report is still written
-to `-o` if you name a file. The CSV report has a `verdict` column and the file
+NUL-separated with `-0`), in place of the report. A path holding a line break
+can only be listed with `-0`: without it the run stops with an error rather
+than print it as two lines. The report is still written to `-o` if you name a
+file. The CSV report has a `verdict` column and the file
 it rests on in `match` and `match_in`, and the JSON lists every matched pair
 as well.
 

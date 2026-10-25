@@ -97,8 +97,8 @@ struct Found {
 #[derive(Clone, Copy, Debug)]
 pub struct Stat {
     pub len: u64,
-    /// `None` when the file's times cannot make one, as for a modification
-    /// time before 1970; such a file is not cached.
+    /// `None` when the file's times cannot make one (nanoseconds past what an
+    /// `i64` holds); such a file is not cached.
     pub key: Option<crate::cache::Key>,
 }
 
@@ -262,6 +262,12 @@ fn walk_dir(
         let kind = entry.file_type();
         if kind.is_symlink() {
             problems.note(Note::Symlink, entry.path().display());
+            continue;
+        }
+        // A folder at the depth the walk stops at is one it will not go
+        // into: only without `--recursive`, whose depth has no end.
+        if kind.is_dir() && entry.depth() > 0 && entry.depth() == levels {
+            problems.note(Note::Subfolder, entry.path().display());
             continue;
         }
         if !kind.is_file() {

@@ -145,10 +145,20 @@ pub fn tally(answers: &[Answer]) -> String {
 
 /// `--list`: the paths with the verdicts asked for, in the report's order,
 /// one a line or NUL-separated, on stdout.
+///
+/// **A name holding a line break is not listed one a line**, and nothing is:
+/// the run stops with an error that says to use `--null`. Written as it
+/// was, `a<LF>b.jpg` read as two paths, `a` and `b.jpg`, and a list is what
+/// a script hands to `rm`. Refused whole rather than left out, so that a list
+/// never reads as complete when it is not.
 pub fn list(scan: &Outcome, answers: &[Answer], wanted: &[Verdict], nul: bool) -> anyhow::Result<()> {
+    let listed = || answers.iter().filter(|a| wanted.contains(&a.verdict)).map(|a| &scan.files[a.file].path);
+    if let Some(p) = listed().find(|p| !nul && p.as_os_str().as_bytes().contains(&b'\n')) {
+        anyhow::bail!("{:?} holds a line break, so the list cannot be written one path a line: use --null (-0)", p);
+    }
     crate::outputs::To::Stdout.write("the list", |w| {
-        for a in answers.iter().filter(|a| wanted.contains(&a.verdict)) {
-            w.write_all(scan.files[a.file].path.as_os_str().as_bytes())?;
+        for p in listed() {
+            w.write_all(p.as_os_str().as_bytes())?;
             w.write_all(if nul { b"\0" } else { b"\n" })?;
         }
         Ok(())

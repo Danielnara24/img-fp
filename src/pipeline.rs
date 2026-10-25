@@ -259,6 +259,7 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
             say!(cx, "Clearing all cache at {}...", p.display());
             cache::heads::remove(p);
             let _ = std::fs::remove_file(matched::path_beside(p));
+            let _ = std::fs::remove_file(matched::identical_beside(p));
             match std::fs::remove_file(p) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -497,7 +498,18 @@ fn analyse_all(
     // took only image names, so it asks nothing.
     let guessed = wanted.is_a_guess_at_images();
     let comparable = |i: usize| guessed || extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
-    let exact = timed!(33, exact_groups(files, stats, comparable));
+    // The cache is keyed on the paths themselves, not on their printable
+    // form: two names that are not UTF-8 can print the same and be two files.
+    // And on each file's canonical path, not the one this run spells; see
+    // `cache_names`. So is what the last run proved byte-identical.
+    let names = cache_path.as_ref().map(|_| cache_names(files, canonical));
+    let keys: Vec<_> = stats.iter().map(|s| s.key).collect();
+    let identical_at = cache_path.as_deref().map(matched::identical_beside);
+    let proven = identical_at.as_deref().zip(names.as_deref()).map_or_else(Vec::new, |(p, names)| matched::proven_identical(p, names, &keys));
+    let exact = timed!(33, exact_groups(files, stats, comparable, &proven));
+    if let (Some(p), Some(names)) = (&identical_at, &names) {
+        matched::keep_identical(p, &exact, names, &keys);
+    }
     stage!(cx, "exact duplicates: {} groups", exact.len());
     let mut same = Same::of_bytes(files.len(), exact);
     // A copy is answered by its original: the most there is to describe
@@ -517,12 +529,7 @@ fn analyse_all(
         features: FEATURES as u32,
         thumb: THUMB_LONG as u32,
     };
-    // The cache is keyed on the paths themselves, not on their printable
-    // form: two names that are not UTF-8 can print the same and be two files.
-    // And on each file's canonical path, not the one this run spells; see
-    // `cache_names`.
-    let mut store = cache_path.as_ref().map(|p| {
-        let names = cache_names(files, canonical);
+    let mut store = cache_path.as_ref().zip(names).map(|(p, names)| {
         progress.begin(Stage::CacheRead);
         // Only this run's paths are unpacked; the rest of the machine's
         // cache is read for where it is, not for what it says. See

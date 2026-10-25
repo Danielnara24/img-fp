@@ -232,8 +232,9 @@ fn outputs_are_distinct(args: &Args, named: &[(&str, &Path)]) -> Result<()> {
     let cache = (!args.no_cache).then(|| crate::cache::locate(args.cache.as_deref()));
     let kept = (!args.no_cache && !args.no_last).then(|| crate::last::dir(args.cache.as_deref()));
     let kept = kept.iter().flat_map(|d| [d.join(crate::last::REPORT), d.join(crate::last::NOTES)]).collect::<Vec<_>>();
-    // And the two files beside the cache: its index and the last matching.
-    let beside = cache.iter().flat_map(|c| [crate::cache::heads::path_of(c), crate::matched::path_beside(c)]).collect::<Vec<_>>();
+    // And the files beside the cache: its index, the last matching and the
+    // files the last run proved byte-identical.
+    let beside = cache.iter().flat_map(|c| [crate::cache::heads::path_of(c), crate::matched::path_beside(c), crate::matched::identical_beside(c)]).collect::<Vec<_>>();
     let all: Vec<(&str, &Path)> = named
         .iter()
         .copied()

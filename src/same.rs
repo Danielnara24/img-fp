@@ -467,9 +467,61 @@ fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
 /// An empty file is in no set: it holds no picture to be a copy of, and a
 /// folder of failed downloads (empty `.jpg`s) was one group, every file but
 /// one of it DELETE, beside each file's own "not an image".
-pub(crate) fn exact_groups(files: &[PathBuf], stats: &[walk::Stat], comparable: impl Fn(usize) -> bool + Sync) -> Vec<Vec<usize>> {
+///
+/// `proven` are pairs of files already shown to be byte-identical, unchanged
+/// since a comparison the last run made (`matched::proven_identical`). Each
+/// set they join is read as its first file: the copies are not read at all,
+/// and the first only if another file of its size is still to be told apart
+/// from it.
+pub(crate) fn exact_groups(
+    files: &[PathBuf],
+    stats: &[walk::Stat],
+    comparable: impl Fn(usize) -> bool + Sync,
+    proven: &[(usize, usize)],
+) -> Vec<Vec<usize>> {
+    // The sets the proven pairs join, each answered by its lowest file.
+    let mut head: Vec<usize> = (0..files.len()).collect();
+    fn root(head: &mut [usize], mut i: usize) -> usize {
+        while head[i] != i {
+            head[i] = head[head[i]];
+            i = head[i];
+        }
+        i
+    }
+    for &(a, b) in proven.iter().filter(|&&(a, b)| stats[a].len == stats[b].len && stats[a].len > 0) {
+        let (ra, rb) = (root(&mut head, a), root(&mut head, b));
+        head[ra.max(rb)] = ra.min(rb);
+    }
+    let heads: Vec<usize> = (0..files.len()).map(|i| root(&mut head, i)).collect();
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &h) in heads.iter().enumerate().filter(|&(i, &h)| i != h) {
+        members.entry(h).or_insert_with(|| vec![h]).push(i);
+    }
+    let found = exact_groups_read(files, stats, comparable, |i| heads[i] == i);
+    // Each set read as its first file stands for all of it, and a set no
+    // other file joined is a set still.
+    let mut joined = std::collections::HashSet::new();
+    let mut out: Vec<Vec<usize>> = found
+        .into_iter()
+        .map(|g| {
+            let mut all: Vec<usize> = g.iter().flat_map(|h| members.get(h).cloned().unwrap_or_else(|| vec![*h])).collect();
+            joined.extend(g);
+            all.sort_unstable();
+            all
+        })
+        .collect();
+    out.extend(members.into_iter().filter(|(h, _)| !joined.contains(h)).map(|(_, mut m)| {
+        m.sort_unstable();
+        m
+    }));
+    out.sort();
+    out
+}
+
+/// `exact_groups` over the files `asked` says to read.
+fn exact_groups_read(files: &[PathBuf], stats: &[walk::Stat], comparable: impl Fn(usize) -> bool + Sync, asked: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, st) in stats.iter().enumerate().filter(|(_, st)| st.len > 0) {
+    for (i, st) in stats.iter().enumerate().filter(|&(i, st)| st.len > 0 && asked(i)) {
         by_size.entry(st.len).or_default().push(i);
     }
     // Files that share a size are told apart first by a few pieces of each,
@@ -828,12 +880,34 @@ mod tests {
         let groups = |files: &[PathBuf]| {
             let stats: Vec<walk::Stat> =
                 files.iter().map(|f| walk::Stat { len: std::fs::metadata(f).unwrap().len(), key: None }).collect();
-            exact_groups(files, &stats, |_| true)
+            exact_groups(files, &stats, |_| true, &[])
         };
         assert_eq!(groups(&files), vec![vec![0, 1, 2], vec![4, 5]]);
         // A pair alone is compared straight away.
         assert_eq!(groups(&[files[0].clone(), files[3].clone()]), Vec::<Vec<usize>>::new());
         assert_eq!(groups(&[files[0].clone(), files[1].clone()]), vec![vec![0, 1]]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files the last run proved identical are a set without being read
+    /// (two that are not there at all); a set of them takes in a new copy of
+    /// its first file, compared as before; a proven pair whose sizes now
+    /// differ proves nothing.
+    #[test]
+    fn files_proven_identical_are_not_read_again() {
+        let dir = std::env::temp_dir().join(format!("img-fp-exact-proven-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 253) as u8).collect();
+        let files: Vec<PathBuf> = ["a", "a_copy", "a_new", "gone1", "gone2", "short"].iter().map(|n| dir.join(n)).collect();
+        for f in &files[..3] {
+            std::fs::write(f, &body).unwrap();
+        }
+        std::fs::write(&files[5], b"short").unwrap();
+        let len = |i: usize| if i == 5 { 5 } else { body.len() as u64 };
+        let stats: Vec<walk::Stat> = (0..files.len()).map(|i| walk::Stat { len: len(i), key: None }).collect();
+        let proven = [(1, 0), (3, 4), (5, 0)];
+        assert_eq!(exact_groups(&files, &stats, |_| true, &proven), vec![vec![0, 1, 2], vec![3, 4]]);
+        assert_eq!(exact_groups(&files, &stats, |_| true, &[]), vec![vec![0, 1, 2]], "unproven, the missing files are no set");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -852,7 +926,7 @@ mod tests {
         }
         let stats: Vec<walk::Stat> = files.iter().map(|_| walk::Stat { len: video.len() as u64, key: None }).collect();
         let comparable = |i: usize| crate::extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
-        assert_eq!(exact_groups(&files, &stats, comparable), vec![vec![2, 3]]);
+        assert_eq!(exact_groups(&files, &stats, comparable, &[]), vec![vec![2, 3]]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

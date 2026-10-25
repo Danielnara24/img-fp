@@ -290,9 +290,16 @@ pub fn locate(explicit: Option<&Path>) -> PathBuf {
 /// filesystem again — the exact pass for the size, the cache for the key, the
 /// header probe and the report for the size once more — and three of those on
 /// one thread, which a network share charges a round trip apiece.
+///
+/// Both times are read as the kernel keeps them, seconds and nanoseconds,
+/// signed: a file dated before 1970 has a key like any other. Read through
+/// `SystemTime` since `UNIX_EPOCH`, as it was, such a file had none, so it
+/// was analysed again on every run and no run holding it could take the last
+/// run's matching (`matched.rs`). Times from 1970 on are the same numbers
+/// either way, so the records already kept still answer.
 pub fn key_from(md: &std::fs::Metadata) -> Option<Key> {
     use std::os::unix::fs::MetadataExt;
-    let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as i64;
+    let mtime = md.mtime().checked_mul(1_000_000_000)?.checked_add(md.mtime_nsec())?;
     let ctime = md.ctime().checked_mul(1_000_000_000)?.checked_add(md.ctime_nsec())?;
     Some(Key { len: md.len(), mtime, ctime, dev: md.dev() })
 }

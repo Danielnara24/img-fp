@@ -10,7 +10,34 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## Status (0.71.0)
+## DO FIRST NEXT SESSION: is `-k` cherry-picking the corpus?
+
+Found at 0.72.0 and **not yet checked; every precision and merge figure in
+this file may depend on it.** Each seed of the generated corpora has ~90
+variants (IMGS-ALL: 27,659 files / 304 seeds), and a file is verified only
+against its best `-k` = 150 candidates. Inside the corpus a seed's
+candidates are filled by its own family, so a near-miss *sibling* photograph
+is often never compared at all. Proof: IMGS5's 60 seeds scanned alone (no
+variants) pair 8 sibling seed pairs at 0.7 and 13 at 0.6 (0.71.0 and 0.72.0
+alike), while inside the full IMGS5 run (0.71.0) the same seed originals
+pair only Fountain3/5, Mural1/2 and bird1/2 (`out/v42-flat-cliffs/seeds`,
+`out/v44-flat-contrast/seeds`). A real library has one to
+a few copies of a photo, not 90, so there every sibling is a candidate. So:
+(1) `-k` 150 may be fitted, unknowingly, to the family size the generator
+makes (150 > ~90 means a family fits whole, with ~60 slots left); (2) the
+corpora hide false pairs between near-miss photographs, and the "no merge"
+cliffs, IMGS5's merge counts and the 0.54.0 / 0.72.0 correlation choices
+were measured where siblings mostly cannot meet; (3) the `-k` cliff rows
+(merges *fall* as `-k` falls) are candidate starvation, not safety. What to
+do: score precision and merges where families are small: seeds alone, and
+each seed with 1, 2, 5, 10, 30 variants drawn at random (several draws),
+on IMGS5 and IMGS-ALL; sweep `-k` (10-400) and the three bars on those; see
+whether `-k`'s value and the bars' cliffs survive, and whether `-k` should be
+derived (from the corpus, or a candidate's score) rather than fixed. Until
+then treat every precision figure here as measured on a corpus that shields
+the matcher from its hardest negatives.
+
+## Status (0.72.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -696,6 +723,81 @@ under *Tried and rejected* below, or before quoting a figure not given here.
     plain copy, so in a family of three a q95 upside-down copy was KEEP and
     the upright q87 original DELETE, and `--against` called an upright photo
     a `repeat` of a sideways library copy; a mirror deletes nothing.
+- 0.72.0 (audit fixes C-I; C-H change no pair or suggestion: IMGS-ALL report
+  and all 90 `pairs.py` reports identical to 0.71.0's with I off; I moves
+  them, below):
+  - **C** a rescan no longer reads byte-identical copies again: the pairs
+    the last run compared and found identical are kept beside the cache
+    (`<cache>.same`) and taken while both keys are unchanged (see *The
+    analysis and the cache*). 47 duplicate pairs, 251 MB, page cache
+    evicted: 0.72 s -> 0.10 s; a copy rewritten at its size (mtime put
+    back), touched, added, or its first file deleted: handled as a cold run.
+  - **D** the kept matching's fingerprint is the build (`IMGFP_BUILD`, from
+    `build.rs`) rather than the program's bytes, and leaves out the thread
+    count: IMGS-ALL matched at `-t 3` gives the `-t 8` report to the byte;
+    the window's worker takes the matching a CLI scan kept.
+  - **E** a key is the kernel's signed times: a file dated before 1970 is
+    cached, and a run holding one takes the kept matching (one such file
+    in 636: 1.08 s a rescan -> ~0.2 s).
+  - **F** `Note::Subfolder`: the subfolders a scan without `-r` passes over
+    are a skip, counted in the summary.
+  - **H** `--list` without `-0` refuses a path holding a line break (exit 1,
+    nothing listed).
+  - **A, B** (the keeper among lossy copies, a lossless file of degraded
+    pixels): tried and reverted, see *Tried and rejected*.
+  - **I** a block of the pixel check that is flat in one picture only now
+    counts (`verify::pixel_check_with`), at its |r| times SSIM's contrast
+    term, `2 |cov| / (va + vb)`; a block flat in both still abstains. Since
+    the first version it abstained when flat in *either* (the comments said
+    "both"), so detail added onto a flat area or painted out agreed at 0.9
+    a block: a person added onto a plain wall joined IMGS5's Mural1/2.
+    First built at r = 0, which misfired on blocks whose two sides lie
+    either side of the flatness bar (variance 10.2 against 16.1 at a bar of
+    16, measured r 0.994-0.999; `crop_strip_top` pairs went to REVIEW, and
+    bird1/2's burst split); plain |r| scored like the contrast term here
+    but lets a near-flat ramp agree with stripes (|r| 0.88 seen), and a
+    plane fitted out of each block lost real shared gradients. No new
+    constant. `--min-pixel-correlation` stays **0.7** (user's decision,
+    after the seeds-alone sweep below; the rule was first shipped in this
+    tree at 0.6 with `CUT` 0.75). Measured at every step of every bar on
+    IMGS-ALL and IMGS5 (`out/v44-flat-contrast`, `summary.py` there: 0.71.0
+    and r = 0 from `out/v42-flat-cliffs`; the rule at 0.6 in
+    `out/v43-flat06`; page https://claude.ai/artifact/6HBZCeWVkzTFoiSBpNyGYP).
+    0.71.0 -> r = 0 -> shipped, at 0.7: IMGS-ALL F1 0.9747 -> 0.9683 ->
+    **0.9710**, precision 99.60 -> 99.79 -> 99.78%, recall 95.43 -> 94.04 ->
+    94.56%, traps 4,398 -> 2,238 -> 2,359, cross-family 7 -> 10 -> 10
+    (largest 2), perfect transforms 49 -> 45 -> 47, no merge; IMGS5 F1 0.9119
+    -> 0.9405 -> 0.9325, precision 86.35 -> 93.15 -> 90.84%, recall 96.61 ->
+    94.96 -> 95.79%, merges 8 -> 5 -> 5 (Mural1/2, Puerto3/4, Macizo5/6 gone;
+    bird1/2, Fountain3/5, both Floriana pairs, Tree1/2 stay; the precision
+    r = 0 has over the rule is bird1/2 split, which by eye may merge). Cliffs:
+    IMGS-ALL merges nothing at any step; IMGS5 never more merges than 0.71.0
+    at a step and fewer at most (points 4-3: 6 against 8; overlap 0.75-0.3:
+    7, 0.25: 8; correlation 0.9-0.2: 5 against 7-8), higher F1 at every step
+    but overlap 0.25 and `-k` 10. Keep rule: IMGS-ALL 0 lost, 295 -> 297 /
+    304, 304 / 304, DELETE 16,697 -> 16,658, REVIEW 3,156 -> 3,073, strict
+    line 56, picture only in an edit 4 -> 3 (`logo` back); `pairs.py` (0.71.0
+    -> r = 0 -> shipped) loss 24 -> 20 -> 23, originals deleted 352 -> 335
+    -> 344, copies deleted 5,043 -> 4,849 -> 5,024, REVIEW 29,391 -> 29,502
+    -> 29,291; IMGS-PROVENANCE unchanged (126 / 266, 0 lost). Found corpus
+    (unlabelled): pairs 2,230 -> 1,732 -> 1,855, groups 737 -> 730 -> 734.
+    **IMGS5's 60 seeds alone** (no variants, so every seed is compared with
+    its sibling; inside the full corpus a seed's candidates are its own
+    variants and the sibling is never asked, see the section at the top):
+    the shipped rule pairs exactly what 0.71.0 pairs at every bar 0.9-0.5,
+    8 seed pairs at 0.7 and 13 at 0.6, five of them the ones 0.54.0 named
+    (GanyutingStore, Kaper-12/13, Lizard, Los Gigantes, Macizo1/2); that, not
+    F1, is why the bar stayed at 0.7. Puerto3/4, Macizo5/6, Tree1/2 and both
+    Floriana pairs pair as seeds at no bar down to 0.2; IMGS5's merges are
+    made through variants. Cross-family 7 -> 10 (0.6 had 13), not a bug:
+    the rule can only lower a verdict's agreement; eleven of 0.6's thirteen
+    were `tiled_watermark` on both sides (one generated stamp over two
+    photographs), and IMGS2 ducks1's contact sheet, whose only clean link in
+    its family (to its `print_scan`) lost it to one block where the sheet's
+    last sample row takes in a thumbnail pixel of the next cell (measured r
+    0.04), so as a lone file it joined IMGS4 harvester's sheet (same
+    generated filler; the verdict, r 0.81, was refused in 0.71.0 by the
+    cluster rules).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -724,7 +826,8 @@ under *Tried and rejected* below, or before quoting a figure not given here.
   assumes, so the old check could never fire; it refuses with raw `write` +
   `_exit`, since formatting an error ran AVX-512 code.
 - Grey is BT.601 luma; a JPEG's grey is its Y plane.
-- Shipped `--min-pixel-correlation` is 0.7 (0.54.0; was 0.6), chosen for
+- Shipped `--min-pixel-correlation` is 0.7 (0.54.0 on; kept at 0.72.0,
+  when a block flat in one picture only began to count: see its entry), chosen for
   what users want grouped, not for F1: 0.5 grouped merely similar photos,
   and 0.6 paired five of IMGS5's sixty seeds with their near-miss sibling
   (direct, 0.63-0.70: GanyutingStore, Kaper-12/13, Lizard, Los Gigantes,
@@ -794,7 +897,8 @@ src/
   cache.rs      on-disk analysis cache: answers for a run's files by number,
                 and decides what the file keeps (`Store::finish`); its
                 index of heads (`heads`)
-  matched.rs    the last run's matching, taken by a run with nothing changed
+  matched.rs    the last run's matching, taken by a run with nothing changed;
+                and the files it proved byte-identical (`<cache>.same`)
   outcome.rs    a finished scan (groups by number, or against a library each
                 scanned file's pairs; evidence, content rule's suggestions),
                 as the report, --last and the window read it
@@ -981,12 +1085,28 @@ was missing.
 
 `<cache>.matched` (`matched.rs`) is the last run's matching: its claims and
 its console notes, under a `Fingerprint` of everything the matching reads
-(this program's bytes, the bars, `-k`, `--skip-mirrored`, the work size, the
-thread count, and each file's path, key, read state and side). A run with
-the same fingerprint takes it after the analysis and goes on to the
-assembly, which is worked out as always (groups, keep rule, report with its
-`pairs`); not with `--dump`, nor a file with no key. IMGS3 unchanged rescan
-26 s -> 10-13 s, reports identical to a cold run's.
+(the build, `IMGFP_BUILD`: a hash `build.rs` makes of every source file,
+the manifest, the lock file, the compiler, the target, its features and the
+flags, which `img-fp` and `img-fp-gui` of one build share; the bars, `-k`,
+`--skip-mirrored`, the work size, and each file's path, key, read state and
+side). A run with the same fingerprint takes it after the analysis and goes
+on to the assembly, which is worked out as always (groups, keep rule,
+report with its `pairs`); not with `--dump`, nor a file with no key. IMGS3
+unchanged rescan 26 s -> 10-13 s, reports identical to a cold run's. Until
+0.72.0 the fingerprint hashed the running program's bytes (read whole every
+run, and never the same for the window's worker and the CLI) and the thread
+count (IMGS-ALL matched again at `-t 3` writes the `-t 8` report to the
+byte), so a scan from the window or at another `-t` matched everything again.
+
+`<cache>.same` (`matched::proven_identical`) is which files the last run
+compared byte for byte and found identical, by canonical name and key. The
+byte pass (`same::exact_groups`) takes a pair whose two keys are unchanged
+as proven and reads neither file (a set is read as its first file, and only
+if another file of its size is still to be told apart from it). The proof
+is still the byte comparison; what is kept is that it was made, trusted for
+as long as the analysis cache trusts a key. Before 0.72.0 every rescan read
+every copy whole before the cache was asked: 47 duplicate pairs, 251 MB,
+0.66 s of a 0.72 s rescan on SSD; now 0.10 s.
 
 **Adding a record kind or a reason to keep one**: a field of `Asked` or
 `Unasked` and a condition in `finish` / `carried`. Not bookkeeping in the
@@ -1173,7 +1293,9 @@ Each was measured; changing one needs a re-measure.
   cosine (-5 recall).
 - **A claim is a transform plus pixel agreement**, never a score over a
   threshold (rejects `tile_shuffle`).
-- **Pixel check**: flat blocks abstain; flatness is relative to the
+- **Pixel check**: blocks flat in both pictures abstain, a block flat in
+  one only counts at |r| times SSIM's contrast term (0.72.0; it abstained,
+  and a person added onto a plain wall agreed at 0.9 a block); flatness is relative to the
   thumbnail's own contrast (`Thumb::build` stretches each thumbnail); blocks
   are averaged (|r|), not counted; both sides are read through a mip pyramid
   (`Thumb::lod`) at the right footprint. **Do not reintroduce a plain tap.**
@@ -1346,13 +1468,15 @@ nothing for its files.
 
 `--suggest correlation | representative` (`suggest::by_group`): simple
 group-only rules, by user request; `correlation` deletes at 0.9 at the
-default bar (`CUT` = 2/3 of the way from the bar 0.7 to 1; it was 0.75 of the
-way from 0.6, and the cut is what was chosen), the user's choice. Neither answers to the content requirement.
+default bar (`CUT` = 2/3 of the way from the bar 0.7 to 1; the cut is
+what was chosen), the user's choice. Neither answers to the content requirement.
 
 ### `--against LIBRARY` (`against.rs`)
 
 Verdicts `repeat` / `better` / `review` / `new` per scanned file; `--list`
-prints paths. It is the content rule with the library pinned
+prints paths (one a line, or NUL-separated with `-0`; a path holding a line
+break stops the run with an error unless `-0`, since `a<LF>b.jpg` listed as
+two paths, and a list is what a script hands to `rm`). It is the content rule with the library pinned
 (`suggest::suggest_pinned`). One index over both sides; the scan queries,
 then library files it reached query in turn until none is new; candidates
 ranked by `both_ways`. The second look also re-asks the best-connected member
@@ -1413,7 +1537,15 @@ a parameter is the cheap experiment; run it before adding one.
 - Self-deriving the aligned-points bar from a null model was built and is
   worse (coincidence was never the binding constraint).
 
-Cliffs, distance from shipped to nearest merge, on the four corpora and
+Cliffs at 0.72.0's defaults (the one-sided flat block counted), every step
+of every bar, IMGS-ALL and IMGS5 (`out/v44-flat-contrast`; 0.71.0 at the
+same steps in `out/v42-flat-cliffs`): IMGS-ALL merges nothing at points
+10-3, overlap 0.85-0.25 (Antoniego1/2 165-170 false pairs at 0.5 and
+below), correlation 0.9-0.2 (cross-family 461 at 0.2, largest 78; 43 at
+0.8, largest 39) or `-k` 150-10. IMGS5 merges 5 at the default and points
+8-5, 6 at points 4-3 (Mural1/2 back), 7 at overlap 0.75-0.3 (Puerto3/4,
+Macizo5/6 back), 8 at 0.25, 5 at every correlation 0.9-0.2, 5 at `-k` 100,
+4 at 50 and 25, 2 at 10. The table below is from before 0.72.0, on the four corpora and
 IMGS-ALL: the 512 column at 0.54.0's default (correlation 0.7; session
 scratch, not in `out/`), the 640 column at 0.51.0 with correlation 0.6
 (`out/v36-cliffs/cliffs.txt`; 0.44.0's in `out/v31-cost-cliff`). At 0.7,
@@ -1547,6 +1679,30 @@ Measurement tools:
 ### Tried and rejected (numbers in `git show 5de81bc:CLAUDE.md`)
 
 Do not retry without new evidence:
+- Keeping the **larger** of lossy same-frame copies nothing else separates,
+  and **lossless files with no lossy twin ranked after lossy ones** (0.72.0
+  audit A and B, reverted; `out/v40-keep`). The cases they were for are
+  real: of a q95, a q70 and a q60 JPEG of one picture the q60 is kept (the
+  smaller, after `TAU` and the softness median), and a PNG saved from a q30
+  JPEG is kept over the q95 and q85 JPEGs beside it (lossless first), on 7 of
+  7 IMGS seeds each. But on IMGS-ALL (pairs identical, 0 content lost by the
+  main measure in every variant) families keeping the original or a lossless
+  copy went 295 -> 64-65 / 304 with both, 58 with B narrowed to lossless
+  files sharing no lossy file's pixels and the smaller kept, 74 with B
+  narrowed and the larger. Larger is not better: `noise`, `alpha_on_white`
+  and `jpeg_high` edits are larger than their original and pass `TAU`, and
+  win; without the softness filter, 209 families keep only an edit.
+  IMGS-ALL's lossless copies (`webp_lossless`, `to_png`, `to_tiff`) differ
+  from img-fp's own JPEG decode by a level and are no twin of their
+  original, so ranked after the lossy files they were deleted, through a
+  chain: the lossy keeper deletes the 2x upscale (no detail in its extra
+  pixels), and the deleted upscale deletes the lossless copy, since
+  `own_pixels` guards only against a file of its size. That chain is in
+  0.71.0 too and fires nowhere in IMGS-ALL only because the lossless copy is
+  the keeper there. IMGS-PROVENANCE: larger kept the original in 91 / 266
+  (q97 instead), 0.71.0 in 126 (q85 instead), no content lost either way.
+  The softness filter also works against an original among more compressed
+  copies (they read sharper: dog2 q95 0.43, q60 0.31). Open.
 - Answering a moved file with another name's record whose key (length,
   mtime, ctime to the nanosecond) is its own (0.69.0, reverted): the
   kernel's ctime is a clock tick's, shared by files written or touched
@@ -1752,7 +1908,9 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
 - **Skips vs problems** (vid-fp's summary format). Skips: extension not
   taken by `-x` (extensionless files only under `-x '*'`), non-pictures under
   a wildcard (`decode::sniff::plausible` checks short signatures), hidden folders
-  without `--hidden`, Trash/thumbnail/NAS recycle and snapshot folders
+  without `--hidden`, subfolders without `--recursive` (`Note::Subfolder`: a
+  scan of a folder of folders said "No images found." and exit 0 with nothing
+  to say why), Trash/thumbnail/NAS recycle and snapshot folders
   (`walk::SetAside`: `#recycle`, `@eaDir`, `#snapshot`, `@Recycle`,
   `@__thumb`, `@Recently-Snapshot` too; and `lost+found`, root's 0700 on
   every ext4 drive, which made a drive scan exit 2 and refuse a prune), symlinks
@@ -1783,7 +1941,10 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   `--clear-cache`.
 - **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC18.bin`
   (named for its format, so upgrades start a new file). Records keyed by
-  canonical path + size + mtime + ctime, settings per record; a file under
+  canonical path + size + mtime + ctime (the kernel's seconds and
+  nanoseconds, signed: before 0.72.0 a file dated before 1970 had no key, was
+  analysed again on every run, and kept any run holding it from taking the
+  last matching), settings per record; a file under
   another name is analysed again (intended: see *Tried and rejected*). A run keeps
   what it took and made, and every record it was not asked about (a path it
   did not walk, or other settings) while the file exists or its volume is

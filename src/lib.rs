@@ -135,7 +135,8 @@ struct Args {
     /// only the paths of the images with this verdict, one a line, instead of the report: repeat, better, review or
     /// new. Repeat the option, or separate verdicts with commas, for several.
     ///
-    /// The report is still written to `--output`, if that names a file.
+    /// The report is still written to `--output`, if that names a file. A
+    /// path holding a line break can be listed only with `--null`.
     #[arg(long, value_enum, value_delimiter = ',', value_name = "VERDICT")]
     list: Vec<against::Verdict>,
 
