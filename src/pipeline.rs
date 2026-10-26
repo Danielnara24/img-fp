@@ -941,6 +941,15 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     // files they reach, round after round until none is new (`Scope::reached`).
     let mut asked = vec![false; n];
     let mut ask: Vec<usize> = (0..n).filter(|&i| matched[i] && scope.asks_first(i)).collect();
+    // SCAFFOLDING (v46, `IMGFP_K_REJECT`): `-k` counts rejections. A file's
+    // candidates are a window of its ranking (`window[i]`: from, how many);
+    // after verification each file whose window held accepted candidates asks
+    // for as many more, until `-k` of its candidates have been rejected or
+    // its ranking runs out. So a picture's own copies do not use up the
+    // budget its other relations are looked for in.
+    let k_reject = std::env::var_os("IMGFP_K_REJECT").is_some();
+    let mut window: Vec<(usize, usize)> = vec![(0, args.candidates); n];
+    let mut extended = 0usize;
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
     let mut all_direct: Vec<Edge> = Vec::new();
     let mut verified = 0usize;
@@ -961,7 +970,9 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
             .map_init(
                 || index.asking(),
                 |a, &i| {
-                    let cands = index.candidates(i, &[&index.lists()[i]], args.candidates, a);
+                    let (from, w) = window[i];
+                    let cands = index.candidates(i, &[&index.lists()[i]], from + w, a);
+                    let cands = &cands[from.min(cands.len())..];
                     bar.add(items[i].feats.len() as u64);
                     let i = i as u32;
                     cands.iter().map(|&(j, ..)| if j < i { (j, i) } else { (i, j) }).collect::<Vec<_>>()
@@ -975,7 +986,8 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         });
         // Only a library's files ask after the first round, and only they can
         // propose a pair an earlier round verified.
-        if scope.against {
+        // With `IMGFP_K_REJECT` a later window can propose any pair.
+        if scope.against || k_reject {
             cand_pairs.retain(|p| seen.insert(*p));
         }
         if first {
@@ -1018,12 +1030,42 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         verified += cand_pairs.len();
         drop(cand_pairs);
         ask = scope.reached(&all_direct[from..], pass.policy, &asked);
+        if k_reject {
+            // Accepted: any verdict that stands, whichever side proposed it.
+            let stood: std::collections::HashSet<(u32, u32)> = all_direct.iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)).collect();
+            let asked_now: Vec<usize> = (0..n).filter(|&i| asked[i] && window[i].1 > 0).collect();
+            let more: Vec<(usize, (usize, usize))> = asked_now
+                .par_iter()
+                .map_init(
+                    || index.asking(),
+                    |a, &i| {
+                        let (from, w) = window[i];
+                        let cands = index.candidates(i, &[&index.lists()[i]], from + w, a);
+                        let got = &cands[from.min(cands.len())..];
+                        let ok = got.iter().filter(|&&(j, ..)| stood.contains(&((i as u32).min(j), (i as u32).max(j)))).count();
+                        // A window shorter than asked for is the ranking's end.
+                        (i, if got.len() < w { (from + got.len(), 0) } else { (from + w, ok) })
+                    },
+                )
+                .collect();
+            for (i, wi) in more {
+                window[i] = wi;
+                if wi.1 > 0 && !ask.contains(&i) {
+                    ask.push(i);
+                    extended += 1;
+                }
+            }
+            ask.sort_unstable();
+        }
         if ask.is_empty() {
             break;
         }
         round += 1;
     }
     let n_edges = anchors(&all_direct, pass.policy).count();
+    if k_reject {
+        stage!(cx, "k counts rejections: {extended} windows more in {round} rounds, {verified} candidates verified");
+    }
     stage!(cx, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
     progress.learn(|k| k.anchors = Some(n_edges));
     (all_direct, verified)
@@ -1128,7 +1170,7 @@ fn cluster(
     progress.begin(Stage::Propagate);
     // Clusters are made from clean anchors, and an anchor that is only an
     // anchor may add a file to one but never join two; see `claims::admit`.
-    let mut clean: Vec<bool> = all.iter().map(|e| policy.standing(&e.v) == Standing::Clean).collect();
+    let mut clean: Vec<bool> = all.iter().map(|e| claims::rule_off("clean") || policy.standing(&e.v) == Standing::Clean).collect();
     let demoted = claims::demote_bridges(&all, &mut clean, n);
     stage!(cx, "bridges: dropped {demoted} lone links between clusters");
     let n_weak = clean.iter().filter(|&&c| !c).count();

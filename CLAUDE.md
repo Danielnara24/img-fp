@@ -103,8 +103,18 @@ does not filter (every file is inside `-k`). **Word floor**
 keypoints) are one word. Meets 9 / 10; originals-alone reports identical, small
 families flat over r 100-250, full IMGS-ALL F1 0.9773 -> 0.9780, recall 95.96%,
 cross-family 502 (none >= 300), keep rule unchanged; +8% CPU on full IMGS5,
-+2.6% on the found mix. Left: the `-k` cut against both photos' copies, scores
-near the noise, and the claim graph.
++2.6% on the found mix. **`-k` counts rejections** (`IMGFP_K_REJECT`: a file
+whose window held standing verdicts asks for as many more, until `-k` are
+rejected): meets 10 / 11, small families identical, full IMGS-ALL F1 0.9781,
+CPU within the runs' spread (verified candidates +60% on IMGS-ALL, mostly
+rejected early); no newly met pair is stated, the claim graph refuses them.
+**The claim graph's rules off alone** (`IMGFP_CLAIMS_OFF`): all still
+load-bearing. Cover test: small families joined 26.0 / 41.0 -> 31.0 / 48.0;
+bridge test: bust1/2 merges on IMGS-ALL, Mural, Puerto3/4, Macizo5/6 on IMGS5;
+cycle rule: Segovia1/2, and Mural, Parish Church; every anchor clean: 229
+merges. No rule moves n0 or f: a pair of lone files is one verdict, so there
+precision is the verdict's alone. Left: scores near the noise (Cemetery3/4,
+Shenzhen1/2).
 
 ## Status (0.72.0)
 

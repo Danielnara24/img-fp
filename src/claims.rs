@@ -174,6 +174,9 @@ impl Clusters {
 /// own. Without the test, at `--min-frame-overlap` 0.6 two photographs of
 /// the docks merge for 1,545 false pairs.
 pub(crate) fn demote_bridges(edges: &[Edge], clean: &mut [bool], n: usize) -> usize {
+    if rule_off("bridge") {
+        return 0;
+    }
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbour, edge index)
     for (k, e) in edges.iter().enumerate().filter(|&(k, _)| clean[k]) {
         adj[e.a()].push((e.b(), k));
@@ -232,6 +235,14 @@ pub(crate) fn demote_bridges(edges: &[Edge], clean: &mut [bool], n: usize) -> us
         }
     }
     demoted
+}
+
+/// SCAFFOLDING (v46): a claim-graph rule switched off by `IMGFP_CLAIMS_OFF`
+/// (comma-separated: `bridge`, `cover`, `cycle`, `clean`, which makes every
+/// anchor clean).
+pub(crate) fn rule_off(name: &str) -> bool {
+    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| std::env::var("IMGFP_CLAIMS_OFF").unwrap_or_default().split(',').map(str::to_owned).collect()).iter().any(|r| r == name)
 }
 
 /// The clusters the clean anchors make (`clean`, by position in `edges`),
@@ -315,13 +326,13 @@ pub(crate) fn admit(edges: Vec<Edge>, clean: &[bool], n: usize) -> (Clusters, Ve
             if refused_pairs.contains(&(small, big)) {
                 continue;
             }
-            let covered = c.members(small).iter().all(|&x| near[x].iter().any(|&y| c.id(y) == big));
+            let covered = rule_off("cover") || c.members(small).iter().all(|&x| near[x].iter().any(|&y| c.id(y) == big));
             // Two clusters with clean cycles join only when one file of the
             // larger has a weak anchor to every file of the smaller: the
             // smaller is then renderings of a photograph the larger holds.
             // A weak edge is listed once, so a count is a cover.
             let admitted = covered
-                && (!(c.cycle[ra] && c.cycle[rb]) || {
+                && (rule_off("cycle") || !(c.cycle[ra] && c.cycle[rb]) || {
                     let k = c.members(small).len();
                     c.members(big).iter().any(|&y| near[y].iter().filter(|&&z| c.id(z) == small).count() == k)
                 });
