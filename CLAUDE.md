@@ -122,16 +122,21 @@ one file are no bridge. The floor tips the second over `CLEAN_WORST_BLOCK`
 (`IMGFP_PART_RULE`, `claims::demote_shared_parts`): a clean link holding one
 way only (overlap bar one side) makes a part; a part whose containers lie in
 two clusters (of the two-way clean links; a file with none is of the cluster
-most of its one-way links reach) keeps only its own cluster's, else the
-most-linked one's. First built with lone files as clusters of their own: it
-cut every family's composites out, and Henares1/2 merged at correlation 0.4
-(cycle rule's exception, `hen/replay3.py`). Fixed, on guided + `-k`: small
-families identical, full IMGS-ALL F1 0.9773 -> 0.9772 (perfect transforms
-58 -> 55, one family each), keep rule unchanged; full IMGS5 F1 0.9340 ->
-0.9569, cross-family 21,939 -> 9,189, Tree1/2 gone, Floriana / Fountain
-2,600-6,600 -> 430-780 pairs, **Mural1/2 248 -> 327** (over 300); IMGS-ALL
-cliffs identical in merges at every step, IMGS5 never more. With the floor,
-Macizo1/2 gone (F1 0.9684). RESULTS section 11.
+most of its one-way links reach) keeps only the most-linked of those
+clusters (its own on a tie). First built with lone files as clusters of
+their own: it cut every family's composites out, and Henares1/2 merged at
+correlation 0.4 (cycle rule's exception, `hen/replay3.py`). Then own cluster
+first (v2): IMGS-ALL lost 378 true pairs, 375 in `low-light` (two crops
+two-way to each other drew four composites, and ~50 links into the main 57
+went; `low/trace.py`). Now, on guided + `-k`: small families identical,
+full IMGS-ALL F1 0.9773 -> 0.9774, no true pair lost (+3), perfect
+transforms 58, keep rule unchanged, every demotion same-family; full IMGS5
+F1 0.9340 -> 0.9425 (recall 96.30 -> 96.17), cross-family 21,939 -> 17,418,
+Tree1/2 gone, Floriana3/4 2,665 -> 473, Fountain3/5 and Floriana1/2 as off
+(crop-like, may merge: user's verdict; v2 cut them to 430-550, F1 0.9569),
+**Mural1/2 248 -> 327** (over 300; fine by eye); IMGS-ALL cliffs identical
+in merges at every step, IMGS5 never more. With the floor, Macizo1/2 5,813
+-> 3 pairs (F1 0.9535). RESULTS section 11.
 
 ## Status (0.72.0)
 

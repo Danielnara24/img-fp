@@ -163,9 +163,12 @@ impl Clusters {
 /// `part`'s) says `part` is a part of the other file; that `part` is a part
 /// of two files does not make them one picture (a crop of a distant mountain
 /// two photographs share: Macizo1/2). The clusters the two-way clean links
-/// make are asked first; of the clusters holding `part`'s containers, its own
-/// keeps its links if it holds any, else the one holding most (then the
-/// lowest file); its one-way links into the others stop being clean. A file
+/// make are asked first; of the clusters holding `part`'s containers, the one
+/// holding most keeps its links (its own on a tie, then the lowest file); its
+/// one-way links into the others stop being clean. Its own first, however
+/// few, split `low-light`: two crops two-way to each other were a cluster with
+/// the four composites holding them, and their fifty links into the family
+/// were cut. A file
 /// with no two-way clean link (a composite, a crop) is of the cluster most of
 /// its one-way clean links reach, then the lowest file: alone, a family's own
 /// contact sheet was a cluster of its own, and its links were cut from the
@@ -217,7 +220,11 @@ pub(crate) fn demote_shared_parts(edges: &[Edge], clean: &mut [bool], n: usize, 
         if count.len() < 2 {
             continue;
         }
-        let keep = if count.contains_key(&own) { own } else { *count.iter().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.1 .1.cmp(&a.1 .1))).unwrap().0 };
+        let keep = *count
+            .iter()
+            .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then((*a.0 == own).cmp(&(*b.0 == own))).then(b.1 .1.cmp(&a.1 .1)))
+            .unwrap()
+            .0;
         for (k, cl) in links {
             if cl != keep {
                 clean[k] = false;
