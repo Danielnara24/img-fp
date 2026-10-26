@@ -115,6 +115,23 @@ cycle rule: Segovia1/2, and Mural, Parish Church; every anchor clean: 229
 merges. No rule moves n0 or f: a pair of lone files is one verdict, so there
 precision is the verdict's alone. Left: scores near the noise (Cemetery3/4,
 Shenzhen1/2).
+**Macizo1/2** merges through Macizo1's `crop_off_centre` (the distant
+mountain both share): two Macizo2 copies match it clean, and two links into
+one file are no bridge. The floor tips the second over `CLEAN_WORST_BLOCK`
+(0.9005); guided + `-k` is 0.0067 short. **Shared-part rule**
+(`IMGFP_PART_RULE`, `claims::demote_shared_parts`): a clean link holding one
+way only (overlap bar one side) makes a part; a part whose containers lie in
+two clusters (of the two-way clean links; a file with none is of the cluster
+most of its one-way links reach) keeps only its own cluster's, else the
+most-linked one's. First built with lone files as clusters of their own: it
+cut every family's composites out, and Henares1/2 merged at correlation 0.4
+(cycle rule's exception, `hen/replay3.py`). Fixed, on guided + `-k`: small
+families identical, full IMGS-ALL F1 0.9773 -> 0.9772 (perfect transforms
+58 -> 55, one family each), keep rule unchanged; full IMGS5 F1 0.9340 ->
+0.9569, cross-family 21,939 -> 9,189, Tree1/2 gone, Floriana / Fountain
+2,600-6,600 -> 430-780 pairs, **Mural1/2 248 -> 327** (over 300); IMGS-ALL
+cliffs identical in merges at every step, IMGS5 never more. With the floor,
+Macizo1/2 gone (F1 0.9684). RESULTS section 11.
 
 ## Status (0.72.0)
 

@@ -157,6 +157,77 @@ impl Clusters {
 /// and a beach photograph produced 62 false pairs downstream, and an earlier
 /// one produced 354.
 ///
+/// SCAFFOLDING (v46, `IMGFP_PART_RULE`): a file that is part of two
+/// clusters joins neither to the other. A clean link that holds one way only
+/// (`part`'s frame on the other's at the overlap bar, not the other's on
+/// `part`'s) says `part` is a part of the other file; that `part` is a part
+/// of two files does not make them one picture (a crop of a distant mountain
+/// two photographs share: Macizo1/2). The clusters the two-way clean links
+/// make are asked first; of the clusters holding `part`'s containers, its own
+/// keeps its links if it holds any, else the one holding most (then the
+/// lowest file); its one-way links into the others stop being clean. A file
+/// with no two-way clean link (a composite, a crop) is of the cluster most of
+/// its one-way clean links reach, then the lowest file: alone, a family's own
+/// contact sheet was a cluster of its own, and its links were cut from the
+/// family (Henares1/2 then joined at correlation 0.4). How many were demoted.
+pub(crate) fn demote_shared_parts(edges: &[Edge], clean: &mut [bool], n: usize, bar: f32) -> usize {
+    if std::env::var_os("IMGFP_PART_RULE").is_none() {
+        return 0;
+    }
+    // (part, container) of a one-way clean link, by edge index.
+    let one_way = |e: &Edge| -> Option<(usize, usize)> {
+        let (a, b) = (e.v.ov_a >= bar, e.v.ov_b >= bar);
+        match (a, b) {
+            (true, false) => Some((e.a(), e.b())),
+            (false, true) => Some((e.b(), e.a())),
+            _ => None,
+        }
+    };
+    let c = Clusters::joined(n, edges.iter().zip(clean.iter()).filter(|&(e, &k)| k && one_way(e).is_none()).map(|(e, _)| *e));
+    let alone = |x: usize| c.members(c.id(x)).len() == 1;
+    let lowest = |cl: usize| c.members(cl).iter().copied().min().unwrap_or(cl);
+    let mut votes: HashMap<usize, HashMap<usize, usize>> = HashMap::new(); // lone file -> cluster -> links
+    for (e, _) in edges.iter().zip(clean.iter()).filter(|&(e, &k)| k && one_way(e).is_some()) {
+        for (x, y) in [(e.a(), e.b()), (e.b(), e.a())] {
+            if alone(x) && !alone(y) {
+                *votes.entry(x).or_default().entry(c.id(y)).or_default() += 1;
+            }
+        }
+    }
+    let home: Vec<usize> = (0..n)
+        .map(|x| match votes.get(&x) {
+            Some(v) => *v.iter().max_by(|a, b| a.1.cmp(b.1).then(lowest(*b.0).cmp(&lowest(*a.0)))).unwrap().0,
+            None => c.id(x),
+        })
+        .collect();
+    let mut by_part: HashMap<usize, Vec<(usize, usize)>> = HashMap::new(); // part -> (edge index, container's cluster)
+    for (k, e) in edges.iter().enumerate().filter(|&(k, _)| clean[k]) {
+        if let Some((part, holder)) = one_way(e) {
+            by_part.entry(part).or_default().push((k, home[holder]));
+        }
+    }
+    let mut demoted = 0;
+    for (part, links) in by_part {
+        let own = home[part];
+        let mut count: HashMap<usize, (usize, usize)> = HashMap::new(); // cluster -> (links, lowest file)
+        for &(_, cl) in &links {
+            let x = count.entry(cl).or_insert((0, lowest(cl)));
+            x.0 += 1;
+        }
+        if count.len() < 2 {
+            continue;
+        }
+        let keep = if count.contains_key(&own) { own } else { *count.iter().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.1 .1.cmp(&a.1 .1))).unwrap().0 };
+        for (k, cl) in links {
+            if cl != keep {
+                clean[k] = false;
+                demoted += 1;
+            }
+        }
+    }
+    demoted
+}
+
 /// So an edge that is a *bridge* in the graph theory sense — its removal
 /// disconnects the component — and which separates two non-trivial groups is
 /// held to a much higher standard than an ordinary match, because it is

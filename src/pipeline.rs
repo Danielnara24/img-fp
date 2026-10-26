@@ -1171,6 +1171,10 @@ fn cluster(
     // Clusters are made from clean anchors, and an anchor that is only an
     // anchor may add a file to one but never join two; see `claims::admit`.
     let mut clean: Vec<bool> = all.iter().map(|e| claims::rule_off("clean") || policy.standing(&e.v) == Standing::Clean).collect();
+    let parts = claims::demote_shared_parts(&all, &mut clean, n, policy.min_frame_overlap());
+    if parts > 0 {
+        stage!(cx, "shared parts: {parts} one-way links between clusters no longer clean");
+    }
     let demoted = claims::demote_bridges(&all, &mut clean, n);
     stage!(cx, "bridges: dropped {demoted} lone links between clusters");
     let n_weak = clean.iter().filter(|&&c| !c).count();
