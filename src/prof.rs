@@ -14,7 +14,7 @@
 //! come to several times the wall clock.
 #![allow(dead_code)]
 
-pub const N: usize = 45;
+pub const N: usize = 50;
 
 #[rustfmt::skip]
 pub static NAMES: [&str; N] = [
@@ -51,6 +51,8 @@ pub static NAMES: [&str; N] = [
     // The keep/delete suggestion, on one thread over every component's
     // workers: its wall clock.
     "suggest",
+    // SCAFFOLDING (v46): guided matching. `#` slots are counts, not cycles.
+    "guided", "#guided:calls", "#guided:rounds", "#guided:dist", "#guided:same",
 ];
 
 pub static ACC: [std::sync::atomic::AtomicU64; N] =
@@ -137,12 +139,15 @@ pub fn report() {
             .iter()
             .enumerate()
             .map(|(i, n)| (ACC[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / hz, *n))
-            .filter(|(t, _)| *t > 0.0)
+            .filter(|(t, n)| *t > 0.0 && !n.starts_with('#'))
             .collect();
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
         crate::progress::to_stderr(&format!("--- profile (cpu seconds; stages nest; tsc {:.0} MHz) ---", hz / 1e6));
         for (t, n) in v {
             crate::progress::to_stderr(&format!("{n:>18}  {t:8.2}"));
+        }
+        for (i, n) in NAMES.iter().enumerate().filter(|(_, n)| n.starts_with('#')) {
+            crate::progress::to_stderr(&format!("{n:>18}  {}", ACC[i].load(std::sync::atomic::Ordering::Relaxed)));
         }
     }
 }

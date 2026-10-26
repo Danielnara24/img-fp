@@ -671,6 +671,130 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
     Some((m, held_after))
 }
 
+thread_local! {
+    /// SCAFFOLDING (v46): the last verdict's agreeing count before and after
+    /// guided matching, for `pipeline::watch`.
+    pub(crate) static LAST_AGREEING: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// SCAFFOLDING (v46): the descriptor bar of guided matching, squared, from
+/// `IMGFP_GUIDE_D`; none, off.
+fn guide_d2() -> Option<u32> {
+    static D: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("IMGFP_GUIDE_D").ok().and_then(|v| v.parse::<u32>().ok()).filter(|&d| d > 0).map(|d| d * d))
+}
+
+fn guide_gated() -> bool {
+    static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *G.get_or_init(|| std::env::var("IMGFP_GUIDE_GATED").is_ok())
+}
+
+/// Correspondences found again at a transform, without the vocabulary: each of
+/// A's keypoints is carried by `m` into B, and matched to the B keypoint within
+/// the inlier tolerance of where it lands whose descriptor is nearest, if that
+/// one is nearer than `d2`. The least-squares fit through them is taken and
+/// they are found again, twice. Hands back the transform and how many it
+/// explains; `pairs` and `scratch.mask` are the guided matches, all inliers.
+#[cfg_attr(dispatch, inline(always))]
+pub(crate) fn guided(a: &Features, b: &Features, m: Affine, bw: f32, bh: f32, d2: u32, pairs: &mut Vec<(u32, u32)>, sc: &mut Scratch) -> (Affine, usize) {
+    let tol = (0.015 * (bw * bw + bh * bh).sqrt()).max(3.0);
+    let tol2 = tol * tol;
+    let (nx, ny) = ((bw / tol) as usize + 1, (bh / tol) as usize + 1);
+    let cell = |x: f32, y: f32| -> Option<usize> {
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let (cx, cy) = ((x / tol) as usize, (y / tol) as usize);
+        (cx < nx && cy < ny).then_some(cy * nx + cx)
+    };
+    // B's keypoints bucketed by cell, row-major (a counting sort), with their
+    // positions beside them in that order: three cells of a row are then one
+    // run of `by_cell`.
+    sc.cell_at.clear();
+    sc.cell_at.resize(nx * ny + 1, 0);
+    sc.fill.clear();
+    for k in b.kps.iter() {
+        let c = cell(k.x, k.y).map_or(u32::MAX, |c| c as u32);
+        sc.fill.push(c);
+        if c != u32::MAX {
+            sc.cell_at[c as usize + 1] += 1;
+        }
+    }
+    for c in 0..nx * ny {
+        sc.cell_at[c + 1] += sc.cell_at[c];
+    }
+    let held = sc.cell_at[nx * ny] as usize;
+    sc.by_cell.clear();
+    sc.by_cell.resize(held, 0);
+    sc.at_xy.clear();
+    sc.at_xy.resize(held, (0.0, 0.0));
+    for (j, k) in b.kps.iter().enumerate() {
+        let c = sc.fill[j];
+        if c != u32::MAX {
+            let o = sc.cell_at[c as usize] as usize;
+            sc.by_cell[o] = j as u32;
+            sc.at_xy[o] = (k.x, k.y);
+            sc.cell_at[c as usize] += 1;
+        }
+    }
+    // The fill moved each start to the next cell's: shift back.
+    for c in (0..nx * ny).rev() {
+        sc.cell_at[c + 1] = sc.cell_at[c];
+    }
+    sc.cell_at[0] = 0;
+    let mut m = m;
+    let mut n = 0;
+    for round in 0..3 {
+        // The last round's matches, to stop once a round finds the same ones:
+        // the fit through them is then the transform they were found at.
+        std::mem::swap(pairs, &mut sc.last);
+        pairs.clear();
+        for (i, ka) in a.kps.iter().enumerate() {
+            let (x, y) = apply(&m, ka.x, ka.y);
+            let (cx, cy) = ((x / tol).floor() as isize, (y / tol).floor() as isize);
+            if cx < -1 || cy < -1 || cx > nx as isize || cy > ny as isize {
+                continue;
+            }
+            let da: &[u8; DESC_LEN] = a.d(i).try_into().unwrap();
+            let mut best = (d2, u32::MAX);
+            let (x0, x1) = ((cx - 1).max(0) as usize, (cx + 1).min(nx as isize - 1) as usize);
+            if x0 > x1 {
+                continue;
+            }
+            for yy in (cy - 1).max(0)..=(cy + 1).min(ny as isize - 1) {
+                let row = yy as usize * nx;
+                let (s, e) = (sc.cell_at[row + x0] as usize, sc.cell_at[row + x1 + 1] as usize);
+                for o in s..e {
+                    let (kx, ky) = sc.at_xy[o];
+                    let (dx, dy) = (x - kx, y - ky);
+                    if dx * dx + dy * dy >= tol2 {
+                        continue;
+                    }
+                    let j = sc.by_cell[o];
+                    let d = dist2(da, b.d(j as usize));
+                    if d < best.0 {
+                        best = (d, j);
+                    }
+                }
+            }
+            if best.1 != u32::MAX {
+                pairs.push((i as u32, best.1));
+            }
+        }
+        n = pairs.len();
+        sc.mask.clear();
+        sc.mask.resize(n, true);
+        if round == 2 || (round > 0 && *pairs == sc.last) {
+            break;
+        }
+        match fit_affine(a, b, pairs, &sc.mask) {
+            Some(m2) => m = m2,
+            None => break,
+        }
+    }
+    (m, n)
+}
+
 /// Ask for the keypoints `pairs[k]` will read, on both sides.
 #[cfg_attr(dispatch, inline(always))]
 #[cfg_attr(not(dispatch), inline)]
@@ -1863,6 +1987,13 @@ pub struct Scratch {
     /// The four coordinate arrays again, the best hypothesis's outliers first.
     /// See `best_transform`.
     order: [Vec<f32>; 4],
+    /// Guided matching's grid over B's keypoints (`guide`): cell starts, then
+    /// keypoint indices by cell.
+    cell_at: Vec<u32>,
+    by_cell: Vec<u32>,
+    at_xy: Vec<(f32, f32)>,
+    fill: Vec<u32>,
+    last: Vec<(u32, u32)>,
 }
 
 pub struct Pair<'a> {
@@ -1887,11 +2018,21 @@ crate::simd::dispatched! {
 #[cfg_attr(dispatch, inline(always))]
 fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
     let mut v = Verdict { variant: var, ..Default::default() };
+    LAST_AGREEING.with(|c| c.set((0, 0)));
     timed!(16, correspond(p.fa, p.fb, cands, matches));
     v.n_match = matches.len() as u32;
     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
     let Some((m, n_agreeing)) = timed!(17, best_transform(p.fa, p.fb, matches, bw, bh, scratch)) else { return v };
+    // SCAFFOLDING (v46): `IMGFP_GUIDE_GATED` guides only a hypothesis that
+    // already clears the points the verdict will be held to.
+    let wanted = !guide_gated() || n_agreeing >= if frame_onto_frame(&{ if var.mirror { compose(&mirror_affine(aw), &m) } else { m } }, aw, ah, bw, bh) { 3 } else { gate.0.max(3) as usize };
+    let pre = n_agreeing;
+    let (m, n_agreeing) = match guide_d2() {
+        Some(d2) if n_agreeing >= 3 && wanted => timed!(45, guided(p.fa, p.fb, m, bw, bh, d2, matches, scratch)),
+        _ => (m, n_agreeing),
+    };
+    LAST_AGREEING.with(|c| c.set((pre as u32, n_agreeing as u32)));
     // `p.fa` is the query image already mirrored, so `m` maps mirrored-A
     // coordinates into B. Composing the mirror back in gives a transform from
     // A's own coordinates, which is what the rest of the tool stores, checks
@@ -2274,4 +2415,101 @@ mod tests {
         }
         assert!(Verdict { m: [0.0; 6], ..Default::default() }.reversed().is_none());
     }
+}
+
+/// SCAFFOLDING (v46, test only): the pixel check with B's sample positions
+/// read off `field` (A's working coordinates to B's) instead of one affine;
+/// `m` still sets the overlap's box and the footprints. Scalar path only.
+/// Returns (mean block agreement, blocks, worst block).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pixel_check_field(ta: &Thumb, tb: &Thumb, m: &Affine, field: &dyn Fn(f32, f32) -> (f32, f32), aw: f32, ah: f32, bw: f32, bh: f32) -> (f32, u32, f32) {
+    const P: usize = 24;
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for iy in 0..P {
+        let y = (iy as f32 + 0.5) / P as f32 * ah;
+        for ix in 0..P {
+            let x = (ix as f32 + 0.5) / P as f32 * aw;
+            let (u, v) = apply(m, x, y);
+            if u >= 0.0 && u < bw && v >= 0.0 && v < bh {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if !(x1 > x0 && y1 > y0) {
+        return (0.0, 0, 0.0);
+    }
+    let (mut pa, mut pb) = (Pyramid::default(), Pyramid::default());
+    let step_a = ((x1 - x0) / (GRID - 1) as f32).max((y1 - y0) / (GRID - 1) as f32);
+    let lin = linear_scale(m);
+    let lod_a = ta.lod((step_a * ta.scale).max(1e-6), &mut pa);
+    let lod_b = tb.lod((step_a * lin * tb.scale).max(1e-6), &mut pb);
+    let sa = (ta.w as f32 / aw, ta.h as f32 / ah);
+    let sb = (tb.w as f32 / bw, tb.h as f32 / bh);
+    let grid_a = GridTaps::of(&lod_a, (x0, x1 - x0), (y0, y1 - y0), sa);
+    let mut va = [0f32; GRID * GRID];
+    let mut vb = [0f32; GRID * GRID];
+    let mut ok = [false; GRID * GRID];
+    for iy in 0..GRID {
+        let y = y0 + (y1 - y0) * iy as f32 / (GRID - 1) as f32;
+        for ix in 0..GRID {
+            let x = x0 + (x1 - x0) * ix as f32 / (GRID - 1) as f32;
+            let (u, v) = field(x, y);
+            if u < 0.0 || u >= bw || v < 0.0 || v >= bh {
+                continue;
+            }
+            let k = iy * GRID + ix;
+            va[k] = grid_a.at(&lod_a, ix, iy);
+            vb[k] = lod_b.at((u + 0.5) * sb.0, (v + 0.5) * sb.1);
+            ok[k] = true;
+        }
+    }
+    let (mut agree, mut total, mut worst) = (0f32, 0u32, f32::INFINITY);
+    for by in (0..GRID).step_by(BLOCK) {
+        for bx in (0..GRID).step_by(BLOCK) {
+            let mut n = 0usize;
+            let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0f64, 0f64, 0f64, 0f64, 0f64);
+            for y in by..by + BLOCK {
+                for x in bx..bx + BLOCK {
+                    let k = y * GRID + x;
+                    if !ok[k] {
+                        continue;
+                    }
+                    n += 1;
+                    let (p, q) = (va[k] as f64, vb[k] as f64);
+                    sa += p;
+                    sb += q;
+                    saa += p * p;
+                    sbb += q * q;
+                    sab += p * q;
+                }
+            }
+            if n < BLOCK * BLOCK {
+                continue;
+            }
+            let nf = n as f64;
+            let vara = saa - sa * sa / nf;
+            let varb = sbb - sb * sb / nf;
+            let flat = 4.0 * 4.0 * nf;
+            let (flat_a, flat_b) = (vara < flat, varb < flat);
+            if flat_a && flat_b {
+                continue;
+            }
+            let r = if flat_a || flat_b {
+                (2.0 * (sab - sa * sb / nf).abs() / (vara + varb)) as f32
+            } else {
+                ((sab - sa * sb / nf) / (vara * varb).sqrt()).abs() as f32
+            };
+            total += 1;
+            agree += r;
+            worst = worst.min(r);
+        }
+    }
+    if total == 0 {
+        return (0.0, 0, 0.0);
+    }
+    (agree / total as f32, total, worst)
 }

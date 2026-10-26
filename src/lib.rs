@@ -45,6 +45,8 @@ mod matched;
 pub mod outcome;
 mod outputs;
 mod pipeline;
+#[cfg(test)]
+mod probe;
 mod problems;
 mod prof;
 mod progress;

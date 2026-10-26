@@ -10,32 +10,101 @@ with its numbers) was in this file until 0.44.0. It is in git:
 `git show 5de81bc:CLAUDE.md`. Look there before re-trying anything listed
 under *Tried and rejected* below, or before quoting a figure not given here.
 
-## DO FIRST NEXT SESSION: is `-k` cherry-picking the corpus?
+## Precision is measured where siblings cannot meet (found 0.72.0, checked)
 
-Found at 0.72.0 and **not yet checked; every precision and merge figure in
-this file may depend on it.** Each seed of the generated corpora has ~90
-variants (IMGS-ALL: 27,659 files / 304 seeds), and a file is verified only
-against its best `-k` = 150 candidates. Inside the corpus a seed's
-candidates are filled by its own family, so a near-miss *sibling* photograph
-is often never compared at all. Proof: IMGS5's 60 seeds scanned alone (no
-variants) pair 8 sibling seed pairs at 0.7 and 13 at 0.6 (0.71.0 and 0.72.0
-alike), while inside the full IMGS5 run (0.71.0) the same seed originals
-pair only Fountain3/5, Mural1/2 and bird1/2 (`out/v42-flat-cliffs/seeds`,
-`out/v44-flat-contrast/seeds`). A real library has one to
-a few copies of a photo, not 90, so there every sibling is a candidate. So:
-(1) `-k` 150 may be fitted, unknowingly, to the family size the generator
-makes (150 > ~90 means a family fits whole, with ~60 slots left); (2) the
-corpora hide false pairs between near-miss photographs, and the "no merge"
-cliffs, IMGS5's merge counts and the 0.54.0 / 0.72.0 correlation choices
-were measured where siblings mostly cannot meet; (3) the `-k` cliff rows
-(merges *fall* as `-k` falls) are candidate starvation, not safety. What to
-do: score precision and merges where families are small: seeds alone, and
-each seed with 1, 2, 5, 10, 30 variants drawn at random (several draws),
-on IMGS5 and IMGS-ALL; sweep `-k` (10-400) and the three bars on those; see
-whether `-k`'s value and the bars' cliffs survive, and whether `-k` should be
-derived (from the corpus, or a candidate's score) rather than fixed. Until
-then treat every precision figure here as measured on a corpus that shields
-the matcher from its hardest negatives.
+`benchmark/out/v45-k/RESULTS.md`. **`-k` is not the cause**: full IMGS5 at `-k`
+300-5,460 is identical (candidate lists are "files sharing a word", shorter
+than 300), small families are flat from `-k` 50 (IMGS5) and 10-400 (IMGS-ALL);
+the "merges fall as `-k` falls" rows are candidate starvation. **The
+vocabulary is**: correspondences are sought only within shared words, and a
+vocabulary trained on ~90 copies of each seed is finest around each seed's
+descriptors, so a near-miss sibling's matches collapse (Puerto1/2: 489 matches
+seeds alone, 300 at 2 copies, 125 at 10, 47 at 30, 19 in the full corpus; its
+`blk` 0.71-0.73 in all) and fall under the points bar or are never met. Corpus
+size alone does not do it: originals among 9,285 unrelated found photos pair
+as many siblings as alone (IMGS-ALL 6, IMGS5 8). A real library is that regime.
+There, at 1-2 copies a photo (3 draws each), IMGS-ALL joins **5-11** sibling
+sets directly at pair precision **90.6-96.8%** (full corpus: 0, 99.78%);
+IMGS5 7-13 at 64-71%. Recall does not move (IMGS-ALL 93-97%).
+
+- **Not to be trusted as safety**: every precision, cross-family and "no
+  merge" figure below and in *Parameters* measured on the full corpora; the
+  cliff table; every constant justified by a merge cliff (`CLEAN_WORST_BLOCK`,
+  `GRID / BLOCK`, flat-block bar, inlier tolerance, the claim-graph survey).
+  The claim-graph rules guard merges of large families; at 1-2 copies the
+  error is one direct verdict between two small clusters, which they pass.
+- **Still good**: recall; pixel-check values (corpus-independent); the 0.72.0
+  correlation choice (made on seeds alone); keep rule on IMGS-ALL (no DELETE
+  rests on another photograph at any family size).
+- **Where families are small**: correlation is the only bar that separates
+  siblings (IMGS-ALL seeds 0.5-0.9: 18/13/9/6/5/4/2; Segovia1/2 and game2/3
+  pass at 0.9); overlap one step down, 0.75, takes IMGS5 seeds 8 -> 14 (a
+  portrait from the landscape's spot is a crop of it); points 10 -> 3 adds no
+  sibling at <= 2 copies and +1.4 recall (it guarded siblings only where the
+  vocabulary had already thinned them). `blk_min` alone does not separate:
+  18-20% of true verdicts (warps, photo_of_screen, vignette) are at or below
+  Segovia1/2's 0.70.
+- **IMGS5 keep rule, never scored**: DELETEs resting on a sibling at every
+  family size (bird1/2 burst nearly all; Floriana, Puerto3/4, Cemetery3/4), 123
+  rows in the full run.
+- **Open, to rethink**: (1) score precision on small families (seeds + 1-2
+  variants, several draws; seeds among found photos), counting sibling sets
+  joined, not >= 300-pair merges; full corpora for recall only. (2) A verdict
+  that depends on what else is scanned: the same pair passes in a folder of 60
+  and not of 5,460 copies. Verification independent of the vocabulary's
+  fineness (correspondences not limited to leaf words) would make one answer,
+  then the bars need re-choosing on (1).
+
+## Scoring on small families, and guided matching (session v46, not shipped)
+
+`benchmark/families.py` scores precision where siblings meet (`run BINARY OUT
+--cache C`, `score`, `compare`): seeds alone, seeds + 1 / 2 variants (three draws
+each), seeds among the found photos, `--only full` for the whole corpus. The
+figure to drive down is **total joined** (seed pairs reported as one picture,
+n0 + mean n1 + mean n2 + f): 0.72.0 **IMGS-ALL 27.0, IMGS5 36.7**. Read recall
+from the full corpora. A brute-force probe (every keypoint against every
+keypoint, `src/probe.rs`, test-only scaffolding) passes 7 / 8 sibling pairs at
+the default bars, the seeds-alone answer.
+
+Scaffolding in `verify::guided`, on only under `IMGFP_GUIDE_D` (off: 17 reports
+byte-identical to 0.72.0): the vocabulary's transform finds the correspondences
+again by position, nearest descriptor under D within the inlier tolerance,
+refit twice, so a verdict no longer depends on the vocabulary's fineness.
+`benchmark/out/v46-matcher/RESULTS.md`. **D is derived, 320**: the distance at
+which a pair expects one coincidental correspondence (the 1/C quantile of its
+own off-window null, C its window trials; median over unrelated pairs, p10-p90
+283-351; `probe/null.tsv`). Below ~250 D is a descriptor-similarity cut that
+takes siblings, warps and recall down together (a ramp: joined 17.3 / 18.3 at
+100), so it would be fitted. From 250 to 1000 (no bar) small families are a
+plateau (joined 25.7-29.3 / 39.0-42.0) and no seed pairs with a found photo:
+there the pixel check decides. D cannot go: with no bar an unrelated pair has
+314 inliers (5.6 at 320), which the points bar and `encloses_centre` read. At
+320 full IMGS-ALL F1 0.9773, precision 99.72%, recall 95.82%, cross-family 412
+(no seed pair >= 300), perfect transforms 58; keep rule 0 lost, 298 / 304; small
+families joined 26.0 / 40.3 (0.72.0 27.0 / 36.7). Cost +17% CPU on the found mix
+(guided 68 s, pixel checks 1.3 -> 12 s); `IMGFP_GUIDE_GATED` (refine only what
+clears the points bar already) +3.4%, small-family joined identical, recall
+-0.4 to -0.9 points, full IMGS-ALL F1 0.9722, but a hypothesis the vocabulary
+thinned below 10 is again left alone. The loop's rewrite (row runs, early stop)
+is byte-identical and ~1.5%. Siblings against warps: no separator in descriptor
+distance, residual, coverage, local alignment (a lattice-grown smooth field
+helps warps, hurts composites, leaves siblings) or leave-one-out local
+consistency over keypoint scale (only camera-moved siblings stand out, and
+`wave_vertical` overlaps them). The nearest siblings (bird, Mural, Segovia) are
+a static camera and changed content, which the truth calls an edit.
+Where a sibling verdict depends on the corpus (`IMGFP_WATCH`, `watch/why.py`):
+of the pairs standing on their originals alone (12 IMGS-ALL, 13 IMGS5), the
+full corpus gives the same n_in wherever it meets them, but meets only 6 / 7
+(ranked past `-k` or sharing no word: the score is 1-19% of its value alone),
+and the claim graph refuses most of those met. On originals alone retrieval
+does not filter (every file is inside `-k`). **Word floor**
+(`IMGFP_WORD_R`, `Vocabulary::with_floor`): leaves of one parent within r = 143
+(median over true pairs of the p90 descriptor distance between corresponding
+keypoints) are one word. Meets 9 / 10; originals-alone reports identical, small
+families flat over r 100-250, full IMGS-ALL F1 0.9773 -> 0.9780, recall 95.96%,
+cross-family 502 (none >= 300), keep rule unchanged; +8% CPU on full IMGS5,
++2.6% on the found mix. Left: the `-k` cut against both photos' copies, scores
+near the noise, and the claim graph.
 
 ## Status (0.72.0)
 

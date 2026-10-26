@@ -105,6 +105,22 @@ impl<'a> Index<'a> {
                 if let Some(mass) = &self.mass {
                     both_ways(&mut a.scored, postings.mass(wl), mass);
                 }
+                if crate::pipeline::watch::wants(i) && v == 0 && asked.len() == 1 {
+                    let mut all: Vec<f32> = a.scored.iter().map(|x| x.1).collect();
+                    all.sort_by(|x, y| y.partial_cmp(x).unwrap());
+                    let at = |r: usize| all.get(r - 1).copied().unwrap_or(0.0);
+                    crate::pipeline::watch::say(i, i, &format!("scores\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}", all.len(), at(1), at(10), at(50), at(150), at(300), at(1000), at((all.len() / 2).max(1))));
+                }
+                if crate::pipeline::watch::wants(i) {
+                    for j in crate::pipeline::watch::partners(i) {
+                        let at = a.scored.iter().find(|&&(c, _)| c as usize == j).map(|&(_, sc)| sc);
+                        let what = match at {
+                            Some(sc) => format!("rank\t{v}\t{}\tof {}\tscore {sc:.4}\ttop {:.4}", 1 + a.scored.iter().filter(|&&(_, o)| o > sc).count(), a.scored.len(), a.scored.iter().map(|x| x.1).fold(0f32, f32::max)),
+                            None => format!("rank\t{v}\tuntouched\tof {}", a.scored.len()),
+                        };
+                        crate::pipeline::watch::say(i, j, &what);
+                    }
+                }
                 rank_best(&mut a.scored, k);
             });
             a.merged.extend(a.scored.iter().map(|&(j, s)| (j, s, v as u8)));

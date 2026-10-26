@@ -225,6 +225,11 @@ pub struct Vocabulary<'a> {
     down: Vec<Vec<Kids>>,
     max_paths: usize,
     path_ratio: f32,
+    /// SCAFFOLDING (v46, `IMGFP_WORD_R`): each leaf's word. Leaves of one
+    /// parent whose centres lie within r of each other are one word (single
+    /// linkage), so no word is finer than two observations of one point.
+    /// Empty: each leaf its own word.
+    alias: Vec<u32>,
 }
 
 // SAFETY: `leaves` points into `own`, whose buffer is never touched after
@@ -577,7 +582,49 @@ impl<'a> Vocabulary<'a> {
             down,
             max_paths: p.max_paths,
             path_ratio: p.path_ratio,
+            alias: Vec::new(),
         }
+        .with_floor()
+    }
+
+    /// SCAFFOLDING (v46): `alias`, from `IMGFP_WORD_R`.
+    fn with_floor(mut self) -> Self {
+        let Some(r) = std::env::var("IMGFP_WORD_R").ok().and_then(|v| v.parse::<u32>().ok()).filter(|&r| r > 0) else { return self };
+        let r2 = r * r;
+        let n = self.leaves.len();
+        let parents: Vec<Kids> = if self.depth >= 2 { self.down[self.depth - 2].clone() } else { vec![self.root] };
+        let mut alias: Vec<u32> = (0..n as u32).collect();
+        let find = |a: &mut Vec<u32>, mut x: u32| {
+            while a[x as usize] != x {
+                let up = a[a[x as usize] as usize];
+                a[x as usize] = up;
+                x = up;
+            }
+            x
+        };
+        let leaf = |i: usize| -> &[u8; DESC_LEN] { unsafe { &*(self.leaves[i] as *const [u8; DESC_LEN]) } };
+        for k in parents {
+            let (f, m) = (k.first as usize, k.n as usize);
+            for i in f..f + m {
+                for j in i + 1..f + m {
+                    if dist2(leaf(i), leaf(j)) < r2 {
+                        let (a, b) = (find(&mut alias, i as u32), find(&mut alias, j as u32));
+                        if a != b {
+                            let (lo, hi) = (a.min(b), a.max(b));
+                            alias[hi as usize] = lo;
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            let a = find(&mut alias, i as u32);
+            alias[i] = a;
+        }
+        let words = (0..n).filter(|&i| alias[i] == i as u32).count();
+        eprintln!("vocabulary floor r {r}: {n} leaves -> {words} words");
+        self.alias = alias;
+        self
     }
 
     /// Quantise one descriptor to up to `max_paths` words, best first.
@@ -735,7 +782,10 @@ impl<'a> Vocabulary<'a> {
             }
         }
         for &(slot, _) in cur[..n_cur].iter() {
-            out.push(slot);
+            let w = if self.alias.is_empty() { slot } else { self.alias[slot as usize] };
+            if !out.contains(&w) {
+                out.push(w);
+            }
         }
     }
 }
