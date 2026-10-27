@@ -146,18 +146,7 @@ impl Clusters {
     }
 }
 
-/// Take from the clean anchors (`clean`, by position in `edges`) every one
-/// that is the only thing joining two groups of files; it stays an anchor. How
-/// many were taken.
-///
-/// A wrong pair does not cost one pair. If it is the *only* edge between two
-/// groups of files, everything on one side becomes a claimed duplicate of
-/// everything on the other, and propagation will dutifully manufacture the
-/// evidence: on this corpus one weak match between a dark galaxy photograph
-/// and a beach photograph produced 62 false pairs downstream, and an earlier
-/// one produced 354.
-///
-/// SCAFFOLDING (v46, `IMGFP_PART_RULE`): a file that is part of two
+/// A file that is part of two
 /// clusters joins neither to the other. A clean link that holds one way only
 /// (`part`'s frame on the other's at the overlap bar, not the other's on
 /// `part`'s) says `part` is a part of the other file; that `part` is a part
@@ -168,15 +157,11 @@ impl Clusters {
 /// one-way links into the others stop being clean. Its own first, however
 /// few, split `low-light`: two crops two-way to each other were a cluster with
 /// the four composites holding them, and their fifty links into the family
-/// were cut. A file
-/// with no two-way clean link (a composite, a crop) is of the cluster most of
+/// were cut. A file with no two-way clean link (a composite, a crop) is of the cluster most of
 /// its one-way clean links reach, then the lowest file: alone, a family's own
 /// contact sheet was a cluster of its own, and its links were cut from the
 /// family (Henares1/2 then joined at correlation 0.4). How many were demoted.
 pub(crate) fn demote_shared_parts(edges: &[Edge], clean: &mut [bool], n: usize, bar: f32) -> usize {
-    if std::env::var_os("IMGFP_PART_RULE").is_none() {
-        return 0;
-    }
     // (part, container) of a one-way clean link, by edge index.
     let one_way = |e: &Edge| -> Option<(usize, usize)> {
         let (a, b) = (e.v.ov_a >= bar, e.v.ov_b >= bar);
@@ -235,6 +220,17 @@ pub(crate) fn demote_shared_parts(edges: &[Edge], clean: &mut [bool], n: usize, 
     demoted
 }
 
+/// Take from the clean anchors (`clean`, by position in `edges`) every one
+/// that is the only thing joining two groups of files; it stays an anchor. How
+/// many were taken.
+///
+/// A wrong pair does not cost one pair. If it is the *only* edge between two
+/// groups of files, everything on one side becomes a claimed duplicate of
+/// everything on the other, and propagation will dutifully manufacture the
+/// evidence: on this corpus one weak match between a dark galaxy photograph
+/// and a beach photograph produced 62 false pairs downstream, and an earlier
+/// one produced 354.
+///
 /// So an edge that is a *bridge* in the graph theory sense — its removal
 /// disconnects the component — and which separates two non-trivial groups is
 /// held to a much higher standard than an ordinary match, because it is
@@ -252,9 +248,6 @@ pub(crate) fn demote_shared_parts(edges: &[Edge], clean: &mut [bool], n: usize, 
 /// own. Without the test, at `--min-frame-overlap` 0.6 two photographs of
 /// the docks merge for 1,545 false pairs.
 pub(crate) fn demote_bridges(edges: &[Edge], clean: &mut [bool], n: usize) -> usize {
-    if rule_off("bridge") {
-        return 0;
-    }
     let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n]; // (neighbour, edge index)
     for (k, e) in edges.iter().enumerate().filter(|&(k, _)| clean[k]) {
         adj[e.a()].push((e.b(), k));
@@ -313,14 +306,6 @@ pub(crate) fn demote_bridges(edges: &[Edge], clean: &mut [bool], n: usize) -> us
         }
     }
     demoted
-}
-
-/// SCAFFOLDING (v46): a claim-graph rule switched off by `IMGFP_CLAIMS_OFF`
-/// (comma-separated: `bridge`, `cover`, `cycle`, `clean`, which makes every
-/// anchor clean).
-pub(crate) fn rule_off(name: &str) -> bool {
-    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    OFF.get_or_init(|| std::env::var("IMGFP_CLAIMS_OFF").unwrap_or_default().split(',').map(str::to_owned).collect()).iter().any(|r| r == name)
 }
 
 /// The clusters the clean anchors make (`clean`, by position in `edges`),
@@ -404,13 +389,13 @@ pub(crate) fn admit(edges: Vec<Edge>, clean: &[bool], n: usize) -> (Clusters, Ve
             if refused_pairs.contains(&(small, big)) {
                 continue;
             }
-            let covered = rule_off("cover") || c.members(small).iter().all(|&x| near[x].iter().any(|&y| c.id(y) == big));
+            let covered = c.members(small).iter().all(|&x| near[x].iter().any(|&y| c.id(y) == big));
             // Two clusters with clean cycles join only when one file of the
             // larger has a weak anchor to every file of the smaller: the
             // smaller is then renderings of a photograph the larger holds.
             // A weak edge is listed once, so a count is a cover.
             let admitted = covered
-                && (rule_off("cycle") || !(c.cycle[ra] && c.cycle[rb]) || {
+                && (!(c.cycle[ra] && c.cycle[rb]) || {
                     let k = c.members(small).len();
                     c.members(big).iter().any(|&y| near[y].iter().filter(|&&z| c.id(z) == small).count() == k)
                 });

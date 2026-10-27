@@ -348,7 +348,6 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     // their mirror images, each saved three ways, found 9 of the 72 pairs
     // between a photograph and its mirror image, and 15 groups for 8.
     let matched: Vec<bool> = (0..n).map(|i| items[i].read.ok() && same.answers_for(i) == i).collect();
-    watch::answers(&files, (0..n).map(|i| same.answers_for(i)).collect());
     let n_same = (0..n).filter(|&i| items[i].read.ok() && !same.is_copy(i) && same.answers_for(i) != i).count();
     if n_same > 0 {
         stage!(cx, "same pixels: {n_same} files decode to a picture another file already holds");
@@ -420,7 +419,6 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
     let gate = policy.gate();
     let gate = if dump.is_some() { (gate.0.min(3), gate.1.min(0.2)) } else { gate };
     let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some() };
-    watch::load(files);
     let index = index_all(cx, scope, &pass);
     let (mut direct, verified) = retrieve_and_verify(cx, scope, &pass, &index);
     let turned = second_look(cx, scope, &pass, index, &direct);
@@ -830,11 +828,7 @@ impl Pass<'_> {
     #[allow(clippy::too_many_arguments)]
     fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, (cands, matches, scratch): &mut Work) -> Option<Edge> {
         timed!(15, index::shared(wi, &lists[j], cands, 60_000));
-        let watched = watch::is(i, j);
         if cands.len() < 3 {
-            if watched {
-                watch::say(i, j, &format!("{variant:?}\tshared {}", cands.len()));
-            }
             return None;
         }
         let items = self.items;
@@ -845,10 +839,6 @@ impl Pass<'_> {
             tb: &items[j].thumb,
         };
         let v = verify::verify(&p, cands, variant, self.gate, matches, scratch);
-        if watched {
-            let (pre, post) = verify::LAST_AGREEING.with(|c| c.get());
-            watch::say(i, j, &format!("{variant:?}\tshared {}\tn_match {}\tvocab {pre}\tguided {post}\tn_in {}\tov {:.3}/{:.3}\tblk {:.3}\tmin {:.3}\tframed {}\tcentred {}\t{:?}", cands.len(), v.n_match, v.n_in, v.ov_a, v.ov_b, v.blk, v.blk_min, v.framed, v.centred, self.policy.standing(&v)));
-        }
         if self.policy.standing(&v) == Standing::Rejected && !(self.dumping && v.n_in >= 3) {
             return None;
         }
@@ -941,13 +931,13 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     // files they reach, round after round until none is new (`Scope::reached`).
     let mut asked = vec![false; n];
     let mut ask: Vec<usize> = (0..n).filter(|&i| matched[i] && scope.asks_first(i)).collect();
-    // SCAFFOLDING (v46, `IMGFP_K_REJECT`): `-k` counts rejections. A file's
-    // candidates are a window of its ranking (`window[i]`: from, how many);
-    // after verification each file whose window held accepted candidates asks
-    // for as many more, until `-k` of its candidates have been rejected or
-    // its ranking runs out. So a picture's own copies do not use up the
-    // budget its other relations are looked for in.
-    let k_reject = std::env::var_os("IMGFP_K_REJECT").is_some();
+    // `-k` counts rejections. A file's candidates are a window of its ranking
+    // (`window[i]`: from, how many); after verification each file whose window
+    // held accepted candidates asks for as many more, until `-k` of its
+    // candidates have been rejected or its ranking runs out. So a picture's own
+    // copies do not use up the budget its other relations are looked for in:
+    // in a folder of many copies a near-miss sibling ranked past `-k` was
+    // never asked.
     let mut window: Vec<(usize, usize)> = vec![(0, args.candidates); n];
     let mut extended = 0usize;
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
@@ -984,16 +974,14 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
             cand_pairs.par_sort_unstable();
             cand_pairs.dedup();
         });
-        // Only a library's files ask after the first round, and only they can
-        // propose a pair an earlier round verified.
-        // With `IMGFP_K_REJECT` a later window can propose any pair.
-        if scope.against || k_reject {
-            cand_pairs.retain(|p| seen.insert(*p));
-        }
+        // A later round can propose a pair an earlier one verified (a library
+        // file reached, or a window further down a ranking).
+        cand_pairs.retain(|p| seen.insert(*p));
         if first {
             stage!(cx, "candidates: {} pairs", cand_pairs.len());
         } else {
-            stage!(cx, "  library round {round}: {} library files asked, {} more candidates", ask.len(), cand_pairs.len());
+            let who = if scope.against { "library files asked" } else { "files asked further down their ranking" };
+            stage!(cx, "  round {round}: {} {who}, {} more candidates", ask.len(), cand_pairs.len());
         }
         let vbar = progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs");
         // Verified a slice of the candidates at a time, each slice's verdicts
@@ -1030,42 +1018,38 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         verified += cand_pairs.len();
         drop(cand_pairs);
         ask = scope.reached(&all_direct[from..], pass.policy, &asked);
-        if k_reject {
-            // Accepted: any verdict that stands, whichever side proposed it.
-            let stood: std::collections::HashSet<(u32, u32)> = all_direct.iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)).collect();
-            let asked_now: Vec<usize> = (0..n).filter(|&i| asked[i] && window[i].1 > 0).collect();
-            let more: Vec<(usize, (usize, usize))> = asked_now
-                .par_iter()
-                .map_init(
-                    || index.asking(),
-                    |a, &i| {
-                        let (from, w) = window[i];
-                        let cands = index.candidates(i, &[&index.lists()[i]], from + w, a);
-                        let got = &cands[from.min(cands.len())..];
-                        let ok = got.iter().filter(|&&(j, ..)| stood.contains(&((i as u32).min(j), (i as u32).max(j)))).count();
-                        // A window shorter than asked for is the ranking's end.
-                        (i, if got.len() < w { (from + got.len(), 0) } else { (from + w, ok) })
-                    },
-                )
-                .collect();
-            for (i, wi) in more {
-                window[i] = wi;
-                if wi.1 > 0 && !ask.contains(&i) {
-                    ask.push(i);
-                    extended += 1;
-                }
+        // Accepted: any verdict that stands, whichever side proposed it.
+        let stood: std::collections::HashSet<(u32, u32)> = all_direct.iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)).collect();
+        let asked_now: Vec<usize> = (0..n).filter(|&i| asked[i] && window[i].1 > 0).collect();
+        let more: Vec<(usize, (usize, usize))> = asked_now
+            .par_iter()
+            .map_init(
+                || index.asking(),
+                |a, &i| {
+                    let (from, w) = window[i];
+                    let cands = index.candidates(i, &[&index.lists()[i]], from + w, a);
+                    let got = &cands[from.min(cands.len())..];
+                    let ok = got.iter().filter(|&&(j, ..)| stood.contains(&((i as u32).min(j), (i as u32).max(j)))).count();
+                    // A window shorter than asked for is the ranking's end.
+                    (i, if got.len() < w { (from + got.len(), 0) } else { (from + w, ok) })
+                },
+            )
+            .collect();
+        for (i, wi) in more {
+            window[i] = wi;
+            if wi.1 > 0 && !ask.contains(&i) {
+                ask.push(i);
+                extended += 1;
             }
-            ask.sort_unstable();
         }
+        ask.sort_unstable();
         if ask.is_empty() {
             break;
         }
         round += 1;
     }
     let n_edges = anchors(&all_direct, pass.policy).count();
-    if k_reject {
-        stage!(cx, "k counts rejections: {extended} windows more in {round} rounds, {verified} candidates verified");
-    }
+    stage!(cx, "-k counts rejections: {extended} windows more in {round} rounds, {verified} candidates verified");
     stage!(cx, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
     progress.learn(|k| k.anchors = Some(n_edges));
     (all_direct, verified)
@@ -1170,7 +1154,7 @@ fn cluster(
     progress.begin(Stage::Propagate);
     // Clusters are made from clean anchors, and an anchor that is only an
     // anchor may add a file to one but never join two; see `claims::admit`.
-    let mut clean: Vec<bool> = all.iter().map(|e| claims::rule_off("clean") || policy.standing(&e.v) == Standing::Clean).collect();
+    let mut clean: Vec<bool> = all.iter().map(|e| policy.standing(&e.v) == Standing::Clean).collect();
     let parts = claims::demote_shared_parts(&all, &mut clean, n, policy.min_frame_overlap());
     if parts > 0 {
         stage!(cx, "shared parts: {parts} one-way links between clusters no longer clean");
@@ -1902,59 +1886,5 @@ mod tests {
         assert_eq!((low.a(), low.b()), (0, 1));
         assert_eq!((high.a(), high.b()), (0, 1));
         assert!((low.v.scale - high.v.scale).abs() < 0.02 * low.v.scale, "scale {} from below, {} from above", low.v.scale, high.v.scale);
-    }
-}
-
-
-/// SCAFFOLDING (v46): `IMGFP_WATCH=pairs.tsv` (lines `a<TAB>b`, paths as the
-/// run spells them) logs every verification of a watched pair to stderr as
-/// `WATCH` lines, and retrieval's rank for it.
-pub(crate) mod watch {
-    use std::collections::{HashMap, HashSet};
-    use std::sync::OnceLock;
-    static W: OnceLock<(HashSet<(usize, usize)>, Vec<String>)> = OnceLock::new();
-    static A: OnceLock<Vec<usize>> = OnceLock::new();
-    static W_NAMES: OnceLock<HashSet<usize>> = OnceLock::new();
-    /// Which file is matched for each (a copy or twin is matched as its
-    /// original): a watched pair is watched as the files matched for it.
-    pub(crate) fn answers(_files: &[std::path::PathBuf], a: Vec<usize>) {
-        let _ = A.set(a);
-    }
-    pub(crate) fn load(files: &[std::path::PathBuf]) {
-        let Ok(p) = std::env::var("IMGFP_WATCH") else { return };
-        let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
-        let at: HashMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
-        let mut set = HashSet::new();
-        let mut named = HashSet::new();
-        for l in std::fs::read_to_string(p).unwrap().lines() {
-            let mut it = l.split('\t');
-            if let (Some(a), Some(b)) = (it.next(), it.next()) {
-                if let (Some(&i), Some(&j)) = (at.get(a), at.get(b)) {
-                    named.insert(i);
-                    named.insert(j);
-                    let (i, j) = A.get().map_or((i, j), |m| (m[i], m[j]));
-                    set.insert((i.min(j), i.max(j)));
-                }
-            }
-        }
-        eprintln!("WATCH\tpairs {}", set.len());
-        let _ = W_NAMES.set(named);
-        let _ = W.set((set, names));
-    }
-    pub(crate) fn is(i: usize, j: usize) -> bool {
-        W.get().is_some_and(|w| w.0.contains(&(i.min(j), i.max(j))))
-    }
-    pub(crate) fn wants(i: usize) -> bool {
-        W.get().is_some_and(|w| w.0.iter().any(|&(a, b)| a == i || b == i))
-    }
-    pub(crate) fn partners(i: usize) -> Vec<usize> {
-        W.get().map_or(vec![], |w| w.0.iter().filter_map(|&(a, b)| if a == i { Some(b) } else if b == i { Some(a) } else { None }).collect())
-    }
-    pub(crate) fn say(i: usize, j: usize, what: &str) {
-        let w = W.get().unwrap();
-        // Named as the pair watched: the first watched name matched as `i`, `j`.
-        let a = A.get();
-        let name = |k: usize| w.1.iter().enumerate().find(|&(o, _)| a.map_or(o == k, |m| m[o] == k) && W_NAMES.get().is_some_and(|n| n.contains(&o))).map_or(w.1[k].clone(), |(_, s)| s.clone());
-        eprintln!("WATCH\t{}\t{}\t{what}", name(i), name(j));
     }
 }

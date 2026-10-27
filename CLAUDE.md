@@ -55,7 +55,17 @@ IMGS5 7-13 at 64-71%. Recall does not move (IMGS-ALL 93-97%).
   fineness (correspondences not limited to leaf words) would make one answer,
   then the bars need re-choosing on (1).
 
-## Scoring on small families, and guided matching (session v46, not shipped)
+## Scoring on small families, and guided matching (session v46, shipped in 0.73.0)
+
+**Shipped in 0.73.0**: guided matching at D 320, ungated (`verify::guided`,
+`GUIDE_D2`); `-k` counting rejections (`pipeline::retrieve_and_verify`'s
+windows); the shared-part rule (`claims::demote_shared_parts`). Everything
+below names them by the env switches they were measured under; those and the
+rest of the scaffolding are gone from the tree (`IMGFP_GUIDE_D`,
+`IMGFP_K_REJECT`, `IMGFP_PART_RULE`; not shipped: `IMGFP_GUIDE_GATED`, the
+word floor `IMGFP_WORD_R`, `IMGFP_WATCH`, `IMGFP_CLAIMS_OFF`, `src/probe.rs`;
+all in commit 5e6edeb). 0.73.0 reproduces the measured stack runs byte for
+byte (full IMGS-ALL, full IMGS5).
 
 `benchmark/families.py` scores precision where siblings meet (`run BINARY OUT
 --cache C`, `score`, `compare`): seeds alone, seeds + 1 / 2 variants (three draws
@@ -137,8 +147,12 @@ Tree1/2 gone, Floriana3/4 2,665 -> 473, Fountain3/5 and Floriana1/2 as off
 **Mural1/2 248 -> 327** (over 300; fine by eye); IMGS-ALL cliffs identical
 in merges at every step, IMGS5 never more. With the floor, Macizo1/2 5,813
 -> 3 pairs (F1 0.9535). RESULTS section 11.
+The stack (guided + `-k` + this rule) against 0.72.0, cached, ABBA:
+found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
+IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
+s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.72.0)
+## Status (0.73.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -899,6 +913,33 @@ in merges at every step, IMGS5 never more. With the floor, Macizo1/2 5,813
     0.04), so as a lone file it joined IMGS4 harvester's sheet (same
     generated filler; the verdict, r 0.81, was refused in 0.71.0 by the
     cluster rules).
+- 0.73.0 (the matcher: guided matching, `-k` counting rejections, the
+  shared-part rule; see *Scoring on small families* and *How it works*;
+  `out/v46-matcher`, RESULTS sections 5-11). Against 0.72.0 at the defaults:
+  IMGS-ALL F1 0.9710 -> **0.9774**, precision 99.78 -> 99.73%, recall 94.56
+  -> 95.83%, perfect transforms 47 -> 58, cross-family 10 -> 479 (largest
+  Acueducto1/2 139), no merge; IMGS5 F1 0.9325 -> 0.9425, precision 90.84 ->
+  92.40%, recall 95.79 -> 96.17%, cross-family 21,375 -> 17,418, merges 5 ->
+  5 (Tree1/2 out, Floriana3/4 2,654 -> 473, Mural1/2 in at 327; Fountain3/5,
+  both Floriana pairs and Mural1/2 judged acceptable by eye, user's verdict);
+  Macizo1/2 does not merge (it did with the word floor, 5,813, before the
+  rule). Small families joined IMGS-ALL 27.0 -> 26.0, **IMGS5 36.7 -> 40.3**
+  (guided matching: siblings the vocabulary thinned are now judged on their
+  pixels). Cliffs, every 0.72.0 step (`cliff6_table.out`, page
+  https://claude.ai/artifact/UQpb24tWzdheHiFdKfANx8): IMGS-ALL recall higher
+  at all 24, F1 at 23 (equal at correlation 0.2), precision lower at all 24
+  (0.01-0.6 points, 1.0 at overlap 0.25); **new merges at the far steps**,
+  none in 0.72.0: docks1/2 at overlap 0.5-0.25, Acueducto3/4 at 0.25,
+  red_rocks_sign1/2 at correlation 0.3-0.2, Henares1/2 at 0.2 (the same with
+  the rule off: guided matching's). IMGS5 F1 higher at 23 (overlap 0.3
+  level), merges fewer at points 4-3 and correlation 0.9-0.8, more at overlap
+  0.3 and `-k` 50-10 (0.72.0 starved there). Keep rule: IMGS-ALL 0 lost, 297
+  -> 298 / 304, 304 / 304, strict line 56 -> 55; `pairs.py` loss 23 -> 23,
+  originals deleted 344 -> 341, copies 5,024 -> 5,036, REVIEW 29,291 ->
+  29,476. Cost, cached matching (ABBA): found mix +16% CPU, full IMGS5 +70%
+  (78 -> 132 CPU-s; guided +45 s of it, `-k` +13.5 s, the rule nothing).
+  Released build identical to the measured env-switched runs (full IMGS-ALL
+  and IMGS5 reports byte for byte); tests pass.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1109,7 +1150,10 @@ features are `Features::seen_as`). `Index::candidates` is the one question:
 each list it is handed is queried, read both ways round against a library
 (`both_ways`), ranked (`rank_best`), and the lists merged into the best `-k`
 (`merge_variants`; one list is its own merge). The direct pass asks every
-file as it is (pairs from both ends deduped, verified from the lower);
+file as it is (pairs from both ends deduped, verified from the lower), and
+`-k` counts rejections: a file is asked again for the next window of its
+ranking as long as its last window held verdicts that stand (`window`), so
+its own copies do not use up the `-k` its other relations are looked for in;
 the second look asks `Scope::re_askers` turned, verified from the asker
 as it asks (its turned features exist only then). The index owns what the
 questions need held: the postings are let go between the passes (`let_go`)
@@ -1219,6 +1263,8 @@ What a direct verdict may do is its `Standing`, read once from the three
 bars a user sets (`Policy::standing`; `Policy::gate` is what the lowest asks,
 `Policy::composed` judges a propagated one). `pipeline::cluster` is then a
 list of rules over one edge list: `claims::unique_pairs`, the clean flags,
+`demote_shared_parts` (a file that is part of files in two clusters, by
+one-way clean links, keeps only the most-linked cluster's links clean),
 `demote_bridges` (a lone clean link between two groups stops being clean),
 `admit` (clean anchors join clusters; the rest join two only under the cover
 test and the cycle rule), which hands back the `Clusters` that propagation
@@ -1392,6 +1438,25 @@ Each was measured; changing one needs a re-measure.
   works. Check `collage_2x2`, `embed_quarter` after any global shortcut.
 - **Retrieval scores containment** (normalised by the query's idf mass), not
   cosine (-5 recall).
+- **Guided matching** (0.73.0, `verify::guided`): a hypothesis with >= 3
+  agreeing points has its correspondences found again by position, each of
+  A's keypoints carried by the transform into B and matched to the nearest
+  descriptor within the inlier tolerance under `GUIDE_D2` (320, derived:
+  the distance at which an unrelated pair expects one coincidental
+  correspondence), refit up to twice. Without it a verdict depends on the
+  vocabulary's fineness, so on what else is scanned (the same sibling pair
+  passes among 60 files and not among 5,460). Cost: +16% CPU on the found
+  mix, +70% on IMGS5's matching (all its own refinement, `out/v46-matcher`
+  section 6); gated to hypotheses already past the points bar it is +3.4%
+  and loses ~1 point of recall.
+- **`-k` counts rejections** (0.73.0): a file whose window of candidates held
+  verdicts that stand asks for as many more, until `-k` are rejected. In a
+  folder of many copies a sibling ranked past `-k` was never asked.
+- **Shared-part rule** (0.73.0, `claims::demote_shared_parts`): a one-way
+  clean link (overlap bar one side only) makes a part; a part whose containers
+  lie in two clusters keeps only the most-linked cluster's links clean. A
+  shared distant mountain merged Macizo1/2 (two clean links into one file are
+  no bridge).
 - **A claim is a transform plus pixel agreement**, never a score over a
   threshold (rejects `tile_shuffle`).
 - **Pixel check**: blocks flat in both pictures abstain, a block flat in
@@ -1638,6 +1703,9 @@ a parameter is the cheap experiment; run it before adding one.
 - Self-deriving the aligned-points bar from a null model was built and is
   worse (coincidence was never the binding constraint).
 
+Cliffs at 0.73.0's defaults: see its *Status* entry (IMGS-ALL merges docks1/2
+at overlap 0.5 and below, Acueducto3/4 at 0.25, red_rocks_sign1/2 at
+correlation 0.3 and below, Henares1/2 at 0.2; none elsewhere).
 Cliffs at 0.72.0's defaults (the one-sided flat block counted), every step
 of every bar, IMGS-ALL and IMGS5 (`out/v44-flat-contrast`; 0.71.0 at the
 same steps in `out/v42-flat-cliffs`): IMGS-ALL merges nothing at points
