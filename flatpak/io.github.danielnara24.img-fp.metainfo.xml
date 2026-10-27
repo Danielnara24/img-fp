@@ -94,6 +94,36 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.73.0" date="2026-10-26">
+      <description>
+        <p>Two pictures get the same answer whatever else is in the folders being scanned, so a small folder and a whole library agree. Photos that only share a part, such as a distant mountain both show, are no longer grouped together.</p>
+      </description>
+    </release>
+    <release version="0.72.0" date="2026-10-25">
+      <description>
+        <p>Detail added to a plain area, such as a person painted on a wall, now counts when pictures are compared. A rescan no longer reads identical copies again, and the window can reuse a scan made in the terminal.</p>
+      </description>
+    </release>
+    <release version="0.71.0" date="2026-10-24">
+      <description>
+        <p>Motion Photos and pictures with a gain map are kept rather than deleted for their still copy. The cache opens faster, and a rescan where nothing changed skips the matching.</p>
+      </description>
+    </release>
+    <release version="0.70.0" date="2026-10-23">
+      <description>
+        <p>A moved or renamed file is analysed again, so two files can no longer be taken for each other. Of copies with the same pixels, the one with a colour profile, camera details or more colour depth is kept.</p>
+      </description>
+    </release>
+    <release version="0.69.0" date="2026-10-23">
+      <description>
+        <p>Files deleted in another program are noticed before anything is moved to the Trash, and files on drives without a Trash can be deleted permanently. img-fp no longer offers itself as the program that opens folders.</p>
+      </description>
+    </release>
+    <release version="0.68.0" date="2026-10-23">
+      <description>
+        <p>Damaged and empty files are reported with their cause, a library inside the scanned folder is handled, and the large view can show a picture at its actual size.</p>
+      </description>
+    </release>
     <release version="0.67.0" date="2026-10-22">
       <description>
         <p>The progress bar follows the time left, measured as the scan goes.</p>
