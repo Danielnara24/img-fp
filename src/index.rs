@@ -414,10 +414,13 @@ impl<'a> Vocabulary<'a> {
         // and a half on a corpus of 27,000 pictures — was measured at 30%
         // slower than reading them from here. It is kept as bytes: k-means
         // widens each member to floats as it reads it, which is exact.
-        let mut sample: Vec<u8> = Vec::with_capacity(take * DESC_LEN);
-        for d in sample_at.iter() {
-            sample.extend_from_slice(&d[..]);
-        }
+        //
+        // Gathered by every thread at once. One at a time it was 2.5 s on that
+        // corpus with the rest of the machine idle: the descriptors lie at
+        // random in the analysis's scratch file, and each read waited on its
+        // own miss or fault. Each lands where the loop put it.
+        let mut sample: Vec<u8> = vec![0; take * DESC_LEN];
+        sample.par_chunks_mut(DESC_LEN).zip(sample_at.par_iter()).for_each(|(to, d)| to.copy_from_slice(&d[..]));
 
         let mut levels: Vec<Vec<u8>> = Vec::with_capacity(p.depth);
         let mut norms: Vec<Vec<u32>> = Vec::with_capacity(p.depth);
@@ -1503,12 +1506,38 @@ impl InvertedFile {
         // folder where each photograph is there three times weighed every
         // word by ln(3n/d) rather than ln(n/d).
         let docs = lists.iter().filter(|l| !l.is_empty()).count().max(1);
-        let mut df = vec![0u32; n_words];
-        for wl in lists.iter() {
-            for (w, _) in wl.runs() {
-                df[w as usize] += 1;
+        // Both passes below are taken a range of words at a time, by every
+        // thread at once: a range's counts and its postings are its own, and
+        // each range reads the images in order, so a word's images land in
+        // the order they did when one loop took every word (increasing image
+        // index). One loop was a second and a half of a 27,000-picture
+        // corpus's run with the rest of the machine idle, its reads and writes
+        // at random over arrays as long as the vocabulary.
+        let per = n_words.div_ceil(rayon::current_num_threads() * 4).max(1);
+        // A list's runs of the words in `lo..hi`: the list is sorted by word.
+        let runs_in = |wl: &WordList, lo: usize, hi: usize, each: &mut dyn FnMut(usize, u32)| {
+            let e = &wl.e[..];
+            let mut i = e.partition_point(|&v| ((v >> KP_BITS) as usize) < lo);
+            while i < e.len() {
+                let w = (e[i] >> KP_BITS) as usize;
+                if w >= hi {
+                    break;
+                }
+                let mut j = i + 1;
+                while j < e.len() && e[j] >> KP_BITS == e[i] >> KP_BITS {
+                    j += 1;
+                }
+                each(w, (j - i) as u32);
+                i = j;
             }
-        }
+        };
+        let mut df = vec![0u32; n_words];
+        df.par_chunks_mut(per).enumerate().for_each(|(k, part)| {
+            let lo = k * per;
+            for wl in lists.iter() {
+                runs_in(wl, lo, lo + part.len(), &mut |w, _| part[w - lo] += 1);
+            }
+        });
         let mut idf = vec![0f32; n_words];
         let mut zero_idf = false;
         let mut off: Vec<u32> = Vec::with_capacity(n_words + 1);
@@ -1524,28 +1553,44 @@ impl InvertedFile {
             total += df[w];
         }
         off.push(total);
+        drop(df);
         assert!(n < 1 << (32 - POST_COUNT_BITS), "{n} images is more than a posting can name");
         let mut data = vec![0u32; total as usize];
-        let mut wide: Vec<(u32, u32)> = Vec::new();
-        // The document counts become write cursors, so the images of a word
-        // land in the order they are visited: increasing image index, as
-        // before.
-        let mut cursor = df;
-        cursor.copy_from_slice(&off[..n_words]);
-        for (img, wl) in lists.iter().enumerate() {
-            for (w, c) in wl.runs() {
-                let w = w as usize;
-                if off[w + 1] == off[w] {
-                    continue;
-                }
-                let at = cursor[w] as usize;
-                if c >= POST_COUNT_MAX {
-                    wide.push((at as u32, c));
-                }
-                data[at] = (img as u32) << POST_COUNT_BITS | c.min(POST_COUNT_MAX);
-                cursor[w] = at as u32 + 1;
-            }
+        // Each range's postings, as the slice of `data` they fill.
+        let mut parts: Vec<(usize, &mut [u32])> = Vec::with_capacity(n_words.div_ceil(per));
+        let mut rest = &mut data[..];
+        for lo in (0..n_words).step_by(per) {
+            let hi = (lo + per).min(n_words);
+            let (part, more) = rest.split_at_mut((off[hi] - off[lo]) as usize);
+            parts.push((lo, part));
+            rest = more;
         }
+        let off_ = &off;
+        let wide: Vec<Vec<(u32, u32)>> = parts
+            .into_par_iter()
+            .map(|(lo, part)| {
+                let hi = (lo + per).min(n_words);
+                let base = off_[lo];
+                // The document counts' places become write cursors.
+                let mut cursor: Vec<u32> = off_[lo..hi].to_vec();
+                let mut wide = Vec::new();
+                for (img, wl) in lists.iter().enumerate() {
+                    runs_in(wl, lo, hi, &mut |w, c| {
+                        if off_[w + 1] == off_[w] {
+                            return;
+                        }
+                        let at = cursor[w - lo];
+                        if c >= POST_COUNT_MAX {
+                            wide.push((at, c));
+                        }
+                        part[(at - base) as usize] = (img as u32) << POST_COUNT_BITS | c.min(POST_COUNT_MAX);
+                        cursor[w - lo] = at + 1;
+                    });
+                }
+                wide
+            })
+            .collect();
+        let mut wide: Vec<(u32, u32)> = wide.into_iter().flatten().collect();
         // Written in image order within each word, so not sorted by position.
         wide.sort_unstable();
         InvertedFile { off, data, idf, wide, n_images: n, zero_idf }

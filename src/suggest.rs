@@ -396,7 +396,13 @@ pub fn suggest_pinned(
     // a composite: a composite usually matches its photograph weakly, since
     // the photograph is small inside it.
     let mut all_sides: Vec<Vec<Side>> = vec![Vec::new(); n];
-    for (li, (a, b, link)) in links.iter().enumerate() {
+    // What each link makes of its two files, worked out on every thread a
+    // slice of links at a time and then put down in link order: one link
+    // after another, this was most of a second of a 27,000-picture corpus's
+    // run with the machine otherwise idle. A slice keeps what is held for it
+    // small, here where the run's memory peaks.
+    let side_of = |li: usize| -> Option<(Side, Side, bool)> {
+        let (a, b, link) = &links[li];
         let (pa, pb) = (&pics[*a], &pics[*b]);
         // Working pixels to the file's own, for each.
         let shrink = |p: &Picture| {
@@ -414,7 +420,7 @@ pub fn suggest_pinned(
             Link::Edge(v, m, inverted) => {
                 let clean = v.blk_min >= CLEAN;
                 if *inverted {
-                    continue;
+                    return None;
                 }
                 let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
                 let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
@@ -434,8 +440,6 @@ pub fn suggest_pinned(
                 (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, sx: -sx, sy: -sy, f_out: b_out, ..s })
             }
         };
-        all_sides[*a].push(fwd);
-        all_sides[*b].push(back);
         let usable = match link {
             Link::Exact | Link::Twin => true,
             // A mirror image settles nothing either way, as a negative does
@@ -450,9 +454,20 @@ pub fn suggest_pinned(
                 !mirrored(m) && v.blk >= min_correlation && (fwd.clean || v.blk >= WEAK_DELETES)
             }
         };
-        if usable {
-            sides[*a].push(fwd);
-            sides[*b].push(back);
+        Some((fwd, back, usable))
+    };
+    const SLICE: usize = 1 << 16;
+    for from in (0..links.len()).step_by(SLICE) {
+        let made: Vec<Option<(Side, Side, bool)>> = (from..(from + SLICE).min(links.len())).into_par_iter().map(side_of).collect();
+        for (li, m) in (from..).zip(made) {
+            let Some((fwd, back, usable)) = m else { continue };
+            let (a, b, _) = &links[li];
+            all_sides[*a].push(fwd);
+            all_sides[*b].push(back);
+            if usable {
+                sides[*a].push(fwd);
+                sides[*b].push(back);
+            }
         }
     }
     for s in sides.iter_mut().chain(all_sides.iter_mut()) {
