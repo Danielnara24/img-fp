@@ -946,6 +946,46 @@ fn orienting_the_plane_is_orienting_the_picture() {
     }
 }
 
+/// A picture stored turned or mirrored is reduced to the plane its upright
+/// copy is, bit for bit, wherever the box reduction trims an edge and adds
+/// in an order (`reduce::Turned`): every orientation, every layout, sizes
+/// that divide and that do not, strips narrower than a box, and the plain
+/// fit. Reduced and then turned, a turned PNG and its upright copy were two
+/// pictures at the default working size.
+#[test]
+fn a_turned_picture_reduces_to_its_upright_copys_plane() {
+    use image::metadata::Orientation::*;
+    let px = |x: u32, y: u32, c: u32| ((x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503) ^ c.wrapping_mul(977)) >> 7) as u8;
+    for &(w, h, work) in &[(2101usize, 1403usize, 512usize), (1403, 2101, 512), (1500, 1000, 512), (3001, 9, 512), (9, 3001, 512), (700, 500, 512), (4100, 3075, 640), (1031, 769, 128), (37, 23, 512)] {
+        for layout in [Layout::Grey, Layout::GreyAlpha, Layout::Rgb, Layout::Rgba] {
+            let (w32, h32) = (w as u32, h as u32);
+            let pic = match layout {
+                Layout::Grey => DynamicImage::ImageLuma8(image::GrayImage::from_fn(w32, h32, |x, y| image::Luma([px(x, y, 0)]))),
+                Layout::GreyAlpha => DynamicImage::ImageLumaA8(image::GrayAlphaImage::from_fn(w32, h32, |x, y| image::LumaA([px(x, y, 0), px(x, y, 3) | 0x80]))),
+                Layout::Rgb => DynamicImage::ImageRgb8(image::RgbImage::from_fn(w32, h32, |x, y| image::Rgb([px(x, y, 0), px(x, y, 1), px(x, y, 2)]))),
+                Layout::Rgba => DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w32, h32, |x, y| image::Rgba([px(x, y, 0), px(x, y, 1), px(x, y, 2), px(x, y, 3) | 0x80]))),
+            };
+            for o in [Rotate90, Rotate180, Rotate270, FlipHorizontal, FlipVertical, Rotate90FlipH, Rotate270FlipH] {
+                let stored = analyse(work, |sink| {
+                    let n = sink.begin(&Rows { w, h, layout, orientation: o, grey_of_colour: false });
+                    let row = w * layout.ch();
+                    for y in 0..n {
+                        sink.row(&pic.as_bytes()[y * row..(y + 1) * row]);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                let mut upright = pic.clone();
+                upright.apply_orientation(o);
+                let want = reduced(upright.width() as usize, upright.height() as usize, upright.as_bytes(), layout, work);
+                let got = &stored.0;
+                assert_eq!((got.w, got.h), (want.w, want.h), "{w}x{h} {layout:?} {o:?} at {work}");
+                assert!(got.px.iter().zip(&want.px).all(|(a, b)| a.to_bits() == b.to_bits()), "{w}x{h} {layout:?} {o:?} at {work}");
+            }
+        }
+    }
+}
+
 /// A JPEG cut off part-way decodes — the decoder fills the rest with grey
 /// — and says it is damaged; the whole file does not.
 #[test]

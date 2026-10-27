@@ -152,7 +152,7 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.73.1)
+## Status (0.74.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -964,6 +964,36 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   expected). Peak RssAnon+swap cached IMGS-ALL +18 MB (the kept windows,
   600 bytes a file; it shows in the run's peak); cold IMGS-ALL 580 / 566
   base, 598 / 671 new, not settled.
+- 0.74.0 (audit fixes A-F; cache format IMGFPC19):
+  - **A** `index::query_touched` (an index where a word is in every image:
+    a small folder, or one all one picture) listed an image once per such
+    word, since its score stayed 0; `-k` counting rejections then asked
+    through every repeat (3 files: 209 rounds; 5 files at `-t 1024`: 9.2 s,
+    now 1.9 s). Listed once; reports identical.
+  - **C** an EXIF-turned picture is reduced straight into the plane as
+    shown (`reduce::Turned`), its plane the upright copy's to the bit: a
+    turned PNG and its upright copy were 482 points at 1.00, both REVIEW, at
+    512; now same pixels. No corpus has a turned file; +2% CPU on turned
+    12 MP JPEGs.
+  - **D** the kept matching's fingerprint names files by their canonical
+    path: `photos`, `./photos/`, an absolute path or a followed link matched
+    again (Desktop 1.4 s against 0.16 s), and the window never took a CLI
+    scan's. Reports identical to a fresh match for every spelling.
+  - **F** the window's Trash and permanent delete look at each marked
+    deletion's kept copy again just before moving it (`results::Move`): one
+    deleted while the dialog waited took the last copy (checked under Xvfb,
+    base vs new). The dialog also says when a kept copy has already gone.
+  - **B** `-k` counting rejections credits no verdict with a file already
+    clean-joined to the asker (see *How it works*): 1,600 copies 1,251,350
+    candidates, 89-97 s -> 258,498, 32 s. IMGS-ALL pairs and actions
+    identical, IMGS5 F1 to four places (2 TP fewer), `families.py`
+    identical, found corpus byte for byte.
+  - Measured, not done (user's decision: cold and cached runs stay equal):
+    incremental matching. One unrelated file added to the found corpus moved
+    818 pairs out and 393 in (215 files' suggestions), all marginal (median
+    17 points, correlation 0.72), through the vocabulary retrained on 60 more
+    descriptors; re-matching the same set is byte-identical, and file order
+    does not matter.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1475,7 +1505,14 @@ Each was measured; changing one needs a re-measure.
   and loses ~1 point of recall.
 - **`-k` counts rejections** (0.73.0): a file whose window of candidates held
   verdicts that stand asks for as many more, until `-k` are rejected. In a
-  folder of many copies a sibling ranked past `-k` was never asked.
+  folder of many copies a sibling ranked past `-k` was never asked. A verdict
+  with a file clean verdicts had already joined to the asker before its round
+  is verified but not counted (`joined`): counted, a family of N copies had all
+  N(N-1)/2 pairs verified (1,600 crops: 1,251,350 candidates, 169 rounds, 89 s;
+  now 258,498, one round, 32 s, same groups and suggestions). IMGS-ALL (pairs
+  and actions), IMGS5 (F1 to four places, 2 TP fewer), `families.py` and the
+  found corpus (byte for byte) as before. Passing such files over unverified
+  was tried: IMGS5 bird1/2's merged burst lost 826 true pairs (recall -0.37).
 - **Shared-part rule** (0.73.0, `claims::demote_shared_parts`): a one-way
   clean link (overlap bar one side only) makes a part; a part whose containers
   lie in two clusters keeps only the most-linked cluster's links clean. A
@@ -1568,8 +1605,13 @@ Each was measured; changing one needs a re-measure.
 - **Enlargement** (`upsample_below`, `analysis::enlarge_below`): small pictures
   doubled up to `min(work, 512)`, never past the working size. 512 is the low
   edge of a plateau; no cap on the factor.
-- **EXIF orientation** is applied to the working plane, not the decoded
-  picture (`decode::picture::orient`).
+- **EXIF orientation**: a turned or mirrored picture is box-reduced as
+  stored, straight into the plane as shown (`decode::reduce::Turned`: shown
+  edges trimmed, each box summed in the upright picture's order), never
+  turned at full size; its plane is its upright copy's to the bit
+  (`a_turned_picture_reduces_to_its_upright_copys_plane`). Reduced then
+  turned (`orient`, before), a turned PNG and its upright copy were two
+  pictures at 512, both REVIEW.
 
 ### Keep, delete, review (`suggest.rs`)
 
@@ -2135,7 +2177,7 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC18.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC19.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime (the kernel's seconds and
   nanoseconds, signed: before 0.72.0 a file dated before 1970 had no key, was

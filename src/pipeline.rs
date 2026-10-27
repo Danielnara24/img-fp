@@ -366,7 +366,11 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
         skip_mirrored: args.skip_mirrored,
     };
     let keys: Vec<_> = stats.iter().map(|s| s.key).collect();
-    let fingerprint = kept_at.as_ref().and_then(|_| matched::Fingerprint::of(&asked, &files, &keys, items, &scope.library));
+    // Each file by the cache's name for it, not as this run spelled it.
+    let fingerprint = kept_at.as_ref().zip(analysed.store.as_ref()).and_then(|(_, store)| {
+        let names: Vec<&std::path::Path> = (0..n).map(|i| store.name(i)).collect();
+        matched::Fingerprint::of(&asked, &names, &keys, items, &scope.library)
+    });
     let kept = kept_at.as_deref().zip(fingerprint).and_then(|(p, fp)| matched::load(p, fp));
     let claims = match kept {
         Some(kept) => {
@@ -943,7 +947,21 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     // copies do not use up the budget its other relations are looked for in:
     // in a folder of many copies a near-miss sibling ranked past `-k` was
     // never asked.
+    //
+    // A candidate that stands counts towards the next window only when clean
+    // verdicts had not already joined it to the asker before its round
+    // (`joined`, over every round's): one that had is a copy of the asker's
+    // copies, and is verified but asks for nothing more. Counted, a family of
+    // N copies asked on until every one of its N(N-1)/2 pairs was verified:
+    // 1,600 crops of one picture verified 1,251,350 candidates in 169 rounds
+    // and matched in 89-97 s; now 258,498 in one round, 32 s, the same groups
+    // and suggestions. IMGS-ALL, IMGS5, the small families and the found
+    // corpus are as they were (IMGS5 two true pairs fewer). Passed over instead
+    // of verified, a merged burst (IMGS5 bird1/2, 180 files) lost 826 true
+    // pairs: a file's own weaker copies, ranked past the window its sibling's
+    // copies filled, are what the further window is for.
     let mut window: Vec<(usize, usize)> = vec![(0, args.candidates); n];
+    let mut joined = Clusters::new(n);
     let mut extended = 0usize;
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
     let mut stood: std::collections::HashSet<(u32, u32)> = Default::default();
@@ -1050,6 +1068,8 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         // order and each is collected in order, so the list is the one a single
         // collect gave, verdict for verdict.
         let from = all_direct.len();
+        // Which files clean verdicts had joined before this round's.
+        let joined_before: Vec<usize> = (0..n).map(|i| joined.id(i)).collect();
         for (slice, by) in held.chunks(VERIFY_SLICE).zip(by.chunks(VERIFY_SLICE)) {
             let part: Vec<Edge> = slice
                 .par_iter()
@@ -1063,6 +1083,9 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
                 .flatten()
                 .collect();
             for e in anchors(&part, pass.policy) {
+                if pass.policy.standing(&e.v) == Standing::Clean {
+                    joined.join(e.a(), e.b());
+                }
                 for i in [e.a(), e.b()] {
                     degree[i] += 1;
                     if matched[i] && degree[i] == 2 && scope.settled(degree[i]) {
@@ -1077,9 +1100,15 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         let reached = scope.reached(&all_direct[from..], pass.policy, &asked);
         // Accepted: any verdict that stands, whichever side proposed it.
         stood.extend(all_direct[from..].iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)));
-        // Each window's candidates that stood, whichever round verified them.
+        // Each window's candidates that stood, whichever round verified them,
+        // less those already joined to it.
         let mut ok = vec![0usize; n];
-        let credited: Vec<(u32, u32, u8)> = held.par_iter().zip(by.par_iter()).filter(|(p, _)| stood.contains(p)).map(|(&(lo, hi), &b)| (lo, hi, b)).collect();
+        let credited: Vec<(u32, u32, u8)> = held
+            .par_iter()
+            .zip(by.par_iter())
+            .filter(|(p, _)| joined_before[p.0 as usize] != joined_before[p.1 as usize] && stood.contains(p))
+            .map(|(&(lo, hi), &b)| (lo, hi, b))
+            .collect();
         for (lo, hi, b) in credited {
             if b & 1 != 0 {
                 ok[lo as usize] += 1;

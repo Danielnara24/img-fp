@@ -2804,12 +2804,20 @@ impl Results {
         if self.trashing.get() {
             return;
         }
-        let (paths, bytes, whole, changed_after, with_copy, kept_changed) = {
+        let (paths, bytes, whole, changed_after, with_copy, kept_changed, kept_gone) = {
             let s = self.state.borrow();
-            // With the length the scan found, which the move checks first.
-            let mut paths: Vec<(PathBuf, u64)> = s.marked_ids().map(|id| (s.path(id as usize).to_path_buf(), s.bytes(id as usize))).collect();
+            // With the length the scan found, which the move checks first,
+            // and the kept copy each deletion rests on as things stand now.
+            let file = |id: usize| (s.path(id).to_path_buf(), s.bytes(id));
+            let mut paths: Vec<Move> = s
+                .marked_ids()
+                .map(|id| {
+                    let (path, scanned) = file(id as usize);
+                    Move { path, scanned, kept: s.scan.kept_copy(id as usize).map(file) }
+                })
+                .collect();
             let changed_after = s.changed_after;
-            paths.sort();
+            paths.sort_by(|a, b| a.path.cmp(&b.path));
             let bytes = s.marked_bytes;
             // The groups, by the number the list shows them under, in which
             // every image is marked.
@@ -2821,7 +2829,8 @@ impl Results {
                 .map(|(gi, _)| gi + 1)
                 .collect();
             let kept_changed = s.marked_ids().filter(|&id| s.unheld_of(id) == Some(Lapse::Changed)).count();
-            (paths, bytes, whole, changed_after, s.marked_with_their_copy(), kept_changed)
+            let kept_gone = s.marked_ids().filter(|&id| s.unheld_of(id) == Some(Lapse::Gone)).count();
+            (paths, bytes, whole, changed_after, s.marked_with_their_copy(), kept_changed, kept_gone)
         };
         if paths.is_empty() {
             return;
@@ -2870,6 +2879,19 @@ impl Results {
                 if one { "it" } else { "them" },
             ));
         }
+        // Nor does a mark go with a kept copy that has gone: it was the copy
+        // left, and nothing the scan found may hold the picture now.
+        if kept_gone > 0 {
+            let one = kept_gone == 1;
+            detail.push_str(&format!(
+                "\n\n{kept_gone} of {} {} suggested for deletion because another image showed all of {}, and that image has \
+                 gone since the scan: no copy of {} may be left.",
+                if n == 1 { "it" } else { "them" },
+                if one { "was" } else { "were" },
+                if one { "it" } else { "them" },
+                if one { "that picture" } else { "those pictures" },
+            ));
+        }
         let dialog = gtk::AlertDialog::builder()
             .message(format!("Move {n} image{} to the Trash?", if n == 1 { "" } else { "s" }))
             .detail(detail)
@@ -2886,7 +2908,7 @@ impl Results {
         });
     }
 
-    async fn trash(self: &Rc<Self>, paths: Vec<(PathBuf, u64)>, changed_after: Option<u64>) {
+    async fn trash(self: &Rc<Self>, paths: Vec<Move>, changed_after: Option<u64>) {
         if self.trashing.replace(true) {
             return;
         }
@@ -2898,24 +2920,14 @@ impl Results {
         let mut gone: HashSet<PathBuf> = HashSet::new();
         let mut failed: Vec<String> = Vec::new();
         // Files on a drive with no Trash, for `delete_instead`.
-        let mut no_trash: Vec<(PathBuf, u64)> = Vec::new();
-        for (i, (p, scanned)) in paths.iter().enumerate() {
+        let mut no_trash: Vec<Move> = Vec::new();
+        for (i, m) in paths.into_iter().enumerate() {
             self.status.set_text(&format!("Moving to the Trash: {} of {n}…", i + 1));
-            // A file at that path that is not the length the scan found is
-            // not the file the scan judged: replaced since, or, for a scan
-            // kept from an earlier session, another file under the same
-            // name. Nor is one changed since the scan started, whatever its
-            // length: its change time is the kernel's, which `cp -p` or
-            // `rsync -a` cannot put back as they put back a modification
-            // time (a rename or a `chmod` since counts too, and leaves the
-            // file where it is, which is the side to err on). It stays where
-            // it is.
-            if let Ok(md) = std::fs::metadata(p) {
-                if img_fp::last::changed_since(&md, *scanned, changed_after) {
-                    failed.push(format!("{}: changed since the scan, so it was left where it is", p.display()));
-                    continue;
-                }
+            if let Some(why) = m.stays(changed_after, &gone) {
+                failed.push(why);
+                continue;
             }
+            let p = &m.path;
             match gio::File::for_path(p).trash_future(glib::Priority::DEFAULT).await {
                 Ok(()) => {
                     gone.insert(p.clone());
@@ -2927,7 +2939,7 @@ impl Results {
                 // A drive or share with no Trash, or one this user cannot
                 // make there: "Trashing on system internal mounts is not
                 // supported", "Unable to find or create trash directory".
-                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => no_trash.push((p.clone(), *scanned)),
+                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => no_trash.push(m),
                 Err(e) => failed.push(format!("{}: {}", p.display(), e.message())),
             }
         }
@@ -2961,11 +2973,12 @@ impl Results {
     /// as not moved, so a duplicate on a NAS could not be removed from the
     /// window at all.
     ///
-    /// Each is looked at again first, as the Trash looks: a file changed
-    /// since the scan is left where it is.
-    async fn delete_instead(self: &Rc<Self>, paths: Vec<(PathBuf, u64)>, changed_after: Option<u64>, gone: &mut HashSet<PathBuf>, failed: &mut Vec<String>) {
+    /// Each is looked at again first, as the Trash looks (`Move::stays`): a
+    /// file changed since the scan, or whose kept copy has gone or changed
+    /// meanwhile, is left where it is.
+    async fn delete_instead(self: &Rc<Self>, paths: Vec<Move>, changed_after: Option<u64>, gone: &mut HashSet<PathBuf>, failed: &mut Vec<String>) {
         let n = paths.len();
-        let mut names: String = paths.iter().take(10).map(|(p, _)| format!("\n{}", p.display())).collect();
+        let mut names: String = paths.iter().take(10).map(|m| format!("\n{}", m.path.display())).collect();
         if n > 10 {
             names.push_str(&format!("\n… and {} more", n - 10));
         }
@@ -2983,17 +2996,16 @@ impl Results {
             .build();
         self.status.set_text(&format!("{n} image{} cannot be moved to the Trash", if n == 1 { "" } else { "s" }));
         if !matches!(dialog.choose_future(Some(&self.app.window)).await, Ok(1)) {
-            failed.extend(paths.iter().map(|(p, _)| format!("{}: its drive has no Trash, so it was left where it is", p.display())));
+            failed.extend(paths.iter().map(|m| format!("{}: its drive has no Trash, so it was left where it is", m.path.display())));
             return;
         }
-        for (i, (p, scanned)) in paths.iter().enumerate() {
+        for (i, m) in paths.iter().enumerate() {
             self.status.set_text(&format!("Deleting: {} of {n}…", i + 1));
-            if let Ok(md) = std::fs::metadata(p) {
-                if img_fp::last::changed_since(&md, *scanned, changed_after) {
-                    failed.push(format!("{}: changed since the scan, so it was left where it is", p.display()));
-                    continue;
-                }
+            if let Some(why) = m.stays(changed_after, gone) {
+                failed.push(why);
+                continue;
             }
+            let p = &m.path;
             match gio::File::for_path(p).delete_future(glib::Priority::DEFAULT).await {
                 Ok(()) => {
                     self.app.log_line(&format!("deleted: {}", p.display()));
@@ -3048,6 +3060,51 @@ impl Results {
         self.thumbs.clear_queue();
         self.rebuild(select);
         self.focus();
+    }
+}
+
+/// A marked file the Trash is to move: its path and the length the scan
+/// found, and the kept copy the content rule deletes it for (path and
+/// length), as things stood when the move was confirmed.
+struct Move {
+    path: PathBuf,
+    scanned: u64,
+    kept: Option<(PathBuf, u64)>,
+}
+
+impl Move {
+    /// Why the file is to stay where it is, asked just before it is moved,
+    /// or `None` to move it. `moved` is what this move has taken so far.
+    ///
+    /// A file at its path that is not the length the scan found is not the
+    /// file the scan judged: replaced since, or, for a scan kept from an
+    /// earlier session, another file under the same name. Nor is one changed
+    /// since the scan started, whatever its length: its change time is the
+    /// kernel's, which `cp -p` or `rsync -a` cannot put back as they put back
+    /// a modification time (a rename or a `chmod` since counts too, and
+    /// leaves the file where it is, which is the side to err on).
+    ///
+    /// And a deletion rests on its kept copy, looked at again here: files
+    /// were looked at before the dialog was shown (`Results::checked`), but
+    /// the dialog waits on the person, and a kept copy deleted or changed in
+    /// another program meanwhile took the last copy with this one. A kept
+    /// copy this move took itself was marked too, which the dialog said.
+    fn stays(&self, changed_after: Option<u64>, moved: &HashSet<PathBuf>) -> Option<String> {
+        let p = self.path.display();
+        if let Ok(md) = std::fs::metadata(&self.path)
+            && img_fp::last::changed_since(&md, self.scanned, changed_after)
+        {
+            return Some(format!("{p}: changed since the scan, so it was left where it is"));
+        }
+        let (kept, scanned) = self.kept.as_ref().filter(|(k, _)| !moved.contains(k))?;
+        // Any failure to look is no proof it is there: a share that has
+        // dropped is not a deletion to the cache, but nothing here may rest
+        // on it either.
+        match std::fs::metadata(kept) {
+            Ok(md) if !img_fp::last::changed_since(&md, *scanned, changed_after) => None,
+            Ok(_) => Some(format!("{p}: its kept copy {} has changed since the scan, so it was left where it is", kept.display())),
+            Err(_) => Some(format!("{p}: its kept copy {} has gone, so it was left where it is", kept.display())),
+        }
     }
 }
 
@@ -3944,6 +4001,35 @@ mod tests {
             assert_eq!(t.by_mode[mode][2], d, "{:?}: an unchanged copy is as it was", MODES[mode]);
         }
         assert_eq!(t.said(1), "review: changed since the scan");
+    }
+
+    /// The Trash looks at a deletion's kept copy again just before it moves
+    /// the file: one deleted or changed in another program while the dialog
+    /// waited leaves the file where it is, and one this move took itself (it
+    /// was marked too, which the dialog said) does not.
+    #[test]
+    fn a_kept_copy_gone_or_changed_while_the_dialog_waits_holds_the_file_back() {
+        let dir = std::env::temp_dir().join(format!("img-fp-move-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (copy, kept) = (dir.join("copy.jpg"), dir.join("kept.png"));
+        std::fs::write(&copy, b"copy").unwrap();
+        std::fs::write(&kept, b"kept!").unwrap();
+        let m = Move { path: copy.clone(), scanned: 4, kept: Some((kept.clone(), 5)) };
+        let none = HashSet::new();
+        assert_eq!(m.stays(None, &none), None, "both as the scan found them");
+        assert_eq!(Move { kept: None, ..m }.stays(None, &none), None, "a file marked by the person alone");
+        let m = Move { path: copy.clone(), scanned: 4, kept: Some((kept.clone(), 5)) };
+
+        std::fs::write(&kept, b"another picture").unwrap();
+        assert!(m.stays(None, &none).is_some_and(|w| w.contains("has changed")), "the kept copy rewritten");
+        std::fs::remove_file(&kept).unwrap();
+        assert!(m.stays(None, &none).is_some_and(|w| w.contains("has gone")), "the kept copy deleted");
+        assert_eq!(m.stays(None, &HashSet::from([kept.clone()])), None, "taken by this move, marked too");
+
+        std::fs::write(&kept, b"kept!").unwrap();
+        std::fs::write(&copy, b"changed").unwrap();
+        assert!(m.stays(None, &none).is_some_and(|w| w.contains("changed since the scan")), "the file itself");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A kept copy in another folder is named with its folder: copies share

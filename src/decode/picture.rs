@@ -160,17 +160,18 @@ pub(super) fn shown_size(w: u32, h: u32, o: Orientation) -> (u32, u32) {
     if turns(o) { (h, w) } else { (w, h) }
 }
 
-/// A working plane, turned the way an EXIF orientation says to show it.
+/// A plane, turned the way an EXIF orientation says to show it: the
+/// mapping is `apply_orientation`'s, pixel for pixel.
 ///
-/// **The picture is reduced first and turned after**, as a plane of a few
-/// hundred pixels a side. It used to be the other way round: the decoded
-/// picture was turned at full size, which held a second copy of it for the
-/// turn and walked the first column-wise, a cache miss a pixel — and a phone
-/// stores most of its portraits that way. Twenty-four 4032x3024 JPEGs with
+/// The working plane is not made by turning: **the picture is reduced as it
+/// is stored, into the plane as shown** (`reduce::Turned`). Turning the
+/// decoded picture at full size held a second copy of it for the turn and
+/// walked the first column-wise, a cache miss a pixel — and a phone stores
+/// most of its portraits that way: twenty-four 4032x3024 JPEGs with
 /// orientation 6 decoded in 3 CPU-seconds against 2 for the same pictures
-/// stored upright, and held 12 MB more a worker. The mapping is
-/// `apply_orientation`'s, pixel for pixel; what differs is only which edge the
-/// box reduction trims when the size does not divide.
+/// stored upright, and held 12 MB more a worker. Reducing and then turning
+/// this way trimmed other edges and added in another order than the upright
+/// picture's reduction, so the two were not the same pixels.
 pub(super) fn orient(g: Gray, o: Orientation) -> Gray {
     use Orientation::*;
     if o == NoTransforms {

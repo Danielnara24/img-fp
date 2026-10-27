@@ -1603,13 +1603,19 @@ impl InvertedFile {
     /// non-zero, which is right whenever every word weighs something. A word
     /// in every image of the corpus weighs ln 1 = 0, which happens in a small
     /// folder and in one that is all one picture, and nowhere in a library of
-    /// different photographs. There an image can be touched and score nothing, and
-    /// the old loop listed it (once per such posting, until it scored) and the
-    /// mirrored pass went on to verify it. A handful of images is no place to
-    /// be fast, so it is simply the old loop, over the packed postings.
+    /// different photographs. There an image can be touched and score nothing,
+    /// and is still listed (the mirrored pass goes on to verify it), once: its
+    /// slot stays 0 through every word that weighs nothing, so "touched" is
+    /// kept apart from the score. Listed again for each such word, as the old
+    /// loop did, a folder of three copies held each other ~360 times over, and
+    /// `-k` counting rejections asked through every repeat (a window of
+    /// standing verdicts asks for the next): 209 rounds, 9 s at `-t 1024`. A
+    /// handful of images is no place to be fast, so it is simply the old loop,
+    /// over the packed postings.
     #[cold]
     fn query_touched(&self, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) {
         let mut touched: Vec<u32> = Vec::new();
+        let mut listed = vec![false; self.n_images];
         let mut qmass = 0f32;
         for (w, c) in wl.runs() {
             let w = w as usize;
@@ -1628,11 +1634,11 @@ impl InvertedFile {
                 if cnt == POST_COUNT_MAX {
                     cnt = self.wide_count(p0 + k);
                 }
-                let a = &mut acc[other as usize];
-                if *a == 0.0 {
+                if !listed[other as usize] {
+                    listed[other as usize] = true;
                     touched.push(other);
                 }
-                *a += cnt.min(c) as f32 * idf2;
+                acc[other as usize] += cnt.min(c) as f32 * idf2;
             }
         }
         let inv = 1.0 / qmass.max(1e-6);
@@ -2193,8 +2199,8 @@ mod tests {
 
     /// The query as it was written before its postings were packed and its
     /// inner loop lost its tests: every posting a pair, the query image
-    /// skipped, the touched images listed as they were first reached. Kept as
-    /// the reference `query` is checked against.
+    /// skipped, the touched images listed once each, as they were first
+    /// reached. Kept as the reference `query` is checked against.
     fn query_reference(lists: &[WordList], wl: &WordList, exclude: u32) -> Vec<(u32, f32)> {
         let n = lists.len();
         let top = |l: &WordList| (0..l.len()).map(|i| l.word(i) as usize + 1).max().unwrap_or(0);
@@ -2209,6 +2215,7 @@ mod tests {
         }
         let mut acc = vec![0f32; n];
         let mut touched = Vec::new();
+        let mut listed = std::collections::HashSet::new();
         let mut qmass = 0f32;
         for (w, c) in wl.runs() {
             let w = w as usize;
@@ -2223,7 +2230,7 @@ mod tests {
                 if other == exclude {
                     continue;
                 }
-                if acc[other as usize] == 0.0 {
+                if listed.insert(other) {
                     touched.push(other);
                 }
                 acc[other as usize] += cnt.min(c) as f32 * idf2;
@@ -2275,6 +2282,7 @@ mod tests {
                 for (g, w) in got.iter().zip(want.iter()) {
                     assert_eq!((g.0, g.1.to_bits()), (w.0, w.1.to_bits()), "n {n_imgs} span {span} heavy {heavy}");
                 }
+                assert!(got.windows(2).all(|p| p[0].0 != p[1].0), "each image listed once: n {n_imgs} span {span} heavy {heavy}");
                 assert!(acc.iter().all(|&v| v == 0.0), "the accumulator is left clean");
             }
         }

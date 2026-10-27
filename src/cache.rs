@@ -141,7 +141,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 18: `Traits::frames` is said of a JPEG holding a video or another JPEG
 /// after its picture (a Motion Photo), and not of one whose MPF index adds
 /// only a large thumbnail; a record of 17 says the opposite of both.
-const MAGIC: &[u8; 8] = b"IMGFPC18";
+/// 19: a picture stored turned or mirrored (an EXIF orientation) is reduced
+/// to the plane its upright copy is (`reduce::Turned`); a record of 18 holds
+/// the plane reduced as stored and turned after, other features.
+const MAGIC: &[u8; 8] = b"IMGFPC19";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -215,7 +218,7 @@ impl PartialEq for Key {
     }
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC18.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC19.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -1189,6 +1192,12 @@ impl Store {
         if let Some(span) = span {
             self.write_colour(span, &self.asked[i].name, colour);
         }
+    }
+
+    /// Walked file `i`'s name in the file: its canonical path
+    /// (`lib::cache_names`), however the run spelled it.
+    pub fn name(&self, i: usize) -> &Path {
+        &self.asked[i].name
     }
 
     /// Records at this run's settings the file holds, the latest for each

@@ -18,8 +18,13 @@
 //! may match otherwise, and a version number does not change between two
 //! builds of one; `img-fp` and `img-fp-gui` of one build share it), the
 //! settings the matching reads, and for every file in the order it is
-//! numbered its path, its key, what reading it came to and which side of
-//! `--against` it is on. Not the thread count: the claims are the same at any
+//! numbered its canonical path (`lib::cache_names`, the cache's name for it),
+//! its key, what reading it came to and which side of `--against` it is on.
+//! Not the path as the run spelled it: the matching reads no path, and with
+//! it a scan of `photos`, `./photos/` or `/home/me/photos` matched everything
+//! again, and a scan from the window (absolute paths) never took one the CLI
+//! made with relative ones. Two spellings of one folder that number its files
+//! in another order are two fingerprints, and match again. Not the thread count: the claims are the same at any
 //! (IMGS-ALL, cached, at `-t 3` and `-t 8`: the same report to the byte), and
 //! with it a run at another `-t` matched everything again. A file without a
 //! key is not vouched for by anything, and a run holding one keeps nothing.
@@ -79,15 +84,15 @@ pub struct Asked {
 impl Fingerprint {
     /// `None` where nothing can vouch for the run's inputs: a file with no
     /// key.
-    pub fn of(asked: &Asked, files: &[PathBuf], keys: &[Option<crate::cache::Key>], items: &[Item], library: &[bool]) -> Option<Fingerprint> {
+    pub fn of(asked: &Asked, names: &[&Path], keys: &[Option<crate::cache::Key>], items: &[Item], library: &[bool]) -> Option<Fingerprint> {
         use std::os::unix::ffi::OsStrExt;
         let mut h = Hash::new();
         h.bytes(MAGIC);
         h.bytes(env!("IMGFP_BUILD").as_bytes());
-        for v in [asked.work_size as u64, asked.candidates as u64, asked.points as u64, asked.overlap.to_bits() as u64, asked.correlation.to_bits() as u64, asked.skip_mirrored as u64, files.len() as u64] {
+        for v in [asked.work_size as u64, asked.candidates as u64, asked.points as u64, asked.overlap.to_bits() as u64, asked.correlation.to_bits() as u64, asked.skip_mirrored as u64, names.len() as u64] {
             h.u64(v);
         }
-        for (i, f) in files.iter().enumerate() {
+        for (i, f) in names.iter().enumerate() {
             let name = f.as_os_str().as_bytes();
             h.u64(name.len() as u64);
             h.bytes(name);

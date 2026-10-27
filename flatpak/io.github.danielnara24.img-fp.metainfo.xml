@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.74.0" date="2026-10-27">
+      <description>
+        <p>A photo stored sideways with a rotation tag is recognised as the same picture as an upright copy, folders of many copies of one photo are compared much faster, and the Trash no longer takes an image whose kept copy was deleted while the confirmation was open.</p>
+      </description>
+    </release>
     <release version="0.73.1" date="2026-10-27">
       <description>
         <p>Comparing pictures is faster, most of all in folders holding many copies of the same photos. What is found is unchanged.</p>

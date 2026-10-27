@@ -3,7 +3,7 @@
 //! measured on the way (`Measure`); and the area resampling itself.
 
 use super::measure::{Measure, Traits};
-use super::picture::{orient, shown_size, Layout, Orientation, Rows, Sink};
+use super::picture::{shown_size, turns, Layout, Orientation, Rows, Sink};
 use super::Gray;
 use crate::timed;
 
@@ -39,18 +39,32 @@ impl<const CH: usize, const ALPHA: bool> Reduction for Reducer<CH, ALPHA> {
     }
 }
 
+impl<const CH: usize, const ALPHA: bool> Reduction for Turned<CH, ALPHA> {
+    fn rows_read(&self) -> usize {
+        Turned::rows_read(self)
+    }
+
+    fn push(&mut self, line: &[u8]) {
+        Turned::push(self, line)
+    }
+
+    fn finish(self: Box<Self>) -> (Gray, Traits) {
+        Turned::finish(*self)
+    }
+}
+
 impl Reduce {
     pub fn new(work: usize) -> Reduce {
         Reduce { work, rows: None }
     }
 
-    /// The working plane, turned as the picture is shown; the picture's own
-    /// size as shown; and what the rows measured.
+    /// The working plane as the picture is shown; the picture's own size as
+    /// shown; and what the rows measured.
     pub fn finish(self) -> anyhow::Result<(Gray, (u32, u32), Traits)> {
         let (rows, reduction) = self.rows.ok_or_else(|| anyhow::anyhow!("the decoder gave no picture"))?;
         let (g, traits) = reduction.finish();
         let size = shown_size(rows.w as u32, rows.h as u32, rows.orientation);
-        Ok((orient(g, rows.orientation), size, traits))
+        Ok((g, size, traits))
     }
 }
 
@@ -68,12 +82,16 @@ impl Sink for Reduce {
     }
 
     fn begin(&mut self, rows: &Rows) -> usize {
-        let (w, h, work, grey) = (rows.w, rows.h, self.work, rows.grey_of_colour);
-        let reduction: Box<dyn Reduction> = match rows.layout {
-            Layout::Grey => Box::new(Reducer::<1, false>::new(w, h, work, grey)),
-            Layout::GreyAlpha => Box::new(Reducer::<2, true>::new(w, h, work, grey)),
-            Layout::Rgb => Box::new(Reducer::<3, false>::new(w, h, work, grey)),
-            Layout::Rgba => Box::new(Reducer::<4, true>::new(w, h, work, grey)),
+        let (w, h, work, grey, o) = (rows.w, rows.h, self.work, rows.grey_of_colour, rows.orientation);
+        let reduction: Box<dyn Reduction> = match (rows.layout, o == Orientation::NoTransforms) {
+            (Layout::Grey, true) => Box::new(Reducer::<1, false>::new(w, h, work, grey)),
+            (Layout::GreyAlpha, true) => Box::new(Reducer::<2, true>::new(w, h, work, grey)),
+            (Layout::Rgb, true) => Box::new(Reducer::<3, false>::new(w, h, work, grey)),
+            (Layout::Rgba, true) => Box::new(Reducer::<4, true>::new(w, h, work, grey)),
+            (Layout::Grey, false) => Box::new(Turned::<1, false>::new(w, h, work, grey, o)),
+            (Layout::GreyAlpha, false) => Box::new(Turned::<2, true>::new(w, h, work, grey, o)),
+            (Layout::Rgb, false) => Box::new(Turned::<3, false>::new(w, h, work, grey, o)),
+            (Layout::Rgba, false) => Box::new(Turned::<4, true>::new(w, h, work, grey, o)),
         };
         let n = reduction.rows_read();
         self.rows = Some((*rows, reduction));
@@ -104,10 +122,13 @@ pub(super) fn working_bytes(w: usize, h: usize, work: usize) -> u64 {
     // What `Fit` holds: the vertical pass's rows at the reduction's width and
     // the output, or the reduction's plane when there is nothing to resample.
     let f = Fit::size(ow, oh, work);
-    match f {
+    let fit = match f {
         Some((tw, th)) => ((ow * th + tw * th) * 4) as u64,
         None => (ow * oh * 4) as u64,
-    }
+    };
+    // A picture stored turned (`Turned`) also holds a band of its rows and
+    // the whole reduced plane, which the claim is asked before it is known.
+    fit + ((ow * oh + box_factor(w, h, work) * w.max(h)) * 4) as u64
 }
 
 /// How much further than `--work-size` a picture's long side may go: as far
@@ -308,6 +329,185 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
     fn finish(self) -> (Gray, Traits) {
         let traits = self.measure.traits();
         (timed!(3, self.fit.finish()), traits)
+    }
+}
+
+/// The box reduction of a picture stored turned or mirrored (an EXIF
+/// orientation), made as `Reducer` makes it of the same picture stored as it
+/// is shown: the same boxes, trimmed at the shown right and bottom edges, each
+/// summed along its shown rows from the left and then those sums from the
+/// top, and the plane fitted as shown. So a turned file and an upright copy
+/// of its pixels have one working plane to the bit, and are the same pixels
+/// to `same::same_analysis`.
+///
+/// `Reducer` with the plane turned after it, as before, trimmed the stored
+/// picture's right and bottom edges and added each box in stored order: a
+/// PNG stored sideways with orientation 6 and its upright copy matched at 482
+/// points and correlation 1.00 at the default working size, and two lossless
+/// files of different pixels are undecided, so both were REVIEW where the
+/// copy is a plain DELETE. Rows still arrive as stored, so a box's are held
+/// until its band of the shown picture is in: up to `k` rows, then the
+/// reduced plane, a few hundred pixels a side, is fitted. Nothing the size of
+/// the picture is held, which is why it is not turned first.
+struct Turned<const CH: usize, const ALPHA: bool> {
+    o: Orientation,
+    /// The picture as stored.
+    w: usize,
+    h: usize,
+    k: usize,
+    /// The reduced plane, as shown.
+    ow: usize,
+    oh: usize,
+    /// How far across and down the shown picture the boxes reach.
+    used_x: usize,
+    used_y: usize,
+    inv: f32,
+    work: usize,
+    /// A trimmed stored row's grey values, for `measure`.
+    grey: Vec<f32>,
+    /// The rows of the band being read, each in the shown order of its
+    /// pixels, by its place in the band (`k` rows of `w`).
+    band: Vec<f32>,
+    /// How many of the band's rows are in.
+    filled: usize,
+    /// One shown row of boxes being summed (`Reducer::row`), or one shown
+    /// line's sums across a band.
+    sums: Vec<f32>,
+    plane: Vec<f32>,
+    /// The next stored row `push` expects.
+    sy: usize,
+    measure: Measure,
+}
+
+impl<const CH: usize, const ALPHA: bool> Turned<CH, ALPHA> {
+    fn new(w: usize, h: usize, work: usize, grey_of_colour: bool, o: Orientation) -> Self {
+        let (sw, sh) = if turns(o) { (h, w) } else { (w, h) };
+        let k = box_factor(sw, sh, work);
+        let (ow, oh) = boxed(sw, sh, work);
+        Turned {
+            o,
+            w,
+            h,
+            k,
+            ow,
+            oh,
+            used_x: (ow * k).min(sw),
+            used_y: (oh * k).min(sh),
+            inv: 1.0 / (255.0 * (k * k) as f32),
+            work,
+            grey: vec![0.0; w],
+            band: vec![0.0; k * w],
+            filled: 0,
+            sums: vec![0.0; w.max(ow)],
+            plane: vec![0.0; ow * oh],
+            sy: 0,
+            measure: Measure::new(grey_of_colour),
+        }
+    }
+
+    /// Stored rows run from the shown picture's far end: bottom first, or
+    /// (turned) right first.
+    fn backwards(&self) -> bool {
+        use Orientation::*;
+        matches!(self.o, Rotate90 | Rotate180 | FlipVertical | Rotate270FlipH)
+    }
+
+    /// A stored row's pixels run the other way to the shown line it is.
+    fn reversed(&self) -> bool {
+        use Orientation::*;
+        matches!(self.o, Rotate270 | Rotate270FlipH | Rotate180 | FlipHorizontal)
+    }
+
+    /// How far the boxes reach along the shown axis the stored rows step
+    /// along: across when the picture is turned, down when not.
+    fn used(&self) -> usize {
+        if turns(self.o) { self.used_x } else { self.used_y }
+    }
+
+    /// How many stored rows the reduction reads: from the top, the trimmed
+    /// edge when that is the stored bottom, and all of them when it is not.
+    fn rows_read(&self) -> usize {
+        if self.backwards() { self.h } else { self.used() }
+    }
+
+    fn push(&mut self, line: &[u8]) {
+        let (w, k, sy) = (self.w, self.k, self.sy);
+        self.sy += 1;
+        if sy >= self.rows_read() {
+            return;
+        }
+        // The shown line this row is, across (turned) or down.
+        let t = if self.backwards() { self.h - 1 - sy } else { sy };
+        let used = self.used();
+        if t >= used {
+            // Trimmed, and still measured, as `Reducer` measures every row it
+            // reads.
+            grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
+            self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], &self.grey[..w]);
+            return;
+        }
+        let (b, at) = (t / k, t % k);
+        let reversed = self.reversed();
+        // Straight into its place in the band: a copy of every row there was
+        // 6% of the CPU a phone's turned JPEG took.
+        let slot = &mut self.band[at * w..(at + 1) * w];
+        grey_row::<CH, ALPHA>(&line[..w * CH], slot);
+        self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], slot);
+        if reversed {
+            slot.reverse();
+        }
+        self.filled += 1;
+        if self.filled == (b * k + k).min(used) - b * k {
+            self.filled = 0;
+            self.band_in(b);
+        }
+    }
+
+    /// Band `b` of the shown picture is in: its boxes, summed as `Reducer`
+    /// sums them, into the plane.
+    fn band_in(&mut self, b: usize) {
+        let (w, k, ow, inv) = (self.w, self.k, self.ow, self.inv);
+        let n = (b * k + k).min(self.used()) - b * k;
+        if !turns(self.o) {
+            // The band is shown rows `b * k ..`, in place by their place in
+            // it: a row of boxes as `Reducer::push` sums one.
+            let row = &mut self.sums[..ow];
+            row.fill(0.0);
+            for at in 0..n {
+                box_row(k, &self.band[at * w..(at + 1) * w], row);
+            }
+            for (p, v) in self.plane[b * ow..(b + 1) * ow].iter_mut().zip(row.iter()) {
+                *p = v * inv;
+            }
+            return;
+        }
+        // The band is shown columns `b * k ..`, each a stored row, its pixels
+        // shown rows. Each shown row's sum along the band, from the left...
+        let used_y = self.used_y;
+        let along = &mut self.sums[..used_y];
+        along.fill(0.0);
+        for at in 0..n {
+            for (a, g) in along.iter_mut().zip(self.band[at * w..at * w + used_y].iter()) {
+                *a += g;
+            }
+        }
+        // ...then a box's rows' sums, from the top.
+        for oy in 0..self.oh {
+            let mut r = 0.0f32;
+            for a in along[oy * k..(oy * k + k).min(used_y)].iter() {
+                r += a;
+            }
+            self.plane[oy * ow + b] = r * inv;
+        }
+    }
+
+    fn finish(self) -> (Gray, Traits) {
+        let traits = self.measure.traits();
+        let mut fit = Fit::new(self.ow, self.oh, self.work);
+        for row in self.plane.chunks_exact(self.ow) {
+            fit.push(row);
+        }
+        (timed!(3, fit.finish()), traits)
     }
 }
 
