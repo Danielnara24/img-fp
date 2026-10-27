@@ -697,23 +697,32 @@ pub(crate) fn guided(a: &Features, b: &Features, m: Affine, bw: f32, bh: f32, d2
         let (cx, cy) = ((x / tol) as usize, (y / tol) as usize);
         (cx < nx && cy < ny).then_some(cy * nx + cx)
     };
+    // B's descriptors are read below in the order its keypoints fall in the
+    // grid, which is no order at all, and B is another file each pair: its
+    // block is cold, and most of it is read. Asked for front to back, it
+    // streams in while the grid is built (-6% of this function at eight
+    // threads). It changes nothing computed.
+    prefetch_block(&b.desc);
     // B's keypoints bucketed by cell, row-major (a counting sort), with their
     // positions beside them in that order: three cells of a row are then one
-    // run of `by_cell`.
+    // run of `by_cell`. Each cell's count is put two places on, so that the
+    // running sum leaves cell `c`'s start at `c + 1`, and placing a keypoint
+    // moves that start on to the next cell's: `cell_at[c]` is then where `c`
+    // starts, with no pass to shift the starts back.
     sc.cell_at.clear();
-    sc.cell_at.resize(nx * ny + 1, 0);
+    sc.cell_at.resize(nx * ny + 2, 0);
     sc.fill.clear();
     for k in b.kps.iter() {
         let c = cell(k.x, k.y).map_or(u32::MAX, |c| c as u32);
         sc.fill.push(c);
         if c != u32::MAX {
-            sc.cell_at[c as usize + 1] += 1;
+            sc.cell_at[c as usize + 2] += 1;
         }
     }
     for c in 0..nx * ny {
-        sc.cell_at[c + 1] += sc.cell_at[c];
+        sc.cell_at[c + 2] += sc.cell_at[c + 1];
     }
-    let held = sc.cell_at[nx * ny] as usize;
+    let held = sc.cell_at[nx * ny + 1] as usize;
     sc.by_cell.clear();
     sc.by_cell.resize(held, 0);
     sc.at_xy.clear();
@@ -721,52 +730,145 @@ pub(crate) fn guided(a: &Features, b: &Features, m: Affine, bw: f32, bh: f32, d2
     for (j, k) in b.kps.iter().enumerate() {
         let c = sc.fill[j];
         if c != u32::MAX {
-            let o = sc.cell_at[c as usize] as usize;
+            let o = sc.cell_at[c as usize + 1] as usize;
             sc.by_cell[o] = j as u32;
             sc.at_xy[o] = (k.x, k.y);
-            sc.cell_at[c as usize] += 1;
+            sc.cell_at[c as usize + 1] += 1;
         }
     }
-    // The fill moved each start to the next cell's: shift back.
-    for c in (0..nx * ny).rev() {
-        sc.cell_at[c + 1] = sc.cell_at[c];
-    }
-    sc.cell_at[0] = 0;
     let mut m = m;
+    let mut was = m;
     let mut n = 0;
     for round in 0..3 {
         // The last round's matches, to stop once a round finds the same ones:
         // the fit through them is then the transform they were found at.
         std::mem::swap(pairs, &mut sc.last);
         pairs.clear();
+        // Read through slices of their own: through `sc`, every access
+        // reloaded the vector's pointer and length.
+        let (cell_at, by_cell, at_xy) = (&sc.cell_at[..], &sc.by_cell[..], &sc.at_xy[..]);
+        // A keypoint that has moved less than its room since it was last
+        // looked at finds what it found then (`Held`), and is not looked at
+        // again. No room is wider than half the tolerance, and a refit that
+        // moved every corner of A's frame further than that (an unrelated
+        // pair's, fitted through a few coincidences) leaves next to none
+        // within it: such a round looks at every keypoint without asking.
+        // Asking or not decides only what is looked at again, never what is
+        // found. The last round leaves no rooms, since none follows it.
+        let look = round > 0 && {
+            let corner = |m: &Affine, x: f32, y: f32| apply(m, x, y);
+            let (aw, ah) = (a.w as f32, a.h as f32);
+            [(0.0, 0.0), (aw, 0.0), (0.0, ah), (aw, ah)].iter().any(|&(x, y)| {
+                let ((px, py), (qx, qy)) = (corner(&m, x, y), corner(&was, x, y));
+                (px - qx) * (px - qx) + (py - qy) * (py - qy) < tol2 * 0.25
+            })
+        };
+        let keep = round < 2;
+        if round == 0 {
+            sc.held.clear();
+            sc.held.resize(a.kps.len(), Held::default());
+        }
+        let held = &mut sc.held[..];
         for (i, ka) in a.kps.iter().enumerate() {
             let (x, y) = apply(&m, ka.x, ka.y);
+            if look {
+                let h = held[i];
+                let (ex, ey) = (x - h.x, y - h.y);
+                if ex * ex + ey * ey < h.room {
+                    if h.j != u32::MAX {
+                        pairs.push((i as u32, h.j));
+                    }
+                    continue;
+                }
+            }
+            held[i].room = 0.0;
             let (cx, cy) = ((x / tol).floor() as isize, (y / tol).floor() as isize);
             if cx < -1 || cy < -1 || cx > nx as isize || cy > ny as isize {
                 continue;
             }
-            let da: &[u8; DESC_LEN] = a.d(i).try_into().unwrap();
-            let mut best = (d2, u32::MAX);
             let (x0, x1) = ((cx - 1).max(0) as usize, (cx + 1).min(nx as isize - 1) as usize);
             if x0 > x1 {
                 continue;
             }
-            for yy in (cy - 1).max(0)..=(cy + 1).min(ny as isize - 1) {
-                let row = yy as usize * nx;
-                let (s, e) = (sc.cell_at[row + x0] as usize, sc.cell_at[row + x1 + 1] as usize);
-                for o in s..e {
-                    let (kx, ky) = sc.at_xy[o];
+            let (y0, y1) = ((cy - 1).max(0) as usize, (cy + 1).min(ny as isize - 1) as usize);
+            // The three rows' runs of the grid, as one sequence: `t` counts
+            // through them, and where it is in B's order is a sum of steps
+            // rather than a loop per row, whose lengths (none, one, two) no
+            // predictor learns. A missing row is an empty run. Then those
+            // within the tolerance, kept or not by where the next one is
+            // written, are measured, and the nearest chosen by a select. In
+            // the order a loop per row met them, so a tie goes the same way.
+            // -17% of this function, on pairs sampled from IMGS5 and the
+            // found corpus.
+            let run = |yy: usize| -> (usize, usize) {
+                if yy > y1 {
+                    return (0, 0);
+                }
+                let row = yy * nx;
+                let s = cell_at[row + x0] as usize;
+                (s, cell_at[row + x1 + 1] as usize - s)
+            };
+            let ((s0, l0), (s1, l1), (s2, l2)) = (run(y0), run(y0 + 1), run(y0 + 2));
+            let total = l0 + l1 + l2;
+            let (to1, to2) = (s1.wrapping_sub(s0 + l0), s2.wrapping_sub(s1 + l1));
+            let mut best = (d2, u32::MAX);
+            let da: &[u8; DESC_LEN] = a.d(i).try_into().unwrap();
+            // How near the tolerance any keypoint looked at came, in squared
+            // distance.
+            let mut edge = f32::INFINITY;
+            if total <= NEAR {
+                let mut near = [0u32; NEAR];
+                let mut nn = 0usize;
+                for t in 0..total {
+                    let o = (s0 + t).wrapping_add(((t >= l0) as usize).wrapping_mul(to1)).wrapping_add(((t >= l0 + l1) as usize).wrapping_mul(to2));
+                    let (kx, ky) = at_xy[o];
                     let (dx, dy) = (x - kx, y - ky);
-                    if dx * dx + dy * dy >= tol2 {
-                        continue;
-                    }
-                    let j = sc.by_cell[o];
+                    let r2 = dx * dx + dy * dy;
+                    edge = edge.min((r2 - tol2).abs());
+                    near[nn] = by_cell[o];
+                    nn += !(r2 >= tol2) as usize;
+                }
+                for &j in near[..nn].iter() {
                     let d = dist2(da, b.d(j as usize));
-                    if d < best.0 {
-                        best = (d, j);
+                    best = if d < best.0 { (d, j) } else { best };
+                }
+            } else {
+                for (s, l) in [(s0, l0), (s1, l1), (s2, l2)] {
+                    for o in s..s + l {
+                        let (kx, ky) = at_xy[o];
+                        let (dx, dy) = (x - kx, y - ky);
+                        let r2 = dx * dx + dy * dy;
+                        edge = edge.min((r2 - tol2).abs());
+                        if r2 >= tol2 {
+                            continue;
+                        }
+                        let j = by_cell[o];
+                        let d = dist2(da, b.d(j as usize));
+                        if d < best.0 {
+                            best = (d, j);
+                        }
                     }
                 }
             }
+            if !keep {
+                if best.1 != u32::MAX {
+                    pairs.push((i as u32, best.1));
+                }
+                continue;
+            }
+            // The room. A move of `e` keeps the keypoint in its own cell, so
+            // looking at the same keypoints of B, while `e` is short of the
+            // cell's nearest side (one outside the three cells is at least
+            // the tolerance plus that away). It keeps one at distance `r`
+            // on its side of the tolerance while `e < |r - tol|`, which
+            // `e^2 + 2 tol e < |r^2 - tol^2|` ensures whether `r` is inside or
+            // out. Each is kept a thousandth of the tolerance short, far more
+            // than the floats' rounding of these distances.
+            let side = (x - cx as f32 * tol).min((cx + 1) as f32 * tol - x).min(y - cy as f32 * tol).min((cy + 1) as f32 * tol - y) - GUARD * tol;
+            let slack = edge - GUARD * tol2;
+            let reach = (tol * tol + slack.max(0.0)).sqrt() - tol;
+            let room = side.min(reach);
+            held[i] = Held { x, y, room: if side > 0.0 && slack > 0.0 { room * room } else { 0.0 }, j: best.1 };
             if best.1 != u32::MAX {
                 pairs.push((i as u32, best.1));
             }
@@ -778,11 +880,46 @@ pub(crate) fn guided(a: &Features, b: &Features, m: Affine, bw: f32, bh: f32, d2
             break;
         }
         match fit_affine(a, b, pairs, &sc.mask) {
-            Some(m2) => m = m2,
+            Some(m2) => {
+                was = m;
+                m = m2;
+            }
             None => break,
         }
     }
     (m, n)
+}
+
+/// What guided matching found for one of A's keypoints, and where it was
+/// then: a move of less than `room` (squared) from there finds the same.
+#[derive(Clone, Copy, Default)]
+struct Held {
+    x: f32,
+    y: f32,
+    room: f32,
+    j: u32,
+}
+
+/// The share of the tolerance every room is kept short by.
+const GUARD: f32 = 1e-3;
+
+/// The most keypoints of B guided matching looks at around one of A's
+/// before it takes the plain loop.
+const NEAR: usize = 32;
+
+/// Ask for every line of `block`, front to back, into the second-level cache.
+#[cfg_attr(dispatch, inline(always))]
+#[cfg_attr(not(dispatch), inline)]
+fn prefetch_block(block: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T1};
+        for o in (0..block.len()).step_by(64) {
+            _mm_prefetch(block.as_ptr().add(o) as *const i8, _MM_HINT_T1);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = block;
 }
 
 /// Ask for the keypoints `pairs[k]` will read, on both sides.
@@ -1984,6 +2121,7 @@ pub struct Scratch {
     at_xy: Vec<(f32, f32)>,
     fill: Vec<u32>,
     last: Vec<(u32, u32)>,
+    held: Vec<Held>,
 }
 
 pub struct Pair<'a> {
@@ -2379,6 +2517,179 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Guided matching as it was first written: every keypoint looked at
+    /// in every round, a loop per row of the grid. What `guided` finds is
+    /// held to it, bit for bit.
+    #[allow(clippy::too_many_arguments)]
+    fn guided_reference(a: &Features, b: &Features, m: Affine, bw: f32, bh: f32, d2: u32, pairs: &mut Vec<(u32, u32)>, sc: &mut Scratch) -> (Affine, usize) {
+        let tol = (0.015 * (bw * bw + bh * bh).sqrt()).max(3.0);
+        let tol2 = tol * tol;
+        let (nx, ny) = ((bw / tol) as usize + 1, (bh / tol) as usize + 1);
+        let cell = |x: f32, y: f32| -> Option<usize> {
+            if x < 0.0 || y < 0.0 {
+                return None;
+            }
+            let (cx, cy) = ((x / tol) as usize, (y / tol) as usize);
+            (cx < nx && cy < ny).then_some(cy * nx + cx)
+        };
+        // B's keypoints bucketed by cell, row-major (a counting sort), with their
+        // positions beside them in that order: three cells of a row are then one
+        // run of `by_cell`.
+        sc.cell_at.clear();
+        sc.cell_at.resize(nx * ny + 1, 0);
+        sc.fill.clear();
+        for k in b.kps.iter() {
+            let c = cell(k.x, k.y).map_or(u32::MAX, |c| c as u32);
+            sc.fill.push(c);
+            if c != u32::MAX {
+                sc.cell_at[c as usize + 1] += 1;
+            }
+        }
+        for c in 0..nx * ny {
+            sc.cell_at[c + 1] += sc.cell_at[c];
+        }
+        let held = sc.cell_at[nx * ny] as usize;
+        sc.by_cell.clear();
+        sc.by_cell.resize(held, 0);
+        sc.at_xy.clear();
+        sc.at_xy.resize(held, (0.0, 0.0));
+        for (j, k) in b.kps.iter().enumerate() {
+            let c = sc.fill[j];
+            if c != u32::MAX {
+                let o = sc.cell_at[c as usize] as usize;
+                sc.by_cell[o] = j as u32;
+                sc.at_xy[o] = (k.x, k.y);
+                sc.cell_at[c as usize] += 1;
+            }
+        }
+        // The fill moved each start to the next cell's: shift back.
+        for c in (0..nx * ny).rev() {
+            sc.cell_at[c + 1] = sc.cell_at[c];
+        }
+        sc.cell_at[0] = 0;
+        let mut m = m;
+        let mut n = 0;
+        for round in 0..3 {
+            // The last round's matches, to stop once a round finds the same ones:
+            // the fit through them is then the transform they were found at.
+            std::mem::swap(pairs, &mut sc.last);
+            pairs.clear();
+            for (i, ka) in a.kps.iter().enumerate() {
+                let (x, y) = apply(&m, ka.x, ka.y);
+                let (cx, cy) = ((x / tol).floor() as isize, (y / tol).floor() as isize);
+                if cx < -1 || cy < -1 || cx > nx as isize || cy > ny as isize {
+                    continue;
+                }
+                let da: &[u8; DESC_LEN] = a.d(i).try_into().unwrap();
+                let mut best = (d2, u32::MAX);
+                let (x0, x1) = ((cx - 1).max(0) as usize, (cx + 1).min(nx as isize - 1) as usize);
+                if x0 > x1 {
+                    continue;
+                }
+                for yy in (cy - 1).max(0)..=(cy + 1).min(ny as isize - 1) {
+                    let row = yy as usize * nx;
+                    let (s, e) = (sc.cell_at[row + x0] as usize, sc.cell_at[row + x1 + 1] as usize);
+                    for o in s..e {
+                        let (kx, ky) = sc.at_xy[o];
+                        let (dx, dy) = (x - kx, y - ky);
+                        if dx * dx + dy * dy >= tol2 {
+                            continue;
+                        }
+                        let j = sc.by_cell[o];
+                        let d = dist2(da, b.d(j as usize));
+                        if d < best.0 {
+                            best = (d, j);
+                        }
+                    }
+                }
+                if best.1 != u32::MAX {
+                    pairs.push((i as u32, best.1));
+                }
+            }
+            n = pairs.len();
+            sc.mask.clear();
+            sc.mask.resize(n, true);
+            if round == 2 || (round > 0 && *pairs == sc.last) {
+                break;
+            }
+            match fit_affine(a, b, pairs, &sc.mask) {
+                Some(m2) => m = m2,
+                None => break,
+            }
+        }
+        (m, n)
+    }
+
+    /// `guided` finds what its reference does, transform and matches alike:
+    /// on copies whose refit moves each keypoint a little (where most are
+    /// not looked at again), on copies the first transform misses by pixels,
+    /// on unrelated pairs, and with B's keypoints crowded into one cell.
+    #[test]
+    fn guided_matching_finds_what_its_reference_does() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut unit = move || (next() >> 40) as f32 / (1u64 << 24) as f32;
+        let (mut sc, mut sr) = (Scratch::default(), Scratch::default());
+        let (mut pairs, mut want) = (Vec::new(), Vec::new());
+        let mut found = 0usize;
+        for case in 0..400 {
+            let (w, h) = [(512u32, 384u32), (384, 512), (512, 512), (200, 150)][case % 4];
+            let n = 50 + (unit() * 550.0) as usize;
+            let mut kps = Vec::with_capacity(n);
+            let mut desc = Vec::with_capacity(n * DESC_LEN);
+            for _ in 0..n {
+                kps.push(Keypoint { x: unit() * w as f32, y: unit() * h as f32, sigma: 2.0, angle: 0.0 });
+                desc.extend((0..DESC_LEN).map(|_| (unit() * 256.0) as u8));
+            }
+            let a = Features { w, h, kps: kps.clone().into(), desc: desc.clone().into() };
+            let (s, t) = (0.6 + unit() * 0.8, unit() * 0.4 - 0.2);
+            let truth: Affine = [s * t.cos(), -s * t.sin(), 20.0 * unit(), s * t.sin(), s * t.cos(), 20.0 * unit()];
+            let kind = case % 5;
+            let (mut bk, mut bd) = (Vec::new(), Vec::new());
+            if kind != 2 {
+                for (k, kp) in kps.iter().enumerate() {
+                    if unit() < 0.3 {
+                        continue;
+                    }
+                    let (x, y) = apply(&truth, kp.x, kp.y);
+                    bk.push(Keypoint { x: x + unit() - 0.5, y: y + unit() - 0.5, sigma: 2.0, angle: 0.0 });
+                    bd.extend(desc[k * DESC_LEN..(k + 1) * DESC_LEN].iter().map(|&v| v.saturating_add((unit() * 12.0) as u8)));
+                }
+            }
+            let crowd = if kind == 4 { 60 } else { 0 };
+            for k in 0..(n / 3 + crowd) {
+                let (x, y) = if k < crowd { (100.0 + unit() * 3.0, 80.0 + unit() * 3.0) } else { (unit() * w as f32 * 1.1, unit() * h as f32 * 1.1) };
+                bk.push(Keypoint { x, y, sigma: 2.0, angle: 0.0 });
+                bd.extend((0..DESC_LEN).map(|_| (unit() * 256.0) as u8));
+            }
+            let b = Features { w, h, kps: bk.into(), desc: bd.into() };
+            // A first transform off by a little, by pixels, or (unrelated)
+            // anywhere.
+            let off = match kind {
+                1 => 6.0,
+                _ => 0.6,
+            };
+            let mut m = truth;
+            m[2] += (unit() - 0.5) * off;
+            m[5] += (unit() - 0.5) * off;
+            m[0] *= 1.0 + (unit() - 0.5) * off * 0.002;
+            m[4] *= 1.0 + (unit() - 0.5) * off * 0.002;
+            for d2 in [GUIDE_D2, u32::MAX] {
+                let r = guided_reference(&a, &b, m, w as f32, h as f32, d2, &mut want, &mut sr);
+                let g = guided(&a, &b, m, w as f32, h as f32, d2, &mut pairs, &mut sc);
+                assert_eq!(g.0.map(f32::to_bits), r.0.map(f32::to_bits), "case {case}");
+                assert_eq!((g.1, &pairs), (r.1, &want), "case {case}");
+                found += r.1;
+            }
+        }
+        assert!(found > 50_000, "{found}");
     }
 
     /// A verdict read the other way round is the same claim about the same two

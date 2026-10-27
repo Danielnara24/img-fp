@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.73.1" date="2026-10-27">
+      <description>
+        <p>Comparing pictures is faster, most of all in folders holding many copies of the same photos. What is found is unchanged.</p>
+      </description>
+    </release>
     <release version="0.73.0" date="2026-10-26">
       <description>
         <p>Two pictures get the same answer whatever else is in the folders being scanned, so a small folder and a whole library agree. Photos that only share a part, such as a distant mountain both show, are no longer grouped together.</p>

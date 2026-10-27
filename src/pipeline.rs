@@ -804,6 +804,9 @@ fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted,
 /// collect is no transient worth the name.
 const VERIFY_SLICE: usize = 1 << 16;
 
+/// A proposed pair not verified before (`retrieve_and_verify`).
+const NEW: u8 = 4;
+
 /// What both verification passes read: the files, which of them are
 /// matched (`run`), the acceptance bars, and the gate a verdict must clear
 /// before its pixels are read.
@@ -923,6 +926,8 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     let (args, progress) = (cx.args, &cx.progress);
     let (items, matched) = (pass.items, pass.matched);
     let n = items.len();
+    // A pair's higher file carries a bit beside it below.
+    assert!(n < 1 << 31, "{n} files");
     // Retrieval and verification are separate passes so that a pair proposed
     // from both sides is verified once. Containment scoring is asymmetric —
     // the crop finds the photograph much more readily than the reverse — so
@@ -941,6 +946,10 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     let mut window: Vec<(usize, usize)> = vec![(0, args.candidates); n];
     let mut extended = 0usize;
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
+    let mut stood: std::collections::HashSet<(u32, u32)> = Default::default();
+    // What each file's last query ranked past its window, and whether that is
+    // the ranking's end.
+    let mut ahead: Vec<(Vec<u32>, bool)> = vec![Default::default(); n];
     let mut all_direct: Vec<Edge> = Vec::new();
     let mut verified = 0usize;
     let mut round = 0usize;
@@ -955,35 +964,82 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         let first = round == 0;
         let descriptors: usize = ask.iter().map(|&i| items[i].feats.len()).sum();
         let bar = progress.begin_counted(Stage::Candidates, descriptors as u64, ask.len(), "images");
-        let mut cand_pairs: Vec<(u32, u32)> = ask
+        // Each window's pairs, lower file first, with which end's window held
+        // it in the lowest bit of the higher (`(i, j << 1 | by)`, `by` 1 when
+        // `j` asked): the windows are counted from these once their verdicts
+        // are in, where they used to be asked for again.
+        // Each query ranks two windows' worth, and what lies past the window
+        // is kept for the next (`ahead`): a file asked further down its
+        // ranking is then answered without asking the index again. The
+        // ranking's best `k` are its best `k + w` cut short (`rank_best` is a
+        // total order), so a window read from there is the window a query
+        // for it gives.
+        let got: Vec<std::sync::atomic::AtomicUsize> = ask.iter().map(|_| Default::default()).collect();
+        let mut taken: Vec<(Vec<u32>, bool)> = ask.iter().map(|&i| std::mem::take(&mut ahead[i])).collect();
+        let mut held: Vec<(u32, u32)> = ask
             .par_iter()
+            .zip(got.par_iter())
+            .zip(taken.par_iter_mut())
             .map_init(
                 || index.asking(),
-                |a, &i| {
+                |a, ((&i, got), (next, ends))| {
                     let (from, w) = window[i];
-                    let cands = index.candidates(i, &[&index.lists()[i]], from + w, a);
-                    let cands = &cands[from.min(cands.len())..];
+                    let js: Vec<u32> = if *ends || next.len() >= w {
+                        next.drain(..w.min(next.len())).collect()
+                    } else {
+                        let cands = index.candidates(i, &[&index.lists()[i]], from + 2 * w, a);
+                        *ends = cands.len() < from + 2 * w;
+                        let rest = &cands[from.min(cands.len())..];
+                        let cut = w.min(rest.len());
+                        *next = rest[cut..].iter().map(|&(j, ..)| j).collect();
+                        rest[..cut].iter().map(|&(j, ..)| j).collect()
+                    };
+                    got.store(js.len(), std::sync::atomic::Ordering::Relaxed);
                     bar.add(items[i].feats.len() as u64);
                     let i = i as u32;
-                    cands.iter().map(|&(j, ..)| if j < i { (j, i) } else { (i, j) }).collect::<Vec<_>>()
+                    js.into_iter().map(|j| if j < i { (j, i << 1 | 1) } else { (i, j << 1) }).collect::<Vec<_>>()
                 },
             )
             .flatten()
             .collect();
-        timed!(35, {
-            cand_pairs.par_sort_unstable();
-            cand_pairs.dedup();
-        });
+        for (&i, t) in ask.iter().zip(taken.iter_mut()) {
+            ahead[i] = std::mem::take(t);
+        }
+        drop(taken);
+        timed!(35, held.par_sort_unstable());
+        // The pairs proposed, and which ends proposed each (bit 0 the lower,
+        // bit 1 the higher).
+        let mut by: Vec<u8> = Vec::with_capacity(held.len());
+        let mut kept = 0usize;
+        for k in 0..held.len() {
+            let (lo, hi) = (held[k].0, held[k].1 >> 1);
+            let end = 1u8 << (held[k].1 & 1);
+            if kept > 0 && held[kept - 1] == (lo, hi) {
+                by[kept - 1] |= end;
+            } else {
+                held[kept] = (lo, hi);
+                by.push(end);
+                kept += 1;
+            }
+        }
+        held.truncate(kept);
         // A later round can propose a pair an earlier one verified (a library
         // file reached, or a window further down a ranking).
-        cand_pairs.retain(|p| seen.insert(*p));
+        // Those to verify are marked in bit 2.
+        let mut fresh = 0usize;
+        for (p, b) in held.iter().zip(by.iter_mut()) {
+            if seen.insert(*p) {
+                *b |= NEW;
+                fresh += 1;
+            }
+        }
         if first {
-            stage!(cx, "candidates: {} pairs", cand_pairs.len());
+            stage!(cx, "candidates: {fresh} pairs");
         } else {
             let who = if scope.against { "library files asked" } else { "files asked further down their ranking" };
-            stage!(cx, "  round {round}: {} {who}, {} more candidates", ask.len(), cand_pairs.len());
+            stage!(cx, "  round {round}: {} {who}, {fresh} more candidates", ask.len());
         }
-        let vbar = progress.begin_counted(Stage::Verify, cand_pairs.len() as u64, cand_pairs.len(), "pairs");
+        let vbar = progress.begin_counted(Stage::Verify, fresh as u64, fresh, "pairs");
         // Verified a slice of the candidates at a time, each slice's verdicts
         // appended to the one list as it finishes. A parallel `collect` of a
         // filtered stream gathers every worker's results into vectors of their
@@ -994,10 +1050,12 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         // order and each is collected in order, so the list is the one a single
         // collect gave, verdict for verdict.
         let from = all_direct.len();
-        for slice in cand_pairs.chunks(VERIFY_SLICE) {
+        for (slice, by) in held.chunks(VERIFY_SLICE).zip(by.chunks(VERIFY_SLICE)) {
             let part: Vec<Edge> = slice
                 .par_iter()
-                .map_init(Work::default, |work, &(i, j)| timed!(42, {
+                .zip(by.par_iter())
+                .filter(|&(_, &b)| b & NEW != 0)
+                .map_init(Work::default, |work, (&(i, j), _)| timed!(42, {
                     vbar.tick();
                     let (i, j) = (i as usize, j as usize);
                     pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j, Variant::SAME, work)
@@ -1015,28 +1073,32 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
             progress.learn(|k| k.settled = settled);
             all_direct.extend(part);
         }
-        verified += cand_pairs.len();
-        drop(cand_pairs);
-        ask = scope.reached(&all_direct[from..], pass.policy, &asked);
+        verified += fresh;
+        let reached = scope.reached(&all_direct[from..], pass.policy, &asked);
         // Accepted: any verdict that stands, whichever side proposed it.
-        let stood: std::collections::HashSet<(u32, u32)> = all_direct.iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)).collect();
-        let asked_now: Vec<usize> = (0..n).filter(|&i| asked[i] && window[i].1 > 0).collect();
-        let more: Vec<(usize, (usize, usize))> = asked_now
-            .par_iter()
-            .map_init(
-                || index.asking(),
-                |a, &i| {
-                    let (from, w) = window[i];
-                    let cands = index.candidates(i, &[&index.lists()[i]], from + w, a);
-                    let got = &cands[from.min(cands.len())..];
-                    let ok = got.iter().filter(|&&(j, ..)| stood.contains(&((i as u32).min(j), (i as u32).max(j)))).count();
-                    // A window shorter than asked for is the ranking's end.
-                    (i, if got.len() < w { (from + got.len(), 0) } else { (from + w, ok) })
-                },
-            )
-            .collect();
-        for (i, wi) in more {
+        stood.extend(all_direct[from..].iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)));
+        // Each window's candidates that stood, whichever round verified them.
+        let mut ok = vec![0usize; n];
+        let credited: Vec<(u32, u32, u8)> = held.par_iter().zip(by.par_iter()).filter(|(p, _)| stood.contains(p)).map(|(&(lo, hi), &b)| (lo, hi, b)).collect();
+        for (lo, hi, b) in credited {
+            if b & 1 != 0 {
+                ok[lo as usize] += 1;
+            }
+            if b & 2 != 0 {
+                ok[hi as usize] += 1;
+            }
+        }
+        drop((held, by));
+        let asked_now: Vec<(usize, usize)> = ask.iter().zip(got).map(|(&i, g)| (i, g.into_inner())).filter(|&(i, _)| window[i].1 > 0).collect();
+        ask = reached;
+        for (i, got) in asked_now {
+            let (from, w) = window[i];
+            // A window shorter than asked for is the ranking's end.
+            let wi = if got < w { (from + got, 0) } else { (from + w, ok[i]) };
             window[i] = wi;
+            if wi.1 == 0 {
+                ahead[i] = Default::default();
+            }
             if wi.1 > 0 && !ask.contains(&i) {
                 ask.push(i);
                 extended += 1;

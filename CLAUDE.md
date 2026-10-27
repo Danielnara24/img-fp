@@ -152,7 +152,7 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.73.0)
+## Status (0.73.1)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -940,6 +940,30 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   (78 -> 132 CPU-s; guided +45 s of it, `-k` +13.5 s, the rule nothing).
   Released build identical to the measured env-switched runs (full IMGS-ALL
   and IMGS5 reports byte for byte); tests pass.
+- 0.73.1 (matching faster, output byte-identical): guided matching
+  (`verify::guided`) scans a keypoint's three grid rows as one branch-free
+  loop with a select for the nearest (-17% of the function), keeps a
+  keypoint's last match when a refit moved it less than its proven room
+  (`Held`: to its cell's side, and `e^2 + 2 tol e < |r^2 - tol^2|` for every
+  B point it looked at, a 1e-3 tolerance guard; asked only when a corner of
+  A's frame moved under half the tolerance), prefetches B's descriptors,
+  and builds the grid in one pass fewer; held to the old loops bit for bit
+  by `guided_matching_finds_what_its_reference_does`. The misses were not
+  the cost: reusing distances across rounds was slower; branch
+  mispredictions in the row scan were. `-k` counting rejections no longer
+  queries a file again to count its window (each pair carries which end
+  proposed it), `stood` grows by the round's verdicts instead of being
+  rebuilt, and a query ranks two windows, the second kept for the next
+  round (`ahead`; `rank_best` is a total order, so a prefix is the same
+  answer). Identical to 0.73.0: cached and cold IMGS-ALL, IMGS5 and the
+  found mix, IMGS5 `--dump`, IMGS-AGAINST `--against`, all 90 `pairs.py`
+  reports. Cached matching (ABBA, plain builds): IMGS-ALL 713 -> ~600 CPU-s,
+  wall 113 -> ~97 s; IMGS5 130 -> ~113; found mix 329 -> ~315. Cold (ABBA,
+  machine throttled at 1.4 GHz): IMGS5 422 -> 398 CPU-s, found mix 873 ->
+  863, IMGS-ALL 2,826 -> 2,822 (spread 2,725-2,918, larger than the ~90
+  expected). Peak RssAnon+swap cached IMGS-ALL +18 MB (the kept windows,
+  600 bytes a file; it shows in the run's peak); cold IMGS-ALL 580 / 566
+  base, 598 / 671 new, not settled.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
