@@ -1042,7 +1042,24 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// A failure says its cause, once: an OS error under a context, and not
+    /// The Flatpak's metainfo names this version first among its releases, so
+    /// a version bump without its entry fails here rather than shipping an app
+    /// whose software centre page stops at an older release (0.68.0 to 0.73.0
+    /// were tagged without one). The entry's sentence is for users, so it is
+    /// written by hand. The crate leaves `flatpak/` out, so a packaged crate
+    /// has nothing to check.
+    #[test]
+    fn metainfo_names_this_release() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("flatpak");
+        if !dir.is_dir() {
+            return;
+        }
+        let xml = std::fs::read_to_string(dir.join("io.github.danielnara24.img-fp.metainfo.xml")).unwrap();
+        let newest = xml.split("<release version=\"").nth(1).and_then(|r| r.split('"').next());
+        assert_eq!(newest, Some(env!("CARGO_PKG_VERSION")), "add a <release> for {} at the top of the metainfo's <releases>", env!("CARGO_PKG_VERSION"));
+    }
+
+    /// A failure says its cause: an OS error under a context, and not
     /// the `image` crate's cause again after its own text.
     #[test]
     fn why_says_the_cause_once() {

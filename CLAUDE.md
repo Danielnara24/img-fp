@@ -2020,6 +2020,9 @@ finder is pointed anywhere; Flathub's linter flags it and a submission needs
 the exception asked for. Built offline from `cargo-sources.json`
 (flatpak-builder-tools' `flatpak-cargo-generator.py` over `Cargo.lock`;
 **regenerate it whenever Cargo.lock changes**, the release job checks).
+A version bump needs its `<release>` at the top of the metainfo's
+`<releases>`, one plain sentence for users (`metainfo_names_this_release`
+fails without it; 0.68.0-0.73.0 were tagged without one).
 `release.yml`'s `flatpak` job attaches `img-fp-x86_64.flatpak` to each
 release. Local build: the command at the top of the manifest
 (`org.flatpak.Builder`, user install, no sudo).
