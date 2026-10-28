@@ -226,16 +226,32 @@ impl Store {
     }
 }
 
+// O_TMPFILE: never has a name at all. It is `__O_TMPFILE | O_DIRECTORY`,
+// and `O_DIRECTORY` is not one number on every architecture: on ARM and
+// POWER it is 0o40000, and 0o200000 there is `O_DIRECT`, which the
+// kernel refused with the open (EINVAL), so those builds always fell
+// back to a named file. Where neither value is known, the fallback.
+#[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64", target_arch = "riscv32", target_arch = "riscv64", target_arch = "loongarch64", target_arch = "s390x", target_arch = "mips", target_arch = "mips64")))]
+const O_TMPFILE: Option<i32> = Some(0o20000000 | 0o200000);
+#[cfg(all(target_os = "linux", any(target_arch = "arm", target_arch = "aarch64", target_arch = "powerpc", target_arch = "powerpc64")))]
+const O_TMPFILE: Option<i32> = Some(0o20000000 | 0o40000);
+#[cfg(not(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86", target_arch = "x86_64", target_arch = "riscv32", target_arch = "riscv64", target_arch = "loongarch64",
+        target_arch = "s390x", target_arch = "mips", target_arch = "mips64", target_arch = "arm", target_arch = "aarch64",
+        target_arch = "powerpc", target_arch = "powerpc64"
+    )
+)))]
+const O_TMPFILE: Option<i32> = None;
+
 /// A file in `dir` that no other process can open and that is gone, space
 /// and all, once this one closes it and unmaps the last of it — however the
 /// process ends.
 fn unlinked_file(dir: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    #[cfg(target_os = "linux")]
-    {
-        // O_TMPFILE: never has a name at all.
-        const O_TMPFILE: i32 = 0o20000000 | 0o200000;
-        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).mode(0o600).custom_flags(O_TMPFILE).open(dir) {
+    if let Some(flag) = O_TMPFILE {
+        if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).mode(0o600).custom_flags(flag).open(dir) {
             return Ok(f);
         }
     }
@@ -323,5 +339,17 @@ mod tests {
         assert_eq!(b[CHUNK + 4], ((CHUNK + 4) % 251) as u8, "readable after the store is gone");
         assert!(!share(Kind::Thumbs, Vec::<u8>::new().into()).is_mapped());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// On this architecture the nameless file is opened as asked, not by
+    /// the fallback: the flag is the kernel's for it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_scratch_file_is_opened_with_no_name() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir();
+        let flag = O_TMPFILE.expect("this architecture's O_TMPFILE is known");
+        let opened = std::fs::OpenOptions::new().read(true).write(true).mode(0o600).custom_flags(flag).open(&dir);
+        assert!(opened.is_ok(), "{opened:?}");
     }
 }

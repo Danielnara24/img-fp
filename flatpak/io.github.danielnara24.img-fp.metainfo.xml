@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.75.0" date="2026-10-28">
+      <description>
+        <p>Copies of logos, icons and other pictures with little detail are found in folders full of other photos, and a damaged copy of a photo is no longer kept in place of the intact one.</p>
+      </description>
+    </release>
     <release version="0.74.0" date="2026-10-27">
       <description>
         <p>A photo stored sideways with a rotation tag is recognised as the same picture as an upright copy, folders of many copies of one photo are compared much faster, and the Trash no longer takes an image whose kept copy was deleted while the confirmation was open.</p>

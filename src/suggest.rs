@@ -188,6 +188,9 @@ pub struct Picture<'a> {
     pub thumb: &'a Thumb,
     pub traits: &'a Traits,
     pub bytes: u64,
+    /// It decoded only in part (`analysis::Read::Damaged`): a cut-off JPEG
+    /// or PNG, whose missing rows the decoder filled with grey.
+    pub damaged: bool,
 }
 
 /// One stated pair.
@@ -946,6 +949,11 @@ impl Ctx<'_> {
 
     /// The file of a class to keep.
     fn choose(&self, class: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> usize {
+        // One that decoded whole, where there is one: a cut-off file is
+        // filled with grey where its data ends, and the same pixels as an
+        // intact file only when nothing but its end marker was lost.
+        let whole: Vec<usize> = class.iter().copied().filter(|&f| !self.pics[f].damaged).collect();
+        let class = if whole.is_empty() { class } else { &whole[..] };
         // Not one another file of the class shows more of.
         let mut c: Vec<usize> =
             class.iter().copied().filter(|&f| !class.iter().any(|&g| g != f && self.side(f, g).is_some() && self.more(g, f))).collect();
@@ -1163,8 +1171,10 @@ impl<'c, 'a> Component<'c, 'a> {
                 return Some(Refusal::Held);
             }
         }
-        // Asked last, so that what it refuses is what it alone refused.
-        if x.softer(k, d) {
+        // Asked last, so that what it refuses is what it alone refused. A
+        // file that decoded only in part shows less than an intact file of
+        // its picture, by what was cut off, as a softer one does by detail.
+        if x.softer(k, d) || x.pics[k].damaged && !x.pics[d].damaged {
             return Some(Refusal::Softer);
         }
         None
@@ -1513,11 +1523,29 @@ mod tests {
     #[test]
     fn of_two_identical_files_one_is_kept_and_the_other_deleted() {
         let (t, tr) = (thumb(), colourful());
-        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes };
+        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes, damaged: false };
         let pics = [pic(2_000), pic(1_000)];
         let got = suggest(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
         // The same pixels: the smaller file is kept.
         assert_eq!(got, [Some(Action::Delete), Some(Action::Keep)]);
+    }
+
+    /// A file that decoded only in part is not kept over an intact one,
+    /// however small, nor does it delete one: of the same pixels (a JPEG that
+    /// lost only its end marker) the intact file is kept and the damaged one
+    /// deleted, and an intact file the damaged one alone could delete stays.
+    #[test]
+    fn a_damaged_file_is_not_kept_over_an_intact_one() {
+        let (t, tr) = (thumb(), colourful());
+        let pic = |bytes, damaged| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes, damaged };
+        let got = suggest(&[pic(2_000, false), pic(1_998, true)], &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Delete)]);
+        // A larger frame, cut off: it holds the intact crop, and may not
+        // delete it; the crop deletes nothing of it either.
+        let v = verdict(1.0, 1.0);
+        let small = Picture { dims: (64, 48), work: (64, 48), ..pic(1_000, false) };
+        let got = suggest(&[small, pic(3_000, true)], &[(0, 1, Link::Edge(&v, [2.0, 0.0, 0.0, 0.0, 2.0, 0.0], false))], 0.6, |_| 30.0);
+        assert_ne!(got[0], Some(Action::Delete), "{got:?}");
     }
 
     /// Of the same pixels, proven, the file that carries more besides them
@@ -1529,7 +1557,7 @@ mod tests {
         let t = thumb();
         let plain = colourful();
         fn pic<'a>(t: &'a Thumb, traits: &'a Traits, bytes: u64) -> Picture<'a> {
-            Picture { dims: (128, 96), work: (128, 96), thumb: t, traits, bytes }
+            Picture { dims: (128, 96), work: (128, 96), thumb: t, traits, bytes, damaged: false }
         }
         for richer in [Traits { deep: true, ..colourful() }, Traits { profile: true, ..colourful() }, Traits { exif: true, ..colourful() }] {
             let got = suggest(&[pic(&t, &richer, 9_000), pic(&t, &plain, 1_000)], &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
@@ -1551,7 +1579,7 @@ mod tests {
         let t = thumb();
         let sharp = Traits { detail: [10.0, 12.5, 16.0, 20.0, 10.0, 12.5], colour: 30.0, ..Default::default() };
         let soft = Traits { detail: [5.0, 10.0, 15.0, 19.0, 5.0, 10.0], colour: 30.0, ..Default::default() };
-        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes };
+        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes, damaged: false };
         // The original, then three softer copies, each the smaller file.
         let pics = [pic(&sharp, 5_000), pic(&soft, 1_000), pic(&soft, 1_100), pic(&soft, 1_200)];
         let v = verdict(1.0, 1.0);
@@ -1579,7 +1607,7 @@ mod tests {
         let t = thumb();
         let still = colourful();
         let anim = Traits { frames: true, ..colourful() };
-        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes };
+        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes, damaged: false };
         let v = verdict(1.0, 1.0);
         let pics = [pic(&anim, 9_000), pic(&anim, 8_000), pic(&still, 1_000), pic(&still, 1_100)];
         let got = suggest(&pics, &all_pairs(4, &v), 0.6, |_| 30.0);
@@ -1599,7 +1627,7 @@ mod tests {
         let t = thumb();
         let png = Traits { lossless: true, ..colourful() };
         let jpg = colourful();
-        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes };
+        let pic = |traits, bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes, damaged: false };
         let v = verdict(1.0, 1.0);
         let pics = [pic(&png, 5_000), pic(&jpg, 2_000), pic(&png, 5_100)];
         let got = suggest(&pics, &all_pairs(3, &v), 0.6, |_| 30.0);
@@ -1617,7 +1645,7 @@ mod tests {
     #[test]
     fn a_pinned_file_is_kept_and_named_by_what_it_deletes() {
         let (t, tr) = (thumb(), colourful());
-        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes };
+        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes, damaged: false };
         // Unpinned, the smaller file 1 would be kept; pinned, the larger is.
         let pics = [pic(2_000), pic(1_000)];
         let (got, keeper) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, false]);
@@ -1631,7 +1659,7 @@ mod tests {
     #[test]
     fn a_weak_pair_settles_nothing_unless_it_agrees_almost_everywhere() {
         let (t, tr) = (thumb(), colourful());
-        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000 };
+        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000, damaged: false };
         let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }];
         // One block disagrees at a correlation under `WEAK_DELETES`, the
         // correlation is under the run's bar, and one is the other's negative.
@@ -1655,7 +1683,7 @@ mod tests {
     #[test]
     fn a_mirror_image_settles_nothing_and_is_left_for_a_look() {
         let (t, tr) = (thumb(), colourful());
-        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000 };
+        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000, damaged: false };
         // The mirror is the larger file, which would win were it upright.
         let pics = [pic, Picture { bytes: 2_000, ..pic }];
         let v = verdict(0.99, 0.98);
@@ -1682,7 +1710,7 @@ mod tests {
     #[test]
     fn two_pictures_of_one_frame_alone_are_both_left_for_a_look() {
         let (t, tr) = (thumb(), colourful());
-        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000 };
+        let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000, damaged: false };
         let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }];
         let (v, low) = (verdict(1.0, 1.0), verdict(0.8, 0.9));
         for v in [&v, &low] {
@@ -1712,11 +1740,11 @@ mod tests {
         // Half the larger frame is the photograph: on a flat canvas its
         // detail reads half; as more of the photograph, the same.
         let canvas = Traits { detail: [4.0, 6.0, 8.0, 10.0, 4.0, 6.0], colour: 30.0, ..Default::default() };
-        let small = Picture { dims: (64, 96), work: (64, 96), thumb: &half, traits: &photo, bytes: 1_000 };
+        let small = Picture { dims: (64, 96), work: (64, 96), thumb: &half, traits: &photo, bytes: 1_000, damaged: false };
         let v = verdict(1.0, 1.0);
         // Both kept: a composite and its photograph are two things to keep.
         for (traits, want) in [(&photo, Action::Delete), (&canvas, Action::Keep)] {
-            let large = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes: 2_000 };
+            let large = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits, bytes: 2_000, damaged: false };
             let got = suggest(&[small, large], &[(0, 1, Link::Edge(&v, IDENTITY, false))], 0.6, |_| 30.0);
             assert_eq!(got[0], Some(want), "{got:?}");
         }

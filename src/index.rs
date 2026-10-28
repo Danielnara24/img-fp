@@ -44,6 +44,13 @@ pub struct VocabParams {
     pub seed: u64,
 }
 
+/// How close two leaves of one parent are to be one word (`Vocabulary::
+/// with_floor`), as a descriptor distance (`dist2` is its square). Derived,
+/// not fitted: the median over true pairs of the p90 distance between
+/// corresponding keypoints (`out/v46-matcher` section 8), so two
+/// observations of one point fall in one word.
+const WORD_FLOOR: u32 = 143;
+
 /// Descriptors per leaf word the tree aims for.
 ///
 /// Fixing *occupancy* rather than the word count is what makes the vocabulary
@@ -225,6 +232,9 @@ pub struct Vocabulary<'a> {
     down: Vec<Vec<Kids>>,
     max_paths: usize,
     path_ratio: f32,
+    /// Each leaf's word: leaves of one parent whose centres lie within
+    /// `WORD_FLOOR` of each other are one word (`with_floor`).
+    alias: Vec<u32>,
 }
 
 // SAFETY: `leaves` points into `own`, whose buffer is never touched after
@@ -358,6 +368,7 @@ impl<'a> Vocabulary<'a> {
             + self.own.capacity()
             + self.norms.iter().map(|v| v.capacity() * 4).sum::<usize>()
             + self.down.iter().map(|v| v.capacity() * 8).sum::<usize>()
+            + self.alias.capacity() * 4
     }
 
     /// Words are the leaves: `branching^depth` of them.
@@ -580,7 +591,67 @@ impl<'a> Vocabulary<'a> {
             down,
             max_paths: p.max_paths,
             path_ratio: p.path_ratio,
+            alias: Vec::new(),
         }
+        .with_floor()
+    }
+
+    /// Leaves of one parent whose centres lie within `WORD_FLOOR` of each
+    /// other made one word (single linkage), so that no word is finer than
+    /// two observations of one point.
+    ///
+    /// **Without it a copy could share no word with its original.** k-means
+    /// makes a leaf where a training sample lies, and an image with fewer
+    /// descriptors than its share of the sample (`per` in `index_all`) puts
+    /// all of them in, as does each copy of it: two copies of one descriptor
+    /// are then the closest members of their group, and each was given a
+    /// leaf of its own. A logo of 42 keypoints and its PNG copy, among 15 to
+    /// 120 unrelated photographs, shared no word in 28 of 30 folders, so the
+    /// copy was never a candidate (each word one leaf over from its twin's).
+    /// With the floor, 0 of 30. A photograph's copies lost the words of the
+    /// keypoints the sample took from both, which is where the vocabulary was
+    /// finest around a picture with many copies.
+    ///
+    /// Measured (`benchmark/out/v53-audit`): IMGS-ALL F1 0.9735 -> 0.9739,
+    /// IMGS-ALL2 0.9356 -> 0.9390, small families joined 66.0 -> 65.0 and
+    /// 63.7 -> 63.0, no new merge; matching +7.9% CPU on IMGS-ALL, +6% on the
+    /// found mix. Training on no two members within the floor instead (the
+    /// leaves spent elsewhere) cost +1-3% and joined more siblings: 67.0 and
+    /// 65.7, and two unrelated photographs in one draw.
+    fn with_floor(mut self) -> Self {
+        let r2 = WORD_FLOOR * WORD_FLOOR;
+        let n = self.leaves.len();
+        let parents: Vec<Kids> = if self.depth >= 2 { self.down[self.depth - 2].clone() } else { vec![self.root] };
+        let mut alias: Vec<u32> = (0..n as u32).collect();
+        let find = |a: &mut Vec<u32>, mut x: u32| {
+            while a[x as usize] != x {
+                let up = a[a[x as usize] as usize];
+                a[x as usize] = up;
+                x = up;
+            }
+            x
+        };
+        let leaf = |i: usize| -> &[u8; DESC_LEN] { unsafe { &*(self.leaves[i] as *const [u8; DESC_LEN]) } };
+        for k in parents {
+            let (f, m) = (k.first as usize, k.n as usize);
+            for i in f..f + m {
+                for j in i + 1..f + m {
+                    if dist2(leaf(i), leaf(j)) < r2 {
+                        let (a, b) = (find(&mut alias, i as u32), find(&mut alias, j as u32));
+                        if a != b {
+                            let (lo, hi) = (a.min(b), a.max(b));
+                            alias[hi as usize] = lo;
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            let a = find(&mut alias, i as u32);
+            alias[i] = a;
+        }
+        self.alias = alias;
+        self
     }
 
     /// Quantise one descriptor to up to `max_paths` words, best first.
@@ -738,7 +809,10 @@ impl<'a> Vocabulary<'a> {
             }
         }
         for &(slot, _) in cur[..n_cur].iter() {
-            out.push(slot);
+            let w = self.alias[slot as usize];
+            if !out.contains(&w) {
+                out.push(w);
+            }
         }
     }
 }

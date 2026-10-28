@@ -1534,10 +1534,12 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
         (None, against::asked(&scanned, &scope.library, &pairs, &actions, &keeper))
     } else {
         let graph: Vec<(usize, usize)> = pairs.iter().map(Pair::ends).collect();
-        // Among files of equal reach: the one the content rule keeps, then
-        // one it leaves for a look, then one stored losslessly, then the most
-        // pixels, then the most bytes. What `--suggest representative` keeps,
-        // and the picture every other is shown against.
+        // Among files of equal reach: one that decoded whole, then the one
+        // the content rule keeps, then one it leaves for a look, then one
+        // stored losslessly, then the most pixels, then the most bytes. What
+        // `--suggest representative` keeps, and the picture every other is
+        // shown against. A cut-off file was a group's head over the intact
+        // copies it was cut from, and `representative` deleted them for it.
         let better: Vec<_> = (0..files.len())
             .map(|i| {
                 let said = match actions.get(i).copied().flatten() {
@@ -1546,7 +1548,7 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
                     Some(suggest::Action::Delete) => 0,
                 };
                 let (w, h) = items[i].dims;
-                (said, items[i].traits.lossless, w as u64 * h as u64, stats[i].len)
+                (items[i].read.damaged().is_none(), said, items[i].traits.lossless, w as u64 * h as u64, stats[i].len)
             })
             .collect();
         (Some(timed!(28, group::find(files.len(), &graph, &better))), Vec::new())
@@ -1613,6 +1615,7 @@ fn suggest_content(
             thumb: &it.thumb,
             traits: &it.traits,
             bytes: st.len,
+            damaged: it.read.damaged().is_some(),
         })
         .collect();
     let links: Vec<(usize, usize, suggest::Link)> = stated.iter().map(|&(a, b, s)| (a, b, s.link())).collect();

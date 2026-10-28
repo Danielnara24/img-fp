@@ -63,7 +63,7 @@ windows); the shared-part rule (`claims::demote_shared_parts`). Everything
 below names them by the env switches they were measured under; those and the
 rest of the scaffolding are gone from the tree (`IMGFP_GUIDE_D`,
 `IMGFP_K_REJECT`, `IMGFP_PART_RULE`; not shipped: `IMGFP_GUIDE_GATED`, the
-word floor `IMGFP_WORD_R`, `IMGFP_WATCH`, `IMGFP_CLAIMS_OFF`, `src/probe.rs`;
+word floor `IMGFP_WORD_R` (shipped in 0.75.0 as `index::WORD_FLOOR`), `IMGFP_WATCH`, `IMGFP_CLAIMS_OFF`, `src/probe.rs`;
 all in commit 5e6edeb). 0.73.0 reproduces the measured stack runs byte for
 byte (full IMGS-ALL, full IMGS5).
 
@@ -113,7 +113,8 @@ does not filter (every file is inside `-k`). **Word floor**
 keypoints) are one word. Meets 9 / 10; originals-alone reports identical, small
 families flat over r 100-250, full IMGS-ALL F1 0.9773 -> 0.9780, recall 95.96%,
 cross-family 502 (none >= 300), keep rule unchanged; +8% CPU on full IMGS5,
-+2.6% on the found mix. **`-k` counts rejections** (`IMGFP_K_REJECT`: a file
++2.6% on the found mix (shipped in 0.75.0, which found what it is for: a
+low-detail picture and its copy sharing no word at all). **`-k` counts rejections** (`IMGFP_K_REJECT`: a file
 whose window held standing verdicts asks for as many more, until `-k` are
 rejected): meets 10 / 11, small families identical, full IMGS-ALL F1 0.9781,
 CPU within the runs' spread (verified candidates +60% on IMGS-ALL, mostly
@@ -152,7 +153,7 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.74.0)
+## Status (0.75.0)
 
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
@@ -994,6 +995,47 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     17 points, correlation 0.72), through the vocabulary retrained on 60 more
     descriptors; re-matching the same set is byte-identical, and file order
     does not matter.
+- 0.75.0 (audit A-C; `out/v53-audit/RESULTS.md`; no cache format change):
+  - **A, the word floor** (`index::WORD_FLOOR` = 143, `Vocabulary::
+    with_floor`; v46's `IMGFP_WORD_R` made permanent): leaves of one parent
+    within the floor are one word. Why: an image with fewer descriptors than
+    its share of the vocabulary sample (`per` in `index_all`) puts all of
+    them in, and so does each copy; k-means then gave each copy of a
+    descriptor a leaf of its own. A 42-keypoint logo and its PNG or q95 copy,
+    among 15-120 found photos, shared no word in 28 of 30 folders (every word
+    one leaf over from its twin's), so the copy was never a candidate; now
+    0 of 30. IMGS-ALL F1 0.9735 -> 0.9739 (recall 95.86 -> 95.98%, precision
+    98.88 -> 98.85%, cross-family 11,932 -> 12,227, same five merges over 300,
+    Floriana3/4 474 -> 554, perfect transforms 51 -> 54); IMGS-ALL2 0.9356 ->
+    0.9390 (89.01 -> 89.60%, cross-family 13,515 -> 13,091, Henares1/2 200 ->
+    0, perfect 7 -> 11); small families joined 66.0 -> 65.0, 63.7 -> 63.0,
+    n1 recall +0.57 points on both. Keep rule 0 lost; originals kept 358 ->
+    358, IMGS-ALL2 352 -> 351 (three families out, two in, each where
+    `webp_lossless` was the last lossless survivor). Cost, cached matching
+    (ABBA): IMGS-ALL +7.9% CPU, found mix +6.0%. Rejected beside it: training
+    the deepest level on no two members within the floor (`IMGFP_SAMPLE_R`),
+    +1.1% / +3.4% CPU, same recall, but small families joined 67.0 / 65.7
+    (boat_photo1/2 directly as originals; galaxy | sea_photo4, two unrelated
+    seeds, in one draw). The released build reproduces the measured
+    switch-on runs byte for byte (IMGS-ALL, IMGS-ALL2, `families.py`).
+  - **B, a damaged file is not preferred** (`suggest::Picture::damaged`):
+    of a class the keeper is an intact file where there is one (`choose`),
+    a damaged file may not delete an intact one (`Refusal::Softer`, beside
+    `softer`: it shows less, by what was cut off), and among files of equal
+    reach an intact one heads the group (`assemble`'s `better`). Before, a
+    JPEG missing only its EOI marker (same pixels, 2 bytes smaller) was KEEP
+    and its intact original DELETE under every rule, and a copy cut at 85%
+    beside two intact copies headed the group and `--suggest representative`
+    deleted both intact files. Left: in that case the content rule still
+    gives the cut file KEEP (best match 0.89, under `REVIEW`, lowered by the
+    damage itself). IMGS-ALL and IMGS-ALL2 reports identical with A off.
+  - **C** `spill.rs`'s `O_TMPFILE` is `__O_TMPFILE | O_DIRECTORY` per
+    architecture (`O_DIRECTORY` is 0o40000 on ARM and POWER, where the old
+    value was `O_DIRECT`, EINVAL, and every scratch file the named
+    fallback); values checked against the `libc` crate's.
+  - `bench.py`: each tool runs with `oom_score_adj` 1000 (the kernel kills it,
+    not the desktop, when memory runs out), in a session of its own,
+    `--timeout HOURS`, and `--only` runs tools in the order given.
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -1131,10 +1173,55 @@ vendor/         third-party tools and venvs (gitignored)
 
 ## Corpora
 
-- **IMGS-ALL** `/home/daniel/Documents/IMGS-ALL`: hard links to the four
+- **IMGS-ALL** `/home/daniel/Documents/IMGS-ALL`: hard links to the
   corpora, ground truths merged, built by `corpus/make_combined.py`. Default
   for `bench.py`, `score.py`, `analyse.py`. Re-run with `--clean` after
-  `make_variants.py` (links go stale).
+  `make_variants.py` (links go stale). **Since 2026-10-27 it holds all five
+  (IMGS-IMGS5: 33,119 files, 364 seeds, the first generation's 90
+  transforms)**; every IMGS-ALL figure in this file before that date is the
+  four-corpus one (27,659 files, 304 seeds; rebuild with `make_combined.py
+  --parts IMGS,IMGS2,IMGS3,IMGS4 --out DIR`). Baseline, 0.74.0 cold
+  (`out/v52-all5`): F1 0.9735, precision 98.88%, recall 95.86%, perfect
+  transforms 51 of 87, traps 2,955, cross-family 11,932 (IMGS5's sets:
+  Fountain3/5 6,645, Floriana1/2 2,884, bird1/2 799, Floriana3/4 474, Mural
+  325 over 300), 3,133 CPU-s; keep rule 0 lost, 358 / 364, 364 / 364. TP
+  and FN within 0.03% of 0.73.0's four-corpus and IMGS5 runs added.
+- **IMGS-ALL2** `/home/daniel/Documents/IMGS-ALL2`: the **hard** corpus (built
+  2026-10-27). The same 364 seeds as IMGS-ALL, 91 transforms, generated in
+  `/home/daniel/Documents/IMGS-v2/<part>` (seeds hard-linked from the
+  originals; `CLEAN=1 IMGS-v2/generate.sh` regenerates and merges, ~17 min;
+  without `CLEAN` it resumes, which is only safe after an interruption: a
+  changed format moves every later file's name, and the resume reused files
+  under other transforms' names once, `out/v48-all2-hard/void`). Where and
+  which way are drawn per seed as well as how much (crops anywhere, strips
+  off any side, keystones from any edge, rotations, shears, swirls either
+  way, stickers / watermarks / insets in any corner, tile orders:
+  `transforms._oriented`). Then, in five rounds, every transform 0.74.0 found
+  for all 364 seeds was made harder in kind until none was (`out/v47-all2`
+  to `out/v50-all2-r5`): stronger ranges (`rotate_large` 12-45°, shear
+  0.30-0.50, swirl 25-80°, JPEG quality to 1, posterize 2-12 colours, noise
+  30-90 on a smaller copy, blur 0.8-2.4% of the long side), and an exact
+  operation made as it is met (`transforms._shared`: a turned, mirrored,
+  graded or captioned copy is also smaller and re-saved; greyscale through a
+  colour filter; a negative graded; channel swap any order, one channel may
+  be inverted; duotone inks per seed; an upscale is of a small copy). Left
+  perfect on purpose: `copy_exact`, `strip_metadata`, `to_png`, `to_tiff`,
+  `webp_lossless` (identical pixels by definition) and `alpha_on_*` (a plain
+  re-save on an opaque seed). Renamed: `crop_strip_top` -> `crop_strip`,
+  `perspective_top` -> `perspective`, `keystone_side` -> `perspective_two`
+  (both axes), `wave_vertical` -> `wave`; `pinch` new.
+  Baseline, 0.74.0 cold (`out/v50-all2-r5`): F1 **0.9356**, precision
+  98.59%, recall **89.01%**, perfect transforms 7 of 88 (the seven above),
+  traps 4,059, cross-family 13,515 (Fountain3/5 6,010, bird1/2 5,587,
+  Floriana1/2 483, Floriana3/4 372 over 300), 2,545 CPU-s; keep rule 0
+  lost, 352 / 364, 364 / 364. Hardest: `pinch` 242, `tiled_watermark` 248,
+  `swirl` 263, `wave` 274, `crop_micro` 279, `perspective` 291, `blur` 307.
+  15 transforms are at 363 / 364, nearly all one seed (`earth.jpeg`), which
+  flips between runs: one seed is not a margin. Small families
+  (`families.py ... --corpus all all2`, `out/v51-families`): total joined
+  IMGS-ALL **66.0** (n0 17, n1 16.0, n2 17.0, f 16), IMGS-ALL2 **63.7** (n0
+  17, n1 14.0, n2 16.7, f 16); n0 and f are the same seeds in both, so they
+  agree by construction. Pass `--corpus` explicitly; defaults name IMGS-ALL.
 - **IMGS** `/home/daniel/Documents/IMGS`: 62 seeds. Seed `beach` has no
   extension, so comparable runs need `-x '*'` (`bench.py` passes it).
 - **IMGS2** (design), **IMGS3**, **IMGS4**: photographs chosen in near-miss
@@ -1585,7 +1672,10 @@ Each was measured; changing one needs a re-measure.
   steps alone swung occupancy 16x and merged families at ordinary sizes).
   A word is a live leaf's centre slot. Centres are bytes (the one lossy step,
   measured neutral). Sample = a tenth of distinct descriptors, capped 1.28 M
-  (`DESC_PER_SAMPLE`). Do not fix the vocabulary size.
+  (`DESC_PER_SAMPLE`). Do not fix the vocabulary size. Leaves of one parent
+  within `WORD_FLOOR` (143) are one word (0.75.0): without it two copies of a
+  descriptor both in the sample got a leaf each, and a logo shared no word
+  with its own copy.
 - **Inverted file indexes every word**; no frequency cap.
 - **"Identical" is a byte comparison**, after a 4x16 KB sample hash; under a
   wildcard only possible pictures are read (`decode::may_be_image`).
@@ -1679,7 +1769,9 @@ undecided pair, a lossy one does not stand in for it. A file of several
 pictures (`Traits::frames`, a JPEG's MPF pictures too) is deleted only for
 its bytes. Of pixel-identical twins the keeper carries most besides its
 pixels (`Traits::deep`, `profile`, `exif`), and none is deleted for a twin
-lacking what it carries (`carries_more`). Files refused by
+lacking what it carries (`carries_more`). A file that decoded only in
+part (`Picture::damaged`) is not chosen over an intact one and does not
+delete one (0.75.0). Files refused by
 either are KEEP and **delete nothing themselves** (`Refusal::Held`, unlike
 `SOFT_GAP`'s `Refusal::Softer`): spreading from them let a kept posterize
 edit delete its original.
