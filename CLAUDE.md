@@ -175,8 +175,8 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   pairs, no family merge (`out/v33-fit-pyramid/RESULTS.md`; 0.45.0 was
   0.9805 / 95 cross-family). At 640 (0.51.0, `out/v36-cliffs`): F1
   0.9846, recall 97.40%, 8 cross-family, no merge. SSCD, the best competitor:
-  F1 0.748, and every other tool has zero perfect transforms
-  (`benchmark/BASELINE.md`, field in `out/v17-all4`).
+  F1 0.748, and every other tool had zero perfect transforms (the four-corpus
+  field, since replaced by `out/v54-field`).
 - 0.47.0 (audit fixes, `out/v35-audit`): F1 **0.9823**, recall 96.93%,
   same 7 cross-family pairs and trap FPs, 48 perfect transforms; keep rule
   17,299 DELETE, none loses content, 276 / 304.
@@ -1182,7 +1182,7 @@ benchmark/
   runners/      one wrapper per competitor -> canonical JSON
   corpus/       transforms.py (CATALOGUE), make_variants.py, make_combined.py,
                 make_against.py
-  out/vNN/      measurement sessions; v17-all4 is the field's baseline
+  out/vNN/      measurement sessions; v54-field is the field's baseline
 vendor/         third-party tools and venvs (gitignored)
 ```
 
