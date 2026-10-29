@@ -155,6 +155,20 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
 ## Status (0.75.0)
 
+- **The field, 2026-10-28** (`benchmark/BASELINE.md`, `out/v54-field`), cold,
+  one session, img-fp 0.75.0 plain build. IMGS-ALL (five corpora, 33,136
+  files): img-fp F1 **0.974**, 54 / 87 perfect, 590 s, 3,751 CPU-s, 606 MB
+  anon+swap; SSCD 0.729 (12,745 s, 71,057 CPU-s), imagededup_cnn 0.571,
+  imagededup_phash 0.504, czkawka_tuned 0.414, pdq 0.402, every other tool
+  under 0.12 and zero perfect (fclones' one is `copy_exact`); difPy finished
+  this time (5.2 h, F1 0.004). IMGS-ALL2 (hard): img-fp **0.939**, 11 / 88
+  perfect; imagededup_phash 0.423, pdq 0.299, imagededup_cnn 0.249,
+  czkawka_tuned 0.197. difPy and SSCD not yet run on IMGS-ALL2
+  (`out/v54-field/later.sh`, user's decision). Competitors lead on non-affine
+  warps and overlays (SSCD on keystone / perspective / wave on IMGS-ALL;
+  imagededup_cnn on `perspective` and `pinch`, phash on `tiled_watermark`,
+  `jpeg_low`, `noise`, pdq on `blur` on IMGS-ALL2); containment is img-fp's
+  alone on both.
 - Baseline corpus **IMGS-ALL** (IMGS + IMGS2 + IMGS3 + IMGS4: 27,659 files,
   304 seeds, 90 transforms). At the default `--work-size 512`: **F1 0.9821**,
   99.57% precision, 96.90% recall, 47 perfect transforms; 7 cross-family
@@ -1053,7 +1067,8 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   development data: the next rule needs fresh seeds again.
 - Per-corpus at 512 (0.51.0, `out/v36-cliffs`): IMGS 0.9719, IMGS2 0.9846,
   IMGS3 0.9871, IMGS4 0.9860; at 640: 0.9764, 0.9867, 0.9885, 0.9882.
-- Cost: ~2,500 CPU-s / ~6 min cold on IMGS-ALL; SSCD ~55,000 CPU-s.
+- Cost: ~2,500 CPU-s / ~6 min cold on four-corpus IMGS-ALL (SSCD ~55,000); on
+  five corpora 3,751 CPU-s / 590 s (0.75.0, SSCD 71,057).
 - Released binary is the **plain x86-64 build** (`target/plain`), which
   `bench.py` measures by default. It differs from a native build only on
   JPEG XL (jxl-grid's FMA rounding). The repo no longer ships a
