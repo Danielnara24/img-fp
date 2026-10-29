@@ -1104,8 +1104,8 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   5 of the 7 families not keeping their original are grey or near-grey
   originals beaten by a tinted copy (`temperature`) on "colour over grey".
 
-Docs split: `benchmark/BASELINE.md` (competition), `benchmark/VALIDATION.md`
-(held-out experiment), `README.md` is **users only**: install and usage, no
+Docs split: `benchmark/BASELINE.md` (competition; the held-out experiment's
+write-up, `VALIDATION.md`, was deleted 2026-10-28), `README.md` is **users only**: install and usage, no
 benchmark figures, comparisons or local measurements; same for `--help` and
 the man page generated from `Args`. Hidden flags (`hide = true`, re-added in
 `print_man` since `clap_mangen` drops hidden args): `--dump`, `-k`,
