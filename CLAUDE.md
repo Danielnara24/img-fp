@@ -164,8 +164,8 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   this time (5.2 h, F1 0.004). IMGS-ALL2 (hard): img-fp **0.939**, 11 / 88
   perfect; SSCD 0.472 (80.4% precision, 33.4% recall, 67,821 CPU-s, run
   alone that evening), imagededup_phash 0.423, pdq 0.299, imagededup_cnn
-  0.249, czkawka_tuned 0.197. difPy not yet run on IMGS-ALL2
-  (`out/v54-field/later.sh`, user's decision). Competitors lead on non-affine
+  0.249, czkawka_tuned 0.197; difPy 0.003 (2.4 h, run alone the
+  next night). Competitors lead on non-affine
   warps and overlays (SSCD on keystone / perspective / wave on IMGS-ALL, and
   on `perspective`, `pinch`, `swirl`, `wave` on IMGS-ALL2; phash on
   `tiled_watermark`, `jpeg_low`, `noise`, pdq on `blur` on IMGS-ALL2);
