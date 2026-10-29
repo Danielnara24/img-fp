@@ -35,7 +35,7 @@ pub(super) fn open_ico(bytes: &[u8]) -> Picture<'_> {
 /// lossless it tied with the photograph's own lossless copy on everything
 /// but size, and was kept over it. A WebP is lossless when its picture is a
 /// `VP8L` chunk (`webp_lossless`). More than one picture: an animated GIF or
-/// WebP.
+/// WebP, an icon of several sizes.
 fn facts(fmt: ImageFormat, b: &[u8]) -> Facts {
     let u16_at = |at: usize| b.get(at..at + 2).map(|v| u16::from_le_bytes([v[0], v[1]]));
     let u32_at = |at: usize| b.get(at..at + 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
@@ -60,7 +60,11 @@ fn facts(fmt: ImageFormat, b: &[u8]) -> Facts {
         }
         // Image type 1 or 9: colour-mapped, plain or run-length.
         ImageFormat::Tga => (!matches!(b.get(2), Some(1 | 9)), false),
-        ImageFormat::Pnm | ImageFormat::Qoi | ImageFormat::Ico | ImageFormat::OpenExr | ImageFormat::Hdr | ImageFormat::Farbfeld => (true, false),
+        // An icon holds a picture a size, often each drawn for its size: a
+        // 16, 32, 48 and 256 px icon was "same pixels" as a PNG of its 256 px
+        // picture, and DELETE. Lossless as the entry read is.
+        ImageFormat::Ico => ico_entries(b).map_or((true, false), |(n, entry)| (ico_entry_lossless(entry), n >= 2)),
+        ImageFormat::Pnm | ImageFormat::Qoi | ImageFormat::OpenExr | ImageFormat::Hdr | ImageFormat::Farbfeld => (true, false),
         _ => (false, false),
     };
     Facts { lossless, frames, exif, deep, profile, ..Facts::default() }
@@ -126,6 +130,24 @@ pub(super) fn size<R: std::io::BufRead + std::io::Seek>(r: R, fmt: ImageFormat) 
 /// pixels, the last of equals — and, when it is a PNG, as a PNG. An entry
 /// that is a bitmap was the crate's to read and is not second-guessed.
 pub(super) fn ico_png(bytes: &[u8]) -> Option<&[u8]> {
+    let (_, entry) = ico_entries(bytes)?;
+    entry.starts_with(b"\x89PNG\r\n\x1a\n").then_some(entry)
+}
+
+/// Whether an icon's entry keeps every pixel: a PNG not of a palette (its
+/// colour type, IHDR's tenth byte, is not 3), or a bitmap of more than eight
+/// bits a pixel (its own header's bit count, which a directory entry may
+/// misstate).
+fn ico_entry_lossless(entry: &[u8]) -> bool {
+    if entry.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return entry.get(25).is_some_and(|&t| t != 3);
+    }
+    entry.get(14..16).is_some_and(|b| u16::from_le_bytes([b[0], b[1]]) > 8)
+}
+
+/// How many pictures an icon holds, and the entry the crate reads: most bits
+/// a pixel, then most pixels, the last of equals.
+fn ico_entries(bytes: &[u8]) -> Option<(usize, &[u8])> {
     let u16_at = |i: usize| Some(u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?));
     let u32_at = |i: usize| Some(u32::from_le_bytes(bytes.get(i..i + 4)?.try_into().ok()?));
     if u16_at(0)? != 0 || !matches!(u16_at(2)?, 1 | 2) {
@@ -133,7 +155,8 @@ pub(super) fn ico_png(bytes: &[u8]) -> Option<&[u8]> {
     }
     let side = |b: u8| if b == 0 { 256u32 } else { b as u32 };
     let mut entries: Vec<((u16, u32), usize, usize)> = Vec::new();
-    for k in 0..u16_at(4)? as usize {
+    let count = u16_at(4)? as usize;
+    for k in 0..count {
         let e = 6 + 16 * k;
         let (w, h) = (side(*bytes.get(e)?), side(*bytes.get(e + 1)?));
         let score = (u16_at(e + 6)?, w * h);
@@ -148,8 +171,7 @@ pub(super) fn ico_png(bytes: &[u8]) -> Option<&[u8]> {
         }
     }
     let (_, at, len) = best;
-    let entry = bytes.get(at..at.checked_add(len)?)?;
-    entry.starts_with(b"\x89PNG\r\n\x1a\n").then_some(entry)
+    Some((count, bytes.get(at..at.checked_add(len)?)?))
 }
 
 /// Whether a WebP's picture is lossless (`VP8L`) or lossy (`VP8 `), from the

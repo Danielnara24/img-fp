@@ -241,7 +241,7 @@ impl Control {
     fn of(opt: &Opt) -> Control {
         let c = match opt.kind {
             Kind::Check { .. } => Control::Check(gtk::CheckButton::with_mnemonic(opt.label)),
-            Kind::Number { min, max, step, digits } => Control::Spin(spin(min, max, step, digits)),
+            Kind::Number { min, max, step, digits } => Control::Spin(spin(min, max(), step, digits)),
             Kind::Text => Control::Entry(entry()),
             Kind::Choice(cs) => Control::Choice(gtk::DropDown::from_strings(&cs.iter().map(|c| c.2).collect::<Vec<_>>())),
         };

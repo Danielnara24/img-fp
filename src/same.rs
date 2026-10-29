@@ -555,10 +555,14 @@ fn exact_groups_read(files: &[PathBuf], stats: &[walk::Stat], comparable: impl F
     // be made to agree, and two pictures differing in twelve thousand bytes
     // were reported `identical` — and "identical" is the one claim a person
     // acts on without looking. So the files of a group are compared byte for
-    // byte, each against the first of every class found so far. A group of
-    // two, which is nearly every group, is compared straight away, and a
-    // larger one is hashed whole first so that the comparisons are between
-    // files that are almost certainly the same.
+    // byte, all of them side by side (`byte_classes`), each read once.
+    //
+    // They were hashed whole first and then each compared with the first of
+    // its class, which read the first again for every copy: six identical
+    // 30 MB files were 480 MB read where 180 MB tells them apart. A group too
+    // large to hold open at once (`most_open`) is still hashed first, and
+    // each class compared a batch at a time beside its first file.
+    let most = most_open();
     let mut out: Vec<Vec<usize>> = by_sample
         .into_values()
         .filter(|v| v.len() > 1)
@@ -566,28 +570,33 @@ fn exact_groups_read(files: &[PathBuf], stats: &[walk::Stat], comparable: impl F
         .into_par_iter()
         .flat_map_iter(|mut group| {
             group.sort_unstable();
-            let hashed: Vec<Vec<usize>> = if group.len() == 2 {
-                vec![group]
-            } else {
-                let mut by_hash: HashMap<u128, Vec<usize>> = HashMap::new();
-                for i in group {
-                    if let Some(h) = content_hash(&files[i]) {
-                        by_hash.entry(h).or_default().push(i);
+            if group.len() <= most {
+                return compare_files(files, &group);
+            }
+            let mut by_hash: HashMap<u128, Vec<usize>> = HashMap::new();
+            for i in group {
+                if let Some(h) = content_hash(&files[i]) {
+                    by_hash.entry(h).or_default().push(i);
+                }
+            }
+            let mut found = Vec::new();
+            for class in by_hash.into_values().filter(|v| v.len() > 1) {
+                let (first, rest) = (class[0], &class[1..]);
+                let mut with_first = vec![first];
+                for batch in rest.chunks(most - 1) {
+                    let asked: Vec<usize> = std::iter::once(first).chain(batch.iter().copied()).collect();
+                    for c in compare_files(files, &asked) {
+                        if c[0] == first {
+                            with_first.extend_from_slice(&c[1..]);
+                        } else {
+                            found.push(c);
+                        }
                     }
                 }
-                by_hash.into_values().filter(|v| v.len() > 1).collect()
-            };
-            let mut found: Vec<Vec<usize>> = Vec::new();
-            for mut group in hashed {
-                group.sort_unstable();
-                let mut classes: Vec<Vec<usize>> = Vec::new();
-                for i in group {
-                    match classes.iter_mut().find(|c| same_bytes(&files[c[0]], &files[i]) == Some(true)) {
-                        Some(c) => c.push(i),
-                        None => classes.push(vec![i]),
-                    }
+                if with_first.len() > 1 {
+                    with_first.sort_unstable();
+                    found.push(with_first);
                 }
-                found.extend(classes.into_iter().filter(|c| c.len() > 1));
             }
             found
         })
@@ -619,16 +628,54 @@ fn sample_hash(path: &Path, len: u64) -> Option<u128> {
     hash_reader(&buf[..], 1 << 16)
 }
 
-/// Whether two files hold the same bytes, read a piece at a time; `None` if
-/// either could not be read.
-fn same_bytes(a: &Path, b: &Path) -> Option<bool> {
-    same_stream(std::fs::File::open(a).ok()?, std::fs::File::open(b).ok()?, 1 << 20)
+/// Bytes a comparison holds in its pieces at once, all files together: what
+/// comparing two files a megabyte each at a time held.
+const COMPARE_BYTES: usize = 2 << 20;
+
+/// The least a file is read at a time while compared: the kernel's own
+/// readahead window, 128 KB, so a piece is not smaller than what one read
+/// brings in anyway.
+const LEAST_PIECE: usize = 128 << 10;
+
+/// The most files one comparison holds open: as many as `COMPARE_BYTES` gives
+/// a piece of `LEAST_PIECE` each, and no more than each worker's share of
+/// half the descriptors the process may open.
+fn most_open() -> usize {
+    let fds = open_file_limit().map_or(usize::MAX, |n| n / 2 / rayon::current_num_threads().max(1));
+    (COMPARE_BYTES / LEAST_PIECE).min(fds).max(2)
 }
 
-fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usize) -> Option<bool> {
-    let fill = |r: &mut dyn std::io::Read, buf: &mut [u8]| -> Option<usize> {
+/// The process's soft limit on open files, if it says one.
+fn open_file_limit() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    const RLIMIT_NOFILE: i32 = 7;
+    #[cfg(not(target_os = "linux"))]
+    const RLIMIT_NOFILE: i32 = 8;
+    unsafe extern "C" {
+        fn getrlimit(resource: i32, rlim: *mut [u64; 2]) -> i32;
+    }
+    let mut r = [0u64; 2];
+    // SAFETY: `r` is the two `rlim_t`s the call fills.
+    (unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } == 0).then(|| usize::try_from(r[0]).unwrap_or(usize::MAX))
+}
+
+/// The files of `group` (all one length) in sets of the same bytes, each set
+/// ascending; a file that cannot be read is in none.
+fn compare_files(files: &[PathBuf], group: &[usize]) -> Vec<Vec<usize>> {
+    let open: Vec<(usize, std::fs::File)> = group.iter().filter_map(|&i| Some((i, std::fs::File::open(&files[i]).ok()?))).collect();
+    let piece = (COMPARE_BYTES / open.len().max(1)).max(LEAST_PIECE);
+    byte_classes(open, piece)
+}
+
+/// Split `readers` into the sets that yield the same bytes, of two or more,
+/// reading each once, side by side, `piece` bytes at a time: a set splits
+/// where its members' pieces differ, and is done when they end together. A
+/// reader that fails is in no set.
+fn byte_classes<R: std::io::Read>(readers: Vec<(usize, R)>, piece: usize) -> Vec<Vec<usize>> {
+    let fill = |r: &mut R, buf: &mut Vec<u8>| -> Option<()> {
+        buf.resize(piece, 0);
         let mut got = 0;
-        while got < buf.len() {
+        while got < piece {
             match r.read(&mut buf[got..]) {
                 Ok(0) => break,
                 Ok(k) => got += k,
@@ -636,18 +683,33 @@ fn same_stream(mut a: impl std::io::Read, mut b: impl std::io::Read, piece: usiz
                 Err(_) => return None,
             }
         }
-        Some(got)
+        buf.truncate(got);
+        Some(())
     };
-    let (mut x, mut y) = (vec![0u8; piece], vec![0u8; piece]);
-    loop {
-        let (n, m) = (fill(&mut a, &mut x)?, fill(&mut b, &mut y)?);
-        if n != m || x[..n] != y[..m] {
-            return Some(false);
+    let mut out = Vec::new();
+    let mut pending: Vec<Vec<(usize, R, Vec<u8>)>> = vec![readers.into_iter().map(|(i, r)| (i, r, Vec::new())).collect()];
+    while let Some(set) = pending.pop() {
+        let mut parts: Vec<Vec<(usize, R, Vec<u8>)>> = Vec::new();
+        for (i, mut r, mut buf) in set {
+            if fill(&mut r, &mut buf).is_none() {
+                continue;
+            }
+            match parts.iter_mut().find(|p| p[0].2 == buf) {
+                Some(p) => p.push((i, r, buf)),
+                None => parts.push(vec![(i, r, buf)]),
+            }
         }
-        if n < piece {
-            return Some(true);
+        for p in parts.into_iter().filter(|p| p.len() > 1) {
+            if p[0].2.len() < piece {
+                let mut ids: Vec<usize> = p.into_iter().map(|(i, _, _)| i).collect();
+                ids.sort_unstable();
+                out.push(ids);
+            } else {
+                pending.push(p);
+            }
         }
     }
+    out
 }
 
 #[cfg(test)]
@@ -845,10 +907,18 @@ mod tests {
         b[24..32].copy_from_slice(&(word(&a, 3) ^ (ha ^ hb) as u64).to_le_bytes());
         assert_ne!(a, b);
         assert_eq!(hash_reader(&a[..], 8), hash_reader(&b[..], 8), "a collision, as built");
-        assert_eq!(same_stream(&a[..], &b[..], 16), Some(false));
-        assert_eq!(same_stream(&a[..], &a[..], 16), Some(true));
-        assert_eq!(same_stream(&a[..], &a[..63], 16), Some(false));
-        assert_eq!(same_stream(&a[..48], &a[..48], 16), Some(true), "a length that ends on a piece");
+        let classes = |rs: Vec<&[u8]>| byte_classes(rs.into_iter().enumerate().collect(), 16);
+        assert_eq!(classes(vec![&a[..], &b[..]]), Vec::<Vec<usize>>::new());
+        assert_eq!(classes(vec![&a[..], &a[..]]), vec![vec![0, 1]]);
+        assert_eq!(classes(vec![&a[..], &a[..63]]), Vec::<Vec<usize>>::new());
+        assert_eq!(classes(vec![&a[..48], &a[..48]]), vec![vec![0, 1]], "a length that ends on a piece");
+        // Several at once: two sets, apart from the first piece on and from
+        // the last, and a file alone.
+        let mut c = a.clone();
+        c[63] ^= 1;
+        let mut got = classes(vec![&a[..], &b[..], &c[..], &a[..], &b[..], &c[..], &a[..]]);
+        got.sort();
+        assert_eq!(got, vec![vec![0, 3, 6], vec![1, 4], vec![2, 5]]);
     }
 
     /// Same-size files are grouped exactly when their bytes agree, whatever the

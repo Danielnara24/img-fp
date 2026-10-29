@@ -144,7 +144,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// 19: a picture stored turned or mirrored (an EXIF orientation) is reduced
 /// to the plane its upright copy is (`reduce::Turned`); a record of 18 holds
 /// the plane reduced as stored and turned after, other features.
-const MAGIC: &[u8; 8] = b"IMGFPC19";
+/// 20: an icon of several sizes has `Traits::frames`, and an icon is lossless
+/// only as the entry read is; a record of 19 says one picture, lossless.
+const MAGIC: &[u8; 8] = b"IMGFPC20";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -218,7 +220,7 @@ impl PartialEq for Key {
     }
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC19.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC20.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name
@@ -226,14 +228,57 @@ impl PartialEq for Key {
 /// alone (see the note on `MAGIC`), and so cached nothing on any run until
 /// someone thought of `--clear-cache`, which the window's users would not.
 /// Now two versions installed side by side each keep their own default, and
-/// an upgraded one starts afresh. The price is that an old format's file stays
-/// in the directory after nothing reads it; it is not removed, by the user's
-/// decision, since telling an unused one from another installed copy's can
-/// only be guessed. (Up to `IMGFPC11` the file was `analysis.bin`.)
+/// an upgraded one starts afresh. The other formats' files in the default
+/// folder are removed (`remove_other_formats`), unless a run is using one.
+/// (Up to `IMGFPC11` the file was `analysis.bin`.)
 ///
 /// A file named with `--cache` is used as named, whatever format it holds.
 pub fn file_name() -> String {
     format!("analysis-{FORMAT}.bin")
+}
+
+/// Remove the caches of other formats from the default folder, with the
+/// files beside them; each removed, with its format and the bytes it held.
+///
+/// **They were kept for good.** Each format change left the last one's file
+/// behind, read by nothing (on the author's machine a 2.5 GB `IMGFPC15` beside
+/// the 1.6 GB current one), and the window's users never see the folder. A
+/// file another run holds is in use (an older version running now, which
+/// holds it shared from start to end), and is left; another version
+/// installed beside this one starts its own afresh next time it runs. Only
+/// files named as a default cache is and holding a cache's header: a file a
+/// person put there is not touched.
+pub fn remove_other_formats() -> Vec<(String, u64)> {
+    let dir = default_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mine = file_name();
+    let mut removed = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let default_named = name == "analysis.bin" || (name.starts_with("analysis-IMGFPC") && name.ends_with(".bin"));
+        if !default_named || name == mine {
+            continue;
+        }
+        let path = e.path();
+        let Ok(f) = OpenOptions::new().read(true).open(&path) else { continue };
+        let mut magic = [0u8; 8];
+        if !f.metadata().is_ok_and(|m| m.is_file()) || f.read_exact_at(&mut magic, 0).is_err() || &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX || &magic == MAGIC {
+            continue;
+        }
+        if !flock(&f, LOCK_EX | LOCK_NB) {
+            continue;
+        }
+        let bytes = f.metadata().map_or(0, |m| m.len());
+        if std::fs::remove_file(&path).is_ok() {
+            for p in [heads::path_of(&path), crate::matched::path_beside(&path), crate::matched::identical_beside(&path)] {
+                let _ = std::fs::remove_file(p);
+            }
+            removed.push((String::from_utf8_lossy(&magic).into_owned(), bytes));
+        }
+    }
+    removed.sort();
+    removed
 }
 
 /// Where the cache lives when `--cache` does not say.
@@ -266,6 +311,11 @@ fn default_dir() -> PathBuf {
 /// finds exactly the same pairs, only slower. A directory that cannot be made
 /// is a problem, which is to say it is said out loud and sets the exit code,
 /// and then the run goes on without one.
+///
+/// **A file there that is not a cache is not one to use**, nor to delete:
+/// `--cache photo.jpg` (or the window's cache chooser, pointed at a photo)
+/// replaced the photo with an empty cache, saying it was "ignoring" it, and
+/// `--clear-cache` deleted it. Such a run has no cache, and says why.
 pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<PathBuf> {
     let path = locate(explicit);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -274,7 +324,43 @@ pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<
             return None;
         }
     }
+    if is_stranger(&path) {
+        problems.note(Note::Cache, format_args!("{} is not an img-fp cache, so it is left as it is and this run uses no cache", path.display()));
+        return None;
+    }
     Some(path)
+}
+
+/// `--clear-cache`: delete the cache at `path` (one `resolve_path` gave,
+/// so a cache or nothing) and the files kept beside it: its index, the last
+/// matching and the files the last run proved byte-identical. Those are
+/// named after it, so each is deleted only if it is img-fp's.
+pub fn clear(path: &Path, problems: &mut Problems) {
+    let beside = [heads::path_of(path), crate::matched::path_beside(path), crate::matched::identical_beside(path)];
+    for p in beside {
+        let mut head = [0u8; 5];
+        if File::open(&p).and_then(|f| f.read_exact_at(&mut head, 0)).is_ok() && &head == b"IMGFP" {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // Asked for and not done, and the next run will read the cache this
+        // one meant to be rid of.
+        Err(e) => problems.note(Note::Cache, format_args!("could not delete {}: {e}", path.display())),
+    }
+}
+
+/// Whether something is at `path` that is not a cache: a file that does not
+/// begin as one, or anything that is not a regular file. Nothing there, or
+/// a file that cannot be read (for the reading to say), is not a stranger.
+fn is_stranger(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => File::open(path).is_ok_and(|f| !begins_as_cache(&f)),
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }
 
 /// The file `resolve_path` names, without creating anything.
@@ -671,6 +757,8 @@ fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<F
 enum Reject {
     /// Written by a build with another format: its magic, as text.
     OtherVersion(String),
+    /// Not a cache at all: a file the user named by mistake.
+    NotACache,
     /// Not a cache, or corrupt: something to say out loud.
     Damaged(anyhow::Error),
 }
@@ -1007,6 +1095,7 @@ fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) ->
                 store.other_version = Some(v);
                 return (out, store);
             }
+            Found::NotACache => return (out, store),
             // Replaced by an empty one, unless another run is using it.
             Found::Unusable => {
                 if exclusive(&f, path) {
@@ -1081,6 +1170,8 @@ enum Found {
     Usable(Tail),
     /// Written by another format version, whose magic this is.
     OtherVersion(String),
+    /// Not a cache at all, and that has been said: left as it is.
+    NotACache,
     /// Nothing in it is usable, and that has been said.
     Unusable,
 }
@@ -1105,6 +1196,13 @@ fn read_file(
     // buffer was 0.25 s; this is 0.40-0.51 against 0.70-0.75 before, and
     // cold 1.35-1.61. What would read only the heads is an index, which
     // the format does not have.
+    // A file that does not begin as a cache does is not one, however short:
+    // a photo or a note named by mistake with `--cache` was replaced by an
+    // empty cache, and the message said it was being ignored.
+    if !begins_as_cache(f) {
+        let read = Err(Reject::NotACache);
+        return found(read, path, out, others, problems);
+    }
     let index = heads::load(f, path, size);
     let covered = index.as_ref().map_or(0, |i| i.end);
     let mut seen = Vec::new();
@@ -1128,6 +1226,28 @@ fn read_file(
     if let Ok(tail) = &read {
         heads::refresh(f, path, covered, tail, &seen);
     }
+    found(read, path, out, others, problems)
+}
+
+/// Whether the file's first bytes are a cache's (`MAGIC_PREFIX`), or as much
+/// of them as it holds: a header cut short is a damaged cache, not a stranger.
+fn begins_as_cache(f: &File) -> bool {
+    let mut head = [0u8; MAGIC_PREFIX.len()];
+    let mut got = 0;
+    while got < head.len() {
+        match f.read_at(&mut head[got..], got as u64) {
+            Ok(0) => break,
+            Ok(k) => got += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            // Unreadable is for the reading to say.
+            Err(_) => return true,
+        }
+    }
+    head[..got] == MAGIC_PREFIX[..got]
+}
+
+/// What a reading of the file came to, said where it is a problem.
+fn found(read: Result<Tail, Reject>, path: &Path, out: &mut HashMap<PathBuf, Entry>, others: &mut Vec<Unasked>, problems: &mut Problems) -> Found {
     match read {
         Ok(tail) => {
             if let Some(why) = &tail.broken_at {
@@ -1150,6 +1270,12 @@ fn read_file(
             out.clear();
             others.clear();
             Found::OtherVersion(v)
+        }
+        Err(Reject::NotACache) => {
+            problems.note(Note::Cache, format_args!("{} is not an img-fp cache, so it is left as it is and this run keeps nothing in it", path.display()));
+            out.clear();
+            others.clear();
+            Found::NotACache
         }
         Err(Reject::Damaged(e)) => {
             problems.note(Note::Cache, format_args!("ignoring {}: {e}", path.display()));
@@ -1733,9 +1859,9 @@ impl<'a, 'o> Reading<'a, 'o> {
 
     /// The header: this format's, or the reason not to read on.
     fn magic<R: Read>(&mut self, r: &mut Rd<R>) -> Result<(), Reject> {
-        let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("not a cache file"))?;
+        let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("its header is cut off"))?;
         if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
-            return Err(anyhow!("not a cache file").into());
+            return Err(Reject::NotACache);
         }
         if &magic != MAGIC {
             // A cache this build cannot read, written by a build that could. See

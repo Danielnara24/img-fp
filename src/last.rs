@@ -274,7 +274,15 @@ pub fn rewrite(asked: &Rewrite) -> Result<Vec<String>> {
         against::list(&scan, &answers, asked.list, asked.null)?;
     }
 
-    let when = ago(notes.finished);
+    // Which scan it is: each cache keeps its own, so a `--last` beside
+    // the default cache after a scan run with `--cache` wrote an older scan
+    // of other folders, said only as "the scan 1 day ago".
+    let when = match notes.roots.as_slice() {
+        [] => ago(notes.finished),
+        [one] => format!("of {} {}", one.display(), ago(notes.finished)),
+        [one, two] => format!("of {} and {} {}", one.display(), two.display(), ago(notes.finished)),
+        [one, rest @ ..] => format!("of {} and {} more {}", one.display(), rest.len(), ago(notes.finished)),
+    };
     let said = if against { against::tally(&answers) } else { groups_said(scan.shown().count()) };
     let mut lines = vec![match asked.report.and_then(|r| r.to.file()) {
         Some(p) => format!("{said} from the scan {when} -> {}", p.display()),

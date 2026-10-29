@@ -214,7 +214,7 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     let t_start = Instant::now();
     few_arenas();
     if args.threads > 0 {
-        rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
+        rayon::ThreadPoolBuilder::new().num_threads(crate::threads(args.threads)).build_global()?;
     }
     let cx = Ctx { args, outputs, log, progress: progress::Progress::new(), t: t_start };
 
@@ -247,6 +247,9 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     if let Some(note) = &extensions_note {
         say!(cx, "{note}");
     }
+    if args.threads > rayon::current_num_threads() {
+        say!(cx, "Note: -t {} is more threads than the {} cores this run has, which only slows it; it runs on {}.", args.threads, rayon::current_num_threads(), rayon::current_num_threads());
+    }
     if args.min_aligned_points < MIN_ALIGNED_POINTS {
         say!(
             cx,
@@ -257,19 +260,17 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     if args.clear_cache {
         if let Some(p) = &cache_path {
             say!(cx, "Clearing all cache at {}...", p.display());
-            cache::heads::remove(p);
-            let _ = std::fs::remove_file(matched::path_beside(p));
-            let _ = std::fs::remove_file(matched::identical_beside(p));
-            match std::fs::remove_file(p) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                // Asked for and not done, and the next run will read the cache
-                // this one meant to be rid of.
-                Err(e) => problems.note(Note::Cache, format_args!("could not delete {}: {e}", p.display())),
-            }
+            cache::clear(p, problems);
         }
     }
     let cache_path = cache_path.filter(|_| !args.no_cache);
+    // The default cache's folder holds no other format's cache for good; see
+    // `cache::remove_other_formats`.
+    if cache_path.is_some() && args.cache.is_none() {
+        for (format, bytes) in cache::remove_other_formats() {
+            say!(cx, "Removed the cache another version of img-fp kept ({format}, {}), which this one cannot read.", crate::report::format_size(bytes));
+        }
+    }
     match &cache_path {
         Some(p) => say!(cx, "Cache: {}", p.display()),
         None if args.no_cache => say!(cx, "Cache: off (--no-cache)"),
@@ -318,7 +319,7 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
         // walk) and gave the library nothing: every file would be `new`.
         for root in args.against.iter().filter(|r| std::fs::metadata(r).is_ok()) {
             if !files.iter().zip(&scope.library).any(|(f, &l)| l && f.starts_with(root)) {
-                problems.note(Note::EmptyLibrary, root.display());
+                problems.note(Note::EmptyLibrary, format_args!("{}: {}", root.display(), why_no_library(root, &files, &canonical, args.recursive)));
             }
         }
     }
@@ -466,6 +467,20 @@ struct Analysed {
     /// descriptors are let go.
     n_kps: Vec<u32>,
     n_ok: usize,
+}
+
+/// Why a `--against` root that is there gave the library no image. A file
+/// both sides reach is the scan's when the scan's root is as near or nearer
+/// (`walk::settle`): `img-fp . --against .` is a library of nothing, which
+/// the old note blamed on `--recursive`.
+fn why_no_library(root: &Path, files: &[PathBuf], canonical: &[Option<PathBuf>], recursive: bool) -> &'static str {
+    let Ok(real) = std::fs::canonicalize(root) else { return "no image in it" };
+    let scanned = |i: usize| canonical[i].clone().or_else(|| std::fs::canonicalize(&files[i]).ok()).is_some_and(|c| c.starts_with(&real));
+    if (0..files.len()).any(scanned) {
+        return "every image in it is also in a folder scanned, which takes it (name a library outside the folders scanned)";
+    }
+    let has_folders = std::fs::read_dir(&real).is_ok_and(|d| d.flatten().any(|e| e.file_type().is_ok_and(|t| t.is_dir())));
+    if !recursive && has_folders { "a library of subfolders needs --recursive" } else { "no image in it" }
 }
 
 /// Find the byte-identical copies, then describe every other file or read it

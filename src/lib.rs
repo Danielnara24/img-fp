@@ -188,7 +188,8 @@ struct Args {
     #[arg(long, value_enum, value_name = "FORMAT")]
     format: Option<report::Format>,
 
-    /// Worker threads. `0` uses all cores.
+    /// Worker threads. `0` uses all cores, and so does a number larger than
+    /// there are cores.
     #[arg(short = 't', long, value_name = "N", default_value_t = 0)]
     threads: usize,
 
@@ -289,7 +290,8 @@ struct Args {
     /// paths.
     ///
     /// The last scan is the last one run from the command line or the window,
-    /// kept beside the cache. Files deleted since are left out, and a DELETE
+    /// kept beside the cache: a scan run with `--cache` is written again with
+    /// the same `--cache`. Files deleted since are left out, and a DELETE
     /// whose kept copy was one of them is REVIEW; against a library, a repeat
     /// of one is answered by the library alone. A JSON report has no list of
     /// pairs.
@@ -424,6 +426,35 @@ pub(crate) const THUMB_MAX_SIDES: usize = 16;
 /// `VocabParams::for_corpus` holding occupancy instead, the cliff is gone and
 /// what is left is a plateau, which is not a thing to put on a command line.
 const FEATURES: usize = 600;
+
+/// The most aligned points a match can have: an image is described by at
+/// most `FEATURES` keypoints, so a `--min-aligned-points` above it matches
+/// nothing.
+pub const MOST_ALIGNED_POINTS: u32 = FEATURES as u32;
+
+/// The most candidates `-k` can mean: every image the index can name.
+pub const MOST_CANDIDATES: usize = index::MOST_IMAGES;
+
+/// The cores this process may run on (its CPU affinity and control group
+/// quota, as the standard library reads them); 1 if that cannot be told.
+pub fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// The worker threads a run asks for: `-t`, or every core for 0, and never
+/// more than there are cores.
+///
+/// **More threads than cores is slower, and quickly so.** The work is the
+/// processor's, not waiting, and every parallel step wakes every worker: on
+/// ten images on this machine's eight threads, `-t 8` took 0.25 s, `-t 1024`
+/// 3.1 s, `-t 2048` 15.7 s, `-t 5000` 215 s (the vocabulary's k-means and
+/// the grouping, which are many small parallel steps); on a 1,033-file
+/// folder, matching from the cache, `-t 32` was 25% slower than `-t 8` and
+/// `-t 128` 80%. The window offered up to 1,024.
+pub fn threads(asked: usize) -> usize {
+    let cores = cores();
+    if asked == 0 { cores } else { asked.min(cores) }
+}
 
 /// A ceiling, not a setting. Each round re-routes composed transforms through
 /// the pairs the last one accepted, and the loop stops as soon as a round adds

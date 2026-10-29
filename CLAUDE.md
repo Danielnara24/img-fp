@@ -153,7 +153,7 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.75.0)
+## Status (0.76.0)
 
 - **The field, 2026-10-28** (`benchmark/BASELINE.md`, `out/v54-field`), cold,
   one session, img-fp 0.75.0 plain build. IMGS-ALL (five corpora, 33,136
@@ -1052,6 +1052,55 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   - `bench.py`: each tool runs with `oom_score_adj` 1000 (the kernel kills it,
     not the desktop, when memory runs out), in a session of its own,
     `--timeout HOURS`, and `--only` runs tools in the order given.
+- 0.76.0 (audit A-I; cache format IMGFPC20). IMGS cold against 0.75.0:
+  report and console identical with `Foto 38622.png` (the one cut-off file)
+  excluded; with it, its own analysis changes (C), which retrains the
+  vocabulary and moves marginal pairs (224,076 -> 224,181; F1 0.972 both,
+  TP +115, FP -15); that file pairs with nothing either way.
+  - **A** `--cache` naming a file that is not a cache (`cache::is_stranger`:
+    not a regular file, or not beginning with `IMGFPC`, however short) is
+    left alone and the run uses no cache, a problem. Before: "ignoring X:
+    not a cache file" and X replaced by an empty cache (a JPEG, a note), and
+    `--clear-cache --cache X` deleted any X. `cache::clear` deletes the
+    files beside a cache only when they begin `IMGFP`.
+  - **B** no output may name the `--from-file` list, nor stdin's file when
+    `-` reads it (`outputs_spare_the_lists`): `--log-file list.txt
+    --from-file list.txt` emptied the list before it was read and scanned
+    the log's header lines as paths.
+  - **C** a cut-off file is analysed as the part it holds
+    (`decode::trim_fill`): edge rows / columns of the working plane that
+    are the decoders' grey fill (128/255, within half a level) are cut away
+    and the size shown cut in proportion. A JPEG cut at 85% was KEEP beside
+    its original (0.84) and `new` against a library holding it; one cut at
+    half paired with nothing. Now DELETE at 1.00 / 0.99, `repeat`.
+  - **D** an icon of several entries has `Traits::frames`, and is lossless
+    only as the entry read is (a palette PNG, a <= 8-bit bitmap is not): a
+    16/32/48/256 icon was "same pixels" as a PNG of its 256 entry, DELETE.
+  - **E** `--last` names the folders its scan was of; `--help` and README
+    say a scan run with `--cache` is written again with the same `--cache`
+    (each cache keeps its own, by design: a sweep's own `--cache` keeps its
+    scans out of the window's). Before, `--last` after a `--cache X` scan
+    wrote a day-old scan of other folders, said only as "1 day ago".
+  - **F** the default folder's caches of other formats are removed
+    (`cache::remove_other_formats`, user's decision; was kept for good, 2.5
+    GB of IMGFPC15 here): only files named as a default cache, holding a
+    cache header, and not held by a running scan (`flock` exclusive, not
+    waited for). Two versions installed side by side each start afresh
+    after the other ran.
+  - **G** the byte pass compares a same-size set side by side
+    (`same::byte_classes`), each file read once: six identical 30 MB files
+    were 480 MB read (whole hash, then the first file again per copy), now
+    180 MB. A set larger than `most_open` (`COMPARE_BYTES` 2 MB over
+    `LEAST_PIECE` 128 KB = 16, and a worker's share of half the open-file
+    limit) is hashed first and compared in batches beside its first file.
+  - **H** `-t` above the cores runs on the cores, with a note
+    (`img_fp::threads`): 10 images at `-t 5000` took 215 s (0.25 s at 8),
+    a cached 1,033-file folder 25% slower at `-t 32`. The window's limits
+    are what a value can mean: threads the cores, aligned points `FEATURES`
+    (600), candidates `index::MOST_IMAGES` (were 1,024, 200, 2,000).
+  - **I** an empty `--against` library says why: its images are all in a
+    folder scanned (`img-fp . --against .`), or it has subfolders and no
+    `-r`, or it holds no image (was always the `-r` hint).
 - **IMGS5** `/home/daniel/Documents/IMGS5` (held out until 0.54.0, now read
   once): 60 seeds in 25 near-miss sets, 5,400 variants. 0.53.0 and 0.54.0
   alike: F1 0.9131, precision 85.5%, recall 97.97 / 97.94%, **11 seed pairs
@@ -2286,7 +2335,7 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC19.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC20.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime (the kernel's seconds and
   nanoseconds, signed: before 0.72.0 a file dated before 1970 had no key, was
@@ -2314,7 +2363,9 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   its record's colour field as `-2 - c` (below the decode's -1, so a build
   of the same format that predates it reads "not measured"); the value used
   is `cache::kept_colour(c)`, so cold and cached runs decide alike.
-  Another format version's file is left untouched. Damage costs only the
+  Another format version's file named with `--cache` is left untouched; in
+  the default folder it is removed (`remove_other_formats`), and a file that
+  is no cache is never written or deleted. Damage costs only the
   damaged record. **Cost measurements must pass `--no-cache`.** Sweeps
   should use their own `--cache`. `--prune-cache` keeps only what the scan
   used; refuses after a partial walk.

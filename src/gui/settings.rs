@@ -375,7 +375,7 @@ mod tests {
             let id = opt.arg.unwrap();
             let away = match (&opt.kind, opt.default_value()) {
                 (Kind::Check { .. }, Value::On(b)) => Value::On(!b),
-                (Kind::Number { max, .. }, Value::Number(n)) => opt.number(if n + 1.0 <= *max { n + 1.0 } else { n / 2.0 }),
+                (Kind::Number { max, .. }, Value::Number(n)) => opt.number(if n + 1.0 <= max() { n + 1.0 } else { n / 2.0 }),
                 (Kind::Text, _) => Value::Text("png,gif".into()),
                 (_, v) => panic!("{}: nothing away from {v:?}", opt.key),
             };

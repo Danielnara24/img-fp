@@ -158,14 +158,58 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
         Some(_slot) => timed!(_slot, read(&mut sink)),
         None => read(&mut sink),
     }?;
-    let (work, size, mut traits) = sink.finish()?;
+    let (mut work, mut size, mut traits) = sink.finish()?;
     let Facts { lossless, frames, exif, deep, profile, damaged } = (picture.facts)();
+    if damaged.is_some() {
+        size = trim_fill(&mut work, size);
+    }
     traits.lossless = lossless;
     traits.frames = frames;
     traits.exif = exif;
     traits.deep = deep;
     traits.profile = profile;
     Ok(Decoded { work, size, damaged: damaged.map(String::from), traits })
+}
+
+/// The decoders' fill for what a cut-off file does not hold: mid-grey, on the
+/// working plane's scale.
+const FILL: f32 = 128.0 / 255.0;
+
+/// A cut-off picture as the part it holds: the plane's edge rows and columns
+/// that are the decoders' grey fill and nothing else are cut away, and the
+/// size shown is cut in proportion; the new size is returned.
+///
+/// **The fill was compared as picture.** A JPEG cut at 85% of its bytes
+/// paired with its intact original at correlation 0.84, the grey band
+/// disagreeing, so it was KEEP beside it, and against a library holding the
+/// original it was `new`; one cut at half did not pair at all. As the part it
+/// holds it is a crop of the original, which the original holds. Every edge
+/// is asked, since an EXIF orientation puts the missing rows on any side; a
+/// picture whose own edge is that one grey loses a strip that had nothing to
+/// match. The line where picture and fill were averaged together stays.
+fn trim_fill(g: &mut Gray, size: (u32, u32)) -> (u32, u32) {
+    let fill = |v: f32| (v - FILL).abs() < 0.5 / 255.0;
+    let (w, h) = (g.w, g.h);
+    let row = |y: usize| g.px[y * w..(y + 1) * w].iter().all(|&v| fill(v));
+    let col = |x: usize, y0: usize, y1: usize| (y0..y1).all(|y| fill(g.px[y * w + x]));
+    let bottom = (0..h).rev().take_while(|&y| row(y)).count();
+    let top = (0..h - bottom).take_while(|&y| row(y)).count();
+    let (y0, y1) = (top, h - bottom);
+    let right = (0..w).rev().take_while(|&x| col(x, y0, y1)).count();
+    let left = (0..w - right).take_while(|&x| col(x, y0, y1)).count();
+    let (x0, x1) = (left, w - right);
+    // Nothing held at all, or nothing to cut: as it was.
+    if x1 <= x0 || y1 <= y0 || (x1 - x0, y1 - y0) == (w, h) {
+        return size;
+    }
+    let (nw, nh) = (x1 - x0, y1 - y0);
+    let mut px = Vec::with_capacity(nw * nh);
+    for y in y0..y1 {
+        px.extend_from_slice(&g.px[y * w + x0..y * w + x1]);
+    }
+    *g = Gray { w: nw, h: nh, px };
+    let part = |n: u32, kept: usize, of: usize| ((n as f64 * kept as f64 / of as f64).round() as u32).max(1);
+    (part(size.0, nw, w), part(size.1, nh, h))
 }
 
 /// The profile's line for a format's decode: the formats that are almost all

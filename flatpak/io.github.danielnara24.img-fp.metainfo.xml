@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.76.0" date="2026-10-29">
+      <description>
+        <p>A cut-off copy of a photo is recognised as part of the intact one, an icon file holding several sizes is no longer offered for deletion, a cache setting pointed at another file no longer overwrites it, and caches left by older versions are removed.</p>
+      </description>
+    </release>
     <release version="0.75.0" date="2026-10-28">
       <description>
         <p>Copies of logos, icons and other pictures with little detail are found in folders full of other photos, and a damaged copy of a photo is no longer kept in place of the intact one.</p>

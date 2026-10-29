@@ -148,8 +148,8 @@ dot) are skipped unless you pass `--hidden`, since in a home folder they hold
 programs' icons and themes rather than photos; a hidden folder named directly is
 scanned.
 
-`-o` and `--log-file` never write over an image: naming one is
-refused before anything runs.
+`-o` and `--log-file` never write over an image, nor over the list
+`--from-file` reads: naming one is refused before anything runs.
 
 The last scan is kept, so its report can be written again without scanning,
 in another format or with another `--suggest` rule:
@@ -161,7 +161,9 @@ img-fp --last --suggest representative
 
 The last scan is the last one to finish, from the command line or the
 desktop app, which opens on it. It is kept in `last-scan/` beside the cache,
-and files deleted since are left out. A file suggested for deletion because
+so a scan run with `--cache` is written again by `--last` with the same
+`--cache`; `--last` names the folders its scan was of. Files deleted since
+are left out. A file suggested for deletion because
 another file shows all of it becomes REVIEW if that other file has been
 deleted since. A JSON report written this way has no list of pairs. Scans
 run with `--no-cache` are not kept, and neither are scans that found no
@@ -452,10 +454,10 @@ to stderr.
 | `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |
 | `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
 | `--last` | Write the last scan's report again without scanning, in another format with `-o` or `--format`, or with another `--suggest` rule (see Usage); after a comparison with a library, its verdicts, or with `--list` their paths | |
-| `-t`, `--threads <N>` | Worker threads (`0` = all cores) | `0` |
+| `-t`, `--threads <N>` | Worker threads (`0`, or more than there are cores, = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC19.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC20.bin` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -491,8 +493,8 @@ Byte-identical copies of them are still found.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC19.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC19.bin`), so later runs over the same images are much
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC20.bin`
+(or `~/.cache/img-fp/analysis-IMGFPC20.bin`), so later runs over the same images are much
 faster. One cache serves every folder you scan and every `--work-size` you use,
 and entries for deleted files are dropped automatically. Images in a folder
 that is renamed or moved, or on a drive mounted at another place, are
@@ -500,13 +502,16 @@ analysed again.
 Use `--clear-cache` to start over.
 
 The part of the name after `analysis-` is the cache format, which changes
-between some versions. Each format has its own default file, so two versions
-installed side by side keep separate caches, and after an upgrade the new
-version starts a new one. The old file is left in place; delete it by hand to
-reclaim the space (versions before 0.35 used `analysis.bin`).
+between some versions. Each format has its own default file, and after an
+upgrade the new version starts a new one and deletes the old one (unless a
+scan of the old version is using it). Two versions installed side by side
+therefore each start afresh after the other has run; give one of them a cache
+of its own with `--cache`.
 
 A file named with `--cache` that was written by another version is left as it
-is, and the run keeps nothing in it. Use `--clear-cache` to replace it.
+is, and the run keeps nothing in it. Use `--clear-cache` to replace it. A file
+that is not a cache at all is never written over or deleted: the run uses no
+cache, and says so.
 
 Pressing Ctrl-C keeps every image analysed so far.
 

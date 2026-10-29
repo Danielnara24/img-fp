@@ -18,8 +18,9 @@ pub enum Kind {
     /// A check button. Its flag is given when it is on, or, `inverted`, when
     /// it is off.
     Check { inverted: bool },
-    /// A spin button, its value rounded to `digits` decimals.
-    Number { min: f64, max: f64, step: f64, digits: u32 },
+    /// A spin button, its value rounded to `digits` decimals. `max` is asked
+    /// when the button is made: a limit can be this machine's.
+    Number { min: f64, max: fn() -> f64, step: f64, digits: u32 },
     /// An entry, its text as the flag takes it; left out when empty.
     Text,
     /// A drop-down: each choice as the settings file keeps it, the flag's
@@ -81,40 +82,44 @@ const fn plain(key: &'static str, arg: Option<&'static str>, kind: Kind, label: 
     Opt { key, arg, default: None, kind, label, tip: None, hint: None, kept: true }
 }
 
-const fn number(min: f64, max: f64, step: f64, digits: u32) -> Kind {
+const fn number(min: f64, max: fn() -> f64, step: f64, digits: u32) -> Kind {
     Kind::Number { min, max, step, digits }
 }
 
 const CHECK: Kind = Kind::Check { inverted: false };
 
-// Spin ranges: the work size goes up to JPEG's largest side, 65,535. The
-// command line has no limit, and this one used to be 4,096, which turned away
-// a size the command line takes for nothing; past the largest picture in a
-// folder any size means what 0 (full size) means.
+// Spin ranges, each what a value can mean. The work size goes up to JPEG's
+// largest side, 65,535. The command line has no limit, and this one used to
+// be 4,096, which turned away a size the command line takes for nothing; past
+// the largest picture in a folder any size means what 0 (full size) means.
+// Candidates go up to the most images the index can name, aligned points to
+// the most keypoints an image is described by (a bar above it matches
+// nothing), threads to this machine's cores (the scan runs no more: see
+// `img_fp::threads`). They were 2,000, 200 and 1,024, from nothing.
 
 pub static WORK_SIZE: Opt = Opt {
     tip: Some("Pixels on the long side each image is analysed at. Higher finds more, especially small pictures inside larger ones such as slides and collages, but is slower. 640 is a good choice when that matters. 0 does not shrink images at all, which is much slower on large photos."),
-    ..plain("work_size", Some("work_size"), number(0.0, 65535.0, 32.0, 0), l::WORK_SIZE)
+    ..plain("work_size", Some("work_size"), number(0.0, || 65535.0, 32.0, 0), l::WORK_SIZE)
 };
 pub static CANDIDATES: Opt = Opt {
     tip: Some("Possible matches checked for each image."),
-    ..plain("candidates", Some("candidates"), number(1.0, 2000.0, 10.0, 0), l::CANDIDATES)
+    ..plain("candidates", Some("candidates"), number(1.0, || img_fp::MOST_CANDIDATES as f64, 10.0, 0), l::CANDIDATES)
 };
 pub static MIN_POINTS: Opt = Opt {
     tip: Some("Matching points two images must share. Higher is stricter."),
-    ..plain("min_aligned_points", Some("min_aligned_points"), number(0.0, 200.0, 1.0, 0), l::MIN_POINTS)
+    ..plain("min_aligned_points", Some("min_aligned_points"), number(0.0, || img_fp::MOST_ALIGNED_POINTS as f64, 1.0, 0), l::MIN_POINTS)
 };
 pub static MIN_OVERLAP: Opt = Opt {
     tip: Some("How much of one image must lie inside the other, from 0 to 1. Higher is stricter."),
-    ..plain("min_frame_overlap", Some("min_frame_overlap"), number(0.0, 1.0, 0.05, 2), l::MIN_OVERLAP)
+    ..plain("min_frame_overlap", Some("min_frame_overlap"), number(0.0, || 1.0, 0.05, 2), l::MIN_OVERLAP)
 };
 pub static MIN_CORRELATION: Opt = Opt {
     tip: Some("How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter."),
-    ..plain("min_pixel_correlation", Some("min_pixel_correlation"), number(0.0, 1.0, 0.05, 2), l::MIN_CORRELATION)
+    ..plain("min_pixel_correlation", Some("min_pixel_correlation"), number(0.0, || 1.0, 0.05, 2), l::MIN_CORRELATION)
 };
 pub static THREADS: Opt = Opt {
     hint: Some("Worker threads. 0 uses every core."),
-    ..plain("threads", Some("threads"), number(0.0, 1024.0, 1.0, 0), l::THREADS)
+    ..plain("threads", Some("threads"), number(0.0, || img_fp::cores() as f64, 1.0, 0), l::THREADS)
 };
 pub static EXTENSIONS: Opt = Opt {
     hint: Some("Extensions a folder is searched for, comma-separated. * takes every file, and !gif leaves GIFs out of everything else."),

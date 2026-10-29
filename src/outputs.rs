@@ -169,6 +169,7 @@ pub fn plan(args: &Args, window: bool) -> Result<Outputs> {
         }
     }
     outputs_are_distinct(args, &named)?;
+    outputs_spare_the_lists(args, &named)?;
     // The two files written at the end would otherwise fail after the whole
     // run: a directory named where a file was meant is the usual way. The
     // log is opened at once, which is its check.
@@ -246,6 +247,28 @@ fn outputs_are_distinct(args: &Args, named: &[(&str, &Path)]) -> Result<()> {
         for (fb, b) in &all[i + 1..] {
             if same_destination(a, b) {
                 anyhow::bail!("{fa} and {fb} would both write {}; give each its own file", b.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an output that names a list of paths the run reads: `--from-file`,
+/// or stdin when `-` reads it and it is a file.
+///
+/// The log is opened, and so emptied, before the list is read: with
+/// `--from-file list.txt --log-file list.txt` the run scanned the log's own
+/// first lines as paths and the list was gone. A report or dump there was
+/// written over the list at the end.
+fn outputs_spare_the_lists(args: &Args, named: &[(&str, &Path)]) -> Result<()> {
+    let stdin = Path::new("-");
+    let reads_stdin = args.from_file.as_deref() == Some(stdin) || args.roots.iter().any(|r| r == stdin);
+    let lists = args.from_file.as_deref().filter(|&p| p != stdin).map(|p| ("the --from-file list", p));
+    let lists = lists.into_iter().chain(reads_stdin.then(|| ("the list read from stdin", Path::new("/dev/stdin"))));
+    for (what, list) in lists {
+        for (flag, p) in named {
+            if same_destination(p, list) {
+                anyhow::bail!("{flag} {} is {what}, which this run reads; name another file", p.display());
             }
         }
     }

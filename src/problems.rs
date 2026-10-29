@@ -253,7 +253,7 @@ impl Note {
             Note::Featureless => (Skip, "skip/featureless", "image(s) with no detail to match, such as a blank picture: only an identical copy can match one"),
             Note::UnresolvedExclude => (Problem, "problem/unresolved-exclude", "--exclude path(s) could not be resolved; nothing was excluded for them"),
             Note::Unscannable => (Problem, "problem/unscannable", "path(s) could not be scanned"),
-            Note::EmptyLibrary => (Problem, "problem/empty-library", "--against path(s) put no image in the library (a library of subfolders needs --recursive)"),
+            Note::EmptyLibrary => (Problem, "problem/empty-library", "--against path(s) put no image in the library"),
             Note::Unreadable => (Problem, "problem/unreadable", "image(s) could not be read"),
             Note::Damaged => (Problem, "problem/damaged", "image(s) are cut off and were analysed as far as they could be read"),
             Note::Cache => (Problem, "problem/cache", "cache problem(s)"),

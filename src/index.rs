@@ -1502,6 +1502,9 @@ pub struct InvertedFile {
 const POST_COUNT_BITS: u32 = 8;
 const POST_COUNT_MAX: u32 = (1 << POST_COUNT_BITS) - 1;
 
+/// The most images a posting can name: past it, a `-k` means every image.
+pub const MOST_IMAGES: usize = 1 << (32 - POST_COUNT_BITS);
+
 /// How far down the word list the query asks for its postings, in entries.
 ///
 /// Entries rather than distinct words, because a run is walked without
@@ -1628,7 +1631,7 @@ impl InvertedFile {
         }
         off.push(total);
         drop(df);
-        assert!(n < 1 << (32 - POST_COUNT_BITS), "{n} images is more than a posting can name");
+        assert!(n < MOST_IMAGES, "{n} images is more than a posting can name");
         let mut data = vec![0u32; total as usize];
         // Each range's postings, as the slice of `data` they fill.
         let mut parts: Vec<(usize, &mut [u32])> = Vec::with_capacity(n_words.div_ceil(per));

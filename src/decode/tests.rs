@@ -926,6 +926,41 @@ fn an_icon_holding_an_rgb_png_is_read() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// An icon of several sizes is several pictures, deleted only for its own
+/// bytes; one of one size is one. Lossless as the entry read is: a PNG not of
+/// a palette, a bitmap of more than eight bits a pixel.
+#[test]
+fn an_icon_of_several_sizes_is_several_pictures() {
+    let icon = |png: &[u8], sizes: &[u8]| {
+        let mut ico = vec![0, 0, 1, 0, sizes.len() as u8, 0];
+        let mut at = 6 + 16 * sizes.len();
+        for &s in sizes {
+            ico.extend_from_slice(&[s, s, 0, 0, 1, 0, 32, 0]);
+            ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+            ico.extend_from_slice(&(at as u32).to_le_bytes());
+            at += png.len();
+        }
+        for _ in sizes {
+            ico.extend_from_slice(png);
+        }
+        ico
+    };
+    let png_of = |img: image::DynamicImage| {
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png).unwrap();
+        png
+    };
+    let rgb = png_of(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 16, image::Rgb([9, 99, 199]))));
+    let one = facts_of(&icon(&rgb, &[16]));
+    assert!(!one.frames && one.lossless);
+    let four = facts_of(&icon(&rgb, &[16, 32, 48, 0]));
+    assert!(four.frames && four.lossless);
+    // A palette PNG: colour type 3.
+    let mut pal = rgb.clone();
+    pal[25] = 3;
+    assert!(!facts_of(&icon(&pal, &[16])).lossless);
+}
+
 /// Turning the working plane is turning the picture: for a picture small
 /// enough that nothing is reduced, every orientation gives the plane the
 /// picture turned first would have given, value for value.
@@ -987,7 +1022,8 @@ fn a_turned_picture_reduces_to_its_upright_copys_plane() {
 }
 
 /// A JPEG cut off part-way decodes — the decoder fills the rest with grey
-/// — and says it is damaged; the whole file does not.
+/// — and says it is damaged; the whole file does not. It is analysed as the
+/// part it holds: the fill is cut away (`trim_fill`), and its size with it.
 #[test]
 fn a_cut_off_jpeg_decodes_and_says_it_is_damaged() {
     let pic = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 300, |x, y| {
@@ -1004,7 +1040,11 @@ fn a_cut_off_jpeg_decodes_and_says_it_is_damaged() {
     assert!(d.damaged.is_none(), "{:?}", d.damaged);
     let d = decode(&cut, 512).unwrap();
     assert!(d.damaged.is_some(), "a third of a JPEG is damaged");
-    assert_eq!(d.size, (400, 300), "and is still decoded at its size");
+    assert_eq!(d.size.0, 400, "as wide as it was");
+    assert!(d.size.1 > 0 && d.size.1 < 300, "as tall as the rows it holds: {:?}", d.size);
+    let fill = |v: f32| (v - 128.0 / 255.0).abs() < 0.5 / 255.0;
+    let last = &d.work.px[(d.work.h - 1) * d.work.w..];
+    assert!(!last.iter().all(|&v| fill(v)), "no row of the fill is left");
     // What follows the end of the image is a trailer, not damage.
     let mut trailer = jpg.clone();
     trailer.extend(b"SEFT trailer \xff\xd8 written by a camera");
