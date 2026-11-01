@@ -1113,8 +1113,16 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
         }
         verified += fresh;
         let reached = scope.reached(&all_direct[from..], pass.policy, &asked);
-        // Accepted: any verdict that stands, whichever side proposed it.
-        stood.extend(all_direct[from..].iter().map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)));
+        // Accepted: any verdict that stands, whichever side proposed it. Not
+        // one kept only for `--dump`: counted, a dumping run asked other
+        // windows than the same run without it (IMGS-ALL2, 2,087 of 1.28 M
+        // pairs moved).
+        stood.extend(
+            all_direct[from..]
+                .iter()
+                .filter(|e| pass.policy.standing(&e.v) != Standing::Rejected)
+                .map(|e| (e.a().min(e.b()) as u32, e.a().max(e.b()) as u32)),
+        );
         // Each window's candidates that stood, whichever round verified them,
         // less those already joined to it.
         let mut ok = vec![0usize; n];

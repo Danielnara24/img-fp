@@ -228,7 +228,7 @@ struct Args {
     ///
     /// Higher is stricter.
     // 0.7 is set for what a user wants grouped rather than for F1; see
-    // CLAUDE.md for the sweep and the cliff.
+    // CLAUDE.md for the sweep and the cliff (and for 0.8, tried on DISC21).
     #[arg(long, value_name = "F", default_value_t = 0.7, value_parser = parse_fraction)]
     min_pixel_correlation: f32,
 

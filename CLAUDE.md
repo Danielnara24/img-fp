@@ -1130,7 +1130,221 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   assumes, so the old check could never fire; it refuses with raw `write` +
   `_exit`, since formatting an error ran AVX-512 code.
 - Grey is BT.601 luma; a JPEG's grey is its Y plane.
-- Shipped `--min-pixel-correlation` is 0.7 (0.54.0 on; kept at 0.72.0,
+- **Default `--min-pixel-correlation` 0.8: tried and reverted to 0.7**
+  (2026-10-29, both the user's decisions). Raised because on 50,000 DISC21
+  references (unrelated YFCC photos, `~/Documents/DISC21/m50k`) the pairs
+  the user judged false by eye were nearly all below 0.8 (of 175 group
+  members 172 at >= 0.7, 83 at >= 0.8). Cost, cold, 0.76.0
+  (`~/Documents/DISC21/fixtest`): IMGS-ALL F1 0.9739 -> 0.9531, precision
+  98.85 -> 98.99%, recall 95.98 -> 91.91%, trap FPs 3,075 -> 1,988,
+  cross-family 12,227 -> 10,908, merges 53 -> 28; IMGS-ALL2 F1 0.9390 ->
+  0.8971, recall 89.60 -> 82.21%: four times the 0.6 -> 0.7 step's recall
+  cost. Reverted ("it's worth it") on DISC21 itself, 25k dev queries
+  against 25k references (`~/Documents/DISC21/p25`, 126 true copies in
+  reach), ranked by aligned points: 0.8 finds 65 with 13 false, µAP 0.494;
+  0.7 finds 80 with 23 false, µAP 0.607, recall at 90% precision 39.7 ->
+  51.6%. Of the 23 false at >= 0.7, by eye with the claimed region drawn
+  (page https://claude.ai/artifact/LHEcySeL46hfUWE2v2NVsL): 18 another frame
+  of one person's video, an urn that may be an unlisted copy, two dashcam
+  frames of one road, a logo the query holds, and **2 different pictures**
+  (orange streaks on a train photo's rails; two horizons). Neither of the
+  2 is a code bug: plausible similarities resting on line-like structure,
+  which points and blocks cannot tell apart. Open.
+- **DISC21 dev, whole** (2026-10-29/30, `~/Documents/DISC21`; record in
+  `benchmark/BASELINE.md`): 50,000 dev queries against 1,000,000 references
+  (10,000 true copies), the build after 0.76.0 with the sliver bound and
+  copied leaves, run as 20 shards (`loop.sh`: all queries `--against` one
+  50k zip each, `--min-pixel-correlation 0.5 --dump`, zip deleted after),
+  each query-reference pair's best (points, correlation) over shards,
+  ranked by aligned points (correlation / 2 breaks ties; ties either way
+  65.2-65.4), `score_shards.py`, checked with `score_disc.py` (0.6531).
+  Bars read off the 0.5 run (a real 0.7 run on `p25` agreed 102 / 103):
+  0.5 **µAP 65.3**, recall 71.3%, recall at 90% precision 51.7%; 0.6 64.7 /
+  55.2%; 0.7 (default) 59.9 / 54.1%; 0.8 50.1 / 49.0%. SSCD's published dev
+  µAP (percent, as the paper writes it): ResNet50 61.5, large 63.7; with
+  score normalization 72.5, 75.3. Ranking by correlation is worse at every
+  bar. Caveats: up to 150 candidates per shard, not overall; ranking and
+  bar chosen on dev; img-fp uses no training data (SSCD trains on DISC21's
+  training set); no normalization. Cost 9.1 h wall, 37.6 CPU-h, 24-36 min a
+  shard, peak under 1.7 GB. **Score normalization** (SSCD's: a query's
+  similarity less β times its mean similarity to its 1st-3rd nearest
+  neighbours in DISC21's training set, β 1), simulated offline with the
+  other dev queries as the background (no two queries copy one reference,
+  so no true copy is in it; `norm/score_norm.py`): points less β x the mean
+  of the query's 1-3 best query-query verdicts, any correlation, gives µAP
+  66.0-66.7 and recall at 90% precision 54.4-56.8% over β 0.5-1, first
+  neighbour or 1st-3rd, background bar 0.2 or 0.5 (bar 0.7: no gain).
+  About +1.3, not SSCD's +11: an unrelated pair rarely gives img-fp a
+  verdict at all (46,185 queries have a query neighbour, mostly few points),
+  so most biases are 0; it lowers queries with many look-alikes (video
+  frames, textures). Not run against a real training-set background.
+- **DISC21 at `--work-size 1024`** (2026-10-30, `~/Documents/DISC21/strain`,
+  `w1024_0`, `w1024_1`): strain test, all 50k queries against zips 0 + 1
+  (100k references, 972 true copies) in **one run of 150,000 files**:
+  exit 0, 1 h 20 min, 30,400 CPU-s, 81.2 M descriptors, quantised in 160 s,
+  peak RssAnon+swap 2.6 GB (MemAvailable never under 1.85 GB of 5.8),
+  cache 10.2 GB, disk +23.8 GB at the peak. Accuracy is **worse than 512**,
+  and it is the work size, not the sharding: at bar 0.5, 512 as two shards
+  µAP 65.1 (692 true, 972 false), 1024 as two shards 54.7 (674 true, 2,672
+  false), 1024 as one run 56.0 (655 true); at 0.6 65.0 / 59.2 / 59.1, at 0.7
+  58.2 / 54.7 / 53.5. At 1024 unrelated pairs reach many more aligned
+  points (false pairs with >= 40 points: 196 at 512, 764 at 1024; true 605
+  / 593), mostly at correlation under 0.7, so they rank among the true
+  copies. Two shards at 1024 from the cache: 23 min each. On the generated
+  corpora (`benchmark/out/v55-worksize`, same build, 512 from the fixtest
+  caches, 1024 cold into them; accuracy only, no ABBA cost): IMGS-ALL F1
+  0.9737 -> 0.9745 (recall 95.94 -> 96.07%, perfect 53 -> 49), IMGS-ALL2
+  0.9390 -> **0.9316** (recall 89.59 -> 88.22%, perfect 11 -> 9).
+  Containment gains (IMGS-ALL2 `embed_tiny` 344 -> 357, `contact_sheet` 354
+  -> 362, `crop_micro` 281 -> 291), small copies lose: IMGS-ALL2
+  `thumbnail` 352 -> 240, `qr_sticker` 357 -> 193, `rot90`/`rot180` -7/-8.
+  **Two causes, both a constant read at 512** (measured after 0.76.0,
+  both ties reverted with the ladder, below; the code never shipped):
+  (1) `MAX_SCALE` 16 bounds the factor between working planes, but its own
+  reason is a part's pixels (512 / 16 = 32): a 53 x 33 thumbnail of a
+  940-px photo is 18-fold at 1024 (29 points, 0.83, overlap 1.0) and was
+  refused; small `rot90`/`rot180` copies the same. Tried:
+  `Policy::for_work_size`, `16 x max(work, 512) / 512` (0 keeps 16).
+  (2) `FEATURES` 600 at any work size: at native 640 px a QR sticker's
+  modules took the features and the photo with the sticker gave no verdict
+  at all against the photo (1,200 features: 273 points, 0.78). Tried:
+  `lib::features_for`, `600 x work / 512`, at least 600, at most
+  `index::MOST_KEYPOINTS` (2,048, an entry's 11 bits), 2,048 at work 0.
+  At 512 and below both are as before: IMGS-ALL and IMGS-ALL2 reports
+  byte-identical. At 1024, IMGS-ALL2 (512 / 1024 old / bound tied / both):
+  F1 0.9390 / 0.9316 / 0.9339 / **0.9395**, recall 89.59 / 88.22 / 88.63 /
+  89.79%, precision 98.63 / 98.68 / 98.68 / 98.51%; `thumbnail` 352 / 240 /
+  358 / 358, `qr_sticker` 357 / 193 / 193 / 356, `embed_tiny` 344 / 357 /
+  357 / 361, `crop_micro` 281 / 291 / 291 / 298; but **Segovia1/2 119 ->
+  573 and Floriana1/2 178 -> 570 false pairs** (past 300; cross-family
+  13,086 -> 14,386). IMGS-ALL: 0.9737 / 0.9745 / 0.9745 / **0.9756**
+  (recall 96.31%), same five merges. Cost of the features at 1024,
+  IMGS-ALL2 cold ABBA (600 / 1,200 / 1,200 / 600): 3,990 / 4,854 / 4,860 /
+  4,249 CPU-s, +18%, wall 8:53 / 10:46 / 10:46 / 9:21, peak RSS 3.0 ->
+  3.9 GB (runs started at 75-78 C, idle 67: the temperature wait misread a
+  comma decimal). At **2048** (2,048 features, bound 64; cached caches,
+  one run each): IMGS-ALL F1 0.9765, precision 98.90%, recall 96.43%,
+  four merges past 300 (Mural1/2 91), 9,715 CPU-s, 26 min, peak RSS 4.2
+  GB, 37.7 M descriptors; IMGS-ALL2 F1 0.9385, precision 98.32%, recall
+  89.76%, cross-family 16,713 (Floriana1/2 3,011, Mural1/2 333, Floriana3/4
+  304 past 300; Segovia1/2 back to 128), 7,356 CPU-s, 18 min, 4.4 GB.
+  So recall flattens past 1024 and precision falls on IMGS-ALL2.
+  **DISC21 at 1024 with both** (`~/Documents/DISC21/w1024b_0`, `_1`, no
+  `--dump`; zips 0 + 1, 972 true copies; `norm/cmp.py`): µAP at bar 0.5
+  512 65.1 / 1024 old 54.7 / both **55.4** (true 692 / 674 / 681, false
+  972 / 2,672 / 3,475); 0.6 65.0 / 59.2 / 61.3; 0.7 58.2 / 54.7 / 56.7.
+  The fixes help little there; 1024 is still worse. 1:17 and 1:01 a shard
+  (analysis at 1,200 features included), peak RSS 4.0 GB. Of zip 0's
+  true copies 33 found at 512 are not stated at 1024 at all, losses even
+  across query / reference size ratios (2-5% a band, so not scale
+  mismatch); alone, such pairs verify at 1024 (Q05562 | R002092 101
+  points, 0.926), so they are lost in retrieval. Suspect: the vocabulary
+  sample is capped at 1.28 M whatever the descriptor count, so at 1,200
+  features a word holds twice the descriptors. Untested (a `-k` sweep on
+  the cached analyses would show it). False pairs: median 23 points
+  against 20, 3.7 times as many.
+- **The work-size ladder** (2026-10-31/11-01, scaffolding `IMGFP_LADDER`,
+  uncommitted; `~/Documents/DISC21/ws`, runs `*T`, logs in `run5.out`).
+  Requirement (user's): a larger `--work-size` adds true positives and
+  loses none. Found on the way, each measured on DISC21 zip 0 at 1024 and
+  dropped: a larger vocabulary sample alone (false pairs 1,753 -> 1,360,
+  losses 33 -> 31), `-k 300` (8 of 33 back), 512's features kept with
+  finer ones beside (33 -> 21), plus ranking on 512's words (-> 8), plus
+  verifying on them (-> 5), plus 512's exact decode (-> 1, the rest claim
+  graph). What holds, as built:
+  - **Analysis**: rungs 64, 128, 256, 512, ... below the work size, then
+    the work size. The lowest rung is described as a run at its size
+    describes it; each next rung, from its own decode, adds only keypoints
+    finer than the rung below can find (`sift::Params::finer_than`), up to
+    a budget in proportion (`budget`: 600 x L / 512, at most
+    `index::MOST_KEYPOINTS`). Every run's keypoints are in one frame, the
+    picture's plane at 512, so a smaller run's are to the bit the leading
+    keypoints of a larger run's; each carries its rung in the angle's low
+    four bits (inferring rungs from scale failed on a cut-off file, whose
+    decoded size changes with the rung: IMGS-ALL lost 632). Thumbnail
+    from the 128 decode at every size; scale bound 16 (the frame no longer
+    grows, so `for_work_size` is not needed).
+  - **Matching**: each lower rung matched as a run at its size matches (its
+    prefix, its own vocabulary and words), and the run's claims are its own
+    plus every rung's. So a run at W states every pair a run at any rung
+    below states.
+  - **Containment, 512 -> 1024**, true pairs of 512 not stated at 1024:
+    plain build 5,151 / 17,956 / 33 (IMGS-ALL / IMGS-ALL2 / DISC21 zip 0
+    at 0.5); ladder **0 / 0 / 0**. Rung 512 inside the 1024 run matches the
+    512 run to the count. (Bars read off one 0.5 run show "losses" at 0.6
+    and 0.7: the pair is stated, but the report shows the top level's
+    claim, of lower correlation.)
+  - **Accuracy**: IMGS-ALL2 plain 512 0.9390 (P 98.63, R 89.59); ladder 512
+    0.9359 (98.49, 89.15), ladder 1024 **0.9418** (98.38, **90.33**).
+    DISC21 zip 0 at 0.5: plain 512 µAP 64.9 (374 true, 460 false); ladder
+    512 63.6 (360, 300), ladder 1024 58.1 (371, 1,081). The ladder costs
+    the default some recall (a rung's share of features is fixed, not the
+    strongest 600) and precision (every smaller run's false pairs come
+    along). CPU: ladder 512 ~1.8x plain, 1024 ~3.5x.
+  - **Every size, one build** (`img-fp-tag`, `run21.sh`, `run22.sh`): true
+    pairs lost against the size below, 64 -> 256 -> 512 -> 1024 -> 2048:
+    **0 at every step on IMGS-ALL, IMGS-ALL2 and DISC21 zip 0** (bar 0.5).
+    | size | IMGS-ALL F1 / P / R | CPU s | IMGS-ALL2 F1 / P / R | CPU s | DISC21 zip 0 true / false / µAP | CPU s |
+    |---|---|---|---|---|---|---|
+    | 64 | 0.3674 / 100.00 / 22.50 | 1,432 | 0.1885 / 100.00 / 10.41 | 777 | 25 / 0 / 4.7 | 1,966 |
+    | 256 | 0.9403 / 98.68 / 89.80 | 3,136 | 0.8860 / 98.61 / 80.44 | 2,138 | 303 / 76 / 55.3 | 5,556 |
+    | 512 | 0.9711 / 98.19 / 96.05 | 6,152 | 0.9359 / 98.49 / 89.15 | 4,430 | 360 / 300 / 63.6 | 13,734 |
+    | 1024 | 0.9743 / 98.12 / 96.75 | 11,823 | 0.9418 / 98.38 / 90.33 | 8,309 | 371 / 1,081 / 58.1 | 30,610 |
+    | 2048 | 0.9749 / 98.10 / 96.88 | 19,351 | 0.9434 / 98.32 / 90.67 | 13,693 | 371 / 1,081 / 58.1 | 45,151 |
+    Plain build at 512 for comparison: IMGS-ALL 0.9737 / 98.84 / 95.94,
+    IMGS-ALL2 0.9390 / 98.63 / 89.59, DISC21 374 / 460 / 64.9. DISC21's
+    pictures are at most 1024 px, so 2048 adds no rung there: same pairs
+    as 1024. Recall rises and cost about doubles with each step; precision
+    falls slowly (each size states every smaller size's false pairs too).
+    **Rejected** (user's decision, 2026-11-01): containment held, but it
+    costs about twice the CPU at 512 and does worse there (IMGS-ALL2 recall
+    -0.4, DISC21 µAP 64.9 -> 63.6), so it buys the knob by sacrificing the
+    default. Scaffolding removed. Next: `--work-size` goes, and a knob
+    whose higher steps cost nothing where they find nothing replaces it.
+- **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed after 0.76.0,
+  unreleased): `-k` counting rejections credited a window with every
+  verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
+  run's bars reject (three points, overlap 0.2), so it asked other windows.
+  IMGS-ALL2 cached, with and without `--dump`: 2,087 / 2,028 of 1,275,506
+  pairs differed at 512, 12,779 / 12,547 at 1024. Now only verdicts that
+  stand are credited: with and without `--dump` identical on IMGS-ALL and
+  IMGS-ALL2 at 512 and IMGS-ALL2 at 1024, and plain runs identical to
+  before (so released reports were never affected). Every `--dump` figure
+  from 0.73.0 on is a dumping run's own: the DISC21 shards above,
+  replays off a dump.
+- **Squashed transforms are no claim** (after 0.76.0, unreleased;
+  `verify::Policy::frames`, `verify::axis_scales`): `MAX_SCALE` bounds each
+  direction of a transform (its singular values), not their mean. Before,
+  only √|det| was bounded, and a fit through nearly collinear inliers (a
+  wave crest, a horizon) is free across their line: DISC21 R007131 (a
+  yacht on calm sea) was put into R030945 (surf) as a sliver forty times
+  longer than wide (directions 0.44 and 0.0105, mean 0.068), mirrored and
+  inverted, 61 aligned points, overlap 1.00, correlation 0.775 (its blocks
+  mostly flat, abstaining). That scan's four slivers had one direction at
+  0.006-0.011 or 87; every other transform was within 1/16-16 in each
+  direction. No new constant: the bound's own reason (past sixteen-fold a
+  part is ~30 px of the analysis) holds per direction. IMGS-ALL at 0.8:
+  2 pairs of 1,287,146 gone (same seed: `scale_small`|`upscale`,
+  `crop_micro`|`scale_small`), 9 added, F1 0.9531 -> 0.9532; IMGS-ALL2:
+  F1 0.8971 both, one cross-family pair fewer. Tests
+  `axis_scales_are_the_directions_least_and_most`, `a_sliver_is_no_claim`.
+- **The vocabulary's leaves are copies** (after 0.76.0, unreleased;
+  `index::Vocabulary::levels`): they were pointers into the analysis's
+  scratch file (`spill.rs`), saving 120 bytes a leaf, but the sample is
+  spread over every picture, so the descent read the whole mapping at
+  random. DISC21's dev queries against one reference zip (100,000 files,
+  45 M descriptors, 5.8 GB on a 5.8 GB machine) sat in quantising for 90
+  minutes at ~80% I/O wait and was killed. Copies are at most `SAMPLE_CAP`
+  x 128 = 164 MB. IMGS-ALL report byte-identical; quantising 21.6 -> 17.1 s.
+  The same 100,000 files, cached: quantised in 130 s. At 50,000 (2.9 GB of
+  descriptors, which fit) both builds quantise in 72 s. On DISC21's 50,000
+  references with the sliver bound as well: the four slivers gone, 94 pairs
+  in 78 groups, 18.5 min.
+- Not a defect, for the record: a run started as `cmd &` from a script
+  ignores Ctrl-C (the shell starts it with SIGINT ignored, and img-fp
+  keeps a signal it was started ignoring, for `nohup`); `kill -TERM`
+  stopped such a run in 1.3 s mid-thrash.
+- Shipped `--min-pixel-correlation` is 0.7 (since 0.54.0; kept at 0.72.0,
   when a block flat in one picture only began to count: see its entry), chosen for
   what users want grouped, not for F1: 0.5 grouped merely similar photos,
   and 0.6 paired five of IMGS5's sixty seeds with their near-miss sibling

@@ -135,12 +135,22 @@ pub enum Standing {
 /// CLAUDE.md.
 pub const CLEAN_WORST_BLOCK: f32 = 0.9;
 
-/// The largest scale between the working images a claim may span. A sanity
-/// bound, not a tuned one. Both working images are near `--work-size` on
-/// their long side whatever the files' sizes, so it does not limit how much
-/// smaller one file may be than another: it limits how small a part of one
-/// picture the other may be, and past sixteen-fold that part is some thirty
-/// pixels of a 512-pixel analysis.
+/// The largest scale between the working images a claim may span. A sanity bound, not a tuned one. Both working images are near
+/// `--work-size` on their long side whatever the files' sizes, so it does not
+/// limit how much smaller one file may be than another: it limits how small a
+/// part of one picture the other may be, and past sixteen-fold that part is
+/// some thirty pixels of a 512-pixel analysis.
+///
+/// **It bounds each direction, not their mean** (`axis_scales`). Until
+/// 0.76.0 it bounded `linear_scale`, the square root of the area factor, and
+/// a transform could squash one direction as far as it liked if it stretched
+/// the other: a fit through nearly collinear inliers (a wave crest, a
+/// horizon) is free across their line. On 50,000 DISC21 references a yacht
+/// on a calm sea was put into a photograph of surf as a sliver forty times
+/// longer than wide (directions 0.44 and 0.0105, mean 0.068), mirrored and
+/// inverted, 61 aligned points, overlap 1.00, correlation 0.775: the
+/// sliver's blocks are mostly flat and abstain. Four such pairs in that
+/// scan, the next most unequal transform 6:1 and inside the bound.
 const MAX_SCALE: f32 = 16.0;
 
 /// How much easier it is to be believed *inside* a cluster than to create one
@@ -200,7 +210,7 @@ impl Policy {
     }
 
     /// The geometry every claim must have: a transform within `MAX_SCALE`
-    /// that puts enough of one frame on the other.
+    /// in every direction that puts enough of one frame on the other.
     ///
     /// Two of the bars are the CLI's `--min-frame-overlap` and
     /// `--min-pixel-correlation`, and the nouns are the whole point: `ov_a`
@@ -233,9 +243,10 @@ impl Policy {
     /// first costs traps and merges nothing; loosening the second merges
     /// families and costs almost no traps. The sweeps are in `CLAUDE.md`.
     fn frames(&self, v: &Verdict) -> bool {
+        let (least, most) = axis_scales(&v.m);
         v.scale.is_finite()
-            && v.scale >= 1.0 / MAX_SCALE
-            && v.scale <= MAX_SCALE
+            && least >= 1.0 / MAX_SCALE
+            && most <= MAX_SCALE
             && v.ov_a.max(v.ov_b) >= self.min_frame_overlap
     }
 
@@ -516,6 +527,18 @@ pub fn det(m: &Affine) -> f32 {
 #[inline(always)]
 pub fn linear_scale(m: &Affine) -> f32 {
     det(m).abs().sqrt()
+}
+
+/// The factors a transform scales length by in the directions it shrinks
+/// most and stretches most (its linear part's singular values), least first.
+/// Their product is `det`'s magnitude, so `linear_scale` lies between them.
+pub fn axis_scales(m: &Affine) -> (f32, f32) {
+    let (a, b, c, d) = (m[0] as f64, m[1] as f64, m[3] as f64, m[4] as f64);
+    let sum = a * a + b * b + c * c + d * d;
+    let area = (a * d - b * c).abs();
+    let most = ((sum + (sum * sum - 4.0 * area * area).max(0.0).sqrt()) / 2.0).sqrt();
+    let least = if most > 0.0 { area / most } else { 0.0 };
+    (least as f32, most as f32)
 }
 
 /// Whether a transform turns its picture over: a left-right or top-bottom
@@ -2450,6 +2473,35 @@ mod tests {
         assert!(at(Verdict { blk_min: 0.85, ..v }) < Standing::Anchor, "one block disagreeing");
         assert!(at(Verdict { n_in: 2, ..v }) < Standing::Anchor);
         assert_eq!(at(Verdict { n_in: 10, framed: false, blk_min: 0.5, ..v }), Standing::Anchor, "the bar met is the bar as it was");
+    }
+
+    /// A transform's two directions are its singular values, however it is
+    /// turned or flipped.
+    #[test]
+    fn axis_scales_are_the_directions_least_and_most() {
+        let close = |(a, b): (f32, f32), (x, y): (f32, f32)| (a - x).abs() < 1e-5 && (b - y).abs() < 1e-5;
+        assert!(close(axis_scales(&[2.0, 0.0, 5.0, 0.0, 0.5, 7.0]), (0.5, 2.0)));
+        assert!(close(axis_scales(&[-3.0, 0.0, 0.0, 0.0, 3.0, 0.0]), (3.0, 3.0)), "a mirror");
+        let (c, s) = (0.6f32, 0.8f32);
+        // Turned, then squashed along x to a tenth: the turn does not hide it.
+        assert!(close(axis_scales(&[0.1 * c, -0.1 * s, 0.0, s, c, 0.0]), (0.1, 1.0)));
+        assert!(close(axis_scales(&[0.0; 6]), (0.0, 0.0)));
+    }
+
+    /// No direction may shrink or stretch past `MAX_SCALE`, whatever the
+    /// mean: the DISC21 yacht was a sliver of directions 0.44 and 0.0105,
+    /// mean 0.068, inside the old bound on the mean.
+    #[test]
+    fn a_sliver_is_no_claim() {
+        let policy = Policy::new(10, 0.85, 0.6);
+        let v = Verdict { n_in: 61, centred: true, ov_a: 1.0, ov_b: 1.0, blk: 0.95, blk_min: 0.95, ..Default::default() };
+        let with = |m: Affine| Verdict { m, scale: linear_scale(&m), ..v };
+        assert_eq!(policy.standing(&with([0.25, 0.0, 0.0, 0.0, 0.25, 0.0])), Standing::Clean, "a quarter size, both ways");
+        assert_eq!(policy.standing(&with([1.0 / 15.0, 0.0, 0.0, 0.0, 1.0, 0.0])), Standing::Clean, "squashed inside the bound");
+        let sliver = with([0.0105 * 0.6, -0.44 * 0.8, 0.0, 0.0105 * 0.8, 0.44 * 0.6, 0.0]);
+        assert!(sliver.scale > 1.0 / MAX_SCALE, "the mean alone let it through");
+        assert_eq!(policy.standing(&sliver), Standing::Rejected);
+        assert_eq!(policy.standing(&with([20.0, 0.0, 0.0, 0.0, 1.0, 0.0])), Standing::Rejected, "stretched past it");
     }
 
     /// The pyramid one output at a time, each pixel the [1 3 3 1]/8 filter

@@ -174,7 +174,7 @@ impl Default for VocabParams {
 /// 134 MB of centres of which at most a sixth can ever be reached. `slot` maps
 /// a node number to its centre, or to `DEAD` for the nodes k-means never
 /// populated.
-pub struct Vocabulary<'a> {
+pub struct Vocabulary {
     pub branching: usize,
     pub depth: usize,
     /// `levels[l]` holds the centres of the live nodes of level `l`, in node
@@ -184,26 +184,20 @@ pub struct Vocabulary<'a> {
     /// arithmetic — see `dist2` and `quantise_threads`. A centre is the mean of
     /// descriptor bytes and is stored to the nearest one of them.
     ///
-    /// The deepest level is the exception, and is empty here: see `leaves`.
+    /// The deepest level's centres (the leaves, the words) are nearly all
+    /// members of the training sample, byte for byte: the tree is sized so
+    /// that its leaves outnumber the sample, and k-means hands a parent with
+    /// no more members than children each member as a centre of its own. They
+    /// are **copies**, side by side like every other level's. Until 0.76.0 a
+    /// leaf was a pointer to the member where the analysis holds it, eight
+    /// bytes rather than 128 (133 MB less heap on a corpus of 27,000
+    /// pictures). But the sample is spread evenly over every picture, so the
+    /// pointers kept a page of the analysis's scratch file hot per leaf,
+    /// nearly all of it, and the descent reads leaves at random: once the
+    /// descriptors outgrew memory (100,000 DISC21 pictures, 5.8 GB, on a
+    /// machine of 5.8 GB) quantising faulted on nearly every leaf and had not
+    /// finished in 90 minutes. A copy is at most `SAMPLE_CAP` x 128 bytes.
     levels: Vec<Vec<u8>>,
-    /// The deepest level's centres, by slot, as where their bytes are.
-    ///
-    /// Nearly every leaf is a member of the training sample, byte for byte.
-    /// The tree is sized so that its leaves outnumber the sample, so a parent
-    /// at the level above holds a handful of members — about three on a
-    /// corpus of 27,000 pictures — and k-means hands a parent with no more
-    /// members than children each member as a centre of its own. The sample
-    /// is drawn from the descriptors the analysis holds, and those stay where
-    /// they are for as long as the vocabulary is asked anything, so such a
-    /// leaf is a pointer to them: eight bytes rather than a copy of 128. On
-    /// that corpus the level was 133 MB of copies, alive through the whole of
-    /// verification, which is where the run peaks. A leaf that really is a
-    /// mean points into `own`.
-    leaves: Vec<*const u8>,
-    /// The bytes of the leaves that are means of several members.
-    own: Vec<u8>,
-    /// The descriptors `leaves` points into.
-    corpus: std::marker::PhantomData<&'a [u8]>,
     /// Per level, the squared length of each centre in `levels[l]`, by slot.
     /// See `Query`.
     norms: Vec<Vec<u32>>,
@@ -236,13 +230,6 @@ pub struct Vocabulary<'a> {
     /// `WORD_FLOOR` of each other are one word (`with_floor`).
     alias: Vec<u32>,
 }
-
-// SAFETY: `leaves` points into `own`, whose buffer is never touched after
-// `build` and lives as long as the vocabulary, and into descriptors borrowed
-// for `'a`. Nothing is written through any of them, so sharing the vocabulary
-// between threads shares only reads of immutable bytes.
-unsafe impl Send for Vocabulary<'_> {}
-unsafe impl Sync for Vocabulary<'_> {}
 
 /// Where a leaf's bytes are while the tree is being built.
 #[derive(Clone, Copy)]
@@ -330,21 +317,6 @@ fn prefetch_centres(centres: &[u8], kids: Kids) {
     let _ = centres;
 }
 
-/// Ask for the bytes of a parent's leaves, wherever each one is.
-fn prefetch_leaves(leaves: &[*const u8], kids: Kids) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-        let start = kids.first as usize;
-        for &c in leaves[start..(start + kids.n as usize).min(leaves.len())].iter() {
-            _mm_prefetch(c as *const i8, _MM_HINT_T0);
-            _mm_prefetch(c.add(64) as *const i8, _MM_HINT_T0);
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = (leaves, kids);
-}
-
 /// Ask for one centre's entry in `down`.
 #[inline]
 fn prefetch_kids(below: &[Kids], slot: u32) {
@@ -359,13 +331,11 @@ fn prefetch_kids(below: &[Kids], slot: u32) {
     let _ = (below, slot);
 }
 
-impl<'a> Vocabulary<'a> {
+impl Vocabulary {
     /// The bytes the tree holds: every level's centres, their norms and the
     /// descent's tables.
     pub fn heap_bytes(&self) -> usize {
         self.levels.iter().map(|v| v.capacity()).sum::<usize>()
-            + self.leaves.capacity() * std::mem::size_of::<*const u8>()
-            + self.own.capacity()
             + self.norms.iter().map(|v| v.capacity() * 4).sum::<usize>()
             + self.down.iter().map(|v| v.capacity() * 8).sum::<usize>()
             + self.alias.capacity() * 4
@@ -401,18 +371,17 @@ impl<'a> Vocabulary<'a> {
     /// consumer of a word list — the merge in `shared`, the runs the inverted
     /// file is built from — reads only that order.
     pub fn n_live_words(&self) -> usize {
-        self.leaves.len()
+        self.levels.last().map_or(0, |l| l.len() / DESC_LEN)
     }
 
-    pub fn build(mut sample_at: Vec<&'a [u8; DESC_LEN]>, p: &VocabParams) -> Vocabulary<'a> {
+    pub fn build(mut sample_at: Vec<&[u8; DESC_LEN]>, p: &VocabParams) -> Vocabulary {
         assert!(p.max_paths * p.branching <= FRONTIER, "vocabulary frontier too small");
         assert!(p.branching <= MAX_BRANCH, "branching wider than k-means' accumulators");
         let n = sample_at.len();
         let mut rng = Rng(p.seed);
         // Sample without replacement, deterministically: the first `take`
         // candidates after a partial shuffle are the sample, in the order the
-        // shuffle drew them. The candidates are where descriptors are, and
-        // the leaves keep pointing there (see `leaves`).
+        // shuffle drew them.
         let take = p.sample.min(n);
         for i in 0..take {
             let j = i + rng.below(n - i);
@@ -500,8 +469,7 @@ impl<'a> Vocabulary<'a> {
                     // a mean of descriptor bytes; it is kept as the nearest byte,
                     // which is what makes the descent's reads a quarter of what
                     // they were. The deepest level loses nothing at all by it —
-                    // a node with one member hands that member's own bytes down,
-                    // and is kept as where those bytes are (see `leaves`).
+                    // a node with one member hands that member's own bytes down.
                     if !deepest {
                         centres.extend_from_slice(&c[..live.len() * DESC_LEN]);
                     } else if own_centres {
@@ -568,24 +536,23 @@ impl<'a> Vocabulary<'a> {
         let down: Vec<Vec<Kids>> = (0..p.depth.saturating_sub(1))
             .map(|l| node_ofs[l].iter().map(|&node| heads[l + 1][node as usize]).collect())
             .collect();
-        drop(sample);
-        own.shrink_to_fit();
-        let leaves: Vec<*const u8> = leaf_src
-            .iter()
-            .map(|&src| match src {
-                Leaf::Member(m) => sample_at[m as usize].as_ptr(),
-                // In bounds: `own` holds every mean pushed above, and it is
-                // not touched again, so its buffer stays where it is.
-                Leaf::Own(k) => unsafe { own.as_ptr().add(k as usize * DESC_LEN) },
-            })
-            .collect();
+        // The leaves, by slot, where the descent reads every other level's
+        // centres: side by side (see `levels`).
+        let mut leaves: Vec<u8> = Vec::with_capacity(leaf_src.len() * DESC_LEN);
+        for &src in &leaf_src {
+            leaves.extend_from_slice(match src {
+                Leaf::Member(m) => &sample[m as usize * DESC_LEN..(m as usize + 1) * DESC_LEN],
+                Leaf::Own(k) => &own[k as usize * DESC_LEN..(k as usize + 1) * DESC_LEN],
+            });
+        }
+        drop((sample, own, leaf_src));
+        if let Some(deepest) = levels.last_mut() {
+            *deepest = leaves;
+        }
         Vocabulary {
             branching: p.branching,
             depth: p.depth,
             levels,
-            leaves,
-            own,
-            corpus: std::marker::PhantomData,
             norms,
             root: heads[0][0],
             down,
@@ -620,7 +587,7 @@ impl<'a> Vocabulary<'a> {
     /// 65.7, and two unrelated photographs in one draw.
     fn with_floor(mut self) -> Self {
         let r2 = WORD_FLOOR * WORD_FLOOR;
-        let n = self.leaves.len();
+        let n = self.n_live_words();
         let parents: Vec<Kids> = if self.depth >= 2 { self.down[self.depth - 2].clone() } else { vec![self.root] };
         let mut alias: Vec<u32> = (0..n as u32).collect();
         let find = |a: &mut Vec<u32>, mut x: u32| {
@@ -631,7 +598,8 @@ impl<'a> Vocabulary<'a> {
             }
             x
         };
-        let leaf = |i: usize| -> &[u8; DESC_LEN] { unsafe { &*(self.leaves[i] as *const [u8; DESC_LEN]) } };
+        let leaves = self.levels.last().map_or(&[][..], |l| &l[..]);
+        let leaf = |i: usize| -> &[u8; DESC_LEN] { leaves[i * DESC_LEN..(i + 1) * DESC_LEN].try_into().unwrap() };
         for k in parents {
             let (f, m) = (k.first as usize, k.n as usize);
             for i in f..f + m {
@@ -709,13 +677,8 @@ impl<'a> Vocabulary<'a> {
                     kids[pi] = above[cur[pi].0 as usize];
                 }
             }
-            let deepest = l + 1 == self.depth;
             for pi in 0..n_cur {
-                if deepest {
-                    prefetch_leaves(&self.leaves, kids[pi]);
-                } else {
-                    prefetch_centres(centres, kids[pi]);
-                }
+                prefetch_centres(centres, kids[pi]);
             }
             // `max_paths` rather than the old `min(max_paths, n_next)`: the
             // two differ only when the level offers fewer children than that,
@@ -735,11 +698,7 @@ impl<'a> Vocabulary<'a> {
                 // retrieval stage. Each child's centre is its own contiguous
                 // run of bytes, so a parent's children are read as one stream.
                 let norms = &self.norms[l][first..first + n_live];
-                if deepest {
-                    qp.dists_at(&self.leaves[first..first + n_live], norms, &mut dist);
-                } else {
-                    qp.dists(&centres[first * DESC_LEN..(first + n_live) * DESC_LEN], norms, &mut dist);
-                }
+                qp.dists(&centres[first * DESC_LEN..(first + n_live) * DESC_LEN], norms, &mut dist);
                 // Only the closest `max_paths` children are descended, and
                 // only their distances are looked at afterwards. Ordering the
                 // whole frontier — up to forty-eight entries, once per level
@@ -895,42 +854,6 @@ impl Query {
                 hi[b] = _mm256_unpackhi_epi8(v, zero);
             }
             (lo, hi, norm)
-        }
-    }
-
-    /// Distances from this query to each centre `at` points to, into `out`.
-    /// The same arithmetic as `dists`, for centres that are not side by side.
-    #[cfg_attr(dispatch, inline(always))]
-    #[cfg_attr(not(dispatch), inline)]
-    fn dists_at(&self, at: &[*const u8], norms: &[u32], out: &mut [u32; MAX_BRANCH]) {
-        let n = norms.len();
-        debug_assert!(n <= MAX_BRANCH && at.len() == n);
-        // SAFETY: every leaf pointer names `DESC_LEN` readable bytes; see
-        // `Vocabulary::leaves`. The vector form runs only where the CPU has
-        // AVX2.
-        #[cfg(target_arch = "x86_64")]
-        if crate::simd::v3() {
-            unsafe {
-                let mut k = 0usize;
-                while k + 4 <= n {
-                    let d = self.dots4_at([at[k], at[k + 1], at[k + 2], at[k + 3]]);
-                    for i in 0..4 {
-                        out[k + i] = self.norm + norms[k + i] - 2 * d[i];
-                    }
-                    k += 4;
-                }
-                while k < n {
-                    let d = self.dot1(at[k]);
-                    out[k] = self.norm + norms[k] - 2 * d;
-                    k += 1;
-                }
-            }
-            return;
-        }
-        #[cfg(not(target_feature = "avx2"))]
-        for k in 0..n {
-            let c = unsafe { std::slice::from_raw_parts(at[k], DESC_LEN) };
-            out[k] = dist2_portable(&self.q, c);
         }
     }
 
@@ -2665,7 +2588,7 @@ mod bench {
         for depth in 1..=5usize {
             let p = VocabParams { depth, branching: 16, sample: 40_000, ..Default::default() };
             let v = Vocabulary::build(as_samples(&desc), &p);
-            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum::<usize>() + v.leaves.len();
+            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum::<usize>();
             let mut out = Vec::new();
             let mut best = f64::MAX;
             for _ in 0..7 {
@@ -2704,7 +2627,7 @@ mod bench {
         for (depth, branching, sample) in [(4usize, 16usize, 160_000usize), (5, 16, 160_000), (6, 11, 160_000)] {
             let p = VocabParams { depth, branching, sample, ..Default::default() };
             let v = Vocabulary::build(as_samples(&desc), &p);
-            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum::<usize>() + v.leaves.len();
+            let live: usize = v.levels.iter().map(|l| l.len() / DESC_LEN).sum::<usize>();
             let mut best1 = f64::MAX;
             let mut best8 = f64::MAX;
             for _ in 0..3 {

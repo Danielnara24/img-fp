@@ -524,6 +524,24 @@ Pressing Ctrl-C keeps every image analysed so far.
 | `2` | Finished, but something failed, such as an image that would not decode. See the `Problems` summary |
 | `130` | Interrupted with Ctrl-C |
 
+## Accuracy on DISC21
+
+[DISC21](https://ai.meta.com/datasets/disc21-dataset/) is the public benchmark
+for image copy detection: 50,000 edited query images to be matched against
+1,000,000 reference photographs, 10,000 of the queries being copies. Scored
+by micro average precision (µAP) on its dev set:
+
+| | µAP |
+| --- | ---: |
+| img-fp, `--min-pixel-correlation 0.5`, ranked by aligned points | 65.3 |
+| img-fp, default (0.7) | 59.9 |
+| [SSCD](https://github.com/facebookresearch/sscd-copy-detection) ResNet50, as published | 61.5 |
+| SSCD ResNeXt-101, as published | 63.7 |
+
+img-fp is not trained on anything. SSCD is trained on DISC21's own training
+images, and with score normalization, which img-fp does not have, it reaches
+72.5 and 75.3.
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at

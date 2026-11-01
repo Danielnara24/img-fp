@@ -47,7 +47,7 @@ pub(crate) struct Index<'a> {
     matched: &'a [bool],
     /// Held while a question may still need words of its own: the second
     /// look's turned features are quantised with it (`turn`).
-    vocab: Option<Vocabulary<'a>>,
+    vocab: Option<Vocabulary>,
     n_live: usize,
     lists: Vec<WordList>,
     /// Each list's idf mass, for reading answers both ways round
@@ -71,7 +71,7 @@ pub(crate) struct Asking {
 impl<'a> Index<'a> {
     /// The index of `lists`, quantised with `vocab` from the matched
     /// `items`. `both_ways` when not every file asks (against a library).
-    pub(crate) fn new(items: &'a [Item], matched: &'a [bool], vocab: Vocabulary<'a>, lists: Vec<WordList>, both_ways: bool) -> Index<'a> {
+    pub(crate) fn new(items: &'a [Item], matched: &'a [bool], vocab: Vocabulary, lists: Vec<WordList>, both_ways: bool) -> Index<'a> {
         let n_live = vocab.n_live_words();
         let postings = timed!(13, InvertedFile::build(&lists, n_live));
         let mass = both_ways.then(|| lists.iter().map(|wl| postings.mass(wl)).collect());
