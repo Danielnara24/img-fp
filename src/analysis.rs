@@ -99,8 +99,20 @@ pub(crate) fn enlarge_below(work: usize, upsample_below: usize) -> usize {
     if work == 0 { upsample_below } else { upsample_below.min(work) }
 }
 
-/// Decode and describe one file, and how long the decode took.
-pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> (Item, Duration) {
+/// Decode and describe one file at working size `work`, with the levels
+/// finer than it up to `detail` (`finer_levels`); and how long the decode
+/// took. At `detail` no finer than `work` (the default) it is the analysis
+/// at `work` alone.
+pub(crate) fn analyse(path: &Path, work: usize, detail: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> (Item, Duration) {
+    let ups = header.map(|h| finer_levels(h.w as usize, h.h as usize, work, detail)).unwrap_or_default();
+    if ups.is_empty() {
+        return analyse_plain(path, work, p, header, planes);
+    }
+    analyse_finer(path, work, &ups, p, header, planes)
+}
+
+/// `analyse`, as plain.
+pub(crate) fn analyse_plain(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> (Item, Duration) {
     let t0 = Instant::now();
     let r = decode::decode_guarded(|| decode::decode_with(path, work, header));
     let decode = t0.elapsed();
@@ -122,6 +134,118 @@ pub(crate) fn analyse(path: &Path, work: usize, p: &sift::Params, header: Option
             let traits = decode::Traits { grid: grey_grid(&d.work), ..d.traits };
             let read = d.damaged.map_or(Read::Whole, Read::Damaged);
             Item { feats, thumb, dims: d.size, read, traits }
+        }
+        Err(e) => {
+            let read = decode::refused(&e).map_or_else(|| Read::Failed(crate::why(&e)), Read::Refused);
+            Item { read, ..Default::default() }
+        }
+    };
+    (item, decode)
+}
+
+/// A level finer than the working size: the picture fitted to `size` as the
+/// analysis at that working size fits it, or (`whole`) the picture itself,
+/// where it is finer than the level below and coarser than `size`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Finer {
+    pub size: usize,
+    pub whole: bool,
+}
+
+/// The levels a picture shown `w` x `h` is described at beyond working size
+/// `work`, up to `detail`: each doubling of `work` the picture reaches, and
+/// the picture itself where it stops between two. They depend on the
+/// picture and on `work` alone, so a run at a finer `detail` describes every
+/// level a run at a coarser one does, and the same.
+pub(crate) fn finer_levels(w: usize, h: usize, work: usize, detail: usize) -> Vec<Finer> {
+    let af = decode::area_factor(w, h);
+    let long = w.max(h);
+    let side = |g: usize| (g as f64 * af).round() as usize;
+    // The analysis at `work` holds the picture up to its working size.
+    let mut below = long.min(side(work));
+    let mut out = Vec::new();
+    let mut g = work * 2;
+    while work > 0 && g <= detail {
+        if long >= side(g) {
+            out.push(Finer { size: g, whole: false });
+            below = side(g);
+        } else {
+            if long > below {
+                out.push(Finer { size: g, whole: true });
+            }
+            break;
+        }
+        g *= 2;
+    }
+    out
+}
+
+/// The most features an analysis holds at `size`, `FEATURES` at `work`:
+/// each finer level adds `FEATURES / 4` for every `work` the size grows by,
+/// short of what an index entry can number. A finer level is one octave,
+/// and the analysis at `work` spreads its `FEATURES` over four or five, so a
+/// quarter keeps the finer octave about as dense as one of them. Measured on
+/// IMGS-ALL at 1024 (`FEATURES` x 1 / 0.5 / 0.25 added): recall 96.56 / 96.55
+/// / 96.48%, precision 98.24 / 98.27 / 98.72%, cross-family 20,193 / 19,778 /
+/// 13,656; the further features found little and joined sibling pictures.
+pub(crate) fn features_at(size: usize, work: usize) -> usize {
+    let r = size as f64 / work.max(1) as f64;
+    let n = crate::FEATURES as f64 * (1.0 + (r - 1.0).max(0.0) / 4.0);
+    (n.round() as usize).min(crate::index::MOST_KEYPOINTS - 1)
+}
+
+/// `analyse` with finer levels: the analysis at `work` exactly as
+/// `analyse_plain` makes it, and after its features each finer level's, only
+/// keypoints finer than the level below can find, up to `features_at` its
+/// size. The levels' ends are kept (`Features::ends`), so a run at a coarser
+/// `detail` reads its own analysis as a prefix of this one.
+fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, header: Option<&decode::Probe>, twins: &Planes) -> (Item, Duration) {
+    let t0 = Instant::now();
+    let works: Vec<usize> = std::iter::once(work).chain(ups.iter().filter(|u| !u.whole).map(|u| u.size)).chain(ups.iter().any(|u| u.whole).then_some(0)).collect();
+    let r = decode::decode_guarded(|| decode::decode_levels(path, &works, header));
+    let decode = t0.elapsed();
+    T_DECODE.fetch_add(decode.as_micros() as u64, Ordering::Relaxed);
+    let item = match r {
+        Ok((planes, size, damaged, traits)) => {
+            let t1 = Instant::now();
+            let base = &planes[0];
+            let (feats, thumb, grid) = twins.levels(base, || {
+                let pb = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
+                let up = sift::enlargement(base.w.max(base.h), pb.upsample_below);
+                let finer_px: usize = planes[1..].iter().map(|g| g.w * g.h).sum();
+                let _room = decode::describing((base.w * base.h * up * up + finer_px) as u64);
+                let b = sift::extract(base, &pb);
+                let thumb = timed!(4, Thumb::build(base, ((THUMB_LONG as f64 * decode::area_factor(base.w, base.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
+                // Each finer level in the frame of the analysis at `work`,
+                // keeping only what is finer than the level below: that
+                // level's octave starts at scale 1.6 of its own pixels.
+                let flong = b.w.max(b.h) as f32;
+                let to_frame = |g: &decode::Gray| flong / g.w.max(g.h) as f32;
+                let mut below = 1.0f32;
+                let mut fit = planes[1..].iter();
+                let whole = planes.last();
+                let mut ins = Vec::with_capacity(ups.len());
+                for (k, u) in ups.iter().enumerate() {
+                    let g = if u.whole { whole.unwrap() } else { fit.next().unwrap() };
+                    let s = to_frame(g);
+                    ins.push(sift::LevelIn { plane: g, to_frame: s, tag: k as u32 + 1, cap: features_at(u.size, work).saturating_sub(b.len()), finer_than: 1.6 * below });
+                    below = s;
+                }
+                let f = sift::extract_levels(&ins, b.w, b.h, p);
+                let mut ends = vec![b.len() as u32];
+                for k in 0..ups.len() {
+                    let n = f.kps.iter().filter(|kp| sift::level_tag(kp) == k as u32 + 1).count();
+                    ends.push(ends[k] + n as u32);
+                }
+                let kps: Vec<sift::Keypoint> = b.kps.iter().chain(f.kps.iter()).copied().collect();
+                let desc: Vec<u8> = b.desc.iter().chain(f.desc.iter()).copied().collect();
+                let feats = Features { w: b.w, h: b.h, kps: kps.into(), desc: desc.into(), ends }.spilled();
+                (std::sync::Arc::new(feats), std::sync::Arc::new(thumb.spilled()), grey_grid(base))
+            });
+            T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let traits = decode::Traits { grid, ..traits };
+            let read = damaged.map_or(Read::Whole, Read::Damaged);
+            Item { feats, thumb, dims: size, read, traits }
         }
         Err(e) => {
             let read = decode::refused(&e).map_or_else(|| Read::Failed(crate::why(&e)), Read::Refused);
@@ -174,13 +298,28 @@ fn grey_grid(g: &decode::Gray) -> [f32; 16] {
 pub(crate) struct Planes {
     keys: std::collections::hash_map::RandomState,
     made: std::sync::Mutex<HashMap<(usize, usize, u64), Made>>,
+    made_levels: std::sync::Mutex<HashMap<(usize, usize, u64), LevelsMade>>,
 }
 
 type Analysis = (std::sync::Arc<Features>, std::sync::Arc<Thumb>);
 /// An analysis that one file is making and its twins may wait for.
 type Made = std::sync::Arc<std::sync::OnceLock<Analysis>>;
 
+/// An analysis with finer levels, and its grey grid.
+type LevelsMade = std::sync::Arc<std::sync::OnceLock<(std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16])>>;
+
 impl Planes {
+    /// `analysis`, for an analysis with finer levels (`analyse_finer`), keyed by
+    /// the plane of its analysis at the working size.
+    fn levels(&self, g: &decode::Gray, make: impl FnOnce() -> (std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16])) -> (std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16]) {
+        use std::hash::BuildHasher;
+        // SAFETY: as in `analysis`.
+        let bytes = unsafe { std::slice::from_raw_parts(g.px.as_ptr() as *const u8, std::mem::size_of_val(&g.px[..])) };
+        let key = (g.w, g.h, self.keys.hash_one(bytes));
+        let cell = self.made_levels.lock().unwrap().entry(key).or_default().clone();
+        cell.get_or_init(make).clone()
+    }
+
     /// The analysis of `g`: one already made from the same plane, or `make`'s.
     /// A twin that arrives while the first is still being described waits for
     /// it rather than describing it again. `make` takes no lock, and its
@@ -195,5 +334,97 @@ impl Planes {
         let key = (g.w, g.h, self.keys.hash_one(bytes));
         let cell = self.made.lock().unwrap().entry(key).or_default().clone();
         cell.get_or_init(make).clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grey PNG with texture at every scale, written to a fresh file.
+    fn picture(name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("img-fp-analysis-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let mut out = Vec::new();
+        {
+            let mut e = ::png::Encoder::new(&mut out, w, h);
+            e.set_color(::png::ColorType::Grayscale);
+            e.set_depth(::png::BitDepth::Eight);
+            let mut wr = e.write_header().unwrap();
+            let px: Vec<u8> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as f32, (i / w) as f32);
+                    let v = 128.0 + 50.0 * (x * 0.013).sin() * (y * 0.011).cos() + 40.0 * ((x * 0.09).sin() * (y * 0.07).sin()) + 25.0 * (((x as u32 / 23 + y as u32 / 17) % 3) as f32 - 1.0)
+                        + 12.0 * ((x * 0.61 + y * 0.37).sin());
+                    v.clamp(0.0, 255.0) as u8
+                })
+                .collect();
+            wr.write_image_data(&px).unwrap();
+        }
+        std::fs::write(&path, out).unwrap();
+        path
+    }
+
+    /// Each doubling of the working size the picture reaches, then the
+    /// picture itself where it stops between two; nothing for a picture the
+    /// working size already holds whole. A coarser detail's levels lead a
+    /// finer one's.
+    #[test]
+    fn finer_levels_are_doublings_then_the_picture() {
+        let fit = |size| Finer { size, whole: false };
+        let whole = |size| Finer { size, whole: true };
+        assert_eq!(finer_levels(4000, 3000, 512, 2048), vec![fit(1024), fit(2048)]);
+        assert_eq!(finer_levels(1500, 1000, 512, 2048), vec![fit(1024), whole(2048)], "1,500 is past 1024 x 1.06, short of 2048 x 1.06");
+        assert_eq!(finer_levels(700, 525, 512, 2048), vec![whole(1024)]);
+        assert_eq!(finer_levels(400, 300, 512, 2048), vec![], "held whole at 512");
+        assert_eq!(finer_levels(4000, 3000, 512, 512), vec![], "the default");
+        assert_eq!(finer_levels(4000, 3000, 256, 256), vec![], "--fast");
+        for (w, h) in [(4000, 3000), (1500, 1000), (700, 525), (5000, 900), (513, 600), (2048, 1536)] {
+            let all = finer_levels(w, h, 512, 2048);
+            assert!(all.starts_with(&finer_levels(w, h, 512, 1024)), "{w}x{h}");
+        }
+    }
+
+    fn same_features(a: &Features, b: &Features) -> bool {
+        let bits = |f: &Features| f.kps.iter().map(|k| [k.x, k.y, k.sigma, k.angle].map(f32::to_bits)).collect::<Vec<_>>();
+        (a.w, a.h) == (b.w, b.h) && bits(a) == bits(b) && a.desc[..] == b.desc[..]
+    }
+
+    /// An analysis at a finer detail is the default's analysis, then its
+    /// finer levels: the default's features, thumbnail and grid to the bit,
+    /// and at 2048 the 1024 analysis as its prefix. So a run at a coarser
+    /// detail, made apart, reads exactly what a finer one holds of it.
+    #[test]
+    fn a_finer_detail_holds_the_coarser_ones_analysis() {
+        let path = picture("p.png", 2400, 1800);
+        let p = sift::Params { max_features: crate::FEATURES, ..Default::default() };
+        let header = decode::probe(&path);
+        let at = |detail| analyse(&path, 512, detail, &p, header.as_ref(), &Planes::default()).0;
+        let (d512, d1024, d2048) = (at(512), at(1024), at(2048));
+        assert!(d512.feats.ends.is_empty() && d512.feats.len() > 100);
+        assert_eq!(d1024.feats.ends.len(), 2);
+        assert_eq!(d2048.feats.ends.len(), 3);
+        assert_eq!(d1024.feats.ends[0] as usize, d512.feats.len());
+        assert!(same_features(&d1024.feats.prefix(d1024.feats.ends[0] as usize), &d512.feats));
+        assert!(same_features(&d2048.feats.prefix(d2048.feats.ends[1] as usize), &d1024.feats));
+        assert!(d2048.feats.len() > d1024.feats.len() && d1024.feats.len() > d512.feats.len(), "each level adds keypoints");
+        for it in [&d1024, &d2048] {
+            assert_eq!(it.thumb.px[..], d512.thumb.px[..]);
+            assert_eq!(it.thumb.scale.to_bits(), d512.thumb.scale.to_bits());
+            assert_eq!(it.traits.grid, d512.traits.grid);
+            assert_eq!(it.dims, d512.dims);
+        }
+        // Every finer keypoint is finer than the default's finest octave,
+        // which starts at scale 1.6 of its plane, the frame.
+        assert!(d1024.feats.kps[d1024.feats.ends[0] as usize..].iter().all(|k| k.sigma < 1.6));
+        // A picture the default holds whole has no finer level: the default's
+        // analysis at any detail.
+        let small = picture("s.png", 480, 360);
+        let header = decode::probe(&small);
+        let a = analyse(&small, 512, 512, &p, header.as_ref(), &Planes::default()).0;
+        let b = analyse(&small, 512, 2048, &p, header.as_ref(), &Planes::default()).0;
+        assert!(b.feats.ends.is_empty() && same_features(&a.feats, &b.feats));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

@@ -337,7 +337,7 @@ impl Setup {
         g.attach(&exclude.root, 1, 2, 2, 1);
 
         g.attach(&section("What counts as a duplicate"), 0, 3, 3, 1);
-        for (r, opt) in [(4, &o::WORK_SIZE), (5, &o::MIN_CORRELATION)] {
+        for (r, opt) in [(4, &o::DETAIL), (5, &o::MIN_CORRELATION)] {
             g.attach(&label_of(opt, &w(opt)), 0, r, 1, 1);
             g.attach(&w(opt), 1, r, 1, 1);
             g.attach(&hint(hint_of(opt)), 2, r, 1, 1);

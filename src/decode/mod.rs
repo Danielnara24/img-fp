@@ -171,6 +171,37 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     Ok(Decoded { work, size, damaged: damaged.map(String::from), traits })
 }
 
+/// `decode_with` at each of `works` (`0`: the picture's own pixels), from
+/// one read of the file: the first plane is `decode_with`'s at that size, to
+/// the bit, and a cut-off file is trimmed and sized by it.
+pub fn decode_levels(path: &Path, works: &[usize], header: Option<&Probe>) -> Result<(Vec<Gray>, (u32, u32), Option<String>, Traits)> {
+    let (f, head, len) = timed!(0, sniff::open_if_image(path)?);
+    let est: u64 = header.map_or(0, |p| works.iter().map(|&w| budget::decode_estimate(p, w)).max().unwrap_or(0) + works.iter().skip(1).map(|&w| reduce::working_bytes(p.w as usize, p.h as usize, w)).sum::<u64>());
+    let _claim = budget::Claim::new(len + est);
+    let bytes = timed!(0, sniff::read_rest(f, head, len, path)?);
+    let kind = sniff::identify(&bytes, path).ok_or(Refused::NotAnImage)?;
+    let picture = open(kind, &bytes)?;
+    let mut sink = reduce::ReduceLevels::new(works);
+    let read = picture.read;
+    read(&mut sink)?;
+    let (mut planes, mut size, mut traits) = sink.finish()?;
+    let Facts { lossless, frames, exif, deep, profile, damaged } = (picture.facts)();
+    if damaged.is_some() {
+        let mut first = None;
+        for g in planes.iter_mut() {
+            let s = trim_fill(g, size);
+            first.get_or_insert(s);
+        }
+        size = first.unwrap_or(size);
+    }
+    traits.lossless = lossless;
+    traits.frames = frames;
+    traits.exif = exif;
+    traits.deep = deep;
+    traits.profile = profile;
+    Ok((planes, size, damaged.map(String::from), traits))
+}
+
 /// The decoders' fill for what a cut-off file does not hold: mid-grey, on the
 /// working plane's scale.
 const FILL: f32 = 128.0 / 255.0;

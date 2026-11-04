@@ -21,7 +21,7 @@ pub const FOLDERS: &str = "_Folders to scan";
 pub const ADD_FOLDER: &str = "_Add folder…";
 pub const REMOVE_FOLDER: &str = "_Remove";
 pub const RECURSIVE: &str = "Look _in subfolders";
-pub const WORK_SIZE: &str = "_Work size";
+pub const DETAIL: &str = "De_tail";
 pub const MIN_CORRELATION: &str = "Min pi_xel correlation";
 pub const MIRRORED: &str = "Loo_k for mirrored and inverted copies";
 pub const EXCLUDE: &str = "Folders to _exclude";
@@ -124,7 +124,7 @@ mod tests {
         let page = [SCAN, TAB_GENERAL, TAB_ADVANCED, SCAN_LOG, BACK_TO_RESULTS, DEFAULTS];
         let general = [
             FOLDERS, ADD_FOLDER, REMOVE_FOLDER, RECURSIVE, HIDDEN, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE,
-            WORK_SIZE, MIN_CORRELATION, MIRRORED,
+            DETAIL, MIN_CORRELATION, MIRRORED,
         ];
         let advanced = [
             THREADS, CANDIDATES, MIN_POINTS, MIN_OVERLAP, EXTENSIONS, SYMLINKS, REPORT, REPORT_CHOOSE, REPORT_FORMAT, USE_CACHE,

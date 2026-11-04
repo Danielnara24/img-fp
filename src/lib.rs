@@ -193,18 +193,22 @@ struct Args {
     #[arg(short = 't', long, value_name = "N", default_value_t = 0)]
     threads: usize,
 
-    /// Long side, in pixels, the images are analysed at. Larger images are
-    /// shrunk to it; small ones are enlarged, up to it, so their details can
-    /// be found. A picture much wider or taller than 4:3, such as a panorama
-    /// or a full-page screenshot, gets a longer side, so that it is analysed
-    /// with as many pixels as a 4:3 picture.
+    /// How fine a detail is looked for: 512, 1024, 2048 or 4096.
     ///
-    /// Higher finds more, especially small images inside larger ones such as
-    /// slides, screenshots and collages, but is slower and uses more memory.
-    /// 640 is a good choice when that matters. `0` does not shrink images at
-    /// all, which is much slower on large photos.
-    #[arg(long, value_name = "PX", default_value_t = 512)]
-    work_size: usize,
+    /// Each step up finds everything the step below finds, and more, mostly
+    /// small pictures inside large ones, such as a photo on a slide or in a
+    /// collage, and copies cut from a small part of a photo. It is slower,
+    /// but only for pictures large enough to show finer detail: on pictures
+    /// smaller than the step, a step up costs nothing and finds nothing new.
+    /// At 4096 a large picture takes much memory to analyse, so fewer are
+    /// analysed at once and the scan takes longer.
+    #[arg(long, value_name = "PX", default_value_t = 512, value_parser = parse_detail)]
+    detail: usize,
+
+    /// Analyse every picture at less detail: about twice as fast, and finds
+    /// less, mostly small and cropped copies.
+    #[arg(long, conflicts_with = "detail")]
+    fast: bool,
 
     /// Candidate matches checked per image.
     #[arg(short = 'k', long, value_name = "N", default_value_t = 150, value_parser = parse_candidates, hide = true)]
@@ -322,6 +326,20 @@ struct Args {
     man: bool,
 }
 
+impl Args {
+    /// The working size every picture is analysed at: the default's, or half
+    /// it under `--fast`.
+    fn work_size(&self) -> usize {
+        if self.fast { 256 } else { 512 }
+    }
+
+    /// The finest detail described: `--detail`, or the working size under
+    /// `--fast`, which describes nothing finer.
+    fn detail(&self) -> usize {
+        if self.fast { self.work_size() } else { self.detail.max(self.work_size()) }
+    }
+}
+
 // ---------------------------------------------------------------- arguments
 //
 // The thresholds are refused outside the range they are measured on. An
@@ -360,6 +378,15 @@ fn aligned_points(args: &Args) -> u32 {
 }
 
 /// `-k`: at least one, or nothing past the byte-identical pass is compared.
+/// `--detail`: a working size the analysis can describe finer levels at,
+/// each a doubling of the default's (`analysis::finer_levels`).
+fn parse_detail(s: &str) -> std::result::Result<usize, String> {
+    match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
+        v @ (512 | 1024 | 2048 | 4096) => Ok(v),
+        _ => Err("must be 512, 1024, 2048 or 4096".into()),
+    }
+}
+
 fn parse_candidates(s: &str) -> std::result::Result<usize, String> {
     match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
         0 => Err("must be at least 1".into()),
@@ -1246,13 +1273,26 @@ mod tests {
         let ok = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).is_ok();
         assert!(ok(&[]));
         for good in [&["--min-frame-overlap", "0"][..], &["--min-frame-overlap", "1"], &["--min-pixel-correlation", "0.5"],
-            &["-k", "1"], &["--min-aligned-points", "0"], &["--min-aligned-points", "2"], &["--work-size", "0"], &["--work-size", "1"], &["--work-size", "4000"]] {
+            &["-k", "1"], &["--min-aligned-points", "0"], &["--min-aligned-points", "2"], &["--detail", "1024"], &["--detail", "2048"], &["--detail", "4096"], &["--fast"]] {
             assert!(ok(good), "{good:?}");
         }
         for bad in [&["--min-frame-overlap", "7"][..], &["--min-frame-overlap", "NaN"], &["--min-pixel-correlation=-3"],
-            &["--min-pixel-correlation", "1.01"], &["-k", "0"]] {
+            &["--min-pixel-correlation", "1.01"], &["-k", "0"], &["--detail", "640"], &["--detail", "0"], &["--detail", "8192"], &["--work-size", "512"],
+            &["--fast", "--detail", "1024"]] {
             assert!(!ok(bad), "{bad:?}");
         }
+    }
+
+    /// `--fast` analyses at half the default's size and describes nothing
+    /// finer; `--detail` describes up to its size over the default's.
+    #[test]
+    fn detail_and_fast_set_the_analysis() {
+        let args = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
+        let at = |a: Args| (a.work_size(), a.detail());
+        assert_eq!(at(args(&[])), (512, 512));
+        assert_eq!(at(args(&["--detail", "2048"])), (512, 2048));
+        assert_eq!(at(args(&["--detail", "4096"])), (512, 4096));
+        assert_eq!(at(args(&["--fast"])), (256, 256));
     }
 
     /// `--last` rewrites a kept scan: it takes the options that say how,
@@ -1267,14 +1307,14 @@ mod tests {
             assert!(ok(good), "{good:?}");
         }
         for bad in [&["."][..], &["--from-file", "f"], &["--against", "/a"], &["-r"], &["-e", "/x"], &["--follow-symlinks"], &["--hidden"],
-            &["-x", "png"], &["--work-size", "640"], &["-k", "20"], &["--min-aligned-points", "5"], &["--min-frame-overlap", "0.5"],
+            &["-x", "png"], &["--detail", "1024"], &["--fast"], &["-k", "20"], &["--min-aligned-points", "5"], &["--min-frame-overlap", "0.5"],
             &["--min-pixel-correlation", "0.5"], &["--skip-mirrored"], &["--dump", "d.csv"], &["--no-cache"], &["--clear-cache"],
             &["--prune-cache"], &["--no-last"]] {
             let e = parse(["img-fp", "--last"].iter().chain(bad)).err().unwrap_or_else(|| panic!("{bad:?} accepted"));
             assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict, "{bad:?}");
             assert!(e.to_string().contains("'--last' cannot be used with"), "{e}");
         }
-        assert!(parse(["img-fp", "--work-size", "640", "."]).is_ok(), "a default given is only refused beside --last");
+        assert!(parse(["img-fp", "--detail", "512", "."]).is_ok(), "a default given is only refused beside --last");
     }
 
     /// In a build that cannot assume AVX2, the two copies of every dispatched

@@ -478,11 +478,20 @@ fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
         out.extend_from_slice(&(z.len() as u64).to_le_bytes());
         out.extend_from_slice(&z);
     }
+    // Where each level ends, after the streams, for an analysis at a finer
+    // `--detail` alone: a record at the default ends with the streams, as it
+    // always did, and only records of other settings hold this.
+    if !f.ends.is_empty() {
+        out.extend_from_slice(&(f.ends.len() as u32).to_le_bytes());
+        for e in &f.ends {
+            out.extend_from_slice(&e.to_le_bytes());
+        }
+    }
     Ok(out)
 }
 
 /// The inverse, given the shape the record's header already carried.
-fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec<u8>, Vec<u8>)> {
+fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec<u8>, Vec<u8>, Vec<u32>)> {
     let (w, h) = (tw as usize, th as usize);
     let mut at = 0;
     let mut stream = |want: usize| -> Result<Vec<u8>> {
@@ -507,6 +516,24 @@ fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec
     let planes = stream(n * FIELDS * 4)?;
     let desc = stream(n * DESC_LEN)?;
     let resid = stream(w * h)?;
+    let mut ends = Vec::new();
+    if at < blob.len() {
+        let word = |i: usize| -> Result<u32> {
+            let b = blob.get(i..i + 4).ok_or_else(|| anyhow::anyhow!("record truncated"))?;
+            Ok(u32::from_le_bytes(b.try_into().unwrap()))
+        };
+        let k = word(at)? as usize;
+        if k > 8 {
+            bail!("a record's levels are damaged");
+        }
+        for i in 0..k {
+            let e = word(at + 4 + 4 * i)?;
+            if e as usize > n || ends.last().is_some_and(|&l| e < l) {
+                bail!("a record's levels are damaged");
+            }
+            ends.push(e);
+        }
+    }
 
     let mut kps = vec![Keypoint { x: 0.0, y: 0.0, sigma: 0.0, angle: 0.0 }; n];
     let mut bits = vec![[0u8; 4]; n];
@@ -541,7 +568,7 @@ fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec
         }
         prev.copy_from_slice(dst);
     }
-    Ok((kps, desc, px))
+    Ok((kps, desc, px, ends))
 }
 
 /// Writes the flat format a field at a time: into a record's bytes, and into
@@ -2256,13 +2283,13 @@ fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mu
             if !walked(&h.path, h.key) {
                 return Ok((h.path.clone(), (h.key, None, *span)));
             }
-            let (kps, desc, px) = unpack(blob, h.n, h.tw as u16, h.th as u16)?;
+            let (kps, desc, px, ends) = unpack(blob, h.n, h.tw as u16, h.th as u16)?;
             Ok((
                 h.path.clone(),
                 (
                     h.key,
                     Some(Record {
-                        feats: Features { w: h.w, h: h.h, kps: kps.into(), desc: desc.into() }.spilled(),
+                        feats: Features { w: h.w, h: h.h, kps: kps.into(), desc: desc.into(), ends }.spilled(),
                         thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px).spilled(),
                         dims: h.dims,
                         traits: h.traits,
@@ -2581,11 +2608,11 @@ mod tests {
             // wrong at the edges.
             let desc: Vec<u8> = (0..n * DESC_LEN).map(|i| ((i * 37 + i / 128) % 256) as u8).collect();
             let px: Vec<u8> = (0..w * h).map(|i| ((i * 91) % 256) as u8).collect();
-            let feats = Features { w: 640, h: 480, kps: kps.clone().into(), desc: desc.clone().into() };
+            let feats = Features { w: 640, h: 480, kps: kps.clone().into(), desc: desc.clone().into(), ends: Vec::new() };
             let thumb = Thumb::new(w as u16, h as u16, 0.25, px);
 
             let blob = pack(&feats, &thumb).unwrap();
-            let (kps, desc, px) = unpack(&blob, n, w as u16, h as u16).unwrap();
+            let (kps, desc, px, _) = unpack(&blob, n, w as u16, h as u16).unwrap();
             assert_eq!(desc, feats.desc);
             assert_eq!(px, thumb.px);
             assert_eq!(kps.len(), feats.kps.len());
@@ -2596,6 +2623,28 @@ mod tests {
                 assert_eq!(got.angle.to_bits(), want.angle.to_bits());
             }
         }
+    }
+
+    /// An analysis at a finer `--detail` keeps where its levels end, after the
+    /// streams; one at the default packs to exactly what it always did, so a
+    /// build that knows nothing of levels reads it as before.
+    #[test]
+    fn a_records_levels_come_back_and_a_default_record_is_unchanged() {
+        let n = 9;
+        let kps: Vec<Keypoint> = (0..n).map(|i| Keypoint { x: i as f32, y: 2.0, sigma: 1.6, angle: 10.0 }).collect();
+        let desc: Vec<u8> = (0..n * DESC_LEN).map(|i| (i % 251) as u8).collect();
+        let thumb = Thumb::new(4, 3, 0.25, vec![9; 12]);
+        let plain = Features { w: 64, h: 48, kps: kps.clone().into(), desc: desc.clone().into(), ends: Vec::new() };
+        let finer = Features { ends: vec![5, 7, 9], ..plain.clone() };
+        let (a, b) = (pack(&plain, &thumb).unwrap(), pack(&finer, &thumb).unwrap());
+        assert_eq!(&b[..a.len()], &a[..], "the levels follow the streams");
+        assert_eq!(b.len(), a.len() + 4 * 4);
+        assert_eq!(unpack(&a, n, 4, 3).unwrap().3, Vec::<u32>::new());
+        assert_eq!(unpack(&b, n, 4, 3).unwrap().3, vec![5, 7, 9]);
+        let bad = Features { ends: vec![5, 3], ..plain.clone() };
+        assert!(unpack(&pack(&bad, &thumb).unwrap(), n, 4, 3).is_err(), "levels that end before the one below");
+        let over = Features { ends: vec![5, 10], ..plain };
+        assert!(unpack(&pack(&over, &thumb).unwrap(), n, 4, 3).is_err(), "a level past the keypoints");
     }
 
     /// A truncated record is a damaged cache, not a panic and not a silently
@@ -2717,7 +2766,7 @@ mod tests {
             .map(|i| Keypoint { x: i as f32, y: seed as f32, sigma: 1.6, angle: 0.0 })
             .collect();
         let desc = (0..n * DESC_LEN).map(|i| (i as u8).wrapping_add(seed)).collect();
-        (Features { w: 64, h: 48, kps, desc }, Thumb::new(8, 6, 0.125, vec![seed; 48]))
+        (Features { w: 64, h: 48, kps, desc, ends: Vec::new() }, Thumb::new(8, 6, 0.125, vec![seed; 48]))
     }
 
     /// Records the file holds at other settings, as `read` found them.

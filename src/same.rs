@@ -726,6 +726,7 @@ mod tests {
             h: 48,
             kps: vec![sift::Keypoint { x: 1.0, y: 2.0, sigma: 1.6, angle: seed as f32 }].into(),
             desc: vec![seed; DESC_LEN].into(),
+            ends: Vec::new(),
         }
     }
 

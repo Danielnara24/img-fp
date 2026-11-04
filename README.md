@@ -122,7 +122,10 @@ img-fp ~/Pictures ~/Downloads -e ~/Downloads/keep -r
 img-fp ~/Pictures -r -o dupes.csv
 
 # Find more images embedded in slides, screenshots and collages, at some cost in speed
-img-fp ~/Pictures -r --work-size 640
+img-fp ~/Pictures -r --detail 1024
+
+# A quicker, less thorough scan
+img-fp ~/Pictures -r --fast
 ```
 
 By default the scan is **not** recursive. Add `-r` to include subfolders. The
@@ -447,7 +450,8 @@ to stderr.
 | `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken only by those two forms | every supported format |
 | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
-| `--work-size <PX>` | Long side, in pixels, the images are analysed at. Larger images are shrunk to it and small ones enlarged up to it; a picture much wider or taller than 4:3 gets a longer side, for as many pixels as a 4:3 one. Higher finds more embedded images but is slower and uses more memory. `0` does not shrink images at all | `512` |
+| `--detail <PX>` | How fine a detail is looked for: `512`, `1024`, `2048` or `4096`. Each step up finds everything the step below finds, and more, mostly small pictures inside large ones and copies cut from a small part of a photo. It is slower, but only for pictures large enough to show the finer detail. At `4096` a large picture takes much memory to analyse, so fewer are analysed at once and the scan takes longer | `512` |
+| `--fast` | Analyse every picture at less detail: about twice as fast, and finds less, mostly small and cropped copies | off |
 | `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3. An image that is all of the other, only resized, needs 3 if every part of it agrees | `10` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
 | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.7` |
@@ -495,7 +499,7 @@ Byte-identical copies of them are still found.
 
 The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC20.bin`
 (or `~/.cache/img-fp/analysis-IMGFPC20.bin`), so later runs over the same images are much
-faster. One cache serves every folder you scan and every `--work-size` you use,
+faster. One cache serves every folder you scan and every `--detail` you use,
 and entries for deleted files are dropped automatically. Images in a folder
 that is renamed or moved, or on a drive mounted at another place, are
 analysed again.

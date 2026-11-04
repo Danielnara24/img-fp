@@ -1313,6 +1313,9 @@ pub struct WordList {
 const KP_BITS: u32 = 11;
 const KP_MASK: u32 = (1 << KP_BITS) - 1;
 
+/// The most keypoints an image may have for its entries to number them.
+pub(crate) const MOST_KEYPOINTS: usize = 1 << KP_BITS;
+
 impl WordList {
     /// What one entry costs.
     pub const BYTES_PER_ENTRY: usize = std::mem::size_of::<u32>();
@@ -1332,6 +1335,15 @@ impl WordList {
 
     pub fn len(&self) -> usize {
         self.e.len()
+    }
+
+    /// This list and `more`'s entries, in order.
+    pub fn joined(&self, more: &WordList) -> WordList {
+        let mut e = Vec::with_capacity(self.e.len() + more.e.len());
+        e.extend_from_slice(&self.e);
+        e.extend_from_slice(&more.e);
+        e.sort_unstable();
+        WordList { e }
     }
 
     pub fn is_empty(&self) -> bool {

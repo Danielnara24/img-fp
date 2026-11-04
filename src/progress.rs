@@ -249,9 +249,13 @@ pub struct Known {
     pub cache_bytes: u64,
     /// Whether the cache will be rewritten at the end of the analysis.
     pub cache_write: bool,
-    /// `--work-size` and `-k`.
+    /// The working size and `-k`.
     pub work_size: usize,
     pub candidates: usize,
+    /// How many times the matching runs: once, and once more for each
+    /// doubling a finer `--detail` adds (`pipeline::match_by_detail`). 0 is
+    /// taken as 1.
+    pub steps: usize,
     /// How many files the cache and the exact pass leave to be described.
     pub to_describe: Option<usize>,
     /// The files the matching stages are handed, and their descriptors.
@@ -272,6 +276,10 @@ pub struct Known {
 impl Known {
     fn images(&self) -> f64 {
         self.images.unwrap_or(self.files) as f64
+    }
+
+    fn steps(&self) -> f64 {
+        self.steps.max(1) as f64
     }
 
     fn descriptors(&self) -> f64 {
@@ -311,13 +319,14 @@ impl Known {
                     0.0
                 }
             }
-            Stage::Vocabulary => (crate::index::VocabParams::for_corpus(desc as usize).sample as f64).min(desc),
-            Stage::Quantise | Stage::InvertedFile | Stage::Candidates => desc,
-            Stage::Verify => images * (self.candidates as f64).min(images - 1.0).max(0.0),
-            Stage::Variants => self.ask_again().0,
+            Stage::Vocabulary => self.steps() * (crate::index::VocabParams::for_corpus(desc as usize).sample as f64).min(desc),
+            Stage::Quantise | Stage::InvertedFile | Stage::Candidates => self.steps() * desc,
+            Stage::Verify => self.steps() * images * (self.candidates as f64).min(images - 1.0).max(0.0),
+            Stage::Variants => self.steps() * self.ask_again().0,
             // Nothing bounds the anchors before the matching has counted
             // them: none is taken for granted.
-            Stage::Propagate | Stage::Assemble => images + self.anchors.unwrap_or(0) as f64,
+            Stage::Propagate => self.steps() * (images + self.anchors.unwrap_or(0) as f64),
+            Stage::Assemble => images + self.anchors.unwrap_or(0) as f64,
         }
     }
 }

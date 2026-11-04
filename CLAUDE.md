@@ -1301,6 +1301,90 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     -0.4, DISC21 µAP 64.9 -> 63.6), so it buys the knob by sacrificing the
     default. Scaffolding removed. Next: `--work-size` goes, and a knob
     whose higher steps cost nothing where they find nothing replaces it.
+- **`--detail`** (2026-11-01/03, after 0.76.0, unreleased; replaces
+  `--work-size`; scripts and runs in `~/Documents/DISC21/lv`, batches
+  13-22). The user's brief: going up the knob, no step costs more than
+  today's `--work-size` at that size for what it finds, a step that finds
+  nothing costs nothing, true pairs are only added, the default may change
+  (it did not: option C, user's choice). As built:
+  - **Default**: today's 512 exactly (`analyse_plain`, `match_all`).
+    `--fast` is today's `--work-size 256`, outside the knob (a coarser base
+    is the ladder, which cost the default). Both byte-identical to HEAD
+    (8de63d5) but the report's `config` (`detail`, `fast` for `work_size`):
+    IMGS-ALL and IMGS-ALL2 cached, IMGS-ALL2 `--dump`, IMGS-AGAINST
+    `--against`, IMGS `--fast` against `--work-size 256` (`DISC21/final`).
+  - **Analysis** (`analysis::finer_levels`, `features_at`): the 512
+    analysis, then each doubling up to the detail the picture reaches (the
+    picture itself where it stops between two), from the same decode
+    (`reduce::ReduceLevels`), each adding only keypoints finer than the
+    level below finds, up to `FEATURES / 4` a doubling (measured on the
+    constant). The levels' ends are kept (`Features::ends`): a coarser
+    detail's analysis is a prefix of a finer one's.
+  - **Matching** (`pipeline::match_by_detail`): step 512 is the default's
+    matching; each finer step adds the new descriptors' words to step 512's
+    vocabulary (`index_adding`; retrained, 42 of the step's 96 s for recall
+    +0.05), verifies only pairs holding a file with a new level
+    (`Pass::fresh`), with the scale bound its planes allow (`level_bound`),
+    takes earlier steps' verdicts as they stand (`Pass::known`), ranks each
+    file less the pairs already decided in windows of `-k` / 15 (10), and
+    asks no second look of its own. Claims: every step's, finest first,
+    less a finer step's joins of two families the default holds apart (the
+    veto: precision 98.72 -> 98.82%, cross-family 13,653 -> 12,420, recall
+    96.46 -> 96.42%). A step no file reaches is skipped.
+  - **Cost, cold ABBA against today's `--work-size` at the same size**
+    (CPU-s; F1 / precision / recall):
+    | | today | `--detail` | today | `--detail` |
+    |---|---|---|---|---|
+    | IMGS-ALL 1024 | 5,586 / 5,871 | **5,346 / 5,603** | 0.9745 / 98.86 / 96.07 | **0.9753** / 98.82 / **96.27** |
+    | IMGS-ALL2 1024 | 4,326 / 4,352 | **3,929 / 4,082** | 0.9316 / 98.68 / 88.22 | **0.9415** / 98.62 / **90.06** |
+    | IMGS-ALL 2048 | 7,217 / 7,180 | **5,380 / 5,461** | 0.9743 / 98.87 / 96.03 | **0.9757** / 98.82 / **96.36** |
+    | IMGS-ALL2 2048 | 4,820 / 5,670 | **4,086 / 4,138** | 0.9302 / 98.70 / 87.96 | **0.9421** / 98.61 / **90.19** |
+    Wall about level (2048: 17:51 / 17:12 against 18:10 / 17:50). Default
+    512 for reference: 0.9739 / 98.85 / 95.98, 0.9390 / 98.63 / 89.60.
+    Merges past 300: IMGS-ALL the same four; IMGS-ALL2 three either way
+    (bird1/2 1,551 -> 5,740, Floriana1/2 out, Floriana3/4 in).
+  - **Containment**: true pairs lost 512 -> 1024 -> 2048: **0, 0** on
+    IMGS-ALL (+4,582, +1,174) and IMGS-ALL2 (+6,464, +1,863).
+  - **DISC21 proxy** (5,529 queries, 10,529 references, bar 0.5 / 0.7
+    µAP; one cold run each): default 73.0 / 60.6 (1,469 CPU-s), `--detail
+    1024` 73.4 / 60.9 (2,595), today's `--work-size 1024` 67.4 / 58.2
+    (3,198). Its pictures stop at 1024 px: 2048 and 4096 give the 1024
+    report to the byte at its cost (2,369 / 2,393, 2,420 / 2,287).
+  - **DISC21 dev, whole, at `--detail 1024`** (2026-11-03,
+    `~/Documents/DISC21/d1k`, as the 512 run: 20 shards, bar 0.5,
+    `--dump`; `d1k/score.py`, `d1k/contain.py`). Against the 512 shards
+    of 2026-10-29/30 (0.76.0, a dumping run, so before the `--dump` fix):
+    µAP at 0.5 / 0.6 / 0.7 **65.07 / 64.53 / 59.85** against 65.31 / 64.72
+    / 59.94, true 7,123 against 7,132, false 10,131 against 10,205, recall
+    at 90% precision 51.5 against 51.7%; **56.7 CPU-h against 33.0 (+72%)**,
+    wall 12.5 h against 9.1, peak RSS 4.1 / 4.3 GB. A shard with the
+    queries cached: 9,900-10,700 CPU-s against 6,000-6,300. Nearly every
+    reference is ~1024 px, so every file gets the level and is verified
+    again: on DISC21 1024 buys nothing for its cost. "Lost" 36 true pairs
+    (16 shards), none verified at all in the 1024 run: they are the old
+    build's. HEAD's default (8de63d5) on shard 5 misses the same 3 (375
+    true against 378; 6,265 CPU-s, 21:22), and 1024 states exactly its 375
+    (0 lost, 0 added; `head5/`). Shards 0 + 1: 512 65.03, 1024 65.32 (0
+    lost, +4); the two as one 1024 run of 150,000 files 64.80 (682 true,
+    749 false), 25,177 CPU-s, 1:07 wall (today's `--work-size 1024` in
+    one run: 56.0, 30,400 CPU-s, 1:20).
+  - **4096** (kept, user's decision: it may help on corpora of large
+    pictures): 2048 -> 4096 loses 0, adds 188 / 393
+    true pairs (F1 0.9758, 0.9423), CPU +1.5% / +4%, peak RSS level, but
+    wall 17:00 -> 27:50 and 13:15 -> 22:15: a 4096 plane is ~0.7 GB to
+    describe, so the decode budget runs few at once (analysis 849 -> 1,439
+    s on IMGS-ALL at about the same CPU). 8192 would be held to 2,047
+    features (`MOST_KEYPOINTS`), 16384 needs ~11 GB a plane.
+  - **Tried and dropped on the way**: the finer step's own second look (66
+    CPU-s cached on IMGS-ALL for recall +0.02); wider finer windows, cached
+    CPU-s / recall with decided pairs kept 75: 1,289 / 96.36, 40: 1,239 /
+    96.34, without the second look 75 / 40 / 20 / 10: 1,227 / 1,168 / 1,092
+    / 1,052 (96.34 / 96.32 / 96.24 / 96.20), decided pairs left out 20:
+    1,099 / 96.31, 10: 1,045 / 96.27 (kept; today's 1024 1,031-1,053);
+    propagation only in changed clusters (29,992 of 33,119 files are in
+    one at 1024: nothing saved); one grey row for all levels (kept, saved
+    nothing measurable: the log's "cpu: decode" is wall per thread,
+    waiting on the decode budget included, not CPU).
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed after 0.76.0,
   unreleased): `-k` counting rejections credited a window with every
   verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
@@ -1355,10 +1439,11 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   keep rule unchanged (0 lost, 297 / 304, 304 / 304; `pairs.py` loss 24,
   REVIEW +25). It does not stop IMGS5's merges (11 at 0.6-0.75, 10 at 0.8):
   those go through clean anchors, which agree at 0.9 a block.
-- Default `--work-size` 512, one step below the knee at 640. 640 buys ~0.5
-  points of IMGS-ALL recall (mostly containment: `embed_tiny`,
-  `contact_sheet`) for ~22% more CPU on photographs. `--work-size` is the
-  only knob tied to the clock; nothing is analysed above it.
+- The working size is 512 (`Args::work_size`; 256 under `--fast`), one
+  step below the knee at 640. `--work-size` is gone (see *`--detail`*
+  above): `--detail 1024 | 2048 | 4096` adds finer levels above the analysis at
+  512 and matches them in steps, stating everything the default states;
+  `--fast` is a separate, cheaper analysis outside that knob.
 - Precision: on IMGS every false pair is a rearrangement trap. On the
   near-miss corpora stray single files join a sibling photograph's family
   (the clean-anchor rule's lone-file allowance). **Watch merges, not pairs.**
@@ -1654,7 +1739,7 @@ its console notes, under a `Fingerprint` of everything the matching reads
 (the build, `IMGFP_BUILD`: a hash `build.rs` makes of every source file,
 the manifest, the lock file, the compiler, the target, its features and the
 flags, which `img-fp` and `img-fp-gui` of one build share; the bars, `-k`,
-`--skip-mirrored`, the work size, and each file's path, key, read state and
+`--skip-mirrored`, the work size, the detail, and each file's path, key, read state and
 side). A run with the same fingerprint takes it after the analysis and goes
 on to the assembly, which is worked out as always (groups, keep rule,
 report with its `pairs`); not with `--dump`, nor a file with no key. IMGS3

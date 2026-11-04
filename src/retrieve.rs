@@ -23,12 +23,24 @@ simd::dispatched! {
     pub(crate) fn quantise(vocab: &Vocabulary, f: &Features) -> WordList => quantise_any;
 }
 
+simd::dispatched! {
+    /// `quantise` of the descriptors from `from` on, each entry its own
+    /// keypoint's index: a finer level's words.
+    pub(crate) fn quantise_from(vocab: &Vocabulary, f: &Features, from: usize) -> WordList => quantise_from_any;
+}
+
 /// `quantise`, for whichever copy `dispatched!` chose.
 #[cfg_attr(dispatch, inline(always))]
 fn quantise_any(vocab: &Vocabulary, f: &Features) -> WordList {
+    quantise_from_any(vocab, f, 0)
+}
+
+/// `quantise_from`, for whichever copy `dispatched!` chose.
+#[cfg_attr(dispatch, inline(always))]
+fn quantise_from_any(vocab: &Vocabulary, f: &Features, from: usize) -> WordList {
     let mut buf = Vec::with_capacity(4);
-    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(f.len() * 2);
-    for i in 0..f.len() {
+    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(f.len().saturating_sub(from) * 2);
+    for i in from..f.len() {
         vocab.quantise(f.d(i), &mut buf);
         for &w in buf.iter() {
             pairs.push((w, i as u32));
@@ -59,6 +71,9 @@ pub(crate) struct Index<'a> {
     /// when they weigh less than the vocabulary they would keep alive
     /// (`turn`): by asker, in the order the askers were given.
     turned: Option<Vec<[WordList; 3]>>,
+    /// Whether the vocabulary is held past the second look, for a finer
+    /// step to quantise its new descriptors with (`into_parts`).
+    keep_vocab: bool,
 }
 
 /// One worker's scratch for `Index::candidates`.
@@ -75,7 +90,18 @@ impl<'a> Index<'a> {
         let n_live = vocab.n_live_words();
         let postings = timed!(13, InvertedFile::build(&lists, n_live));
         let mass = both_ways.then(|| lists.iter().map(|wl| postings.mass(wl)).collect());
-        Index { items, matched, vocab: Some(vocab), n_live, lists, mass, postings: Some(postings), turned: None }
+        Index { items, matched, vocab: Some(vocab), n_live, lists, mass, postings: Some(postings), turned: None, keep_vocab: false }
+    }
+
+    /// The vocabulary held past the second look (`into_parts`).
+    pub(crate) fn keep_vocab(&mut self) {
+        self.keep_vocab = true;
+    }
+
+    /// The vocabulary and the word lists, for a finer step to add its new
+    /// descriptors' words to (`keep_vocab`).
+    pub(crate) fn into_parts(self) -> (Vocabulary, Vec<WordList>) {
+        (self.vocab.expect("the vocabulary was kept"), self.lists)
     }
 
     pub(crate) fn lists(&self) -> &[WordList] {
@@ -145,7 +171,7 @@ impl<'a> Index<'a> {
     pub(crate) fn turn(&mut self, askers: &[usize]) {
         let vocab = self.vocab.as_ref().expect("the vocabulary is held until the second look");
         let ahead_bytes = askers.iter().map(|&i| self.lists[i].len()).sum::<usize>() * 3 * WordList::BYTES_PER_ENTRY;
-        if ahead_bytes < vocab.heap_bytes() {
+        if ahead_bytes < vocab.heap_bytes() && !self.keep_vocab {
             let items = self.items;
             self.turned = Some(
                 askers

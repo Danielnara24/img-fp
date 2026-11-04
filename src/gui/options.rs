@@ -88,18 +88,25 @@ const fn number(min: f64, max: fn() -> f64, step: f64, digits: u32) -> Kind {
 
 const CHECK: Kind = Kind::Check { inverted: false };
 
-// Spin ranges, each what a value can mean. The work size goes up to JPEG's
-// largest side, 65,535. The command line has no limit, and this one used to
-// be 4,096, which turned away a size the command line takes for nothing; past
-// the largest picture in a folder any size means what 0 (full size) means.
+// Spin ranges, each what a value can mean.
 // Candidates go up to the most images the index can name, aligned points to
 // the most keypoints an image is described by (a bar above it matches
 // nothing), threads to this machine's cores (the scan runs no more: see
 // `img_fp::threads`). They were 2,000, 200 and 1,024, from nothing.
 
-pub static WORK_SIZE: Opt = Opt {
-    tip: Some("Pixels on the long side each image is analysed at. Higher finds more, especially small pictures inside larger ones such as slides and collages, but is slower. 640 is a good choice when that matters. 0 does not shrink images at all, which is much slower on large photos."),
-    ..plain("work_size", Some("work_size"), number(0.0, || 65535.0, 32.0, 0), l::WORK_SIZE)
+/// `--detail`, and `--fast` below it: one choice, passed by hand
+/// (`Settings::argv`), since Fast is a flag of its own.
+pub static DETAIL: Opt = Opt {
+    default: Some("Normal"),
+    tip: Some("How fine a detail is looked for. Each step up finds everything the step below finds, and more, mostly small \
+               pictures inside large ones and copies cut from a small part of a photo; it is slower, but only for pictures \
+               large enough to show the finer detail. Fast finds less, at about twice the speed."),
+    ..plain(
+        "detail",
+        None,
+        Kind::Choice(&[("Fast", Some("fast"), "Fast"), ("Normal", None, "Normal"), ("Fine", Some("1024"), "Fine"), ("Finer", Some("2048"), "Finer"), ("Finest", Some("4096"), "Finest")]),
+        l::DETAIL,
+    )
 };
 pub static CANDIDATES: Opt = Opt {
     tip: Some("Possible matches checked for each image."),
@@ -175,7 +182,7 @@ pub static LOG: Opt = Opt {
 
 /// Every option, in the order the command line passes them.
 pub static ALL: [&Opt; 17] = [
-    &WORK_SIZE, &CANDIDATES, &MIN_POINTS, &MIN_OVERLAP, &MIN_CORRELATION, &THREADS, &EXTENSIONS,
+    &DETAIL, &CANDIDATES, &MIN_POINTS, &MIN_OVERLAP, &MIN_CORRELATION, &THREADS, &EXTENSIONS,
     &RECURSIVE, &SYMLINKS, &HIDDEN, &MIRRORED,
     &REPORT, &REPORT_FORMAT, &USE_CACHE, &CLEAR_CACHE, &PRUNE_CACHE, &LOG,
 ];
@@ -274,7 +281,7 @@ mod tests {
 
     /// img-fp's options the window passes by hand (`Settings::argv`): the paths,
     /// and what the switches above stand for.
-    const BY_HAND: [&str; 9] = ["roots", "exclude", "output", "format", "no_cache", "cache", "clear_cache", "prune_cache", "log_file"];
+    const BY_HAND: [&str; 11] = ["roots", "exclude", "output", "format", "no_cache", "cache", "clear_cache", "prune_cache", "log_file", "detail", "fast"];
 
     /// img-fp's options the window never passes: another kind of run, an output
     /// it has no place for, or what its own worker decides.

@@ -66,6 +66,11 @@ pub struct Verdict {
     /// See `Standing::Clean`.
     pub blk_min: f32,
     pub ncc: f32,
+    /// The least and most a transform may scale length by in any direction:
+    /// `MAX_SCALE` either way at the default, and as far again as a finer
+    /// `--detail` gives the pictures pixels (`pipeline::level_bound`).
+    pub lo: f32,
+    pub hi: f32,
 }
 
 impl Default for Verdict {
@@ -85,6 +90,8 @@ impl Default for Verdict {
             blk_n: 0,
             blk_min: 0.0,
             ncc: 0.0,
+            lo: 1.0 / MAX_SCALE,
+            hi: MAX_SCALE,
         }
     }
 }
@@ -151,7 +158,7 @@ pub const CLEAN_WORST_BLOCK: f32 = 0.9;
 /// inverted, 61 aligned points, overlap 1.00, correlation 0.775: the
 /// sliver's blocks are mostly flat and abstain. Four such pairs in that
 /// scan, the next most unequal transform 6:1 and inside the bound.
-const MAX_SCALE: f32 = 16.0;
+pub const MAX_SCALE: f32 = 16.0;
 
 /// How much easier it is to be believed *inside* a cluster than to create one
 /// (`Standing::Corroborating`): the correlation bar, this much lower.
@@ -245,8 +252,8 @@ impl Policy {
     fn frames(&self, v: &Verdict) -> bool {
         let (least, most) = axis_scales(&v.m);
         v.scale.is_finite()
-            && least >= 1.0 / MAX_SCALE
-            && most <= MAX_SCALE
+            && least >= v.lo
+            && most <= v.hi
             && v.ov_a.max(v.ov_b) >= self.min_frame_overlap
     }
 
@@ -333,6 +340,8 @@ impl Verdict {
             ov_b: self.ov_a,
             scale: linear_scale(&m),
             rot_deg: m[3].atan2(m[0]).to_degrees(),
+            lo: 1.0 / self.hi,
+            hi: 1.0 / self.lo,
             ..self.clone()
         })
     }
@@ -2307,7 +2316,7 @@ mod bench {
                 desc.push(rng.byte());
             }
         }
-        Features { w, h, kps: kps.into(), desc: desc.into() }
+        Features { w, h, kps: kps.into(), desc: desc.into(), ends: Vec::new() }
     }
 
     fn ms(mut f: impl FnMut()) -> f64 {
@@ -2473,6 +2482,18 @@ mod tests {
         assert!(at(Verdict { blk_min: 0.85, ..v }) < Standing::Anchor, "one block disagreeing");
         assert!(at(Verdict { n_in: 2, ..v }) < Standing::Anchor);
         assert_eq!(at(Verdict { n_in: 10, framed: false, blk_min: 0.5, ..v }), Standing::Anchor, "the bar met is the bar as it was");
+    }
+
+    /// Reversed, a verdict's scale bounds are the other way round: what A
+    /// may be of B is what B may be of A, inverted.
+    #[test]
+    fn a_reversed_verdict_bounds_the_other_way() {
+        let m = [0.25, 0.0, 3.0, 0.0, 0.25, 5.0];
+        let v = Verdict { m, scale: linear_scale(&m), lo: 1.0 / 32.0, hi: 16.0, ..Default::default() };
+        let r = v.reversed().unwrap();
+        assert_eq!((r.lo, r.hi), (1.0 / 16.0, 32.0));
+        let (a, b) = (axis_scales(&v.m), axis_scales(&r.m));
+        assert!((a.0 * b.1 - 1.0).abs() < 1e-5 && (a.1 * b.0 - 1.0).abs() < 1e-5);
     }
 
     /// A transform's two directions are its singular values, however it is
@@ -2700,7 +2721,7 @@ mod tests {
                 kps.push(Keypoint { x: unit() * w as f32, y: unit() * h as f32, sigma: 2.0, angle: 0.0 });
                 desc.extend((0..DESC_LEN).map(|_| (unit() * 256.0) as u8));
             }
-            let a = Features { w, h, kps: kps.clone().into(), desc: desc.clone().into() };
+            let a = Features { w, h, kps: kps.clone().into(), desc: desc.clone().into(), ends: Vec::new() };
             let (s, t) = (0.6 + unit() * 0.8, unit() * 0.4 - 0.2);
             let truth: Affine = [s * t.cos(), -s * t.sin(), 20.0 * unit(), s * t.sin(), s * t.cos(), 20.0 * unit()];
             let kind = case % 5;
@@ -2721,7 +2742,7 @@ mod tests {
                 bk.push(Keypoint { x, y, sigma: 2.0, angle: 0.0 });
                 bd.extend((0..DESC_LEN).map(|_| (unit() * 256.0) as u8));
             }
-            let b = Features { w, h, kps: bk.into(), desc: bd.into() };
+            let b = Features { w, h, kps: bk.into(), desc: bd.into(), ends: Vec::new() };
             // A first transform off by a little, by pixels, or (unrelated)
             // anywhere.
             let off = match kind {

@@ -22,6 +22,10 @@ pub(super) struct Reduce {
 trait Reduction {
     fn rows_read(&self) -> usize;
     fn push(&mut self, line: &[u8]);
+    /// `push`, given the row's grey values (`grey_row`'s) already made.
+    fn push_grey(&mut self, line: &[u8], grey: &[f32]);
+    /// Measures nothing: its `Traits` are another reduction's to give.
+    fn quiet(&mut self);
     fn finish(self: Box<Self>) -> (Gray, Traits);
 }
 
@@ -31,7 +35,15 @@ impl<const CH: usize, const ALPHA: bool> Reduction for Reducer<CH, ALPHA> {
     }
 
     fn push(&mut self, line: &[u8]) {
-        Reducer::push(self, line)
+        Reducer::push(self, line, None)
+    }
+
+    fn push_grey(&mut self, line: &[u8], grey: &[f32]) {
+        Reducer::push(self, line, Some(grey))
+    }
+
+    fn quiet(&mut self) {
+        self.measures = false;
     }
 
     fn finish(self: Box<Self>) -> (Gray, Traits) {
@@ -45,7 +57,15 @@ impl<const CH: usize, const ALPHA: bool> Reduction for Turned<CH, ALPHA> {
     }
 
     fn push(&mut self, line: &[u8]) {
-        Turned::push(self, line)
+        Turned::push(self, line, None)
+    }
+
+    fn push_grey(&mut self, line: &[u8], grey: &[f32]) {
+        Turned::push(self, line, Some(grey))
+    }
+
+    fn quiet(&mut self) {
+        self.measures = false;
     }
 
     fn finish(self: Box<Self>) -> (Gray, Traits) {
@@ -260,6 +280,7 @@ struct Reducer<const CH: usize, const ALPHA: bool> {
     sy: usize,
     /// What the rows measure on the way (`Traits`).
     measure: Measure,
+    measures: bool,
 }
 
 impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
@@ -278,6 +299,7 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
             row: if k == 1 { Vec::new() } else { vec![0.0f32; ow] },
             sy: 0,
             measure: Measure::new(grey_of_colour),
+            measures: true,
         }
     }
 
@@ -287,11 +309,19 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
         (self.oh * self.k).min(self.h)
     }
 
-    fn push(&mut self, line: &[u8]) {
+    /// One source row; `grey` its grey values when the caller made them.
+    fn push(&mut self, line: &[u8], grey: Option<&[f32]>) {
         let (w, k, sy) = (self.w, self.k, self.sy);
         self.sy += 1;
         if sy >= self.rows_read() {
             return;
+        }
+        match grey {
+            Some(g) => self.grey[..w].copy_from_slice(&g[..w]),
+            None => grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]),
+        }
+        if self.measures {
+            self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], &self.grey[..w]);
         }
         if k == 1 {
             // No box reduction: every output pixel is one source pixel, so
@@ -299,8 +329,6 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
             // row goes straight on to the area resample, which takes it while
             // it is still in the first-level cache; the full-size plane it
             // used to be written into first is gone.
-            grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
-            self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], &self.grey[..w]);
             let inv = self.inv;
             let out = &mut self.grey[..self.ow];
             for g in out.iter_mut() {
@@ -312,8 +340,6 @@ impl<const CH: usize, const ALPHA: bool> Reducer<CH, ALPHA> {
         if sy % k == 0 {
             self.row.fill(0.0);
         }
-        grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
-        self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], &self.grey[..w]);
         box_row(k, &self.grey[..w], &mut self.row);
         // The last row of a box: `k` rows in, or the picture's last row when
         // the picture is shorter than one box.
@@ -377,6 +403,7 @@ struct Turned<const CH: usize, const ALPHA: bool> {
     /// The next stored row `push` expects.
     sy: usize,
     measure: Measure,
+    measures: bool,
 }
 
 impl<const CH: usize, const ALPHA: bool> Turned<CH, ALPHA> {
@@ -402,6 +429,7 @@ impl<const CH: usize, const ALPHA: bool> Turned<CH, ALPHA> {
             plane: vec![0.0; ow * oh],
             sy: 0,
             measure: Measure::new(grey_of_colour),
+            measures: true,
         }
     }
 
@@ -430,7 +458,8 @@ impl<const CH: usize, const ALPHA: bool> Turned<CH, ALPHA> {
         if self.backwards() { self.h } else { self.used() }
     }
 
-    fn push(&mut self, line: &[u8]) {
+    /// One stored row; `grey` its grey values when the caller made them.
+    fn push(&mut self, line: &[u8], grey: Option<&[f32]>) {
         let (w, k, sy) = (self.w, self.k, self.sy);
         self.sy += 1;
         if sy >= self.rows_read() {
@@ -442,8 +471,13 @@ impl<const CH: usize, const ALPHA: bool> Turned<CH, ALPHA> {
         if t >= used {
             // Trimmed, and still measured, as `Reducer` measures every row it
             // reads.
-            grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]);
-            self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], &self.grey[..w]);
+            match grey {
+                Some(g) => self.grey[..w].copy_from_slice(&g[..w]),
+                None => grey_row::<CH, ALPHA>(&line[..w * CH], &mut self.grey[..w]),
+            }
+            if self.measures {
+                self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], &self.grey[..w]);
+            }
             return;
         }
         let (b, at) = (t / k, t % k);
@@ -451,8 +485,13 @@ impl<const CH: usize, const ALPHA: bool> Turned<CH, ALPHA> {
         // Straight into its place in the band: a copy of every row there was
         // 6% of the CPU a phone's turned JPEG took.
         let slot = &mut self.band[at * w..(at + 1) * w];
-        grey_row::<CH, ALPHA>(&line[..w * CH], slot);
-        self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], slot);
+        match grey {
+            Some(g) => slot.copy_from_slice(&g[..w]),
+            None => grey_row::<CH, ALPHA>(&line[..w * CH], slot),
+        }
+        if self.measures {
+            self.measure.row::<CH, ALPHA>(sy, self.h, &line[..w * CH], slot);
+        }
         if reversed {
             slot.reverse();
         }
@@ -940,4 +979,100 @@ fn weights(src: usize, dst: usize) -> Taps {
     }
     t.at.push(t.w.len() as u32);
     t
+}
+
+// ---------------------------------------------------------------- levels
+
+/// The analysis's sink at a finer `--detail`: the picture reduced to each of
+/// `works` as `Reduce` reduces it at that working size (`0`: its own pixels),
+/// all from one read of its rows. The first is the working plane, to the bit.
+/// A row is made grey once for every level, and measured by the first only
+/// (each level made and measured its own: 20% more decode CPU at
+/// `--detail 1024` than `--work-size 1024`).
+pub(super) struct ReduceLevels {
+    works: Vec<usize>,
+    rows: Option<(Rows, Vec<Box<dyn Reduction>>)>,
+    /// The layout's `grey_row`, the bytes of a row it reads, and the row it
+    /// fills.
+    grey: (fn(&[u8], &mut [f32]), usize, Vec<f32>),
+}
+
+impl ReduceLevels {
+    pub fn new(works: &[usize]) -> ReduceLevels {
+        ReduceLevels { works: works.to_vec(), rows: None, grey: (grey_row::<1, false>, 0, Vec::new()) }
+    }
+
+    pub fn finish(self) -> anyhow::Result<(Vec<Gray>, (u32, u32), Traits)> {
+        let (rows, rs) = self.rows.ok_or_else(|| anyhow::anyhow!("the decoder gave no picture"))?;
+        let mut traits = None;
+        let planes = rs
+            .into_iter()
+            .map(|r| {
+                let (g, t) = r.finish();
+                traits.get_or_insert(t);
+                g
+            })
+            .collect();
+        let size = shown_size(rows.w as u32, rows.h as u32, rows.orientation);
+        Ok((planes, size, traits.unwrap_or_default()))
+    }
+}
+
+fn reduction(rows: &Rows, work: usize) -> Box<dyn Reduction> {
+    let (w, h, grey, o) = (rows.w, rows.h, rows.grey_of_colour, rows.orientation);
+    match (rows.layout, o == Orientation::NoTransforms) {
+        (Layout::Grey, true) => Box::new(Reducer::<1, false>::new(w, h, work, grey)),
+        (Layout::GreyAlpha, true) => Box::new(Reducer::<2, true>::new(w, h, work, grey)),
+        (Layout::Rgb, true) => Box::new(Reducer::<3, false>::new(w, h, work, grey)),
+        (Layout::Rgba, true) => Box::new(Reducer::<4, true>::new(w, h, work, grey)),
+        (Layout::Grey, false) => Box::new(Turned::<1, false>::new(w, h, work, grey, o)),
+        (Layout::GreyAlpha, false) => Box::new(Turned::<2, true>::new(w, h, work, grey, o)),
+        (Layout::Rgb, false) => Box::new(Turned::<3, false>::new(w, h, work, grey, o)),
+        (Layout::Rgba, false) => Box::new(Turned::<4, true>::new(w, h, work, grey, o)),
+    }
+}
+
+impl Sink for ReduceLevels {
+    fn streams(&self, _: usize, _: usize) -> bool {
+        true
+    }
+
+    fn grey(&self) -> bool {
+        true
+    }
+
+    fn holds(&self, w: usize, h: usize) -> u64 {
+        self.works.iter().map(|&k| working_bytes(w, h, k)).sum()
+    }
+
+    fn begin(&mut self, rows: &Rows) -> usize {
+        let mut rs: Vec<Box<dyn Reduction>> = self.works.iter().map(|&k| reduction(rows, k)).collect();
+        for r in rs.iter_mut().skip(1) {
+            r.quiet();
+        }
+        let (f, ch): (fn(&[u8], &mut [f32]), usize) = match rows.layout {
+            Layout::Grey => (grey_row::<1, false>, 1),
+            Layout::GreyAlpha => (grey_row::<2, true>, 2),
+            Layout::Rgb => (grey_row::<3, false>, 3),
+            Layout::Rgba => (grey_row::<4, true>, 4),
+        };
+        self.grey = (f, rows.w * ch, vec![0.0; rows.w]);
+        let n = rs.iter().map(|r| r.rows_read()).max().unwrap_or(0);
+        self.rows = Some((*rows, rs));
+        n
+    }
+
+    fn row(&mut self, line: &[u8]) {
+        if let Some((_, rs)) = &mut self.rows {
+            let (f, n, grey) = &mut self.grey;
+            f(&line[..*n], grey);
+            for r in rs.iter_mut() {
+                r.push_grey(line, grey);
+            }
+        }
+    }
+
+    fn whole(&mut self, img: image::DynamicImage, orientation: Orientation) {
+        super::picture::rows_of(self, img, orientation)
+    }
 }

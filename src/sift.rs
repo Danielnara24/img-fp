@@ -107,6 +107,11 @@ pub struct Features {
     pub kps: Shared<Keypoint>,
     /// `kps.len() * DESC_LEN` bytes.
     pub desc: Shared<u8>,
+    /// Where each of the picture's levels ends, coarsest first, when it was
+    /// described at a finer `--detail` than the default: the first is the
+    /// default's analysis, each next the keypoints a level finer adds. Empty
+    /// for an analysis at the default, which is all one level.
+    pub ends: Vec<u32>,
 }
 
 impl Features {
@@ -121,7 +126,7 @@ impl Features {
     /// The same features with both arrays in the run's scratch file.
     pub fn spilled(self) -> Features {
         use crate::spill::{share, Kind};
-        Features { w: self.w, h: self.h, kps: share(Kind::Features, self.kps), desc: share(Kind::Features, self.desc) }
+        Features { w: self.w, h: self.h, kps: share(Kind::Features, self.kps), desc: share(Kind::Features, self.desc), ends: self.ends }
     }
 }
 
@@ -989,6 +994,7 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
 
     let min_side = base.w.min(base.h) as f32;
     let n_octaves = ((min_side.ln() / 2f32.ln()).round() as i32 - 2).max(1) as usize;
+
     let s = p.n_layers;
     let k = 2f32.powf(1.0 / s as f32);
     let mut sig = vec![p.sigma; s + 3];
@@ -1109,7 +1115,133 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
         }
     });
     let (kps, desc) = timed!(10, retain_best(&kps, &desc, &response, p.max_features));
-    Features { w, h, kps: kps.into(), desc: desc.into() }
+    Features { w, h, kps: kps.into(), desc: desc.into(), ends: Vec::new() }
+}
+
+/// A level finer than the working size, to be described for `extract_levels`:
+/// its plane, the factor from its pixels to the frame's (the working
+/// plane's), its tag, the most features it and the levels before it in the
+/// call may hold together, and the scale, in the frame's pixels, its
+/// keypoints must be finer than (where the level below it starts).
+pub struct LevelIn<'a> {
+    pub plane: &'a Gray,
+    pub to_frame: f32,
+    pub tag: u32,
+    pub cap: usize,
+    pub finer_than: f32,
+}
+
+crate::simd::dispatched! {
+    pub fn extract_levels(levels: &[LevelIn], w: u32, h: u32, p: &Params) -> Features => extract_levels_any;
+}
+
+/// A finer level's keypoint's tag (`LevelIn::tag`), kept in its angle's four
+/// lowest bits: a few millionths of a degree.
+pub fn level_tag(k: &Keypoint) -> u32 {
+    k.angle.to_bits() & 0xf
+}
+
+/// The finer levels, coarsest first, each described on one octave of its own:
+/// its best keypoints by response finer than `finer_than`, up to its cap less
+/// what the levels before it hold. So a level's keypoints depend on it and
+/// the levels before it, never on a finer one, and an analysis that stops at a
+/// level holds a prefix of one that goes on.
+#[cfg_attr(dispatch, inline(always))]
+fn extract_levels_any(levels: &[LevelIn], w: u32, h: u32, p: &Params) -> Features {
+    let (mut kps, mut desc): (Vec<Keypoint>, Vec<u8>) = (Vec::new(), Vec::new());
+    let s = p.n_layers;
+    let k = 2f32.powf(1.0 / s as f32);
+    let mut sig = vec![p.sigma; s + 3];
+    for i in 1..s + 3 {
+        let prev = p.sigma * k.powi(i as i32 - 1);
+        let total = prev * k;
+        sig[i] = (total * total - prev * prev).sqrt();
+    }
+    let thr_pre = 0.5 * p.contrast / s as f32;
+    for lv in levels {
+        let g = lv.plane;
+        let budget = lv.cap.saturating_sub(kps.len());
+        if budget == 0 || g.w < 8 || g.h < 8 {
+            continue;
+        }
+        let coord_scale = lv.to_frame;
+        // Only the layers whose scale is finer than the level below's: on a
+        // picture a little larger than the level below, none, and the level
+        // is not built. The top layer of a doubling is the scale the octave
+        // below starts at.
+        let layers = (1..=s).filter(|&l| p.sigma * k.powi(l as i32) * coord_scale < lv.finer_than).count();
+        if layers == 0 {
+            continue;
+        }
+        let sig_diff = (p.sigma * p.sigma - 0.25).max(0.01).sqrt();
+        let base = timed!(5, blur_plane(g.w, g.h, &g.px, sig_diff));
+        let height = base.h;
+        let (dog, layer_grads, _) = timed!(6, Octave::new(&base, &sig[..layers + 3], layers, false).run());
+        let mut cands: Vec<Cand> = Vec::new();
+        timed!(7, find_extrema(&dog, 0, p, thr_pre, coord_scale, &mut cands));
+        drop(dog);
+        if lv.finer_than.is_finite() {
+            cands.retain(|c| c.kp.sigma < lv.finer_than);
+        }
+        cands.sort_by(|a, b| key3(&a.kp).cmp(&key3(&b.kp)).then(b.response.partial_cmp(&a.response).unwrap()));
+        cands.dedup_by(|a, b| key3(&a.kp) == key3(&b.kp));
+        cands.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap().then(key3(&a.kp).cmp(&key3(&b.kp))));
+        cands.truncate(budget * p.candidate_pool + 8);
+        const KEEP_MARGIN: usize = 8;
+        let stop_at = budget + KEEP_MARGIN;
+        let (mut lk, mut ld, mut response): (Vec<Keypoint>, Vec<u8>, Vec<f32>) = (Vec::new(), Vec::new(), Vec::new());
+        for c in cands.iter() {
+            if lk.len() >= stop_at && c.response < response[stop_at - 1] {
+                break;
+            }
+            let oct_scale = coord_scale;
+            let grad = layer_grads[c.layer].as_ref().unwrap();
+            let scl_octv = c.kp.sigma / oct_scale;
+            let px = c.kp.x / oct_scale;
+            let py = c.kp.y / oct_scale;
+            let mut hist = [0f32; ORI_BINS];
+            let radius = (ORI_RADIUS * scl_octv).round() as i32;
+            let omax = timed!(30, orientation_hist(grad, height, px, py, radius, ORI_SIG_FCTR * scl_octv, &mut hist));
+            let mag_thr = omax * ORI_PEAK_RATIO;
+            for j in 0..ORI_BINS {
+                let l = if j > 0 { j - 1 } else { ORI_BINS - 1 };
+                let r2 = if j < ORI_BINS - 1 { j + 1 } else { 0 };
+                if hist[j] > hist[l] && hist[j] > hist[r2] && hist[j] >= mag_thr {
+                    let mut bin = j as f32 + 0.5 * (hist[l] - hist[r2]) / (hist[l] - 2.0 * hist[j] + hist[r2]);
+                    if bin < 0.0 {
+                        bin += ORI_BINS as f32;
+                    } else if bin >= ORI_BINS as f32 {
+                        bin -= ORI_BINS as f32;
+                    }
+                    let mut angle = 360.0 - (360.0 / ORI_BINS as f32) * bin;
+                    if (angle - 360.0).abs() < 1e-5 {
+                        angle = 0.0;
+                    }
+                    let mut kp = c.kp;
+                    kp.angle = angle;
+                    let mut d = [0u8; DESC_LEN];
+                    timed!(31, descriptor(grad, height, px, py, angle, scl_octv, &mut d));
+                    lk.push(kp);
+                    response.push(c.response);
+                    ld.extend_from_slice(&d);
+                }
+            }
+        }
+        let (lk, ld) = timed!(10, retain_best(&lk, &ld, &response, budget));
+        for mut kp in lk {
+            kp.angle = f32::from_bits((kp.angle.to_bits() & !0xf) | (lv.tag & 0xf));
+            kps.push(kp);
+        }
+        desc.extend_from_slice(&ld);
+    }
+    Features { w, h, kps: kps.into(), desc: desc.into(), ends: Vec::new() }
+}
+
+impl Features {
+    /// The leading `n` features alone: an analysis at a coarser `--detail`.
+    pub fn prefix(&self, n: usize) -> Features {
+        Features { w: self.w, h: self.h, kps: self.kps.prefix(n), desc: self.desc.prefix(n * DESC_LEN), ends: Vec::new() }
+    }
 }
 
 /// Larger of two, written as the comparison it is so that the compiler emits
@@ -1172,7 +1304,6 @@ fn key3(k: &Keypoint) -> (i32, i32, i32) {
 
 #[cfg_attr(dispatch, inline(always))]
 fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_scale: f32, out: &mut Vec<Cand>) {
-    let s = p.n_layers;
     let (w, h) = (dog[0].w as i32, dog[0].h as i32);
     if w <= 2 * IMG_BORDER || h <= 2 * IMG_BORDER {
         return;
@@ -1190,7 +1321,9 @@ fn find_extrema(dog: &[Layer], octave: usize, p: &Params, thr_pre: f32, coord_sc
     // then walking the survivors leaves one branch that is almost always not
     // taken, and the comparisons themselves run eight to an instruction.
     let mut alive = vec![false; span];
-    for layer in 1..=s {
+    // The layers the differences hold: `s`, or fewer where a finer level
+    // builds only those finer than the level below (`extract_levels`).
+    for layer in 1..=dog.len() - 2 {
         let cur = &dog[layer];
         let prv = &dog[layer - 1];
         let nxt = &dog[layer + 1];
@@ -1311,7 +1444,7 @@ fn adjust(
         x += xc.round() as i32;
         y += xr.round() as i32;
         layer += xi.round() as i32;
-        if layer < 1 || layer > s as i32 || x < IMG_BORDER || x >= w - IMG_BORDER || y < IMG_BORDER || y >= h - IMG_BORDER {
+        if layer < 1 || layer > dog.len() as i32 - 2 || x < IMG_BORDER || x >= w - IMG_BORDER || y < IMG_BORDER || y >= h - IMG_BORDER {
             return None;
         }
     }
@@ -1812,7 +1945,7 @@ impl Features {
                 k.angle = (k.angle + 180.0).rem_euclid(360.0);
             }
         }
-        Features { w: self.w, h: self.h, kps: kps.into(), desc: desc.into() }
+        Features { w: self.w, h: self.h, kps: kps.into(), desc: desc.into(), ends: Vec::new() }
     }
 }
 

@@ -173,6 +173,12 @@ impl Settings {
         for (opt, v) in o::ALL.iter().zip(&self.values) {
             a.extend(opt.command_line(v).into_iter().map(OsString::from));
         }
+        // How fine a detail: a flag of its own below the default.
+        match o::DETAIL.choice_flag(self.get(&o::DETAIL)) {
+            Some("fast") => a.push("--fast".into()),
+            Some(px) => a.extend(["--detail".into(), px.into()]),
+            None => {}
+        }
         // The window's own switches, each with the path it stands for.
         let mut flag = |f: &str, v: &str| {
             a.push(f.into());
@@ -256,7 +262,7 @@ mod tests {
     fn only_options_set_by_hand_are_kept() {
         let d = Settings::default();
         let mut s = Settings { folders: vec!["/x".into()], ..Default::default() };
-        s.set(&o::WORK_SIZE, Value::Number(640.0));
+        s.set(&o::DETAIL, Value::Text("Fine".into()));
         s.set(&o::USE_CACHE, Value::On(false));
         s.set(&o::LOG, Value::On(true));
         s.set(&o::RECURSIVE, Value::On(false));
@@ -266,10 +272,10 @@ mod tests {
         s.set(&o::PRUNE_CACHE, Value::On(true));
         let v: serde_json::Value = serde_json::to_value(&s).unwrap();
         let keys: Vec<&str> = v["options"].as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        assert_eq!(keys, ["log", "min_pixel_correlation", "recursive", "report_format", "use_cache", "work_size"]);
-        assert_eq!(v["options"]["work_size"], serde_json::json!(640));
+        assert_eq!(keys, ["detail", "log", "min_pixel_correlation", "recursive", "report_format", "use_cache"]);
+        assert_eq!(v["options"]["detail"], serde_json::json!("Fine"));
         let back: Settings = serde_json::from_value(v).unwrap();
-        for opt in [&o::WORK_SIZE, &o::USE_CACHE, &o::LOG, &o::RECURSIVE, &o::REPORT_FORMAT, &o::MIN_CORRELATION] {
+        for opt in [&o::DETAIL, &o::USE_CACHE, &o::LOG, &o::RECURSIVE, &o::REPORT_FORMAT, &o::MIN_CORRELATION] {
             assert_eq!(back.get(opt), s.get(opt), "{}", opt.key);
         }
         for opt in [&o::CANDIDATES, &o::EXTENSIONS] {
@@ -293,10 +299,10 @@ mod tests {
         // A value of another type, or a choice not offered, is the default;
         // the rest of the file still reads. (It used to make the whole file
         // the defaults, folders and all.)
-        let odd = r#"{"folders": ["/x"], "options": {"work_size": "big", "report_format": "Pdf", "threads": 3}}"#;
+        let odd = r#"{"folders": ["/x"], "options": {"detail": "Huge", "work_size": 640, "report_format": "Pdf", "threads": 3}}"#;
         let s: Settings = serde_json::from_str(odd).unwrap();
         assert_eq!(s.folders, vec![PathBuf::from("/x")]);
-        assert_eq!((s.get(&o::WORK_SIZE), s.get(&o::REPORT_FORMAT)), (d.get(&o::WORK_SIZE), d.get(&o::REPORT_FORMAT)));
+        assert_eq!((s.get(&o::DETAIL), s.get(&o::REPORT_FORMAT)), (d.get(&o::DETAIL), d.get(&o::REPORT_FORMAT)));
         assert_eq!(s.get(&o::THREADS), &Value::Number(3.0));
     }
 

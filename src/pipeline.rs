@@ -230,10 +230,10 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     // it does any of it, so a run's log says which settings produced it.
     say!(
         cx,
-        "Settings -> Work size: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
+        "Settings -> Detail: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
          Min pixel correlation: {}, Mirrored and inverted: {}, Threads: {}, Recursive: {}, Follow symlinks: {}, \
          Hidden folders: {}",
-        args.work_size,
+        if args.fast { "fast".to_string() } else { args.detail().to_string() },
         args.candidates,
         args.min_aligned_points,
         args.min_frame_overlap,
@@ -359,7 +359,8 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
     // (`matched.rs`); a dump records every verdict, and matches again.
     let kept_at = cache_path.as_deref().filter(|_| args.dump.is_none()).map(matched::path_beside);
     let asked = matched::Asked {
-        work_size: args.work_size,
+        work_size: args.work_size(),
+        detail: args.detail(),
         candidates: args.candidates,
         points: aligned_points(args),
         overlap: args.min_frame_overlap,
@@ -423,10 +424,14 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
     let mut dump = args.dump.is_some().then(Dump::default);
     let gate = policy.gate();
     let gate = if dump.is_some() { (gate.0.min(3), gate.1.min(0.2)) } else { gate };
-    let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some() };
-    let index = index_all(cx, scope, &pass);
+    if args.detail() > args.work_size() {
+        return match_by_detail(cx, scope, files, items, matched, outputs, &policy, gate, dump);
+    }
+    let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some(), bounds: None, known: None, fresh: None };
+    let mut index = index_all(cx, scope, &pass);
     let (mut direct, verified) = retrieve_and_verify(cx, scope, &pass, &index);
-    let turned = second_look(cx, scope, &pass, index, &direct);
+    let turned = second_look(cx, scope, &pass, &mut index, &direct);
+    drop(index);
     direct.extend(turned);
 
     // Nothing after this point matches a descriptor against another. What is
@@ -453,6 +458,133 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
     // the assembly, which is where such a run peaks.
     drop(direct);
     Ok(matched::Matched { claims, notes })
+}
+
+/// `match_all` at a `--detail` finer than the working size, by steps: the
+/// working size, then each doubling up to the detail.
+///
+/// The first step is the run at the default exactly: the same features (the
+/// analysis's first level, `Features::ends`), the same matching. Each finer
+/// step matches every file on its features up to that step's detail, with
+/// the scale bound its finer planes allow (`level_bound`), and takes the pairs
+/// earlier steps found standing as they stand, so it verifies only what they
+/// did not settle, and only pairs holding a file with a level the step
+/// before did not (`Pass::fresh`), in windows a fifteenth of the default's,
+/// each file's ranking less the pairs earlier steps decided; the second look
+/// is the first step's alone. Its verdicts join theirs, and the claim graph
+/// is run on them. The run states
+/// every step's claims, less a finer step's joins of two families the
+/// default's claims hold apart. So a run at a detail states
+/// every pair a run at any coarser detail states: the claim graph alone is
+/// not monotone (more evidence can part what less joined), so the steps'
+/// claims are kept rather than the finest graph's alone. A step where no file
+/// has a finer level than the step before is the step before, and costs
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+fn match_by_detail(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], matched: &[bool], outputs: &Outputs, policy: &verify::Policy, gate: (u32, f32), mut dump: Option<Dump>) -> Result<matched::Matched> {
+    let args = cx.args;
+    let work = args.work_size();
+    let mut sizes = vec![work];
+    while sizes.last().unwrap() * 2 <= args.detail() {
+        sizes.push(sizes.last().unwrap() * 2);
+    }
+    let mut all: Vec<Edge> = Vec::new();
+    let mut verified = 0usize;
+    let mut earlier: Vec<Claim> = Vec::new();
+    let mut base: Vec<Claim> = Vec::new();
+    let mut notes = Vec::new();
+    let mut below: Option<Vec<usize>> = None;
+    let mut last_claims: Vec<Claim> = Vec::new();
+    // The vocabulary the first step trained and every file's words, which a
+    // finer step adds its new descriptors' words to.
+    let mut carried: Option<(index::Vocabulary, Vec<WordList>)> = None;
+    for (step, &size) in sizes.iter().enumerate() {
+        let top = step + 1 == sizes.len();
+        let n_of: Vec<usize> = items.iter().map(|it| level_prefix(it, work, size)).collect();
+        if below.as_ref().is_some_and(|n| *n == n_of) && !(top && dump.is_some()) {
+            stage!(cx, "detail {size}: nothing finer to describe");
+            continue;
+        }
+        if step > 0 {
+            stage!(cx, "detail {size}: matching");
+        }
+        let items_r: Vec<Item> = items.iter().zip(&n_of).map(|(it, &k)| Item { feats: std::sync::Arc::new(it.feats.prefix(k)), ..it.clone() }).collect();
+        let r: Vec<f32> = items.iter().map(|it| level_bound(it, work, size)).collect();
+        let known: HashMap<(u32, u32, bool, bool), Verdict> = if step == 0 {
+            HashMap::new()
+        } else {
+            all.iter().filter(|e| policy.standing(&e.v) != Standing::Rejected).map(|e| ((e.a() as u32, e.b() as u32, e.v.variant.mirror, e.v.variant.invert), e.v)).collect()
+        };
+        let dumping = top && dump.is_some();
+        let fresh: Option<Vec<bool>> = below.as_ref().map(|b| b.iter().zip(&n_of).map(|(x, y)| y > x).collect());
+        let pass = Pass { items: &items_r, matched, policy, gate: if dumping { gate } else { policy.gate() }, dumping, bounds: (step > 0).then_some(&r[..]), known: (step > 0).then_some(&known), fresh: fresh.as_deref() };
+        // A finer step quantises its new descriptors with the first step's
+        // vocabulary: trained again on every step's, it took 42 s of the
+        // finer step's 96 on IMGS-ALL at 1024, for recall 96.37 -> 96.42%.
+        let mut index = match (carried.take(), &below) {
+            (Some((vocab, lists)), Some(b)) => index_adding(cx, scope, &pass, vocab, lists, b),
+            _ => index_all(cx, scope, &pass),
+        };
+        if !top {
+            index.keep_vocab();
+        }
+        let (mut d, v) = retrieve_and_verify(cx, scope, &pass, &index);
+        // The second look is the default step's: asked again at a finer one
+        // it cost 66 CPU-s cached on IMGS-ALL at 1024 for recall +0.02.
+        let t = if step == 0 { second_look(cx, scope, &pass, &mut index, &d) } else { Vec::new() };
+        d.extend(t);
+        if !top {
+            carried = Some(index.into_parts());
+        } else {
+            drop(index);
+        }
+        drop(known);
+        verified += v;
+        merge_best(&mut all, d, policy);
+        let mut step_notes = Vec::new();
+        let c = cluster(cx, items, policy, &all, verified, if top { dump.as_mut() } else { None }, &mut step_notes);
+        notes = step_notes;
+        if step == 0 {
+            base = c.clone();
+        }
+        earlier.extend(std::mem::replace(&mut last_claims, c));
+        below = Some(n_of);
+    }
+    // The finest step's claims lead, so a pair stated by several is stated
+    // as the finest states it; every coarser step's follow, so nothing a
+    // coarser detail states is lost.
+    let mut ordered = last_claims;
+    ordered.extend(earlier);
+    // A finer step adds files to what the default joined and pairs inside
+    // it; it does not join two families the default's claims hold apart (a
+    // file alone there may join one). The finer features found what they are
+    // for, and sibling pictures besides: on IMGS-ALL at 1024 this keeps
+    // precision at the default's (98.72 -> 98.82%, default 98.84%; cross-
+    // family 13,653 -> 12,420, merges 84 -> 71) for recall 96.46 -> 96.42%.
+    // Every step's claims meet the one rule, so a finer detail still states
+    // whatever a coarser one does.
+    if sizes.len() > 1 {
+        let n = items.len();
+        let fam = Clusters::joined(n, base.iter().map(|c| c.e));
+        let mut size = vec![0usize; n];
+        for i in 0..n {
+            size[fam.id(i)] += 1;
+        }
+        let in_base: std::collections::HashSet<(usize, usize)> = base.iter().map(|c| (c.e.a(), c.e.b())).collect();
+        ordered.retain(|c| {
+            let (a, b) = (fam.id(c.e.a()), fam.id(c.e.b()));
+            in_base.contains(&(c.e.a(), c.e.b())) || a == b || size[a] == 1 || size[b] == 1
+        });
+    }
+    for it in items.iter_mut() {
+        it.feats = std::sync::Arc::new(Features { w: it.feats.w, h: it.feats.h, ..Default::default() });
+    }
+    timed!(37, release_memory());
+    stage!(cx, "released the index and the descriptors");
+    if let (Some(to), Some(dump)) = (&outputs.dump, dump) {
+        write_dump(cx, to, files, items, &all, dump)?;
+    }
+    Ok(matched::Matched { claims: ordered, notes })
 }
 
 /// What the analysis hands on: every file's analysis, which files are one
@@ -501,8 +633,9 @@ fn analyse_all(
         k.files = files.len();
         k.cache_bytes = cache_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
         k.cache_write = cache_path.is_some();
-        k.work_size = args.work_size;
+        k.work_size = args.work_size();
         k.candidates = args.candidates;
+        k.steps = (args.detail() / args.work_size()).ilog2() as usize + 1;
         if args.skip_mirrored {
             k.ask_again = Some((0, 0));
         }
@@ -544,8 +677,8 @@ fn analyse_all(
     let done = AtomicUsize::new(0);
     let n = files.len();
     let settings = cache::Settings {
-        work_size: args.work_size as u32,
-        features: FEATURES as u32,
+        work_size: args.work_size() as u32,
+        features: crate::analysis::features_at(args.detail().max(args.work_size()), args.work_size()) as u32,
         thumb: THUMB_LONG as u32,
     };
     let mut store = cache_path.as_ref().zip(names).map(|(p, names)| {
@@ -629,7 +762,7 @@ fn analyse_all(
                 return Default::default();
             }
             let probe = decode::probe(&files[i]);
-            (progress::file_cost(probe.as_ref(), stats[i].len, args.work_size, sp.upsample_below), probe)
+            (progress::file_cost(probe.as_ref(), stats[i].len, args.work_size(), sp.upsample_below), probe)
         })
         .unzip();
     stage!(cx, "{todo} files to analyse");
@@ -663,7 +796,7 @@ fn analyse_all(
                 return Some(Item::from(rec));
             }
             let t0 = Instant::now();
-            let (it, decode) = analysis::analyse(&files[i], args.work_size, &sp, header[i].as_ref(), &planes);
+            let (it, decode) = analysis::analyse(&files[i], args.work_size(), args.detail(), &sp, header[i].as_ref(), &planes);
             // Each record goes into the cache file as soon as it is made,
             // which is what lets an interrupt keep the analysis without
             // writing anything; see `cache::Store`.
@@ -836,6 +969,15 @@ struct Pass<'a> {
     gate: (u32, f32),
     /// Whether `--dump` records every verdict with three aligned points.
     dumping: bool,
+    /// At a finer `--detail`'s step: each file's finest plane over its frame,
+    /// which widens the scale a verdict may claim (`level_bound`).
+    bounds: Option<&'a [f32]>,
+    /// At a finer step: the verdicts that stand from the steps before, by
+    /// pair and variant, which stand for this step too (`match_by_detail`).
+    known: Option<&'a HashMap<(u32, u32, bool, bool), Verdict>>,
+    /// At a finer step: the files with a level the step before did not hold.
+    /// A pair of two others is what it was, so it is not verified again.
+    fresh: Option<&'a [bool]>,
 }
 
 /// One worker's scratch for `Pass::verify`: the shared words, the matches
@@ -849,6 +991,14 @@ impl Pass<'_> {
     /// stands at all (`Standing::Corroborating`) or `--dump` records it.
     #[allow(clippy::too_many_arguments)]
     fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, (cands, matches, scratch): &mut Work) -> Option<Edge> {
+        // A pair a coarser step found standing stands for this one as it was
+        // found: the finer step looks for what the coarser could not.
+        if let Some(v) = self.known.and_then(|k| k.get(&(i.min(j) as u32, i.max(j) as u32, variant.mirror, variant.invert))) {
+            return Some(Edge::new(i.min(j), i.max(j), *v));
+        }
+        if self.fresh.is_some_and(|f| !f[i] && !f[j]) {
+            return None;
+        }
         timed!(15, index::shared(wi, &lists[j], cands, 60_000));
         if cands.len() < 3 {
             return None;
@@ -860,7 +1010,11 @@ impl Pass<'_> {
             ta: &items[i].thumb,
             tb: &items[j].thumb,
         };
-        let v = verify::verify(&p, cands, variant, self.gate, matches, scratch);
+        let mut v = verify::verify(&p, cands, variant, self.gate, matches, scratch);
+        if let Some(r) = self.bounds {
+            v.lo = 1.0 / (verify::MAX_SCALE * r[j]);
+            v.hi = verify::MAX_SCALE * r[i];
+        }
         if self.policy.standing(&v) == Standing::Rejected && !(self.dumping && v.n_in >= 3) {
             return None;
         }
@@ -878,6 +1032,59 @@ impl Pass<'_> {
 /// which is where a large corpus's run peaks.
 fn anchors<'a>(direct: &'a [Edge], policy: &'a verify::Policy) -> impl Iterator<Item = Edge> + 'a {
     direct.iter().filter(|e| policy.standing(&e.v) >= Standing::Anchor).copied()
+}
+
+/// A file's finest plane at `size` over its frame (the plane at the working
+/// size `work`), on the long side, never under 1: what bounds the scale a
+/// finer step's verdict may claim.
+fn level_bound(it: &Item, work: usize, size: usize) -> f32 {
+    let (w, h) = (it.dims.0 as usize, it.dims.1 as usize);
+    let frame = it.feats.w.max(it.feats.h) as f32;
+    if w == 0 || h == 0 || frame == 0.0 {
+        return 1.0;
+    }
+    let finest = match crate::analysis::finer_levels(w, h, work, size).last() {
+        Some(u) if u.whole => w.max(h) as f32,
+        Some(u) => (u.size as f64 * decode::area_factor(w, h)).round() as f32,
+        None => frame,
+    };
+    (finest / frame).max(1.0)
+}
+
+/// How many of a file's features a run at detail `size` holds: the analysis
+/// at the working size and its levels up to `size`, which lead.
+fn level_prefix(it: &Item, work: usize, size: usize) -> usize {
+    let ends = &it.feats.ends;
+    if ends.is_empty() {
+        return it.feats.len();
+    }
+    let (w, h) = (it.dims.0 as usize, it.dims.1 as usize);
+    let k = crate::analysis::finer_levels(w, h, work, size).len();
+    ends[k.min(ends.len() - 1)] as usize
+}
+
+/// `more` into `direct`: a pair's verdict
+/// replaced by a better one of the same variant, a new pair added.
+fn merge_best(direct: &mut Vec<Edge>, more: Vec<Edge>, policy: &verify::Policy) {
+    let key = |e: &Edge| (e.a(), e.b(), e.v.variant.mirror, e.v.variant.invert);
+    let mut at: HashMap<(usize, usize, bool, bool), usize> = HashMap::with_capacity(direct.len());
+    for (k, e) in direct.iter().enumerate() {
+        at.entry(key(e)).or_insert(k);
+    }
+    for e in more {
+        match at.get(&key(&e)) {
+            Some(&k) => {
+                let (old, new) = (&direct[k].v, &e.v);
+                if (policy.standing(new), new.n_in) > (policy.standing(old), old.n_in) {
+                    direct[k] = e;
+                }
+            }
+            None => {
+                at.insert(key(&e), direct.len());
+                direct.push(e);
+            }
+        }
+    }
 }
 
 /// The vocabulary, built from the corpus, and every matched file's words:
@@ -938,6 +1145,33 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Index<'a> {
     index
 }
 
+/// The index at a finer step: the first step's vocabulary, and each file's
+/// words with those of its descriptors from `below` (the step before's
+/// prefix) on added.
+fn index_adding<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>, vocab: index::Vocabulary, lists: Vec<WordList>, below: &[usize]) -> Index<'a> {
+    let (items, matched) = (pass.items, pass.matched);
+    let n_new: usize = (0..items.len()).filter(|&i| matched[i]).map(|i| items[i].feats.len().saturating_sub(below[i])).sum();
+    let bar = cx.progress.begin_counted(Stage::Quantise, n_new as u64, items.len(), "images");
+    let lists: Vec<WordList> = lists
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, wl)| {
+            let it = &items[i];
+            if !matched[i] || it.feats.len() <= below[i] {
+                return wl;
+            }
+            let more = timed!(11, crate::retrieve::quantise_from(&vocab, &it.feats, below[i]));
+            bar.add((it.feats.len() - below[i]) as u64);
+            wl.joined(&more)
+        })
+        .collect();
+    stage!(cx, "quantised {n_new} finer descriptors");
+    cx.progress.begin(Stage::InvertedFile);
+    let index = Index::new(items, matched, vocab, lists, scope.against);
+    stage!(cx, "inverted file");
+    index
+}
+
 /// Every file that asks first asks the index as it is, and its candidates are
 /// verified: the direct verdicts, and how many candidates were verified,
 /// which is what a round of propagation may spend.
@@ -975,8 +1209,34 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     // of verified, a merged burst (IMGS5 bird1/2, 180 files) lost 826 true
     // pairs: a file's own weaker copies, ranked past the window its sibling's
     // copies filled, are what the further window is for.
-    let mut window: Vec<(usize, usize)> = vec![(0, args.candidates); n];
+    // At a finer step the window is a fifteenth (10 at the default `-k`),
+    // and a ranking leaves out the pairs a coarser step already found
+    // standing, whose verdicts the step holds (`Pass::known`): the default's
+    // step has looked down every ranking, and what the finer features find
+    // is near the top of what is still undecided. Clean verdicts among them
+    // count as joined from the start. Cached matching on IMGS-ALL at 1024,
+    // CPU-s against 1,031 for `--work-size 1024` (recall 96.07%): window 75
+    // with the decided pairs in it 1,289 (recall 96.36%), 40 1,239 (96.34%),
+    // and without the finer second look 75 / 40 / 20 / 10 1,227 / 1,168 /
+    // 1,092 / 1,052 (96.34 / 96.32 / 96.24 / 96.20%); leaving the decided
+    // pairs out, 20 / 10 1,099 / 1,045 (96.31 / 96.27%).
+    let k0 = if pass.bounds.is_some() { args.candidates.div_ceil(15) } else { args.candidates };
+    let mut window: Vec<(usize, usize)> = vec![(0, k0); n];
     let mut joined = Clusters::new(n);
+    // The pairs a coarser step decided, by file.
+    let mut decided: Vec<Vec<u32>> = vec![Vec::new(); n];
+    if let Some(known) = pass.known {
+        for (&(a, b, m, inv), v) in known {
+            if !m && !inv {
+                decided[a as usize].push(b);
+                decided[b as usize].push(a);
+                if pass.policy.standing(v) == Standing::Clean {
+                    joined.join(a as usize, b as usize);
+                }
+            }
+        }
+        decided.par_iter_mut().for_each(|d| d.sort_unstable());
+    }
     let mut extended = 0usize;
     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
     let mut stood: std::collections::HashSet<(u32, u32)> = Default::default();
@@ -1020,12 +1280,15 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
                     let js: Vec<u32> = if *ends || next.len() >= w {
                         next.drain(..w.min(next.len())).collect()
                     } else {
-                        let cands = index.candidates(i, &[&index.lists()[i]], from + 2 * w, a);
-                        *ends = cands.len() < from + 2 * w;
-                        let rest = &cands[from.min(cands.len())..];
+                        let gone = &decided[i];
+                        let asked_for = from + 2 * w + gone.len();
+                        let cands = index.candidates(i, &[&index.lists()[i]], asked_for, a);
+                        *ends = cands.len() < asked_for;
+                        let ranked: Vec<u32> = cands.iter().map(|&(j, ..)| j).filter(|j| gone.binary_search(j).is_err()).collect();
+                        let rest = &ranked[from.min(ranked.len())..];
                         let cut = w.min(rest.len());
-                        *next = rest[cut..].iter().map(|&(j, ..)| j).collect();
-                        rest[..cut].iter().map(|&(j, ..)| j).collect()
+                        *next = rest[cut..].to_vec();
+                        rest[..cut].to_vec()
                     };
                     got.store(js.len(), std::sync::atomic::Ordering::Relaxed);
                     bar.add(items[i].feats.len() as u64);
@@ -1172,7 +1435,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
 /// The second look at files the direct pass came up short on
 /// (`Scope::re_askers`): each asks again mirrored and inverted. Its verdicts,
 /// kept as the direct pass's are; the index goes with it.
-fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, mut index: Index, direct: &[Edge]) -> Vec<Edge> {
+fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct: &[Edge]) -> Vec<Edge> {
     let (args, progress) = (cx.args, &cx.progress);
     let (items, policy) = (pass.items, pass.policy);
     // The postings go until the second look asks; see `Index::let_go`.
@@ -1204,7 +1467,7 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, mut index: Index, direct: &
     let total_weight: u64 = weight.iter().sum();
     let bar = progress.begin_counted(Stage::Variants, total_weight, askers.len(), "images");
     index.turn(&askers);
-    let index = &index;
+    let index = &*index;
     let turned: Vec<Edge> = askers
         .par_iter()
         .enumerate()
@@ -1403,6 +1666,7 @@ fn cluster(
     }
     claims
 }
+
 
 /// Every verdict the matching made, for `--dump`: those of the files' own
 /// questions are the run's own list, and these the ones nothing after their
@@ -1923,7 +2187,8 @@ fn numbered_groups(files: &[PathBuf], grouping: Vec<group::Group>, pairs: &[Pair
 /// The settings a report records, which are the ones that decide its pairs.
 fn run_config(args: &Args) -> serde_json::Value {
     let mut c = serde_json::json!({
-        "work_size": args.work_size,
+        "detail": args.detail(),
+        "fast": args.fast,
         "features": FEATURES,
         "candidates": args.candidates,
         "min_aligned_points": aligned_points(args),
@@ -1953,6 +2218,34 @@ fn as_typed(v: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's features at each detail: the default's analysis, then each
+    /// finer level it has; a picture with fewer levels than the detail has
+    /// all it has. And the scale bound grows with the finest plane, never
+    /// under the default's.
+    #[test]
+    fn a_detail_reads_its_prefix_and_bound() {
+        let item = |dims: (u32, u32), n: usize, ends: Vec<u32>| Item {
+            feats: std::sync::Arc::new(Features {
+                w: 512,
+                h: 384,
+                kps: vec![sift::Keypoint::default(); n].into(),
+                desc: vec![0u8; n * DESC_LEN].into(),
+                ends,
+            }),
+            dims,
+            ..Default::default()
+        };
+        let big = item((4000, 3000), 20, vec![10, 15, 20]);
+        assert_eq!([512, 1024, 2048].map(|d| level_prefix(&big, 512, d)), [10, 15, 20]);
+        assert_eq!([512, 1024, 2048].map(|d| level_bound(&big, 512, d)), [1.0, 2.0, 4.0]);
+        let mid = item((700, 525), 14, vec![10, 14]);
+        assert_eq!([512, 1024, 2048].map(|d| level_prefix(&mid, 512, d)), [10, 14, 14]);
+        assert!((level_bound(&mid, 512, 1024) - 700.0 / 512.0).abs() < 1e-6);
+        let plain = item((300, 200), 7, vec![]);
+        assert_eq!(level_prefix(&plain, 512, 2048), 7);
+        assert_eq!(level_bound(&plain, 512, 2048), 1.0);
+    }
     use verify::Thumb;
 
     #[test]
@@ -1995,7 +2288,7 @@ mod tests {
         let vocab = Vocabulary::build(pool, &index::VocabParams::for_corpus(items.iter().map(|it| it.feats.len()).sum()));
         let lists: Vec<WordList> = items.iter().map(|it| quantise(&vocab, &it.feats)).collect();
         let policy = verify::Policy::new(MIN_ALIGNED_POINTS, 0.5, 0.6);
-        let pass = Pass { items: &items, matched: &[true, true], policy: &policy, gate: (3, 0.2), dumping: false };
+        let pass = Pass { items: &items, matched: &[true, true], policy: &policy, gate: (3, 0.2), dumping: false, bounds: None, known: None, fresh: None };
         let ask = |i: usize, j: usize| pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::SAME, &mut Work::default());
         let low = ask(0, 1).expect("a picture and its downscale match");
         let high = ask(1, 0).expect("asked from the other end too");

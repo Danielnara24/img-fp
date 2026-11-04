@@ -74,6 +74,7 @@ impl Hash {
 /// The settings a run's matching reads.
 pub struct Asked {
     pub work_size: usize,
+    pub detail: usize,
     pub candidates: usize,
     pub points: u32,
     pub overlap: f32,
@@ -89,7 +90,7 @@ impl Fingerprint {
         let mut h = Hash::new();
         h.bytes(MAGIC);
         h.bytes(env!("IMGFP_BUILD").as_bytes());
-        for v in [asked.work_size as u64, asked.candidates as u64, asked.points as u64, asked.overlap.to_bits() as u64, asked.correlation.to_bits() as u64, asked.skip_mirrored as u64, names.len() as u64] {
+        for v in [asked.work_size as u64, asked.detail as u64, asked.candidates as u64, asked.points as u64, asked.overlap.to_bits() as u64, asked.correlation.to_bits() as u64, asked.skip_mirrored as u64, names.len() as u64] {
             h.u64(v);
         }
         for (i, f) in names.iter().enumerate() {
@@ -164,6 +165,7 @@ pub fn load(path: &Path, fp: Fingerprint) -> Option<Matched> {
             blk_n: r.u32()?,
             blk_min: r.f32()?,
             ncc: r.f32()?,
+            ..Default::default()
         };
         claims.push(Claim { e: Edge::new(i, j, v), how });
     }
@@ -377,6 +379,7 @@ mod tests {
             blk_n: 30,
             blk_min: 0.91,
             ncc: f32::NAN,
+            ..Default::default()
         };
         let m = Matched {
             claims: vec![Claim { e: Edge::new(3, 9, v), how: How::Propagated }, Claim { e: Edge::new(0, 1, Verdict::default()), how: How::Corroborated }],

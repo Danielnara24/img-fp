@@ -71,6 +71,17 @@ impl<'a, T: Plain> IntoIterator for &'a Shared<T> {
     }
 }
 
+impl<T: Plain> Shared<T> {
+    /// The first `n` values, sharing the mapping (a heap array is copied).
+    pub fn prefix(&self, n: usize) -> Shared<T> {
+        let n = n.min(self.len);
+        match &self.owner {
+            Owner::Heap(v) => v[..n].to_vec().into(),
+            Owner::Mapped(c) => Shared { ptr: self.ptr, len: n, owner: Owner::Mapped(c.clone()) },
+        }
+    }
+}
+
 impl<T: Plain> From<Vec<T>> for Shared<T> {
     fn from(v: Vec<T>) -> Self {
         Shared { ptr: v.as_ptr(), len: v.len(), owner: Owner::Heap(v) }
