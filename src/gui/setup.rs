@@ -28,16 +28,78 @@ use std::time::{Duration, Instant};
 const KILL_AFTER: Duration = Duration::from_secs(3);
 
 /// A list of folders with Add and Remove, for the folders to scan and the
-/// ones to leave out.
+/// ones to leave out; the second also takes what is typed (`with_patterns`).
 struct PathList {
     root: gtk::Box,
     list: gtk::ListBox,
     paths: RefCell<Vec<PathBuf>>,
     add: gtk::Button,
+    /// Each row says whether its entry is a pattern rather than a path.
+    patterns: bool,
 }
 
 impl PathList {
     fn new(window: &gtk::ApplicationWindow, add_label: &str, remove_label: &str, empty: &str, height: i32) -> Rc<PathList> {
+        Self::make(window, add_label, remove_label, empty, height, false)
+    }
+
+    /// The list of what to leave out, which also takes what is typed: a
+    /// pattern of names (`*.tmp`) or a whole path, plain or a pattern, as
+    /// `--exclude` takes them (`img_fp::typed_exclude`). The chooser can name
+    /// only folders, so the patterns `--exclude` reads could not be given
+    /// from the window at all.
+    fn with_patterns(window: &gtk::ApplicationWindow, add_label: &str, remove_label: &str, empty: &str, height: i32) -> Rc<PathList> {
+        let me = Self::make(window, add_label, remove_label, empty, height, true);
+        let entry = gtk::Entry::builder()
+            .placeholder_text("*.tmp     Thumb?     ~/Pictures/**/raw")
+            .hexpand(true)
+            .secondary_icon_name("list-add-symbolic")
+            .secondary_icon_tooltip_text("Add it")
+            .tooltip_text(
+                "A name to leave out wherever it is met, with * for any run of characters, ? for one and [...] for one of a set: \
+                 *.tmp, Thumb?. Or a whole path, which may hold the same, and ** for any number of folders: ~/Pictures/**/raw. \
+                 Press Enter to add it.",
+            )
+            .build();
+        let label = label_for(l::PATTERN, &entry);
+        let error = gtk::Label::builder().xalign(0.0).wrap(true).visible(false).css_classes(["error", "caption"]).build();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&label);
+        row.append(&entry);
+        me.root.append(&row);
+        me.root.append(&error);
+        let add = {
+            let me = Rc::downgrade(&me);
+            let error = error.clone();
+            move |entry: &gtk::Entry| {
+                let Some(me) = me.upgrade() else { return };
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                match img_fp::typed_exclude(&entry.text(), home.as_deref()) {
+                    Ok(Some(p)) => {
+                        me.add_paths(std::iter::once(p));
+                        entry.set_text("");
+                        error.set_visible(false);
+                    }
+                    Ok(None) => error.set_visible(false),
+                    Err(why) => {
+                        error.set_text(why);
+                        error.set_visible(true);
+                    }
+                }
+            }
+        };
+        entry.connect_activate(add.clone());
+        entry.connect_icon_release(move |entry, pos| {
+            if pos == gtk::EntryIconPosition::Secondary {
+                add(entry);
+            }
+        });
+        // A refusal is about what was typed, and goes once it changes.
+        entry.connect_changed(move |_| error.set_visible(false));
+        me
+    }
+
+    fn make(window: &gtk::ApplicationWindow, add_label: &str, remove_label: &str, empty: &str, height: i32, patterns: bool) -> Rc<PathList> {
         let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Browse).build();
         list.add_css_class("boxed-list");
         list.set_placeholder(Some(&gtk::Label::builder().label(empty).css_classes(["dim-label"]).margin_top(12).margin_bottom(12).build()));
@@ -53,10 +115,12 @@ impl PathList {
         let buttons = gtk::Box::new(gtk::Orientation::Vertical, 6);
         buttons.append(&add);
         buttons.append(&remove);
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        root.append(&scroll);
-        root.append(&buttons);
-        let me = Rc::new(PathList { root, list, paths: RefCell::new(Vec::new()), add: add.clone() });
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        top.append(&scroll);
+        top.append(&buttons);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.append(&top);
+        let me = Rc::new(PathList { root, list, paths: RefCell::new(Vec::new()), add: add.clone(), patterns });
 
         let window = window.downgrade();
         add.connect_clicked({
@@ -127,14 +191,18 @@ impl PathList {
             let label = gtk::Label::builder()
                 .label(p.display().to_string())
                 .xalign(0.0)
+                .hexpand(true)
                 .ellipsize(gtk::pango::EllipsizeMode::Middle)
                 .tooltip_text(p.display().to_string())
-                .margin_start(8)
-                .margin_end(8)
-                .margin_top(4)
-                .margin_bottom(4)
                 .build();
-            self.list.append(&label);
+            let row = gtk::Box::builder().spacing(8).margin_start(8).margin_end(8).margin_top(4).margin_bottom(4).build();
+            row.append(&label);
+            // As the walk reads it: a path that is there is that path,
+            // wildcards and all.
+            if self.patterns && img_fp::is_exclude_pattern(p) && !p.exists() {
+                row.append(&gtk::Label::builder().label("pattern").css_classes(["dim-label", "caption"]).build());
+            }
+            self.list.append(&row);
         }
         *self.paths.borrow_mut() = v;
     }
@@ -320,7 +388,7 @@ impl Setup {
 
         // ---- General
         let folders = PathList::new(window, l::ADD_FOLDER, l::REMOVE_FOLDER, "No folders yet. Add one, or drop it here.", 130);
-        let exclude = PathList::new(window, l::ADD_EXCLUDE, l::REMOVE_EXCLUDE, "Nothing left out.", 90);
+        let exclude = PathList::with_patterns(window, l::ADD_EXCLUDE, l::REMOVE_EXCLUDE, "Nothing left out.", 90);
 
         let g = grid();
         let folders_label = label_for(l::FOLDERS, &folders.list);

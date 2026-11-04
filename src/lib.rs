@@ -61,7 +61,7 @@ mod table;
 pub use outcome::{Evidence, Outcome, Relation};
 pub use suggest::{Action, Lapse, Mode as SuggestMode};
 pub use cache::file_name as cache_file_name;
-pub use walk::desktop_dir;
+pub use walk::{desktop_dir, is_exclude_pattern, typed_exclude};
 
 /// The cache file a run uses when `--cache` does not say.
 pub fn default_cache() -> PathBuf {
@@ -1208,7 +1208,6 @@ mod tests {
     }
 
     use super::*;
-    use verify::Thumb;
 
     /// The mirrored-descriptor permutation must agree with actually mirroring
     /// the image and extracting again. If it does not, mirrored matches are
@@ -1380,7 +1379,7 @@ mod tests {
         let run = || {
             let p = sift::Params { max_features: FEATURES, ..Default::default() };
             let (fa, fb) = (sift::extract(&g, &p), sift::extract(&c, &p));
-            let (ta, tb) = (Thumb::build(&g, THUMB_LONG), Thumb::build(&c, THUMB_LONG));
+            let (ta, tb) = (verify::Thumb::build(&g, THUMB_LONG), verify::Thumb::build(&c, THUMB_LONG));
             let pool: Vec<&[u8; DESC_LEN]> = (0..fa.len()).map(|i| fa.d(i)).chain((0..fb.len()).map(|i| fb.d(i))).map(|d| d.try_into().unwrap()).collect();
             let vp = index::VocabParams::for_corpus(pool.len());
             let vocab = Vocabulary::build(pool, &vp);

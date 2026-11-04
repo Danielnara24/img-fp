@@ -24,7 +24,9 @@ pub const RECURSIVE: &str = "Look _in subfolders";
 pub const DETAIL: &str = "De_tail";
 pub const MIN_CORRELATION: &str = "Min pi_xel correlation";
 pub const MIRRORED: &str = "Loo_k for mirrored and inverted copies";
-pub const EXCLUDE: &str = "Folders to _exclude";
+pub const EXCLUDE: &str = "_Exclude";
+/// The exclude list's entry, for a pattern or a path typed by hand.
+pub const PATTERN: &str = "Or t_ype";
 pub const ADD_EXCLUDE: &str = "Add excl_uded folder…";
 pub const REMOVE_EXCLUDE: &str = "Re_move";
 pub const HIDDEN: &str = "Include _hidden folders";
@@ -123,7 +125,7 @@ mod tests {
         // CANCEL is left out because it replaces SCAN.
         let page = [SCAN, TAB_GENERAL, TAB_ADVANCED, SCAN_LOG, BACK_TO_RESULTS, DEFAULTS];
         let general = [
-            FOLDERS, ADD_FOLDER, REMOVE_FOLDER, RECURSIVE, HIDDEN, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE,
+            FOLDERS, ADD_FOLDER, REMOVE_FOLDER, RECURSIVE, HIDDEN, EXCLUDE, ADD_EXCLUDE, REMOVE_EXCLUDE, PATTERN,
             DETAIL, MIN_CORRELATION, MIRRORED,
         ];
         let advanced = [

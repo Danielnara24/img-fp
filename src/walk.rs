@@ -809,12 +809,74 @@ fn split_path_list(raw: &[u8], null_separated: bool) -> Vec<&[u8]> {
         .collect()
 }
 
+/// Whether an `--exclude` entry is a pattern when it names no path: it holds
+/// `*`, `?` or `[` (`Pattern`). For a window, which shows the two apart.
+pub fn is_exclude_pattern(p: &Path) -> bool {
+    Pattern::is_one(p)
+}
+
+/// What a window makes of an exclusion typed by hand: the `--exclude` entry
+/// to pass, `None` for nothing typed, or why it is not one.
+///
+/// **A window has no current folder to resolve against**, where a shell does:
+/// a relative `photos/**/raw` would be read against wherever the window was
+/// started, which excludes nothing and says so only as a problem after the
+/// scan. So a path, plain or a pattern, is a whole one, or starts `~/`
+/// (`home`, as a shell expands it); and a pattern of names alone (no `/`:
+/// `*.tmp`, `Thumb?`) is taken as typed, since it is matched below every
+/// folder scanned. A bare name with no wildcard is refused rather than
+/// guessed at: on the command line it is a path.
+pub fn typed_exclude(text: &str, home: Option<&Path>) -> Result<Option<PathBuf>, &'static str> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let p = match (t.strip_prefix('~'), home) {
+        (Some(""), Some(h)) => h.to_path_buf(),
+        (Some(rest), Some(h)) if rest.starts_with('/') => h.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(t),
+    };
+    if p.is_absolute() {
+        return Ok(Some(p));
+    }
+    if is_exclude_pattern(&p) && !t.contains('/') {
+        return Ok(Some(p));
+    }
+    Err(if is_exclude_pattern(&p) {
+        "A pattern holding a / needs a whole path, such as ~/Pictures/**/raw."
+    } else {
+        "A folder or file needs its whole path. To leave out a name wherever it is, use * or ?, such as *.tmp."
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::problems::Log;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    /// What a window may pass as `--exclude`: whole paths, `~/` ones, and
+    /// patterns of names; never a path the worker would resolve against a
+    /// folder nobody chose.
+    #[test]
+    fn a_typed_exclusion_is_a_whole_path_or_a_pattern_of_names() {
+        let home = Path::new("/home/u");
+        let ok = |t: &str| typed_exclude(t, Some(home)).unwrap().unwrap();
+        assert_eq!(ok("*.tmp"), PathBuf::from("*.tmp"));
+        assert_eq!(ok("  @eaDi?  "), PathBuf::from("@eaDi?"), "trimmed");
+        assert_eq!(ok("/srv/photos/**/raw"), PathBuf::from("/srv/photos/**/raw"));
+        assert_eq!(ok("/srv/photos/edits"), PathBuf::from("/srv/photos/edits"));
+        assert_eq!(ok("~/Pictures/**/raw"), PathBuf::from("/home/u/Pictures/**/raw"));
+        assert_eq!(ok("~"), PathBuf::from("/home/u"));
+        assert_eq!(typed_exclude("   ", Some(home)), Ok(None));
+        assert!(typed_exclude("photos/**/raw", Some(home)).is_err(), "relative to nothing");
+        assert!(typed_exclude("@eaDir", Some(home)).is_err(), "a bare name is a relative path");
+        assert!(typed_exclude("~/x", None).is_err(), "no home to expand");
+        assert!(typed_exclude("~bob/x", Some(home)).is_err(), "another user's home is not expanded");
+        // What it hands on is what the walk reads as the same kind of entry.
+        assert!(is_exclude_pattern(&ok("*.tmp")) && !is_exclude_pattern(&ok("/srv/photos/edits")));
+    }
 
     /// A directory that removes itself, since the crate has no `tempfile`.
     struct Scratch(PathBuf);

@@ -1471,6 +1471,7 @@ const POST_AHEAD: usize = 6;
 /// Lines of one posting run to ask for. Eight postings to a line, so this is
 /// the first five hundred and twelve of them, which is longer than all but a
 /// handful of runs.
+#[cfg(target_arch = "x86_64")]
 const POST_LINES: usize = 8;
 
 /// Ask for the postings of `words[at]`.

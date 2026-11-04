@@ -247,6 +247,10 @@ since is answered by the rest of the library.
 the scan, then go through the groups and choose which images to move to the
 Trash.
 
+Under *Exclude*, add folders to leave out, or type a pattern as `--exclude`
+takes one: a name to leave out wherever it is (`*.tmp`, `Thumb?`), or a whole
+path, which may hold `*` and `**` (`~/Pictures/**/raw`).
+
 - The groups are listed down the left side, each shown by one of its pictures
   with the number of images in it, and how many are marked once you mark some.
 - A group's images fill the rest of the window. Point at an image, or select

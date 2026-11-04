@@ -1493,6 +1493,56 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   - **E** `same::open_file_limit`: `RLIMIT_NOFILE` per architecture (5 on
     Linux MIPS, 6 on SPARC, 7 elsewhere on Linux, 8 on the BSDs and macOS)
     and `rlim_t` a `c_ulong` on Linux (32 bits on a 32-bit build).
+- **0.79.0, audit after 0.78.1** (A-F; only D changes pairs):
+  - **A** the keep rule was cubic in a class of same-frame copies:
+    `Component::refusal` counted `pictures_of_one_frame` (quadratic in the
+    class) before the cheap `!e.exact` test, once a pair as deletion spread.
+    Byte copies of one picture, 1,000 / 2,000 / 3,000: 0.9 / 8.8 / 37 s;
+    600 re-encodes 5.0 s in the stage. Now the test first and the count
+    stops at three (all it is asked).
+  - **B** what is left is the N(N-1)/2 pairs N copies are stated as (3,000
+    copies: 4.5 M pairs, ~1 GB RSS, a 1.65 GB JSON). Made cheaper without
+    changing a byte: `Component::new` read `frame_any(f, g)` by binary search
+    for the side it was holding (most of 10 s), and the report's pairs were
+    sorted by comparing two path strings a step (`pipeline::name_ranks`).
+    3,000 copies 55 -> 16 s wall, 600 re-encodes 10.2 -> 6.1 s; reports of
+    both and of six small folders identical. **Open** (user's call: the
+    format): stating an identical set once would make it linear.
+  - **C** the window's exclude list takes patterns typed by hand (`PathList::
+    with_patterns`, label `PATTERN`): a pattern of names as typed, a path
+    whole or `~/` (`walk::typed_exclude`: the worker has no current folder,
+    so `photos/**/raw` would resolve against wherever the window started);
+    a bare name with no wildcard is refused, as on the command line it is a
+    path. Checked under Xvfb: refusal shown, `~/` expanded, `skip_*` kept in
+    `gui.json` and its file left out of the scan.
+  - **D** the pixel check takes each side to the blunter one's resolution
+    (`pixel_check_with`: footprint times the other side's shortfall below a
+    pixel a cell). Its comment had said so since 888f90f; the code filtered
+    each side over its own footprint only. Cached, base = HEAD: IMGS-ALL F1
+    0.9737 -> 0.9748 (P 98.84 -> 98.83%, R 95.94 -> 96.17%, traps +42,
+    cross-family +98; past 300 five -> four: Mural1/2 329 -> 252, the
+    other four as they were), `crop_micro` 306 -> 322, `contact_sheet` 349 -> 352,
+    `embed_tiny` 353 -> 351; IMGS-ALL2 0.9390 -> 0.9415 (98.63 -> 98.62%,
+    89.59 -> 90.06%, same three past 300), every transform that moved up
+    (`crop_micro` 281 -> 291, `perspective` 285 -> 289). Keep rule: 0 lost
+    both; IMGS-ALL 358 / 364, 364 / 364, strict line 52 both, DELETE +15;
+    IMGS-ALL2 351 / 364, 364 / 364, strict line 38 -> 39 (not traced).
+    `families.py` joined 65.0 -> 65.3 (one n1 draw), 63.0 -> 63.0. Not run:
+    `pairs.py`, cliffs. **Not fixed by it**: a 48 px thumbnail of a 700 px
+    photo still agrees at 0.87 (KEEP beside it, `new` against a library
+    holding it): both sides hold a pixel a cell there, and what differs is
+    the small file's own resize and JPEG at its pixel scale. A floor of two
+    pixels would read past it, but it is a new constant.
+  - **E** a compaction's copy (`<stem>.tmp.<pid>`) and the heads, matched
+    and same files' temporaries left by a run killed outright (SIGKILL, the
+    OOM killer; the window kills a cancelled scan after 3 s) were never
+    removed. `cache::sweep_litter`, asked by `compact` once it holds the
+    cache alone, removes them: with no other holder each is a dead run's,
+    which a pid test could not say for a cache two machines share. A copy
+    of a stem another cache in the folder shares is left.
+  - **F** no warnings on aarch64 Linux and macOS (`cargo check --target
+    ... --all-targets`): `POST_LINES` x86-only, `verify.rs`'s `last` / `x`,
+    a test's `Thumb` import.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.

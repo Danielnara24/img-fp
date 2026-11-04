@@ -1085,7 +1085,11 @@ impl<'c, 'a> Component<'c, 'a> {
             let s = &ctx.all_sides[f];
             s.binary_search_by_key(&(g as u32), |e| e.to).ok().is_some_and(|k| s[k].exact || s[k].f_in)
         };
-        let is_plain = |f: usize| ctx.all_sides[f].iter().any(|e| frame_any(f, e.to as usize) && frame_any(e.to as usize, f));
+        // `e` is `f`'s side to `e.to`, the one `frame_any(f, e.to)` would
+        // look up (`all_sides` holds one a file): read where it is held. A
+        // lookup a pair made settling a family of 3,000 copies most of 10 s.
+        let in_other = |e: &Side| e.exact || e.f_in;
+        let is_plain = |f: usize| ctx.all_sides[f].iter().any(|e| in_other(e) && frame_any(e.to as usize, f));
         let plain: HashMap<usize, bool> = members.iter().map(|&f| (f, is_plain(f))).collect();
         let any_plain = plain.values().any(|&p| p);
         let part: HashMap<usize, bool> = members
@@ -1093,7 +1097,7 @@ impl<'c, 'a> Component<'c, 'a> {
             .map(|&f| {
                 let holds_plain = ctx.all_sides[f].iter().any(|e| {
                     let g = e.to as usize;
-                    frame_any(g, f) && !frame_any(f, g) && is_plain(g)
+                    !in_other(e) && frame_any(g, f) && is_plain(g)
                 });
                 (f, !holds_plain)
             })
@@ -1134,12 +1138,17 @@ impl<'c, 'a> Component<'c, 'a> {
     /// counted the narrow way, every pair of slight crops of one photograph
     /// was undecided, and kept from deletion what the original would delete
     /// (200 files of IMGS-ALL, `rotate_small`, `print_scan`, `crop_slight`).
+    ///
+    /// **Counted up to three**, all `refusal` asks (fewer than three or not).
+    /// Counted whole it was quadratic in the class, and asked of every pair
+    /// as deletion spreads: 600 re-encodes of one picture spent 5.0 s here,
+    /// now 0.9.
     fn pictures_of_one_frame(&self, c: usize, k: usize, d: usize) -> usize {
         let x = self.ctx;
         let strict = |f: usize, g: usize| x.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f && !e.mutual));
         let narrow = strict(k, d);
         let of = self.classes[c].iter().copied().filter(|&g| !narrow || g == k || g == d || (strict(g, k) && strict(g, d))).collect::<Vec<_>>();
-        of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| x.side(f, g).is_some_and(|e| e.exact))).count()
+        of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| x.side(f, g).is_some_and(|e| e.exact))).take(3).count()
     }
 
     /// The whole-frame check of deleting `d` for `k` (`whole_worst`).
@@ -1186,8 +1195,8 @@ impl<'c, 'a> Component<'c, 'a> {
         // pinned file is kept whatever it is, so against a library the
         // question is not asked.
         if !x.is_pinned(k)
-            && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.pictures_of_one_frame(c, k, d) < 3)
             && x.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
+            && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.pictures_of_one_frame(c, k, d) < 3)
             && !x.more(k, d)
             && !x.more(d, k)
         {

@@ -1344,8 +1344,11 @@ fn filter_row(v: &[u16], out: &mut [u8]) {
         return;
     }
     out[0] = tap(v, 0);
-    // Every tap of these is inside the row.
+    // Every tap of these is inside the row. Only the AVX2 blocks below read
+    // `last` or move `x`.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
     let last = if 2 * n < v.len() { n } else { n - 1 };
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
     let mut x = 1usize;
     // Eight outputs at a time: `madd` takes `v[2x-1] + 3v[2x]` from a load at
     // `2x - 1` and `3v[2x+1] + v[2x+2]` from one at `2x + 1`, as 32-bit sums,
@@ -1975,9 +1978,18 @@ fn pixel_check_with(
     // detail against that measures the gap in resolution, not a difference in
     // content, so the sharper side is taken down to what the blunter one can
     // actually show.
+    //
+    // A side holding `raw` of its thumbnail's pixels a cell shows nothing
+    // finer than `1 / raw` cells where that is under one, so each side is read
+    // over its own footprint times the other's shortfall. Until this was done
+    // the comment above was all there was of it: each side was filtered over
+    // its own footprint alone, and a thumbnail of 48 pixels agreed with the
+    // 700-pixel photograph it was made from at 0.87 a block (0.97 overall),
+    // was kept beside it, and against a library holding it was `new`.
+    let (fa, fb) = (raw_a * (1.0 / raw_b).max(1.0), raw_b * (1.0 / raw_a).max(1.0));
     let (pyr_a, pyr_b) = pyramids;
-    let lod_a = ta.lod(raw_a, pyr_a);
-    let lod_b = tb.lod(raw_b, pyr_b);
+    let lod_a = ta.lod(fa, pyr_a);
+    let lod_b = tb.lod(fb, pyr_b);
 
     // Each axis at its own scale. `Thumb::scale` is the horizontal one; the
     // thumbnail's two sides are rounded separately, so the vertical one differs

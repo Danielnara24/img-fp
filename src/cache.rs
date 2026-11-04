@@ -759,6 +759,61 @@ pub(crate) fn abandon_partial(tmp: &Path) {
     std::fs::remove_file(tmp).ok();
 }
 
+/// The temporary file `replace_with` writes for the cache at `path`, by
+/// process: `<cache stem>.tmp.<pid>`.
+fn temporary(path: &Path, pid: u32) -> PathBuf {
+    path.with_extension(format!("tmp.{pid}"))
+}
+
+/// Remove the temporary files runs killed outright left beside the cache at
+/// `path`: a compaction's copy (`temporary`), and the heads index's, the kept
+/// matching's and the identical files' (each its file's name and `.<pid>`).
+///
+/// **Asked only by a run that holds the cache alone** (`compact`, after
+/// `exclusive`). Every run holds the cache shared while it has it, and writes
+/// those files only then, so with no other holder each of them is a dead
+/// run's, whatever its process id says; a test of the id would be wrong for a
+/// cache on a share that two machines use. Ctrl-C and SIGTERM remove a
+/// half-written copy (`seal`), but SIGKILL, the OOM killer and a power cut do
+/// not, and the copy is up to the cache's own size: the window kills a
+/// cancelled scan that has not ended after three seconds. Left, nothing ever
+/// removed it. A killed compaction leaves the cache as worth compacting as it
+/// was, so the next run that can compacts and sweeps.
+fn sweep_litter(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let Some(stem) = path.file_stem() else { return };
+    let mine = std::process::id().to_string();
+    // A name, then `.`, then a process id of this run's or none.
+    let beside: Vec<Vec<u8>> = [
+        { let mut s = stem.to_owned(); s.push(".tmp."); s }, // `temporary`
+        { let mut s = heads::path_of(Path::new(name)).into_os_string(); s.push("."); s },
+        { let mut s = crate::matched::path_beside(Path::new(name)).into_os_string(); s.push("."); s },
+        { let mut s = crate::matched::identical_beside(Path::new(name)).into_os_string(); s.push("."); s },
+    ]
+    .into_iter()
+    .map(|s| s.as_bytes().to_vec())
+    .collect();
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let names: Vec<std::ffi::OsString> = entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.file_name()).collect();
+    let dead = |n: &[u8], b: &[u8]| n.strip_prefix(b).is_some_and(|pid| !pid.is_empty() && pid.iter().all(u8::is_ascii_digit) && pid != mine.as_bytes());
+    // The compaction's copy is named by the cache's stem, and another cache
+    // of that stem (`foo.bin` beside `foo.old`) would name its copies alike:
+    // then which cache a copy was for cannot be told, and it is left.
+    let mut stem_dot = stem.as_bytes().to_vec();
+    stem_dot.push(b'.');
+    let mut name_dot = name.as_bytes().to_vec();
+    name_dot.push(b'.');
+    let shared_stem = names.iter().map(|n| n.as_bytes()).any(|n| n != name.as_bytes() && n.starts_with(&stem_dot) && !n.starts_with(&name_dot) && !n.starts_with(&beside[0]));
+    for n in &names {
+        let n = n.as_bytes();
+        let litter = beside.iter().enumerate().any(|(i, b)| (i > 0 || !shared_stem) && dead(n, b));
+        if litter {
+            let _ = std::fs::remove_file(dir.join(std::ffi::OsStr::from_bytes(n)));
+        }
+    }
+}
+
 /// Write a new file at `path` through a temporary one, and hand back the new
 /// file open for appending.
 ///
@@ -766,7 +821,7 @@ pub(crate) fn abandon_partial(tmp: &Path) {
 /// removes the temporary file before it can be renamed — and the rename then
 /// fails, in a process that is exiting — or finds nothing to remove.
 fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<File> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = temporary(path, std::process::id());
     std::fs::remove_file(&tmp).ok();
     lock(&PARTIAL).push(tmp.clone());
     // Takes this call's entry out of the list, and says whether it was still
@@ -1574,6 +1629,7 @@ impl Store {
         if !exclusive(src, &self.path) {
             return Ok(false);
         }
+        sweep_litter(&self.path);
         let foreign = self.foreign();
         let mut entries: Vec<(&Path, Span)> = entries.iter().copied().chain(foreign.iter().map(|(p, s)| (p.as_path(), *s))).collect();
         // By the path's bytes, which is the order the text sort gave before
@@ -2577,6 +2633,48 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A dead run's temporary files beside the cache go, and nothing else:
+    /// not this run's own, not files that only look alike, not another
+    /// cache's, and not a copy that could be another cache's of one stem.
+    #[test]
+    fn a_killed_runs_temporary_files_are_swept_and_nothing_else() {
+        let dir = scratch("litter");
+        let cache = dir.join("analysis.bin");
+        let me = std::process::id();
+        let touch = |n: &str| std::fs::write(dir.join(n), b"x").unwrap();
+        let litter = ["analysis.tmp.4242", "analysis.bin.heads.17", "analysis.bin.matched.99", "analysis.bin.same.1"];
+        let kept = [
+            "analysis.bin".to_string(),
+            "analysis.bin.heads".into(),
+            "analysis.bin.matched".into(),
+            "analysis.bin.same".into(),
+            format!("analysis.tmp.{me}"),
+            "analysis.tmp.12x".into(),
+            "analysis.tmp.".into(),
+            "other.tmp.4242".into(),
+            "other.bin.matched.5".into(),
+            "photo.jpg".into(),
+        ];
+        for n in litter.iter().copied().chain(kept.iter().map(String::as_str)) {
+            touch(n);
+        }
+        sweep_litter(&cache);
+        for n in litter {
+            assert!(!dir.join(n).exists(), "{n} is litter");
+        }
+        for n in &kept {
+            assert!(dir.join(n).exists(), "{n} is not");
+        }
+        // Another cache of the stem: its copies cannot be told from ours.
+        touch("analysis.old");
+        touch("analysis.tmp.4242");
+        touch("analysis.bin.same.2");
+        sweep_litter(&cache);
+        assert!(dir.join("analysis.tmp.4242").exists() && !dir.join("analysis.bin.same.2").exists());
+        assert_eq!(temporary(&cache, 4242), dir.join("analysis.tmp.4242"), "the name `replace_with` writes");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `--cache` names the file, except when what it names is obviously a

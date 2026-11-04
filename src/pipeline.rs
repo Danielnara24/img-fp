@@ -1906,8 +1906,15 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
     };
     // By name, as the JSON lists them; stable, so names that read alike keep
     // the order they were met in.
+    //
+    // Each file's name is ranked once, equal names alike (two paths that are
+    // not UTF-8 may display the same), and the pairs sorted by the two ranks:
+    // the order comparing the names gave, without comparing them for every
+    // pair, which with the 4.5 M pairs of 3,000 copies of one file was a
+    // string comparison of two long paths a step of the sort.
     let names: Vec<String> = files.par_iter().map(|f| f.display().to_string()).collect();
-    pairs.par_sort_by(|x, y| names[x.a as usize].cmp(&names[y.a as usize]).then_with(|| names[x.b as usize].cmp(&names[y.b as usize])));
+    let rank = name_ranks(&names);
+    pairs.par_sort_by_key(|p| (rank[p.a as usize], rank[p.b as usize]));
 
     let failures: Vec<serde_json::Value> = items
         .iter()
@@ -1934,6 +1941,22 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
         not_asked,
         ok: items.iter().map(|it| it.read.ok()).collect(),
     }
+}
+
+/// Each name's place in name order, names that are equal at one place: so
+/// that ordering by places is ordering by names, ties included.
+fn name_ranks(names: &[String]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..names.len() as u32).collect();
+    order.par_sort_unstable_by(|&x, &y| names[x as usize].cmp(&names[y as usize]));
+    let mut rank = vec![0u32; names.len()];
+    let mut place = 0u32;
+    for (k, &i) in order.iter().enumerate() {
+        if k > 0 && names[i as usize] != names[order[k - 1] as usize] {
+            place = k as u32;
+        }
+        rank[i as usize] = place;
+    }
+    rank
 }
 
 /// Whether the scan is kept for `--last` and the window (`last`): not one
@@ -2382,5 +2405,29 @@ mod tests {
         assert_eq!((low.a(), low.b()), (0, 1));
         assert_eq!((high.a(), high.b()), (0, 1));
         assert!((low.v.scale - high.v.scale).abs() < 0.02 * low.v.scale, "scale {} from below, {} from above", low.v.scale, high.v.scale);
+    }
+
+    /// Sorting pairs by their names' ranks is sorting them by their names,
+    /// stably: equal names (two paths shown alike) keep the order met.
+    #[test]
+    fn pairs_sorted_by_name_ranks_are_sorted_by_names() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..200 {
+            let names: Vec<String> = (0..1 + rnd(12)).map(|_| ["a", "b", "a/x", "ab", "\u{fffd}", "B"][rnd(6) as usize].to_string()).collect();
+            let n = names.len() as u64;
+            let pairs: Vec<(usize, usize, usize)> = (0..rnd(40)).map(|k| (rnd(n) as usize, rnd(n) as usize, k as usize)).collect();
+            let mut by_names = pairs.clone();
+            by_names.sort_by(|x, y| names[x.0].cmp(&names[y.0]).then_with(|| names[x.1].cmp(&names[y.1])));
+            let rank = name_ranks(&names);
+            let mut by_ranks = pairs.clone();
+            by_ranks.sort_by_key(|p| (rank[p.0], rank[p.1]));
+            assert_eq!(by_names, by_ranks, "{names:?}");
+        }
     }
 }
