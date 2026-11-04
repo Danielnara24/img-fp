@@ -153,7 +153,7 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.77.0)
+## Status (0.78.0)
 
 - **The field, 2026-10-28** (`benchmark/BASELINE.md`, `out/v54-field`), cold,
   one session, img-fp 0.75.0 plain build. IMGS-ALL (five corpora, 33,136
@@ -1421,6 +1421,56 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     4096, `--fast`, `--against` at 2048, `--dump` at 512 and 2048 (CSV
     byte-identical): all identical but `runtime_seconds`. Not run on the
     full corpora.
+- **0.78.0, audit after 0.77.1** (A-G; scratch runs under the session
+  scratchpad `c/`, not in `out/`):
+  - **A** the whole-frame check (`whole_worst`) blurred each side at its own
+    quarter-octave step (`Blurs::get`), and a footprint on a step's midpoint
+    went either way on a fitted scale's last digits. Every 9:16 portrait (a
+    phone's screenshots: thumbnail 83 px wide, footprint -2.4998 steps) hit
+    it: a q70 or q80 re-encode of a q92 screenshot, fitted at scale 0.9999,
+    read 12.9 grey levels (0.1 right), over `WHOLE_RESIDUAL`, so it was not
+    deleted for it (REVIEW), and `--against` a library holding the original
+    called it `better`. Now `d`'s step is rounded and `k`'s is it plus the
+    footprints' ratio (`Blurs::step`): one scale, one blur. Test
+    `the_whole_frame_check_blurs_both_sides_of_one_scale_alike` (16.2 before).
+  - **B** byte copies (`Side::proven`: the same bytes or one JPEG coding)
+    left open keep one, the one carrying most besides its pixels: in a class
+    of two pictures nothing decides between, every file was REVIEW, a backup
+    copy too (photo + its copy + a re-encode or a PNG of it: three REVIEWs;
+    now the copy is DELETE). Test `a_byte_copy_beside_an_undecided_pair_is_deleted`.
+  - **C** `WHOLE_RESIDUAL` (12) swept after A, kept by the user's decision:
+    a ramp with no cliff and no noise floor to derive it from; the numbers
+    are on the constant. pairs.py loss 4 / 8 / 12 / 16 / 24: 44 / 51 / 57 /
+    61 / 66, variants deleted 3,745 / 5,494 / 6,177 / 6,440 / 6,602; IMGS-ALL
+    none lost at 2-30. **Open**: faithful crops, turns and resizes read
+    5-37 there (resampling), same-frame re-encodes p99 2.1; a check that
+    reads a faithful crop as low as a re-encode would let the bar be derived.
+  - **D** the report's `config.features` is `features_at` the run's detail
+    (said 600 at every `--detail`), and `MOST_ALIGNED_POINTS` (the window's
+    Min aligned points limit) is the finest detail's, 1,650 (was 600).
+  - **E** a followed link to nothing is a skip, `Note::BrokenLink`, that
+    still stops `--prune-cache` (`walk_was_complete`): one link to an
+    unplugged drive made every scan of a library exit 2. A root named
+    outright that leads nowhere is still a problem.
+  - **F** `-k` is held to `MOST_CANDIDATES` as parsed (the window's limit
+    already): `from + 2 * w` wrapped near `usize::MAX`.
+  - **G** `--exclude` takes patterns (`walk::Pattern`): an entry holding
+    `*`, `?` or `[` that names no path; without `/`, of a name met below a
+    root, with one, of a path (absolute against the current folder, its
+    plain lead canonical, `**` across names), matched against the canonical
+    path and every folder above it. A pattern was an unresolved path (exit 2,
+    nothing excluded). A plain name without a wildcard is still a path.
+  - Measured (IMGS-ALL, the audit's build against HEAD, one cache): all
+    1,346,632 pairs and 915 groups identical (A-G leave the matching alone);
+    0 lost both, 358 / 364,
+    364 / 364, strict line 55 -> 52, DELETE 19,919 -> 19,915. pairs.py loss
+    54 -> 57, variants deleted 6,184 -> 6,177: A ends the accidental refusals
+    that hid three other rules' errors, `phone_screenshot` (IMGS `16.jpg`, the
+    9:16 screenshot itself, deleted for its phone-screenshot composite: the
+    canvas rule), `wall_poster` (`low-light2`, 12 points) and `scale_mid`
+    (`16.jpg` deleted for its downscale: `extra`, as `scale_large`'s 8). Not
+    fixed here. `derived/Desktop` of IMGS / IMGS2 / IMGS3: 0 / 2 / 1 actions
+    moved. Tests: lib 229 (plain and v3 builds), window 44.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.

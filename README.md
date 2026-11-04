@@ -442,7 +442,7 @@ to stderr.
 | `--from-file <FILE>` | Read the paths to scan from a file, one per line (`-` = stdin) | |
 | `-0`, `--null` | Paths in the list are NUL-separated, for `find -print0` / `fd -0`, and so are the paths `--list` prints | off |
 | `-r`, `--recursive` | Include subfolders | off |
-| `-e`, `--exclude <PATH>` | Leave out a folder or file; repeat for several | |
+| `-e`, `--exclude <PATH>` | Leave out a folder or file; repeat for several. With `*`, `?` or `[...]` it is a pattern: of a name anywhere (`-e '*.tmp'`) or, holding a `/`, of a path (`-e 'photos/**/raw'`) | |
 | `--follow-symlinks` | Follow symlinks met while walking a folder | off |
 | `--hidden` | Also walk hidden folders, whose names start with a dot | off |
 | `--against <PATH>` | Compare the scanned images with a library of images you already keep, a folder or an image file; repeat for several. Each scanned image gets a verdict instead of a group (see Comparing with a library) | |

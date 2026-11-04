@@ -317,6 +317,23 @@ const SOFT_TIE: f32 = 0.05;
 /// 2,496-2,499, 297 / 304 originals and no content lost at every one.
 const SOFT_GAP: f32 = 0.15;
 /// The most a block of the whole-frame check may disagree, in grey levels.
+///
+/// **Measured, not derived: it sits on a ramp, and nothing derives it yet.**
+/// Swept with both sides blurred alike (`Blurs::step`), on `pairs.py` (two-file
+/// families of IMGS-ALL's five corpora) deletions losing content / variants
+/// deleted at 4, 6, 8, 10, 12, 16, 20, 24: 44 / 3,745, 46 / 4,871, 51 / 5,494,
+/// 54 / 5,900, 57 / 6,177, 61 / 6,440, 65 / 6,550, 66 / 6,602; on IMGS-ALL
+/// none lost from 2 to 30 (DELETE 11,454 at 2, 15,477 at 4, 18,746 at 8,
+/// 19,915 at 12, 20,480 at 16), 358 / 364 originals kept at every one. No
+/// cliff, so no bar is the one before a loss. Nor is there a noise floor to
+/// put it over: same-frame faithful copies (re-encodes, format conversions)
+/// read p99 2.1, max 7.1, but faithful crops, turns and resizes read up to
+/// 37 (`crop_micro` p90 28, `rot180` p90 20), which is the check reading
+/// resampling (each thumbnail reduced on its own grid, compared at a
+/// sixty-fourth of the frame) as difference, while pairs whose content
+/// differs read from 0.4 (p01) and 15 at the median. Kept at 12 by the
+/// user's decision (2026-11-04); what would derive it is a check that reads
+/// a faithful crop as low as a re-encode.
 const WHOLE_RESIDUAL: f32 = 12.0;
 /// Samples a side of the whole-frame check (`whole_worst`), which is also
 /// the blur it reads each frame at: a sixty-fourth of the frame.
@@ -898,6 +915,27 @@ impl Ctx<'_> {
                 state.insert(k, State::Keep);
             }
         }
+        // Files left open beside their own bytes (`Side::proven`: the same
+        // bytes, or two JPEGs of one coded picture) keep one of them: deleting
+        // the rest loses nothing, whatever is undecided about the picture. In
+        // a class of two pictures nothing decided between, every file was
+        // REVIEW, a byte copy of either too: a photograph, its backup copy and
+        // a re-encode were three REVIEWs. The one kept carries most besides its
+        // pixels, which the rest may not lack (`refusal`'s `carries_more`).
+        let carried = |g: usize| besides(self.pics[g].traits).iter().filter(|&&b| b).count();
+        let mut open: Vec<usize> = members.iter().copied().filter(|f| !state.contains_key(f)).collect();
+        open.sort_by_key(|&f| (std::cmp::Reverse(carried(f)), f));
+        let mut stays: Vec<usize> = Vec::new();
+        for y in open {
+            let by = stays.iter().copied().find(|&x| self.side(y, x).is_some_and(|e| e.proven) && c.refusal(x, y).is_none());
+            match by {
+                Some(x) => {
+                    state.insert(y, State::Delete(x));
+                    deletes.insert(x);
+                }
+                None => stays.push(y),
+            }
+        }
         // Which pinned file a deletion is said to rest on. Deletion spreads
         // from whichever settled file reaches a file first, and against a
         // library that was as often a greyscale or sharpened copy as the
@@ -1298,8 +1336,13 @@ fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &
     let sk = tk.w as f32 / wk.0 as f32;
     let span_d = td.w as f32 / N as f32;
     let span_k = linear_scale(m) * sk * wd.0 as f32 / N as f32;
-    let bd = blurs.get(d, td, span_d);
-    let bk = blurs.get(k, tk, span_k);
+    // One blur step for `d`, and `k`'s from it by the ratio of the two
+    // footprints, so that the two sides are blurred alike up to that ratio
+    // (`Blurs::step`).
+    let step_d = Blurs::step(span_d);
+    let step_k = (step_d + (4.0 * (span_k / span_d).log2()).round() as i32).max(Blurs::FINEST);
+    let bd = blurs.get(d, td, step_d);
+    let bk = blurs.get(k, tk, step_k);
     let mut a = [0f32; N * N];
     let mut b = [0f32; N * N];
     for iy in 0..N {
@@ -1446,11 +1489,29 @@ fn bilinear(p: &Plane, x: f32, y: f32) -> f32 {
 struct Blurs(HashMap<(usize, i32), std::rc::Rc<Plane>>);
 
 impl Blurs {
-    /// File `i`'s thumbnail blurred to a footprint of `span` pixels: a
-    /// Gaussian of half that, in steps of a quarter octave, so that the
-    /// footprints a file is read at in its pairs share a few blurs.
-    fn get(&mut self, i: usize, t: &Thumb, span: f32) -> std::rc::Rc<Plane> {
-        let step = (4.0 * (0.5 * span).max(0.25).log2()).round() as i32;
+    /// The finest step: a Gaussian of a quarter pixel.
+    const FINEST: i32 = -8;
+
+    /// The blur for a footprint of `span` pixels: a Gaussian of half that, in
+    /// steps of a quarter octave, so that the footprints a file is read at in
+    /// its pairs share a few blurs.
+    ///
+    /// **Asked of one side of a pair only**; the other's step is this one's
+    /// plus the footprints' ratio, rounded (`whole_worst`). Each side used to
+    /// be rounded on its own, and a footprint at a step's midpoint went either
+    /// way on a fitted scale's last digits: every 9:16 portrait (a phone's
+    /// screenshots) has a thumbnail 83 pixels wide, whose footprint is
+    /// -2.4998 steps, and against a re-encode fitted at a scale of 0.9999 the
+    /// two were blurred a quarter octave apart. The check then read 12.9 grey
+    /// levels where it reads 0.1, over `WHOLE_RESIDUAL`: a q70 or q80 copy of
+    /// a q92 screenshot was not deleted for it, and against a library holding
+    /// the original it was `better`.
+    fn step(span: f32) -> i32 {
+        (4.0 * (0.5 * span).max(0.25).log2()).round() as i32
+    }
+
+    /// File `i`'s thumbnail blurred at `step` (`step`).
+    fn get(&mut self, i: usize, t: &Thumb, step: i32) -> std::rc::Rc<Plane> {
         let sigma = (step as f32 / 4.0).exp2();
         self.0.entry((i, step)).or_insert_with(|| blurred(t, sigma).into()).clone()
     }
@@ -1569,6 +1630,42 @@ mod tests {
         let (tagged, dated) = (Traits { profile: true, ..colourful() }, Traits { exif: true, ..colourful() });
         let got = suggest(&[pic(&t, &tagged, 2_000), pic(&t, &dated, 1_000)], &[(0, 1, Link::Exact)], 0.6, |_| 30.0);
         assert_eq!(got, [Some(Action::Keep), Some(Action::Keep)]);
+    }
+
+    /// The whole-frame check blurs both sides alike when they are of one
+    /// scale, wherever the footprint falls: a 9:16 portrait's thumbnail (83
+    /// pixels wide) puts it on a step's midpoint, and each side rounded on its
+    /// own went either way on a fitted scale's last digits (12.9 grey levels
+    /// against a re-encode fitted at 0.9999, where 0.1 is right).
+    #[test]
+    fn the_whole_frame_check_blurs_both_sides_of_one_scale_alike() {
+        let (w, h) = (83u16, 148u16);
+        let t = Thumb::new(w, h, 0.25, (0..w as usize * h as usize).map(|i| (((i * 2_654_435_761) >> 13) % 256) as u8).collect());
+        let tr = colourful();
+        let pic = Picture { dims: (1242, 2208), work: (332, 591), thumb: &t, traits: &tr, bytes: 1, damaged: false };
+        for s in [0.9999f32, 1.0, 1.0001] {
+            let m = [s, 0.0, 0.0, 0.0, s, 0.0];
+            let r = whole_worst(&mut Blurs::default(), (0, &pic), (1, &pic), &m);
+            assert!(r < 1.0, "scale {s}: {r}");
+        }
+    }
+
+    /// Byte copies left open beside an undecided pair keep one of them: two
+    /// identical files and a re-encode of one frame are an original, its
+    /// backup and a copy nothing decides between, and the backup goes.
+    #[test]
+    fn a_byte_copy_beside_an_undecided_pair_is_deleted() {
+        let (t, tr) = (thumb(), colourful());
+        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes, damaged: false };
+        let pics = [pic(2_000), pic(2_000), pic(1_500)];
+        let v = verdict(1.0, 1.0);
+        let links = [(0, 1, Link::Exact), (0, 2, Link::Edge(&v, IDENTITY, false)), (1, 2, Link::Edge(&v, IDENTITY, false))];
+        let (got, keeper) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
+        assert_eq!(got, [Some(Action::Review), Some(Action::Delete), Some(Action::Review)], "{got:?}");
+        assert_eq!(keeper[1], Some(0));
+        // Alone, the pair is undecided as before.
+        let got = suggest(&pics[1..], &[(0, 1, Link::Edge(&v, IDENTITY, false))], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Review); 2]);
     }
 
     /// An original among several softer copies of its size is not deleted
@@ -1779,3 +1876,4 @@ mod tests {
         }
     }
 }
+

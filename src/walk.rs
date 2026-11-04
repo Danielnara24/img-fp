@@ -21,8 +21,11 @@
 //! the flag a link to a file is that file and a link to a directory is walked,
 //! a link back into a folder already being walked is a loop and is skipped
 //! (everything behind it is being walked already, so nothing is missing), and a
-//! link to nothing is a problem, because it is the shape of a link into a drive
-//! that is not mounted — which is also why it stops `--prune-cache`.
+//! link to nothing is a skip, said as one: it is the shape of a link into a
+//! drive that is not mounted, so it stops `--prune-cache`, but a library with
+//! one link to an unplugged drive is not a scan that went wrong, and it made
+//! every run exit 2. (A root named outright that leads nowhere is still a
+//! problem: a mistyped path.)
 //!
 //! **`--exclude` is about bytes, not spellings.** It takes a folder or a file,
 //! and applies to a root named outright as much as to anything a walk finds.
@@ -37,6 +40,15 @@
 //! is kept off the default path: a walk that follows no links produces paths
 //! whose canonical form is the root's plus what follows it, so only a walk
 //! that follows links ever asks the filesystem where a path leads.
+//!
+//! **An `--exclude` holding `*`, `?` or `[` that names no path is a pattern**
+//! (`Pattern`): with no `/`, of a folder's or file's name, met anywhere below
+//! a root (`-e '@eaDir'`, `-e '*.tmp.jpg'`); with one, of a path, made
+//! absolute against the current folder, its leading plain part canonical,
+//! and matched against the canonical path of what the walk meets and every
+//! folder above it, `*` within one name and `**` across any number. A
+//! pattern used to be an unresolved path, which excluded nothing and was a
+//! problem.
 
 use crate::extensions::Wanted;
 use crate::problems::{Note, Problems};
@@ -134,8 +146,8 @@ pub struct Listing {
 ///
 /// Everything it passes over it counts, in one of two senses that must not be
 /// confused. What it cannot *read* is a problem: a root that does not exist, a
-/// directory refused part-way through, a link to nothing under
-/// `--follow-symlinks`. What it was never going to read is a skip: a file `-x`
+/// directory refused part-way through. What it was never going to read is a
+/// skip: a link to nothing under `--follow-symlinks`, a file `-x`
 /// does not take, a symlink it does not follow, a loop, a second name for a
 /// file already listed, a root `--exclude` covers. None of the skips touches
 /// the exit code — which is the whole reason the summary keeps two lists.
@@ -163,12 +175,8 @@ pub fn walk(req: &Request, problems: &mut Problems) -> Listing {
         // `-e`, and it took the library with it, so every file scanned was
         // `new`. What an exclude holds of a library *below* its root is still
         // left out. A file both sides reach is settled in [`settle`].
-        let excludes: Vec<PathBuf> = if library {
-            excludes.iter().filter(|ex| !canon.starts_with(ex)).cloned().collect()
-        } else {
-            excludes.clone()
-        };
-        if is_excluded(&canon, &excludes) {
+        let excludes = if library { excludes.sparing(&canon) } else { excludes.clone() };
+        if is_excluded(&canon, &excludes) || !library && meta.is_file() && excludes.names(root) {
             problems.note(Note::Excluded, &shown);
             continue;
         }
@@ -209,7 +217,7 @@ fn walk_dir(
     levels: usize,
     side: Side,
     req: &Request,
-    excludes: &[PathBuf],
+    excludes: &Excludes,
     set_aside: &SetAside,
     found: &mut Vec<Found>,
     problems: &mut Problems,
@@ -242,7 +250,7 @@ fn walk_dir(
                 passed_over.borrow_mut().push((e.path().to_path_buf(), false));
                 return false;
             }
-            !leads_into(e.path(), &beneath(e.path()), excludes, follow)
+            !excludes.names(e.path()) && !leads_into(e.path(), &beneath(e.path()), excludes, follow)
         });
     for entry in entries {
         let entry = match entry {
@@ -251,6 +259,8 @@ fn walk_dir(
                 let at = e.path().unwrap_or(root).display().to_string();
                 if e.loop_ancestor().is_some() {
                     problems.note(Note::SymlinkLoop, &at);
+                } else if leads_nowhere(&e) {
+                    problems.note(Note::BrokenLink, &at);
                 } else {
                     problems.note(Note::Unscannable, format_args!("{at}: {e}"));
                 }
@@ -282,7 +292,7 @@ fn walk_dir(
         // counted: `excluded` says "named", a file the walk found was not, and
         // an excluded subtree pruned above contributes nothing to any count
         // however many files are behind it.
-        if leads_into(entry.path(), &beneath(entry.path()), excludes, follow) {
+        if excludes.names(entry.path()) || leads_into(entry.path(), &beneath(entry.path()), excludes, follow) {
             continue;
         }
         // One stat, after the filters have thinned the list: it follows a
@@ -495,20 +505,156 @@ fn settle(mut found: Vec<Found>, problems: &mut Problems) -> Listing {
 /// A path that will not resolve excludes nothing, and that is a problem rather
 /// than a detail: `vid-fp` once swallowed it, so a typo in `-e` scanned the
 /// folder the user was protecting.
-fn resolve_excludes(requested: &[PathBuf], problems: &mut Problems) -> Vec<PathBuf> {
-    let mut excludes = Vec::with_capacity(requested.len());
+fn resolve_excludes(requested: &[PathBuf], problems: &mut Problems) -> Excludes {
+    let mut excludes = Excludes::default();
     for p in requested {
         match std::fs::canonicalize(p) {
-            Ok(real) => excludes.push(real),
+            Ok(real) => excludes.paths.push(real),
+            Err(_) if Pattern::is_one(p) => {
+                let pat = Pattern::of(p);
+                if pat.of_name { excludes.names.push(pat) } else { excludes.patterns.push(pat) }
+            }
             Err(e) => problems.note(Note::UnresolvedExclude, format_args!("{}: {}", p.display(), e)),
         }
     }
     excludes
 }
 
-/// Component-wise, so `-e photos/take` is not `photos/take2.jpg`.
-fn is_excluded(path: &Path, excludes: &[PathBuf]) -> bool {
-    excludes.iter().any(|ex| path.starts_with(ex))
+/// What `--exclude` leaves out: folders and files by their canonical path,
+/// and patterns (`Pattern`) of a path or of a name.
+#[derive(Clone, Default)]
+struct Excludes {
+    paths: Vec<PathBuf>,
+    patterns: Vec<Pattern>,
+    names: Vec<Pattern>,
+}
+
+impl Excludes {
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.patterns.is_empty() && self.names.is_empty()
+    }
+
+    /// These, less what would hold the whole of a library rooted at `canon`.
+    fn sparing(&self, canon: &Path) -> Excludes {
+        Excludes {
+            paths: self.paths.iter().filter(|ex| !canon.starts_with(ex)).cloned().collect(),
+            patterns: self.patterns.iter().filter(|p| !canon.ancestors().any(|a| p.matches(a))).cloned().collect(),
+            names: self.names.clone(),
+        }
+    }
+
+    /// Whether a name pattern covers `path`'s own name: asked of what the walk
+    /// meets, never of the folders above a root.
+    fn names(&self, path: &Path) -> bool {
+        !self.names.is_empty() && path.file_name().is_some_and(|n| self.names.iter().any(|p| p.matches(Path::new(n))))
+    }
+}
+
+/// Component-wise, so `-e photos/take` is not `photos/take2.jpg`; a path
+/// pattern, of the path or any folder above it.
+fn is_excluded(path: &Path, excludes: &Excludes) -> bool {
+    excludes.paths.iter().any(|ex| path.starts_with(ex)) || !excludes.patterns.is_empty() && path.ancestors().any(|a| excludes.patterns.iter().any(|p| p.matches(a)))
+}
+
+/// Whether a walk's error is a followed link whose target is not there.
+fn leads_nowhere(e: &walkdir::Error) -> bool {
+    e.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        && e.path().is_some_and(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+}
+
+/// An `--exclude` pattern: `*` any run of bytes within a name, `?` one byte,
+/// `[...]` one of a set (`[!...]` or `[^...]` none of it, `a-z` a range), and
+/// `**` as a whole name any number of names. Bytes, as a path is.
+#[derive(Clone, Debug)]
+struct Pattern {
+    /// The pattern's names; for a path pattern from the root, absolute.
+    parts: Vec<Vec<u8>>,
+    /// Of a name alone: it held no `/`.
+    of_name: bool,
+}
+
+impl Pattern {
+    /// Whether `p` is meant as a pattern: it holds a wildcard.
+    fn is_one(p: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        p.as_os_str().as_bytes().iter().any(|b| matches!(b, b'*' | b'?' | b'['))
+    }
+
+    fn of(p: &Path) -> Pattern {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = p.as_os_str().as_bytes();
+        if !bytes.contains(&b'/') {
+            return Pattern { parts: vec![bytes.to_vec()], of_name: true };
+        }
+        // Absolute, and its plain lead canonical where it resolves, so that it
+        // is compared with canonical paths in their own terms.
+        let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let names: Vec<&std::ffi::OsStr> = p.iter().collect();
+        let plain = names.iter().take_while(|n| !Pattern::is_one(Path::new(n))).count();
+        let lead: PathBuf = names[..plain].iter().collect();
+        let lead = std::fs::canonicalize(&lead).unwrap_or(lead);
+        let mut parts: Vec<Vec<u8>> = lead.iter().map(|n| n.as_bytes().to_vec()).collect();
+        parts.extend(names[plain..].iter().map(|n| n.as_bytes().to_vec()));
+        Pattern { parts, of_name: false }
+    }
+
+    /// Whether `path` (a name, for a name pattern; else an absolute path) is
+    /// what the pattern says, whole.
+    fn matches(&self, path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let names: Vec<&[u8]> = path.iter().map(|n| n.as_bytes()).collect();
+        let pat: Vec<&[u8]> = self.parts.iter().map(Vec::as_slice).collect();
+        names_match(&pat, &names)
+    }
+}
+
+fn names_match(pat: &[&[u8]], names: &[&[u8]]) -> bool {
+    match pat.split_first() {
+        None => names.is_empty(),
+        Some((&b"**", rest)) => (0..=names.len()).any(|i| names_match(rest, &names[i..])),
+        Some((p, rest)) => names.split_first().is_some_and(|(n, more)| name_matches(p, n) && names_match(rest, more)),
+    }
+}
+
+/// One name against one name's pattern.
+fn name_matches(p: &[u8], n: &[u8]) -> bool {
+    match p.split_first() {
+        None => n.is_empty(),
+        Some((b'*', rest)) => (0..=n.len()).any(|i| name_matches(rest, &n[i..])),
+        Some((b'?', rest)) => !n.is_empty() && name_matches(rest, &n[1..]),
+        Some((b'[', rest)) => match (set_end(rest), n.split_first()) {
+            (Some(end), Some((&c, more))) => in_set(&rest[..end], c) && name_matches(&rest[end + 1..], more),
+            // An unclosed `[` is itself.
+            (None, Some((&c, more))) => c == b'[' && name_matches(rest, more),
+            (_, None) => false,
+        },
+        Some((&c, rest)) => n.first() == Some(&c) && name_matches(rest, &n[1..]),
+    }
+}
+
+/// Where a set's `]` is, after its first member (`[]a]` holds `]`).
+fn set_end(s: &[u8]) -> Option<usize> {
+    let skip = usize::from(matches!(s.first(), Some(b'!' | b'^')));
+    (skip + 1..s.len()).find(|&i| s[i] == b']').filter(|_| s.len() > skip)
+}
+
+fn in_set(set: &[u8], c: u8) -> bool {
+    let (negated, set) = match set.split_first() {
+        Some((b'!' | b'^', rest)) => (true, rest),
+        _ => (false, set),
+    };
+    let mut hit = false;
+    let mut i = 0;
+    while i < set.len() {
+        if i + 2 < set.len() && set[i + 1] == b'-' {
+            hit |= (set[i]..=set[i + 2]).contains(&c);
+            i += 3;
+        } else {
+            hit |= set[i] == c;
+            i += 1;
+        }
+    }
+    hit != negated
 }
 
 /// Is this walk path, or what it leads to, under an `--exclude`?
@@ -517,7 +663,7 @@ fn is_excluded(path: &Path, excludes: &[PathBuf]) -> bool {
 /// that follows links asks the filesystem, which is the one case where the
 /// guess can be wrong. A path that will not canonicalize is not excluded, and
 /// needs no protecting: it cannot be opened, so it cannot be analysed.
-fn leads_into(path: &Path, canonical_guess: &Path, excludes: &[PathBuf], through_links: bool) -> bool {
+fn leads_into(path: &Path, canonical_guess: &Path, excludes: &Excludes, through_links: bool) -> bool {
     if excludes.is_empty() {
         return false;
     }
@@ -904,13 +1050,13 @@ mod tests {
     }
 
     #[test]
-    fn a_dangling_link_is_a_problem_when_followed_and_stops_a_prune() {
+    fn a_dangling_link_is_a_skip_when_followed_and_stops_a_prune() {
         let s = Scratch::new();
         let a = s.file("scan/a.jpg");
         symlink(s.0.join("unmounted/drive"), s.0.join("scan/photos")).unwrap();
         let followed = run(&[s.0.join("scan")], &[], true, true);
         assert_eq!(followed.files, vec![a.clone()]);
-        assert_eq!(followed.problems, 1);
+        assert_eq!(followed.problems, 0, "a link to an unplugged drive is no failed scan");
         assert!(!followed.walk_complete, "--prune-cache must not prune against it");
         let not_followed = run(&[s.0.join("scan")], &[], true, false);
         assert_eq!((not_followed.files, not_followed.problems), (vec![a], 0));
@@ -1011,6 +1157,43 @@ mod tests {
         symlink(s.0.join("elsewhere"), s.dir("scan").join("linkdir")).unwrap();
         let r = run(&[s.0.join("scan")], &[precious], true, true);
         assert_eq!(r.files, vec![s.0.join("scan/linkdir/other.jpg")]);
+    }
+
+    /// A pattern of a name leaves out every folder and file of that name
+    /// below a root; a pattern of a path, what lies there; neither is a
+    /// problem.
+    #[test]
+    fn an_exclude_can_be_a_pattern_of_a_name_or_a_path() {
+        let s = Scratch::new();
+        let a = s.file("scan/a.jpg");
+        s.file("scan/junk/a.jpg");
+        let b = s.file("scan/sub/junk2/b.jpg");
+        s.file("scan/sub/junk/b.jpg");
+        let c = s.file("scan/sub/c.jpg");
+        s.file("scan/sub/c.tmp.jpg");
+        s.file("scan/skip1/d.jpg");
+        let e = s.file("scan/skip2/deep/e.jpg");
+        let f = s.file("scan/keep/f.jpg");
+        let sorted = |mut v: Vec<PathBuf>| {
+            v.sort();
+            v
+        };
+        let ex = [PathBuf::from("jun?"), PathBuf::from("*.tmp.jpg"), s.0.join("scan/skip[0-9]")];
+        let r = run(&[s.0.join("scan")], &ex, true, false);
+        assert_eq!(sorted(r.files), sorted(vec![a.clone(), b.clone(), c.clone(), f.clone()]));
+        assert_eq!(r.problems, 0);
+        let r = run(&[s.0.join("scan")], &[s.0.join("**/deep"), s.0.join("scan/s*/*.jpg")], true, false);
+        assert_eq!(sorted(r.files), sorted(vec![a, s.0.join("scan/junk/a.jpg"), b, s.0.join("scan/sub/junk/b.jpg"), f]));
+        let _ = e;
+    }
+
+    #[test]
+    fn a_pattern_matches_by_names() {
+        let p = |s: &str| Pattern::of(Path::new(s));
+        let m = |pat: &Pattern, s: &str| pat.matches(Path::new(s));
+        assert!(m(&p("*.jpg"), "a.jpg") && !m(&p("*.jpg"), "a.png") && m(&p("a?c"), "abc") && !m(&p("a?c"), "ac"));
+        assert!(m(&p("[ab]x"), "bx") && !m(&p("[!ab]x"), "bx") && m(&p("[a-c]"), "b") && m(&p("[]]"), "]") && m(&p("[x"), "[x"));
+        assert!(m(&p("/r/*/z"), "/r/y/z") && !m(&p("/r/*/z"), "/r/y/w/z") && m(&p("/r/**/z"), "/r/y/w/z") && m(&p("/r/**/z"), "/r/z"));
     }
 
     #[test]

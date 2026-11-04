@@ -149,6 +149,12 @@ pub enum Note {
     /// Everything behind it is being walked by the other route, so nothing is
     /// missing and this is not a problem.
     SymlinkLoop,
+    /// A followed link whose target is not there: a link into a drive that is
+    /// not mounted, or to a file deleted since. Nothing it was asked for could
+    /// be read, but neither is the walk complete, so it stops `--prune-cache`
+    /// (`walk_was_complete`). It was a problem, and one link to an unplugged
+    /// drive made every scan of a library exit 2.
+    BrokenLink,
     /// A second name for a file already listed: named twice, reached by two
     /// overlapping roots, a symlink to it, a hard link. It is analysed once;
     /// the count is what explains a file total smaller than the names found.
@@ -225,10 +231,10 @@ enum Weight {
 
 impl Note {
     /// Every category, in the order the summary lists them.
-    const ALL: [Note; 18] = {
+    const ALL: [Note; 19] = {
         use Note::*;
         [
-            NotAnImage, SetAside, Hidden, Subfolder, NotImageContent, Symlink, SymlinkLoop, ListedTwice, Excluded,
+            NotAnImage, SetAside, Hidden, Subfolder, NotImageContent, Symlink, SymlinkLoop, BrokenLink, ListedTwice, Excluded,
             MacMetadata, CameraRaw, Featureless, UnresolvedExclude, Unscannable, EmptyLibrary, Unreadable, Damaged, Cache,
         ]
     };
@@ -245,6 +251,7 @@ impl Note {
             Note::NotImageContent => (Skip, "skip/not-image-content", "file(s) that are not images (reached by a wildcard -x)"),
             Note::Symlink => (Skip, "skip/symlink", "symlink(s), which are not followed (see --follow-symlinks)"),
             Note::SymlinkLoop => (Skip, "skip/symlink-loop", "symlink(s) leading back into a folder already being walked"),
+            Note::BrokenLink => (Skip, "skip/broken-link", "symlink(s) leading nowhere: a drive not mounted, or a file gone (nothing is pruned)"),
             Note::ListedTwice => (Skip, "skip/listed-twice", "path(s) already listed under another name (named twice, overlapping roots, a symlink or a hard link)"),
             Note::Excluded => (Skip, "skip/excluded", "named path(s) skipped because --exclude covers them"),
             Note::MacMetadata => (Skip, "skip/mac-metadata", "macOS metadata file(s) (\"._\" files), which hold no picture"),
@@ -310,7 +317,7 @@ impl<'a> Problems<'a> {
     /// run neither took nor made one for it (`cache::Store::finish`), not for
     /// this reason.
     pub fn walk_was_complete(&self) -> bool {
-        self.tally(Note::Unscannable).count == 0
+        self.tally(Note::Unscannable).count == 0 && self.tally(Note::BrokenLink).count == 0
     }
 
     /// Problems only. A skip is not a failure and must not move the exit code.

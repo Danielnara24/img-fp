@@ -2253,7 +2253,9 @@ fn run_config(args: &Args) -> serde_json::Value {
     let mut c = serde_json::json!({
         "detail": args.detail(),
         "fast": args.fast,
-        "features": FEATURES,
+        // The most an image is described by at this detail, not the
+        // default's alone (it said 600 at every `--detail`).
+        "features": crate::analysis::features_at(args.detail(), args.work_size()),
         "candidates": args.candidates,
         "min_aligned_points": aligned_points(args),
         "min_frame_overlap": as_typed(args.min_frame_overlap),

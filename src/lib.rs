@@ -146,7 +146,12 @@ struct Args {
 
     /// Leave out a folder or file. Repeat for several.
     ///
-    /// A file reached through a symlink or a second root is left out too.
+    /// A file reached through a symlink or a second root is left out too. A
+    /// path holding `*`, `?` or `[...]` is a pattern: with no `/`, of a
+    /// folder's or file's name anywhere below the paths scanned (`-e '*.tmp'`,
+    /// `-e 'Thumb?'`); with one, of a path (`-e 'photos/20??/edits'`,
+    /// `-e 'photos/**/raw'`), `*` within one name and `**` across any number.
+    /// Quote it, so the shell does not expand it.
     #[arg(short = 'e', long = "exclude", value_name = "PATH")]
     exclude: Vec<PathBuf>,
 
@@ -374,16 +379,19 @@ fn aligned_points(args: &Args) -> u32 {
 /// each a doubling of the default's (`analysis::finer_levels`).
 fn parse_detail(s: &str) -> std::result::Result<usize, String> {
     match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
-        v @ (512 | 1024 | 2048 | 4096) => Ok(v),
+        v @ (512 | 1024 | 2048 | FINEST_DETAIL) => Ok(v),
         _ => Err("must be 512, 1024, 2048 or 4096".into()),
     }
 }
 
-/// `-k`: at least one, or nothing past the byte-identical pass is compared.
+/// `-k`: at least one, or nothing past the byte-identical pass is compared;
+/// and at most every image the index can name (`MOST_CANDIDATES`), which a
+/// larger number means. Unbounded, a window's arithmetic (`from + 2 * w`)
+/// wrapped near `usize::MAX`; the window's own limit was this one already.
 fn parse_candidates(s: &str) -> std::result::Result<usize, String> {
     match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
         0 => Err("must be at least 1".into()),
-        v => Ok(v),
+        v => Ok(v.min(MOST_CANDIDATES)),
     }
 }
 
@@ -447,10 +455,21 @@ pub(crate) const THUMB_MAX_SIDES: usize = 16;
 /// what is left is a plateau, which is not a thing to put on a command line.
 const FEATURES: usize = 600;
 
+/// The finest `--detail` (`parse_detail`).
+const FINEST_DETAIL: usize = 4096;
+
 /// The most aligned points a match can have: an image is described by at
-/// most `FEATURES` keypoints, so a `--min-aligned-points` above it matches
-/// nothing.
-pub const MOST_ALIGNED_POINTS: u32 = FEATURES as u32;
+/// most `analysis::features_at` its detail keypoints, the most at the finest
+/// detail, so a `--min-aligned-points` above it matches nothing. It was
+/// `FEATURES`, 600, the default's, from before `--detail`, which describes
+/// up to 1,650 (`most_aligned_points_are_the_finest_details_features`).
+pub const MOST_ALIGNED_POINTS: u32 = {
+    // `features_at(FINEST_DETAIL, 512)`, in integers: FEATURES x (1 + (r - 1) / 4).
+    let r = FINEST_DETAIL / 512;
+    let n = FEATURES * (4 + r - 1) / 4;
+    let most = index::MOST_KEYPOINTS - 1;
+    (if n < most { n } else { most }) as u32
+};
 
 /// The most candidates `-k` can mean: every image the index can name.
 pub const MOST_CANDIDATES: usize = index::MOST_IMAGES;
@@ -1093,6 +1112,15 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The most aligned points a bar can ask are the most keypoints the finest
+    /// detail describes, and `-k` past every image means every image.
+    #[test]
+    fn most_aligned_points_are_the_finest_details_features() {
+        assert_eq!(super::MOST_ALIGNED_POINTS as usize, crate::analysis::features_at(super::FINEST_DETAIL, 512));
+        assert_eq!(super::parse_candidates("18446744073709551615"), Ok(super::MOST_CANDIDATES));
+        assert_eq!(super::parse_candidates("150"), Ok(150));
+    }
+
     /// The Flatpak's metainfo names this version first among its releases, so
     /// a version bump without its entry fails here rather than shipping an app
     /// whose software centre page stops at an older release (0.68.0 to 0.73.0
