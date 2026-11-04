@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.78.1" date="2026-11-04">
+      <description>
+        <p>Leaving folders out by a pattern of many wildcards no longer stalls a scan, the window stays responsive while moving files on a network drive, and deleting files permanently says when no other copy of a picture would be left.</p>
+      </description>
+    </release>
     <release version="0.78.0" date="2026-11-04">
       <description>
         <p>Phone screenshots and their re-encoded copies are now suggested for deletion as other copies are, a backup copy beside an undecided pair is suggested for deletion, folders can be left out by name patterns, and a broken link no longer marks a scan as failed.</p>
