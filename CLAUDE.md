@@ -153,7 +153,7 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Status (0.76.0)
+## Status (0.77.0)
 
 - **The field, 2026-10-28** (`benchmark/BASELINE.md`, `out/v54-field`), cold,
   one session, img-fp 0.75.0 plain build. IMGS-ALL (five corpora, 33,136
@@ -1301,7 +1301,7 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     -0.4, DISC21 µAP 64.9 -> 63.6), so it buys the knob by sacrificing the
     default. Scaffolding removed. Next: `--work-size` goes, and a knob
     whose higher steps cost nothing where they find nothing replaces it.
-- **`--detail`** (2026-11-01/03, after 0.76.0, unreleased; replaces
+- **`--detail`** (2026-11-01/03, 0.77.0; replaces
   `--work-size`; scripts and runs in `~/Documents/DISC21/lv`, batches
   13-22). The user's brief: going up the knob, no step costs more than
   today's `--work-size` at that size for what it finds, a step that finds
@@ -1385,9 +1385,8 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     one at 1024: nothing saved); one grey row for all levels (kept, saved
     nothing measurable: the log's "cpu: decode" is wall per thread,
     waiting on the decode budget included, not CPU).
-- **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed after 0.76.0,
-  unreleased): `-k` counting rejections credited a window with every
-  verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
+- **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
+  counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
   IMGS-ALL2 cached, with and without `--dump`: 2,087 / 2,028 of 1,275,506
   pairs differed at 512, 12,779 / 12,547 at 1024. Now only verdicts that
@@ -1396,7 +1395,7 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   before (so released reports were never affected). Every `--dump` figure
   from 0.73.0 on is a dumping run's own: the DISC21 shards above,
   replays off a dump.
-- **Squashed transforms are no claim** (after 0.76.0, unreleased;
+- **Squashed transforms are no claim** (0.77.0;
   `verify::Policy::frames`, `verify::axis_scales`): `MAX_SCALE` bounds each
   direction of a transform (its singular values), not their mean. Before,
   only √|det| was bounded, and a fit through nearly collinear inliers (a
@@ -1412,7 +1411,7 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   `crop_micro`|`scale_small`), 9 added, F1 0.9531 -> 0.9532; IMGS-ALL2:
   F1 0.8971 both, one cross-family pair fewer. Tests
   `axis_scales_are_the_directions_least_and_most`, `a_sliver_is_no_claim`.
-- **The vocabulary's leaves are copies** (after 0.76.0, unreleased;
+- **The vocabulary's leaves are copies** (0.77.0;
   `index::Vocabulary::levels`): they were pointers into the analysis's
   scratch file (`spill.rs`), saving 120 bytes a leaf, but the sample is
   spread over every picture, so the descent read the whole mapping at
