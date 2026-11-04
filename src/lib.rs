@@ -282,7 +282,8 @@ struct Args {
     clear_cache: bool,
 
     /// Drop cached entries this scan did not use: images it did not find, and
-    /// analyses made at another `--work-size`.
+    /// analyses made with `--fast` when this scan is without it, or the
+    /// other way round.
     ///
     /// Skipped when the scan could not read everything it was given.
     #[arg(long, hide = true)]
@@ -346,14 +347,6 @@ impl Args {
 // overlap of 7, a correlation of NaN or no candidates at all is accepted by
 // the types and finds nothing, and a run that finds nothing and exits 0 reads
 // as a folder with no duplicates in it.
-//
-// `--work-size` has no floor, deliberately. Swept from 1 to 384 on both
-// corpora, a working image under 8 pixels a side describes to no features at
-// all, and the run says so: every file is listed among the skips as an image
-// with no detail to match. It exits 0, since a featureless file is a skip
-// and not a problem (a folder holding one plain backdrop exited 2 on every
-// run). Above that nothing is a threshold: 96 merged no families
-// where 128 and 192 each merged one, and a floor anywhere would be a guess.
 
 /// `--min-frame-overlap` and `--min-pixel-correlation`: both are fractions.
 fn parse_fraction(s: &str) -> std::result::Result<f32, String> {
@@ -377,7 +370,6 @@ fn aligned_points(args: &Args) -> u32 {
     args.min_aligned_points.max(MIN_ALIGNED_POINTS)
 }
 
-/// `-k`: at least one, or nothing past the byte-identical pass is compared.
 /// `--detail`: a working size the analysis can describe finer levels at,
 /// each a doubling of the default's (`analysis::finer_levels`).
 fn parse_detail(s: &str) -> std::result::Result<usize, String> {
@@ -387,6 +379,7 @@ fn parse_detail(s: &str) -> std::result::Result<usize, String> {
     }
 }
 
+/// `-k`: at least one, or nothing past the byte-identical pass is compared.
 fn parse_candidates(s: &str) -> std::result::Result<usize, String> {
     match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
         0 => Err("must be at least 1".into()),

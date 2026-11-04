@@ -81,20 +81,48 @@ impl From<cache::Record> for Item {
     }
 }
 
+impl Item {
+    /// A cached record as a run at working size `work` and detail `detail`
+    /// reads it: its analysis up to the levels the picture has at `detail`,
+    /// cut where the record holds more (a finer run made it), or `None`
+    /// where it holds fewer, to be analysed again. A coarser detail's
+    /// analysis is a finer one's leading levels to the bit
+    /// (`a_finer_detail_holds_the_coarser_ones_analysis`), so what is read
+    /// is what a run at `detail` makes; a picture with no finer level is the
+    /// default's analysis at any detail.
+    pub(crate) fn cached_at(rec: cache::Record, work: usize, detail: usize) -> Option<Item> {
+        let need = finer_levels(rec.dims.0 as usize, rec.dims.1 as usize, work, detail).len();
+        let have = rec.feats.ends.len().saturating_sub(1);
+        if have < need {
+            return None;
+        }
+        let mut it = Item::from(rec);
+        if have > need {
+            let f = &it.feats;
+            let mut cut = f.prefix(f.ends[need] as usize);
+            if need > 0 {
+                cut.ends = f.ends[..=need].to_vec();
+            }
+            it.feats = std::sync::Arc::new(cut);
+        }
+        Some(it)
+    }
+}
+
 /// Thread time spent decoding and describing, in microseconds, for the log.
 pub(crate) static T_DECODE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static T_SIFT: AtomicU64 = AtomicU64::new(0);
 
 /// How far a small picture may be enlarged: up to `upsample_below`, but never
-/// past the working size, so that nothing is analysed above `--work-size` and
-/// the option bounds what every picture costs. It used to enlarge anything
-/// under 256 pixels to between 257 and 512 whatever the working size said,
-/// which made a 120-pixel thumbnail cost what a 480-pixel photograph costs at
-/// `--work-size 140`, and made a picture the working size had just shrunk —
-/// at `--work-size 128`, every photograph — cost what 512 costs from a
-/// sixteenth of the detail. A picture shrunk to the working size is never
-/// enlarged under this limit, since one doubling would take it past it. `0`,
-/// which shrinks nothing, keeps the whole of `upsample_below`.
+/// past the working size (512, or 256 under `--fast`), so that nothing is
+/// analysed above it and it bounds what every picture costs. It used to
+/// enlarge anything under 256 pixels to between 257 and 512 whatever the
+/// working size said (a 120-pixel thumbnail cost what a 480-pixel photograph
+/// costs at a working size of 140), and a picture the working size had just
+/// shrunk cost what 512 costs from a fraction of the detail. A picture shrunk
+/// to the working size is never enlarged under this limit, since one doubling
+/// would take it past it. A working size of `0`, which shrinks nothing, keeps
+/// the whole of `upsample_below`.
 pub(crate) fn enlarge_below(work: usize, upsample_below: usize) -> usize {
     if work == 0 { upsample_below } else { upsample_below.min(work) }
 }
@@ -209,7 +237,7 @@ fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, head
         Ok((planes, size, damaged, traits)) => {
             let t1 = Instant::now();
             let base = &planes[0];
-            let (feats, thumb, grid) = twins.levels(base, || {
+            let (feats, thumb, grid) = twins.levels(&planes, || {
                 let pb = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
                 let up = sift::enlargement(base.w.max(base.h), pb.upsample_below);
                 let finer_px: usize = planes[1..].iter().map(|g| g.w * g.h).sum();
@@ -310,12 +338,21 @@ type LevelsMade = std::sync::Arc<std::sync::OnceLock<(std::sync::Arc<Features>, 
 
 impl Planes {
     /// `analysis`, for an analysis with finer levels (`analyse_finer`), keyed by
-    /// the plane of its analysis at the working size.
-    fn levels(&self, g: &decode::Gray, make: impl FnOnce() -> (std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16])) -> (std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16]) {
-        use std::hash::BuildHasher;
-        // SAFETY: as in `analysis`.
-        let bytes = unsafe { std::slice::from_raw_parts(g.px.as_ptr() as *const u8, std::mem::size_of_val(&g.px[..])) };
-        let key = (g.w, g.h, self.keys.hash_one(bytes));
+    /// every plane it is made from, the working size's first. Keyed by that
+    /// one alone, two pictures alike at the working size and not finer (a
+    /// picture and its copy enlarged by doubling each pixel reduce to one
+    /// plane at 512) shared the first one's levels, and the second lost its
+    /// own.
+    fn levels(&self, planes: &[decode::Gray], make: impl FnOnce() -> (std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16])) -> (std::sync::Arc<Features>, std::sync::Arc<Thumb>, [f32; 16]) {
+        use std::hash::{BuildHasher, Hash, Hasher};
+        let mut h = self.keys.build_hasher();
+        for g in planes {
+            // SAFETY: as in `analysis`.
+            let bytes = unsafe { std::slice::from_raw_parts(g.px.as_ptr() as *const u8, std::mem::size_of_val(&g.px[..])) };
+            (g.w, g.h).hash(&mut h);
+            bytes.hash(&mut h);
+        }
+        let key = (planes[0].w, planes[0].h, h.finish());
         let cell = self.made_levels.lock().unwrap().entry(key).or_default().clone();
         cell.get_or_init(make).clone()
     }
@@ -425,6 +462,19 @@ mod tests {
         let a = analyse(&small, 512, 512, &p, header.as_ref(), &Planes::default()).0;
         let b = analyse(&small, 512, 2048, &p, header.as_ref(), &Planes::default()).0;
         assert!(b.feats.ends.is_empty() && same_features(&a.feats, &b.feats));
+
+        // A record read at another detail: cut to the levels the run's goes
+        // to, which are what that run makes, or refused where it holds fewer.
+        let rec = |it: &Item| cache::Record { feats: (*it.feats).clone(), thumb: (*it.thumb).clone(), dims: it.dims, traits: it.traits.clone() };
+        let read = |it: &Item, detail| Item::cached_at(rec(it), 512, detail);
+        let from2048 = read(&d2048, 512).unwrap();
+        assert!(from2048.feats.ends.is_empty() && same_features(&from2048.feats, &d512.feats), "the default's analysis");
+        let to1024 = read(&d2048, 1024).unwrap();
+        assert_eq!(to1024.feats.ends, d1024.feats.ends);
+        assert!(same_features(&to1024.feats, &d1024.feats), "the 1024 analysis");
+        assert!(read(&d2048, 2048).is_some_and(|it| it.feats.ends == d2048.feats.ends && same_features(&it.feats, &d2048.feats)));
+        assert!(read(&d512, 1024).is_none() && read(&d1024, 2048).is_none(), "fewer levels than the picture has: analysed again");
+        assert!(read(&b, 512).is_some() && read(&a, 4096).is_some(), "a picture with no finer level is read at any detail");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

@@ -1337,6 +1337,12 @@ impl WordList {
         self.e.len()
     }
 
+    /// How many distinct words the list holds: its postings in the inverted
+    /// file.
+    pub fn words(&self) -> usize {
+        self.e.iter().enumerate().filter(|&(k, &v)| k == 0 || v >> KP_BITS != self.e[k - 1] >> KP_BITS).count()
+    }
+
     /// This list and `more`'s entries, in order.
     pub fn joined(&self, more: &WordList) -> WordList {
         let mut e = Vec::with_capacity(self.e.len() + more.e.len());
@@ -1439,6 +1445,16 @@ const POST_COUNT_MAX: u32 = (1 << POST_COUNT_BITS) - 1;
 
 /// The most images a posting can name: past it, a `-k` means every image.
 pub const MOST_IMAGES: usize = 1 << (32 - POST_COUNT_BITS);
+
+/// Whether an inverted file of `lists` can be built: its postings are
+/// numbered by a `u32` (`InvertedFile::build`'s offsets), some seven million
+/// images at the default and fewer at a finer `--detail`. Past it the count
+/// wrapped without a word. Counted only where the entries, which bound the
+/// postings, do not already fit.
+pub fn postings_fit(lists: &[WordList]) -> bool {
+    let most = u32::MAX as u64;
+    lists.iter().map(|l| l.len() as u64).sum::<u64>() <= most || lists.par_iter().map(|l| l.words() as u64).sum::<u64>() <= most
+}
 
 /// How far down the word list the query asks for its postings, in entries.
 ///

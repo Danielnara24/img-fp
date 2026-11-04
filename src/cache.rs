@@ -16,7 +16,10 @@
 //! folder the machine had ever scanned at 512, silently, and going back to 512
 //! cost it again. Now a run reads the records made at its own settings and
 //! carries the rest over untouched, as it does a record for a file it did not
-//! walk, so the two never mix and neither costs the other anything.
+//! walk, so the two never mix and neither costs the other anything. (The
+//! working size is no option now: 512, or 256 under `--fast`.) A `--detail`
+//! is not a setting of its own: a record at any detail is read by a run at
+//! another as far as that run goes (`Settings::reads_as`).
 //!
 //! **What a record costs, because it is more than people expect.** An analysis
 //! is 128 bytes of descriptor and 20 bytes of keypoint for each of up to 600
@@ -168,8 +171,33 @@ const BATCH: usize = 64;
 /// binary that changes them changes the magic instead.
 pub struct Settings {
     pub work_size: u32,
+    /// The most keypoints a record holds: `FEATURES` at the default, more at
+    /// a finer `--detail` (`analysis::features_at`). What a record is checked
+    /// against (`misshapen`), not what a run reads it by (`reads_as`).
     pub features: u32,
     pub thumb: u32,
+}
+
+impl Settings {
+    /// Whether a record made at these settings is read by a run at `want`:
+    /// the same working size and thumbnail, whatever the `--detail`. A
+    /// record at a finer detail holds the default's analysis and its levels
+    /// after it (`Features::ends`), and a run reads it as far as its own
+    /// detail goes, or analyses the file again where the record holds fewer
+    /// levels than the picture has up to it (`analysis::cached_at`). Read only
+    /// at its own detail, a record was made again for every detail tried: a
+    /// scan at `--detail 1024` after one at the default analysed every file
+    /// again, 224-pixel pictures that have no finer level included, and the
+    /// file kept a set of records for each.
+    pub fn reads_as(self, want: Settings) -> bool {
+        self.work_size == want.work_size && self.thumb == want.thumb
+    }
+
+    /// What `reads_as` compares: records of one path that agree on it are
+    /// one record, the latest.
+    fn family(self) -> (u32, u32) {
+        (self.work_size, self.thumb)
+    }
 }
 
 pub struct Record {
@@ -1871,7 +1899,7 @@ struct Reading<'a, 'o> {
     others: &'o mut Vec<Unasked>,
     /// The latest record for each path made at other settings, and where it
     /// is in `others`.
-    other_at: HashMap<(PathBuf, Settings), usize>,
+    other_at: HashMap<(PathBuf, (u32, u32)), usize>,
     tail: Tail,
     batch: Vec<(Head, Vec<u8>, Span)>,
     /// Every record met, for the index (`heads::refresh`).
@@ -1901,7 +1929,7 @@ impl<'a, 'o> Reading<'a, 'o> {
     /// Whether a record's body is unpacked: made at this run's settings, for
     /// a path it walks.
     fn wants(&self, settings: Settings, path: &Path, key: Key) -> bool {
-        settings == self.want && (self.walked)(path, key)
+        settings.reads_as(self.want) && (self.walked)(path, key)
     }
 
     /// Every record from where `r` stands to the end of the file.
@@ -1909,7 +1937,7 @@ impl<'a, 'o> Reading<'a, 'o> {
         loop {
             let at = r.pos;
             let (want, walked) = (self.want, self.walked);
-            match read_record(r, |h| h.settings == want && walked(&h.path, h.key)) {
+            match read_record(r, |h| h.settings.reads_as(want) && walked(&h.path, h.key)) {
                 Ok(None) => break,
                 Ok(Some((head, blob))) => {
                     self.tail.end = r.pos;
@@ -1948,7 +1976,7 @@ impl<'a, 'o> Reading<'a, 'o> {
         // Made at other settings: kept where it is, for whichever run
         // asks at those settings next.
         let s = head.settings;
-        if s != self.want {
+        if !s.reads_as(self.want) {
             self.other(head.path, s, span, head.key.dev);
             return;
         }
@@ -1959,7 +1987,7 @@ impl<'a, 'o> Reading<'a, 'o> {
     }
 
     fn other(&mut self, path: PathBuf, s: Settings, span: Span, dev: u64) {
-        match self.other_at.entry((path, s)) {
+        match self.other_at.entry((path, s.family())) {
             std::collections::hash_map::Entry::Occupied(e) => {
                 let u = &mut self.others[*e.get()];
                 (u.span, u.dev) = (span, dev);
@@ -2053,7 +2081,7 @@ fn read_indexed(
         }
         match bodies.remove(&e.span.at) {
             Some((head, blob)) => reading.record(head, blob, e.span),
-            None if e.settings != want => {
+            None if !e.settings.reads_as(want) => {
                 reading.tail.count += 1;
                 reading.other(e.path.clone(), e.settings, e.span, e.key.dev);
             }
@@ -3340,6 +3368,42 @@ mod tests {
         let (got, store) = read(&path, other, &|_, _| true, &mut problems);
         assert_eq!((got.len(), store.records()), (1, 3));
         assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A record made at another `--detail` (another feature cap at the same
+    /// working size) is read, not carried: the latest of a path's records is
+    /// the one a run takes, whichever detail made it, and the file holds one
+    /// live record a file.
+    #[test]
+    fn records_at_another_detail_are_read() {
+        let dir = scratch("detail");
+        let path = dir.join(file_name());
+        let finer = Settings { features: SETTINGS.features * 2, ..SETTINGS };
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let (_, store) = read(&path, finer, &|_, _| true, &mut problems);
+        let (f, t) = analysis(6, 4);
+        let (f2, t2) = analysis(9, 5);
+        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        store.put("b.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        drop(store);
+        // At the default: both read, nothing carried.
+        let (got, store, bad) = reopen(&path);
+        assert!(!bad);
+        assert_eq!((got.len(), store.records(), others(&store)), (2, 2, 0));
+        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        drop(store);
+        // Finer again: a.jpg's is the default's record written after.
+        let mut problems = Problems::new(&log);
+        let (got, store) = read(&path, finer, &|_, _| true, &mut problems);
+        assert_eq!((got.len(), store.records(), others(&store)), (2, 3, 0));
+        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
+        drop(store);
+        // Another working size reads neither, and carries one a path.
+        let mut problems = Problems::new(&log);
+        let (got, store) = read(&path, Settings { work_size: 256, ..SETTINGS }, &|_, _| true, &mut problems);
+        assert_eq!((got.len(), others(&store)), (0, 2));
         std::fs::remove_dir_all(&dir).ok();
     }
 

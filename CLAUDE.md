@@ -1385,6 +1385,42 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     one at 1024: nothing saved); one grey row for all levels (kept, saved
     nothing measurable: the log's "cpu: decode" is wall per thread,
     waiting on the decode budget included, not CPU).
+- **Audit after 0.77.0** (A-H, uncommitted; no report changes but (A)'s
+  folders of small pictures):
+  - **A** a cache record is read at any `--detail` of its working size
+    (`cache::Settings::reads_as`; the feature cap stays in the record for
+    `misshapen`): cut to the run's levels where it holds more
+    (`Item::cached_at`), analysed again where it holds fewer, one live record
+    a file. Before, each detail kept its own set and a switch analysed every
+    file again: 400 found-corpus pictures (224 px, no finer level) at 4096
+    after the default 40.9 CPU-s, now 0.44, and the default's matching is
+    taken. Desktop on one cache, 2048 / 512 / 1024 / 4096 / 512 / 2048:
+    635 / 0 / 0 / 61 / 0 / 0 files analysed, each report identical to a cold
+    run at its detail; 696 records (before: 1,270 after three details).
+    The matching steps only through doublings some picture reaches
+    (`detail_steps`; the kept matching's fingerprint is the finest of them),
+    so a run reaching none is the default's run (it went through
+    `match_by_detail`'s `merge_best`, a possible small difference), and a
+    `--dump` is the finest running step's (a skipped top step used to be run
+    for it).
+  - **B** a `--detail` run's claims hold each pair once (were every step's,
+    deduplicated only by `stated::unique`): kept matching on Desktop at 4096
+    812 KB -> 204 KB (512: 201 KB), report identical.
+  - **C** the bar's matching estimate is learned from `detail_steps` after the
+    analysis (was `log2(detail / 512) + 1` steps whatever the pictures).
+  - **D** stale `--work-size` text (log line, `--prune-cache` help, comments).
+  - **E** `Planes::levels` keys a finer analysis by every plane, not the 512
+    one alone (a picture and its pixel-doubled copy shared levels).
+  - **F** `-k` windows: membership by a `Vec<bool>` (was `ask.contains`
+    over a growing list, quadratic in the files extended).
+  - **G** more files than `index::MOST_IMAGES` is refused before the
+    analysis (was an assertion after it); postings past `u32` an error
+    (`index::postings_fit`; the count wrapped).
+  - **H** the window reads a pre-0.77.0 `work_size` as its Detail.
+  - Proved: base (HEAD) vs new, cold `derived/Desktop` at 512 / 1024 / 2048 /
+    4096, `--fast`, `--against` at 2048, `--dump` at 512 and 2048 (CSV
+    byte-identical): all identical but `runtime_seconds`. Not run on the
+    full corpora.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.

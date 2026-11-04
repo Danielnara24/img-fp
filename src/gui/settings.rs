@@ -69,7 +69,17 @@ impl From<Settings> for Saved {
 
 impl From<Saved> for Settings {
     /// An option missing, of another type, or not kept, is its default.
-    fn from(f: Saved) -> Settings {
+    fn from(mut f: Saved) -> Settings {
+        // A window before 0.77.0 kept a work size where the detail is now:
+        // read as the detail nearest that covers it, rather than dropped (a
+        // size set high to find more came back as the default with no word).
+        if !f.options.contains_key(o::DETAIL.key) {
+            if let Some(px) = f.options.get("work_size").and_then(serde_json::Value::as_u64) {
+                if let Some(d) = detail_for_work_size(px) {
+                    f.options.insert(o::DETAIL.key.to_string(), d.into());
+                }
+            }
+        }
         let values = o::ALL
             .iter()
             .map(|opt| {
@@ -78,6 +88,20 @@ impl From<Saved> for Settings {
             })
             .collect();
         Settings { folders: f.folders, exclude: f.exclude, report_path: f.report_path, cache_path: f.cache_path, log_path: f.log_path, values }
+    }
+}
+
+/// The Detail choice a window before 0.77.0's Work size stands for: Fast for
+/// 256 and below (`--fast` is 256), the default for up to 512, then the
+/// finest step no coarser than the size asked, and Finest for 0 (full size).
+fn detail_for_work_size(px: u64) -> Option<&'static str> {
+    match px {
+        0 => Some("Finest"),
+        1..=256 => Some("Fast"),
+        257..=512 => None,
+        513..=1024 => Some("Fine"),
+        1025..=2048 => Some("Finer"),
+        _ => Some("Finest"),
     }
 }
 
@@ -304,6 +328,22 @@ mod tests {
         assert_eq!(s.folders, vec![PathBuf::from("/x")]);
         assert_eq!((s.get(&o::DETAIL), s.get(&o::REPORT_FORMAT)), (d.get(&o::DETAIL), d.get(&o::REPORT_FORMAT)));
         assert_eq!(s.get(&o::THREADS), &Value::Number(3.0));
+    }
+
+    /// A work size kept by a window before 0.77.0 is read as the detail that
+    /// stands for it; a detail kept since wins over it, and it is not
+    /// written back.
+    #[test]
+    fn an_old_work_size_is_read_as_its_detail() {
+        let read = |f: &str| -> Settings { serde_json::from_str(f).unwrap() };
+        for (px, d) in [(640, "Fine"), (1024, "Fine"), (2000, "Finer"), (4000, "Finest"), (0, "Finest"), (256, "Fast"), (384, "Normal"), (512, "Normal")] {
+            let s = read(&format!(r#"{{"folders": ["/x"], "options": {{"work_size": {px}}}}}"#));
+            assert_eq!(s.get(&o::DETAIL), &Value::Text(d.into()), "{px}");
+        }
+        let s = read(r#"{"options": {"work_size": 640, "detail": "Finer"}}"#);
+        assert_eq!(s.get(&o::DETAIL), &Value::Text("Finer".into()));
+        let v = serde_json::to_value(read(r#"{"options": {"work_size": 640}}"#)).unwrap();
+        assert_eq!(v["options"], serde_json::json!({"detail": "Fine"}));
     }
 
     /// A file written by the window before the options were a table reads
