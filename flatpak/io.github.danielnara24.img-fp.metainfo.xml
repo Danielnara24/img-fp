@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.77.1" date="2026-11-03">
+      <description>
+        <p>Changing the Detail setting no longer analyses every picture again, and a finer Detail costs nothing on pictures too small to show finer detail.</p>
+      </description>
+    </release>
     <release version="0.77.0" date="2026-11-03">
       <description>
         <p>A new Detail setting finds small pictures inside large ones and copies cut from a small part of a photo, taking longer only for pictures large enough to show the finer detail; the old working size setting is gone.</p>
