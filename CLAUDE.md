@@ -1471,6 +1471,28 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     (`16.jpg` deleted for its downscale: `extra`, as `scale_large`'s 8). Not
     fixed here. `derived/Desktop` of IMGS / IMGS2 / IMGS3: 0 / 2 / 1 actions
     moved. Tests: lib 229 (plain and v3 builds), window 44.
+- **0.78.1, audit after 0.78.0** (A-E; no change to pairs or suggestions,
+  not run on the corpora):
+  - **A** `--exclude` patterns match in linear time (`walk::stars_match`,
+    back only to the last `*` or `**`): every split point at every star was
+    exponential when nothing matched (`*a*a*a*a*a*a*a*a*a*a*b` against a
+    60-byte name ran past 60 s, once a file met; now 0.05 s). Held to the
+    old recursive matcher on 300,000 random cases
+    (`a_pattern_matches_as_trying_every_split_would`).
+  - **B** the window's permanent delete (`delete_instead`) says how many
+    files rest on a kept copy deleted with them, or just moved to the Trash:
+    the Trash dialog had warned of a marked kept copy but called it
+    restorable.
+  - **C** `Move::stays` runs off the GTK thread (`Move::looked_at`,
+    `gio::spawn_blocking`): two `stat`s a marked file, a round trip each on a
+    share, held the window still while it moved them.
+  - **D** `rust-version` 1.92 (gtk4 0.11, glib and cairo-rs 0.22 need it;
+    was 1.88, which only the CLI builds with); two `last.rs` test lines bound
+    a temporary that 1.88 drops (E0716). Checked: 1.92 `check --all-targets
+    --features gui`, 1.88 `check --all-targets --ignore-rust-version`.
+  - **E** `same::open_file_limit`: `RLIMIT_NOFILE` per architecture (5 on
+    Linux MIPS, 6 on SPARC, 7 elsewhere on Linux, 8 on the BSDs and macOS)
+    and `rlim_t` a `c_ulong` on Linux (32 bits on a 32-bit build).
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.

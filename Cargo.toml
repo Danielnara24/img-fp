@@ -2,10 +2,12 @@
 name = "img-fp"
 version = "0.78.0"
 edition = "2024"
-# The oldest compiler the dependencies build with (`image` and `jxl-oxide`'s
-# parts need 1.88). Said here so that an older one is told so by cargo,
-# rather than failing part-way through a dependency.
-rust-version = "1.88"
+# The oldest compiler the whole crate builds with: the CLI's dependencies
+# (`image`, `jxl-oxide`'s parts) need 1.88, the window's (gtk4 0.11, glib and
+# cairo-rs 0.22) 1.92, and one version is said for both. Said here so that an
+# older one is told so by cargo, rather than failing part-way through a
+# dependency.
+rust-version = "1.92"
 description = "Finds duplicate and near-duplicate images: re-encoded, resized, cropped, rotated, recoloured or embedded"
 authors = ["Danielnara24"]
 license = "MIT OR Apache-2.0"

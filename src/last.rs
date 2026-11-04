@@ -354,7 +354,8 @@ mod tests {
     fn last(root: &Path, name: &str, suggest: suggest::Mode) -> (Vec<String>, Vec<u8>) {
         let out = root.join(name);
         let to = Report::new(To::Path(out.clone()), None);
-        let asked = Rewrite { cache: Some(&root.join("c.bin")), report: Some(&to), suggest, list: &[], null: false };
+        let cache = root.join("c.bin");
+        let asked = Rewrite { cache: Some(&cache), report: Some(&to), suggest, list: &[], null: false };
         let said = rewrite(&asked).unwrap();
         (said, std::fs::read(out).unwrap())
     }
@@ -474,7 +475,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(NOTES), serde_json::to_vec(&Notes::now(false, 0, 1, String::new(), vec![])).unwrap()).unwrap();
         std::fs::write(dir.join("result.json"), b"{}").unwrap();
-        let asked = Rewrite { cache: Some(&root.join("c.bin")), report: None, suggest: suggest::Mode::Content, list: &[], null: false };
+        let cache = root.join("c.bin");
+        let asked = Rewrite { cache: Some(&cache), report: None, suggest: suggest::Mode::Content, list: &[], null: false };
         let e = rewrite(&asked).unwrap_err().to_string();
         assert!(e.contains("earlier version"), "{e}");
         let _ = std::fs::remove_dir_all(&root);

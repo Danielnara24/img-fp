@@ -647,16 +647,38 @@ fn most_open() -> usize {
 
 /// The process's soft limit on open files, if it says one.
 fn open_file_limit() -> Option<usize> {
-    #[cfg(target_os = "linux")]
+    // `RLIMIT_NOFILE` is not one number on every architecture, as
+    // `O_TMPFILE` is not (`spill.rs`): on Linux MIPS it is 5 (7 there is
+    // `RLIMIT_NPROC`) and on SPARC 6; elsewhere on Linux 7; on the BSDs and
+    // macOS 8.
+    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips32r6", target_arch = "mips64", target_arch = "mips64r6")))]
+    const RLIMIT_NOFILE: i32 = 5;
+    #[cfg(all(target_os = "linux", any(target_arch = "sparc", target_arch = "sparc64")))]
+    const RLIMIT_NOFILE: i32 = 6;
+    #[cfg(all(
+        target_os = "linux",
+        not(any(
+            target_arch = "mips", target_arch = "mips32r6", target_arch = "mips64", target_arch = "mips64r6", target_arch = "sparc",
+            target_arch = "sparc64"
+        ))
+    ))]
     const RLIMIT_NOFILE: i32 = 7;
     #[cfg(not(target_os = "linux"))]
     const RLIMIT_NOFILE: i32 = 8;
+    // And `rlim_t` is an `unsigned long` on Linux, 32 bits on a 32-bit
+    // build (read as two `u64`s, the soft and hard limits were one number);
+    // 64 bits on the BSDs and macOS.
+    #[cfg(target_os = "linux")]
+    type Rlim = std::ffi::c_ulong;
+    #[cfg(not(target_os = "linux"))]
+    type Rlim = u64;
     unsafe extern "C" {
-        fn getrlimit(resource: i32, rlim: *mut [u64; 2]) -> i32;
+        fn getrlimit(resource: i32, rlim: *mut [Rlim; 2]) -> i32;
     }
-    let mut r = [0u64; 2];
+    let mut r: [Rlim; 2] = [0; 2];
     // SAFETY: `r` is the two `rlim_t`s the call fills.
-    (unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } == 0).then(|| usize::try_from(r[0]).unwrap_or(usize::MAX))
+    #[allow(clippy::useless_conversion)]
+    (unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } == 0).then(|| usize::try_from(u64::from(r[0])).unwrap_or(usize::MAX))
 }
 
 /// The files of `group` (all one length) in sets of the same bytes, each set
@@ -714,6 +736,15 @@ fn byte_classes<R: std::io::Read>(readers: Vec<(usize, R)>, piece: usize) -> Vec
 
 #[cfg(test)]
 mod tests {
+    /// The limit read is the one the shell reports for the process.
+    #[test]
+    fn the_open_file_limit_is_the_shells() {
+        let out = std::process::Command::new("sh").args(["-c", "ulimit -n"]).output().unwrap();
+        let said = String::from_utf8(out.stdout).unwrap();
+        let said = said.trim();
+        let want = if said == "unlimited" { None } else { Some(said.parse::<usize>().unwrap()) };
+        assert_eq!(open_file_limit().filter(|&n| n != usize::MAX), want);
+    }
     use super::*;
     use crate::claims::How;
     use crate::sift::{self, Features, DESC_LEN};

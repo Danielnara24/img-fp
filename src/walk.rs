@@ -608,27 +608,69 @@ impl Pattern {
     }
 }
 
+/// Names against a path pattern's names, `**` any run of names. In linear
+/// time, as `name_matches` is within a name.
 fn names_match(pat: &[&[u8]], names: &[&[u8]]) -> bool {
-    match pat.split_first() {
-        None => names.is_empty(),
-        Some((&b"**", rest)) => (0..=names.len()).any(|i| names_match(rest, &names[i..])),
-        Some((p, rest)) => names.split_first().is_some_and(|(n, more)| name_matches(p, n) && names_match(rest, more)),
-    }
+    stars_match(pat.len(), names.len(), |i| pat[i] == b"**", |i, j| name_matches(pat[i], names[j]).then_some(i + 1))
 }
 
 /// One name against one name's pattern.
+///
+/// A star is tried only from the last one met: whatever an earlier star could
+/// take instead, the last can as well, since a star takes any run. Trying
+/// every split point at every star was exponential in the stars when nothing
+/// matched (`*a*a*a*a*a*a*a*a*a*a*b` against a 60-byte name ran for minutes,
+/// once for every file met).
 fn name_matches(p: &[u8], n: &[u8]) -> bool {
-    match p.split_first() {
-        None => n.is_empty(),
-        Some((b'*', rest)) => (0..=n.len()).any(|i| name_matches(rest, &n[i..])),
-        Some((b'?', rest)) => !n.is_empty() && name_matches(rest, &n[1..]),
-        Some((b'[', rest)) => match (set_end(rest), n.split_first()) {
-            (Some(end), Some((&c, more))) => in_set(&rest[..end], c) && name_matches(&rest[end + 1..], more),
+    stars_match(p.len(), n.len(), |i| p[i] == b'*', |i, j| one_byte(p, i, n[j]))
+}
+
+/// The one matcher under both: a pattern of `len_p` tokens, of which `star(i)`
+/// takes any run and the rest one each (`one(i, j)`: whether token `i` takes
+/// item `j`, and where the pattern goes on), against `len_n` items.
+fn stars_match(len_p: usize, len_n: usize, star: impl Fn(usize) -> bool, one: impl Fn(usize, usize) -> Option<usize>) -> bool {
+    let (mut i, mut j) = (0, 0);
+    // After the last star met: where the pattern goes on, and the item it
+    // was last taken up to.
+    let mut back: Option<(usize, usize)> = None;
+    loop {
+        if i < len_p && star(i) {
+            i += 1;
+            back = Some((i, j));
+            continue;
+        }
+        if j < len_n {
+            if i < len_p
+                && let Some(next) = one(i, j)
+            {
+                i = next;
+                j += 1;
+                continue;
+            }
+        } else if i == len_p {
+            return true;
+        }
+        match back {
+            Some((bi, bj)) if bj < len_n => {
+                back = Some((bi, bj + 1));
+                (i, j) = (bi, bj + 1);
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Whether the token at `p[i]` (not a star) takes byte `c`, and where the
+/// pattern goes on.
+fn one_byte(p: &[u8], i: usize, c: u8) -> Option<usize> {
+    match p[i] {
+        b'?' => Some(i + 1),
+        b'[' => match set_end(&p[i + 1..]) {
+            Some(end) => in_set(&p[i + 1..i + 1 + end], c).then_some(i + end + 2),
             // An unclosed `[` is itself.
-            (None, Some((&c, more))) => c == b'[' && name_matches(rest, more),
-            (_, None) => false,
+            None => (c == b'[').then_some(i + 1),
         },
-        Some((&c, rest)) => n.first() == Some(&c) && name_matches(rest, &n[1..]),
+        b => (b == c).then_some(i + 1),
     }
 }
 
@@ -1194,6 +1236,70 @@ mod tests {
         assert!(m(&p("*.jpg"), "a.jpg") && !m(&p("*.jpg"), "a.png") && m(&p("a?c"), "abc") && !m(&p("a?c"), "ac"));
         assert!(m(&p("[ab]x"), "bx") && !m(&p("[!ab]x"), "bx") && m(&p("[a-c]"), "b") && m(&p("[]]"), "]") && m(&p("[x"), "[x"));
         assert!(m(&p("/r/*/z"), "/r/y/z") && !m(&p("/r/*/z"), "/r/y/w/z") && m(&p("/r/**/z"), "/r/y/w/z") && m(&p("/r/**/z"), "/r/z"));
+    }
+
+    /// The matcher as first written, every split point at every star tried:
+    /// what a pattern means, held against the linear one.
+    fn names_match_by_trying(pat: &[&[u8]], names: &[&[u8]]) -> bool {
+        match pat.split_first() {
+            None => names.is_empty(),
+            Some((&b"**", rest)) => (0..=names.len()).any(|i| names_match_by_trying(rest, &names[i..])),
+            Some((p, rest)) => names
+                .split_first()
+                .is_some_and(|(n, more)| name_matches_by_trying(p, n) && names_match_by_trying(rest, more)),
+        }
+    }
+
+    fn name_matches_by_trying(p: &[u8], n: &[u8]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some((b'*', rest)) => (0..=n.len()).any(|i| name_matches_by_trying(rest, &n[i..])),
+            Some((b'?', rest)) => !n.is_empty() && name_matches_by_trying(rest, &n[1..]),
+            Some((b'[', rest)) => match (set_end(rest), n.split_first()) {
+                (Some(end), Some((&c, more))) => in_set(&rest[..end], c) && name_matches_by_trying(&rest[end + 1..], more),
+                (None, Some((&c, more))) => c == b'[' && name_matches_by_trying(rest, more),
+                (_, None) => false,
+            },
+            Some((&c, rest)) => n.first() == Some(&c) && name_matches_by_trying(rest, &n[1..]),
+        }
+    }
+
+    #[test]
+    fn a_pattern_matches_as_trying_every_split_would() {
+        // Small alphabets, so that stars, sets and literals meet often.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |k: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % k) as usize
+        };
+        const PAT: &[&[u8]] = &[b"a", b"b", b"*", b"?", b"[ab]", b"[!a]", b"[", b"]", b"[a-b]"];
+        let (mut hits, mut misses) = (0, 0);
+        for _ in 0..200_000 {
+            let p: Vec<u8> = (0..next(7)).flat_map(|_| PAT[next(PAT.len() as u64)].iter().copied()).collect();
+            let n: Vec<u8> = (0..next(8)).map(|_| b"ab[]"[next(4)]).collect();
+            let want = name_matches_by_trying(&p, &n);
+            assert_eq!(name_matches(&p, &n), want, "{:?} against {:?}", String::from_utf8_lossy(&p), String::from_utf8_lossy(&n));
+            if want { hits += 1 } else { misses += 1 }
+        }
+        assert!(hits > 10_000 && misses > 10_000, "{hits} {misses}");
+        const NAMES: &[&[u8]] = &[b"**", b"a", b"b", b"*", b"a*"];
+        for _ in 0..100_000 {
+            let p: Vec<&[u8]> = (0..next(6)).map(|_| NAMES[next(NAMES.len() as u64)]).collect();
+            let n: Vec<&[u8]> = (0..next(6)).map(|_| [&b"a"[..], b"b", b"ab"][next(3)]).collect();
+            assert_eq!(names_match(&p, &n), names_match_by_trying(&p, &n), "{p:?} against {n:?}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_of_many_stars_that_fails_fails_at_once() {
+        let name = [b'a'; 60];
+        let t = std::time::Instant::now();
+        assert!(!name_matches(b"*a*a*a*a*a*a*a*a*a*a*b", &name));
+        let names: Vec<&[u8]> = vec![b"a"; 60];
+        assert!(!names_match(&[b"**", b"a", b"**", b"a", b"**", b"a", b"**", b"a", b"**", b"a", b"**", b"b"], &names));
+        assert!(t.elapsed() < std::time::Duration::from_millis(100), "{:?}", t.elapsed());
     }
 
     #[test]
