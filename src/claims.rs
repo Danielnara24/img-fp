@@ -483,11 +483,15 @@ pub(crate) fn propagate(
     dirty: Option<&[bool]>,
     budget: usize,
 ) -> Propagation {
-    let mut adj: Vec<Vec<(usize, Affine, bool, u32)>> = vec![Vec::new(); items.len()];
+    // Each hop with how uncertain its fit is, as the inverse of the points it
+    // is worth (`Verdict::fit_points`): a pose's corners are off by about the
+    // sum of its hops' (`suggest::FIT_ERROR`).
+    let mut adj: Vec<Vec<(usize, Affine, bool, f32)>> = vec![Vec::new(); items.len()];
     for e in edges.iter() {
-        adj[e.a()].push((e.b(), e.v.m, e.inverted(), e.v.n_in));
+        let err = 1.0 / e.v.fit_points().max(1.0);
+        adj[e.a()].push((e.b(), e.v.m, e.inverted(), err));
         if let Some(mi) = verify::invert_affine(&e.v.m) {
-            adj[e.b()].push((e.a(), mi, e.inverted(), e.v.n_in));
+            adj[e.b()].push((e.a(), mi, e.inverted(), err));
         }
     }
     let known: HashSet<(usize, usize)> = edges.iter().map(Edge::ends).collect();
@@ -538,22 +542,22 @@ pub(crate) fn propagate(
     // trades short paths for slightly better links and ends up composing more
     // of them. The root is the file most others matched, which is usually the
     // original or a clean re-encode of it.
-    let posed: Vec<(usize, Vec<Option<(Affine, bool)>>)> = plan
+    let posed: Vec<(usize, Vec<Option<(Affine, bool, f32)>>)> = plan
         .par_iter()
         .map(|(comp, _)| {
             let root = *comp.iter().max_by_key(|&&i| (adj[i].len(), std::cmp::Reverse(i))).unwrap();
             let at = |v: usize| comp.binary_search(&v).ok();
-            let mut pose: Vec<Option<(Affine, bool)>> = vec![None; comp.len()];
-            pose[at(root).unwrap()] = Some(([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], false));
+            let mut pose: Vec<Option<(Affine, bool, f32)>> = vec![None; comp.len()];
+            pose[at(root).unwrap()] = Some(([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], false, 0.0));
             let mut queue = std::collections::VecDeque::from([root]);
             while let Some(u) = queue.pop_front() {
-                let (mu, iu) = pose[at(u).unwrap()].unwrap();
-                for &(v, m, inv, _) in adj[u].iter() {
+                let (mu, iu, eu) = pose[at(u).unwrap()].unwrap();
+                for &(v, m, inv, err) in adj[u].iter() {
                     let Some(pv) = at(v) else { continue };
                     if pose[pv].is_some() {
                         continue;
                     }
-                    pose[pv] = Some((verify::compose(&mu, &m), iu ^ inv));
+                    pose[pv] = Some((verify::compose(&mu, &m), iu ^ inv, eu + err));
                     queue.push_back(v);
                 }
             }
@@ -569,13 +573,13 @@ pub(crate) fn propagate(
     // no other. This used to be a fixed 0.5, which quietly overruled a
     // `--min-frame-overlap` below it for every composed pair, and threw away
     // the dump's hypotheses between 0.2 and 0.5.
-    let test = |comp: &[usize], pose: &[Option<(Affine, bool)>], x: usize, y: usize| {
+    let test = |comp: &[usize], pose: &[Option<(Affine, bool, f32)>], x: usize, y: usize| {
         let (a, b) = (comp[x], comp[y]);
-        let ((ma, ia), (mb, ib)) = (pose[x]?, pose[y]?);
+        let ((ma, ia, ea), (mb, ib, eb)) = (pose[x]?, pose[y]?);
         let m = verify::compose(&verify::invert_affine(&ma)?, &mb);
         let var = Variant { mirror: false, invert: ia ^ ib };
         let p = verify::Pair { fa: &items[a].feats, fb: &items[b].feats, ta: &items[a].thumb, tb: &items[b].thumb };
-        let v = verify::verify_transform(&p, &m, var, min_ov);
+        let v = verify::Verdict { composed_points: 1.0 / (ea + eb), ..verify::verify_transform(&p, &m, var, min_ov) };
         (v.ov_a.max(v.ov_b) >= min_ov).then_some(Edge::new(a, b, v))
     };
     let proposed = AtomicUsize::new(0);

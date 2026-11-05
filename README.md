@@ -402,8 +402,8 @@ anything itself.
 - `KEEP`: the best copy of the picture, a file that shows something the
   others don't, such as a collage, a slide or a meme made from it, or a
   different photo that only looks similar
-- `DELETE`: everything in it, apart perhaps from a thin strip at an edge, is
-  also in a file marked to stay, at about the same detail or better
+- `DELETE`: everything in it is also in a file marked to stay, at about the
+  same detail or better
 - `REVIEW`: look at it before deciding. Either a close copy, such as one
   tinted or watermarked, that could not be confirmed, or one of two versions
   of the same picture, such as a photo and its re-save in another format,

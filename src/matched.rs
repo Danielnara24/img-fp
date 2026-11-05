@@ -37,7 +37,7 @@ use crate::sift::Variant;
 use crate::verify::Verdict;
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"IMGFPM01";
+const MAGIC: &[u8; 8] = b"IMGFPM02";
 
 /// The file beside `cache` the last run's matching is kept in.
 pub fn path_beside(cache: &Path) -> PathBuf {
@@ -165,6 +165,7 @@ pub fn load(path: &Path, fp: Fingerprint) -> Option<Matched> {
             blk_n: r.u32()?,
             blk_min: r.f32()?,
             ncc: r.f32()?,
+            composed_points: r.f32()?,
             ..Default::default()
         };
         claims.push(Claim { e: Edge::new(i, j, v), how });
@@ -183,7 +184,7 @@ pub fn load(path: &Path, fp: Fingerprint) -> Option<Matched> {
 /// one or the new one; one that cannot be written is the next run matching
 /// again, and is not said.
 pub fn save(path: &Path, fp: Fingerprint, m: &Matched) {
-    let mut b = Vec::with_capacity(64 + m.claims.len() * 78);
+    let mut b = Vec::with_capacity(64 + m.claims.len() * 82);
     b.extend_from_slice(MAGIC);
     for v in [fp.0, fp.1, m.claims.len() as u64] {
         b.extend_from_slice(&v.to_le_bytes());
@@ -206,7 +207,7 @@ pub fn save(path: &Path, fp: Fingerprint, m: &Matched) {
         b.extend_from_slice(&v.n_match.to_le_bytes());
         f32s(&mut b, &[v.ov_a, v.ov_b, v.scale, v.rot_deg, v.blk]);
         b.extend_from_slice(&v.blk_n.to_le_bytes());
-        f32s(&mut b, &[v.blk_min, v.ncc]);
+        f32s(&mut b, &[v.blk_min, v.ncc, v.composed_points]);
     }
     b.extend_from_slice(&(m.notes.len() as u64).to_le_bytes());
     for n in &m.notes {
@@ -379,6 +380,7 @@ mod tests {
             blk_n: 30,
             blk_min: 0.91,
             ncc: f32::NAN,
+            composed_points: 6.5,
             ..Default::default()
         };
         let m = Matched {
@@ -392,7 +394,7 @@ mod tests {
         let bits = |c: &Claim| {
             let v = c.e.v;
             (c.e.ends(), c.how, v.m.map(f32::to_bits), v.variant, v.n_in, v.centred, v.framed, v.n_match,
-             [v.ov_a, v.ov_b, v.scale, v.rot_deg, v.blk, v.blk_min, v.ncc].map(f32::to_bits), v.blk_n)
+             [v.ov_a, v.ov_b, v.scale, v.rot_deg, v.blk, v.blk_min, v.ncc, v.composed_points].map(f32::to_bits), v.blk_n)
         };
         assert_eq!(back.claims.iter().map(bits).collect::<Vec<_>>(), m.claims.iter().map(bits).collect::<Vec<_>>());
         assert!(load(&p, Fingerprint(1, 3)).is_none(), "another run's");

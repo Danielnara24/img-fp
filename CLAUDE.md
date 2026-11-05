@@ -1543,6 +1543,85 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   - **F** no warnings on aarch64 Linux and macOS (`cargo check --target
     ... --all-targets`): `POST_LINES` x86-only, `verify.rs`'s `last` / `x`,
     a test's `Thumb` import.
+- **0.80.0, audit after 0.79.0** (A-D; matching format IMGFPM02, the
+  pairs unchanged; scratch runs under the session scratchpad `fix/`):
+  - **A** *holds* had a flat corner tolerance, 2% of the frame + 3 px
+    (`TOL`, `TOL_PX`, unmeasured), also subtracted in the keeper's "least
+    left out". A crop missing 1-2% of one side was one frame with its
+    original, kept as the smaller file and the original deleted (default
+    rule; `--suggest representative`; `--against`: a lossless original a
+    `repeat` of a q90 library crop missing up to 2.2%). Measured instead
+    (`suggest::FIT_ERROR`): on IMGS-ALL2's deleting direct verdicts between
+    files of one frame (131,267 pairs, `--dump` of 2026-11-02), how far
+    the fitted corners land outside the other frame times the pair's aligned
+    points is flat in the points (p99 0.61-0.71 from 3 to 200+ points) and in
+    file size (0.60-0.75): p50 0.18, p99 0.68, p99.9 1.14, max 4.60. One bar
+    at p99 (0.7 / points) lost IMGS-ALL 10 families' last lossless copy:
+    the 1% of one-frame pairs past it read as a frame a hair larger, which
+    may delete as a crop and is never asked the one-frame rules (`own_pixels`:
+    a lossy HEIF deleted its 500x667 lossless WebP, 335 points, 1.3 working
+    px out). Swept with one bar, IMGS-ALL original-or-lossless / strict line:
+    base 355 / 75, 0.7 345 / 28, 1.14 350 / 54, 2.0 356 / 87. So two bars:
+    inside at `FIT_ERROR` 0.7 / points (p99), larger only past
+    `FIT_ERROR_MOST` 4.6 / points (the max), neither deleting the other
+    between (`Side::f_past`, read by `strict_in`, `more`, `Component::new`'s
+    composite test). A propagated pair has no points of its own: its
+    hops' 1 / n add (`Verdict::composed_points`, `claims::propagate`).
+    A pair in the band whose files each show the other over the whole frame
+    (`whole_worst` both ways) is undecided, both REVIEW, as two pictures of
+    one frame are: without it turned copies (their fits are ~1.7x a plain
+    copy's: p99 1.06-1.15 x points against 0.65, a third of `rot180` in the
+    band) and `chromatic_aberration` went from REVIEW to KEEP (`pairs.py`
+    `rot180` REVIEW 693 -> 118); without the whole-frame condition,
+    composites matched at few points, where the band is wide (4.6 / 15 =
+    30%), went from KEEP to REVIEW (IMGS-ALL `caption_bar` 279,
+    `phone_screenshot` 176, `browser_window` 150, `column_roll` 97).
+  - **B** `CROPS` (two crops each missing <= 10% the other has: one frame,
+    on its comment "15% lost twice the composites") is gone. A left crop was
+    deleted for its right twin and a re-encode of it, losing a strip up to
+    a tenth, in 3 of 8 cases, and `--against` called it a `repeat` in 7 of 12.
+  - **C** `at_distance` held distances below a pixel at one: past 8x,
+    `extra` compared an enlargement at 8 of its pixels with its original at
+    one, not at 8 / s, so a 12-14x upscale (JPEG or PNG, Lanczos or
+    bicubic, up to 10000 x 11257) was kept and its original deleted on
+    every seed tried. Below a pixel it is now the interpolation's, in
+    proportion to the distance. **Not fixed**: a lossless Lanczos PNG
+    upscale at 3-8x still beats its q92 original on 4 of 15 seeds: its
+    ringing reads above `EXTRA_PER_OCTAVE`, which sits under the
+    enlargements' p99 on purpose (raising it deletes real originals for
+    their downscale). No content is lost; the larger file is kept.
+  - **D** the group head among files of equal reach ranked every KEEP
+    first, including one kept only for agreeing under `REVIEW` with the
+    rest (an edit too far to be a copy): a copy with a sticker over part of
+    the picture (0.88) headed its original and watermarked copy, and
+    `--suggest representative` deleted both. Now `suggest::Head`: a kept
+    copy, then the file an undecided class would keep (`choose`), then a
+    REVIEW, then a file kept for being unlike, then a DELETE. Left: with no
+    pair between them strong enough to settle, the original and its
+    watermarked copy tie, and the larger (the q95 copy) heads.
+  - Docs: featureless files match only byte copies (`same_analysis` passes
+    them over); `--last` writes paths absolute; README's DELETE no longer
+    says "apart perhaps from a thin strip". `suggest_score.py` also prints
+    losses with exact regions (its `holds` had the same 2% slack, and was
+    blind to A).
+  - Measured, base (HEAD) against new, cached, one run each:
+    IMGS-ALL: lost 0 / 0 (2% slack / exact regions) both; strict line 75
+    -> 54; original or lossless copy 355 -> 356 / 364; faithful 364 both;
+    picture only in an edit or composite 4 -> 4; KEEP 8,767 -> 9,004,
+    DELETE 19,938 -> 19,757, REVIEW 3,831 -> 3,775 (`rotate_small`,
+    `print_scan`, `crop_slight` to DELETE, read as the crops of the
+    original they are, were one undecided frame; warps and
+    `chromatic_aberration`, whose affine fit puts corners further out than
+    a copy's, deleted less). Heads that are the original or a lossless copy
+    16 -> 20 of 901 groups (measured before the band's REVIEW rule).
+    IMGS-ALL2: lost 0 / 0 both; strict line 68 -> 50; original or lossless
+    351 -> 355; picture only in an edit or composite 5 -> 3; KEEP 10,896 ->
+    10,894, DELETE 15,401 -> 15,241, REVIEW 5,897 -> 6,059. `pairs.py`
+    (now also `lossX`, exact regions): loss 59 -> 27 (lossX 59 -> 27),
+    originals deleted 365 -> 304, variants deleted 6,056 -> 6,087, REVIEW
+    35,719 -> 35,540. The base figures here (355, 75; pairs loss 59) differ
+    from 0.79.0's entry (358, 52; 57); not traced. Not run:
+    IMGS-PROVENANCE, cost (ABBA). `Edge` is 4 bytes larger.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
@@ -2167,8 +2246,10 @@ Each was measured; changing one needs a re-measure.
   anchor/corroborated with >= 3 aligned
   points if `blk_min >= CLEAN_WORST_BLOCK`; never clean, so it adds a file
   and joins no clusters. For icons/logos: a 512 px icon vs its 128 px copy
-  had 7 points at 0.997. Featureless files (no keypoints) still match only
-  identical / same-pixel copies.
+  had 7 points at 0.997. Featureless files (no keypoints) match only
+  byte-identical copies: `same_analysis` passes them over (two blank
+  pictures of one size stretch to one thumbnail whatever their shade), so a
+  blank PNG and its BMP are no pair.
 - **Weak bridges are demoted** (`claims::demote_bridges`): any clean bridge
   whose far side is more than one file, including mirrored/inverted anchors,
   stays an anchor and is no longer clean (may add one file, counts in the
@@ -2245,8 +2326,11 @@ bar now, not `Standing::Clean`'s; 0.85/0.9/0.95 lose the same, delete ~the
 same); a mirrored pair, like a negative, deletes nothing either way (a flip at
 q95 was kept over its q92 original 14/19 times); weak pair
 deletes at >= 0.95 (`WEAK_DELETES`), REVIEW at >= 0.9 (`REVIEW`); two crops
-each missing <= 10% count as one frame on deleting pairs (`CROPS`); *holds*
-by frame corners, keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
+each missing a strip the other has are two frames, however thin (`CROPS`,
+10%, made them one until the audit after 0.79.0); *holds* by frame corners, a
+corner outside by at most `FIT_ERROR` / the pair's points, and a frame is the
+larger only past `FIT_ERROR_MOST` / points, neither deleting the other between
+(audit after 0.79.0; was 2% + 3 px either way), keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
 pixels hold no detail (`Traits::detail`, `extra` above 0.2 an octave + 0.03,
 `EXTRA_PER_OCTAVE`: enlargements read <= 0.3/octave at p99, real originals
 >= 0.44 at p01; at 0.1 a 3x Lanczos upscale beat its original; originals
@@ -2340,7 +2424,8 @@ and cold runs agree. Kept for `--last` like any scan (see *A finished scan*);
 
 Every finished scan's `Outcome` is kept in `last-scan/found.json` beside
 the cache file, `Notes` in `scan.json` (shared with the window); `--last`
-re-writes text/CSV byte-for-byte, JSON without `pairs`. A scan kept before
+re-writes text/CSV as the scan wrote them but with every path absolute (as
+kept), JSON without `pairs`. A scan kept before
 0.55.0 (`result.json`, the report) is not read: run a scan. Not kept under
 `--no-cache`, `--no-last`, or a walk that found no picture; the window keeps
 by the same rule. Paths are kept absolute

@@ -71,6 +71,10 @@ pub struct Verdict {
     /// `--detail` gives the pictures pixels (`pipeline::level_bound`).
     pub lo: f32,
     pub hi: f32,
+    /// For a transform composed through other files (`claims::propagate`),
+    /// which no fit of its own made: the aligned points a single fit as
+    /// uncertain would have (`fit_points`). Zero for a fitted one.
+    pub composed_points: f32,
 }
 
 impl Default for Verdict {
@@ -92,6 +96,7 @@ impl Default for Verdict {
             ncc: 0.0,
             lo: 1.0 / MAX_SCALE,
             hi: MAX_SCALE,
+            composed_points: 0.0,
         }
     }
 }
@@ -324,6 +329,14 @@ impl Verdict {
             ncc: 1.0,
             ..Default::default()
         }
+    }
+
+    /// How many aligned points the transform's fit is worth: its own inliers,
+    /// or for a composed one what its hops come to (`composed_points`). A
+    /// fitted transform's corners are off by about the inverse of its
+    /// points (`suggest::FIT_ERROR`); 0 where nothing says.
+    pub fn fit_points(&self) -> f32 {
+        if self.n_in > 0 { self.n_in as f32 } else { self.composed_points }
     }
 
     /// The same verdict read from B to A: the transform inverted and every

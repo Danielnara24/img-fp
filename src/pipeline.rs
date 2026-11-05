@@ -1870,7 +1870,7 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
     // scan's suggestions are the content rule's (`last`), and a group is
     // headed, among files of equal reach, by the one it keeps (`group::find`),
     // so that the groups do not depend on the rule shown.
-    let (actions, keeper) = timed!(44, suggest_content(args, scope, files, &items, stats, &same, &stated, store.as_ref()));
+    let (actions, keeper, head) = timed!(44, suggest_content(args, scope, files, &items, stats, &same, &stated, store.as_ref()));
     // Every colour the suggestion measured is in the cache.
     drop(store);
     // What each pair says, which is all that is read of it from here on.
@@ -1886,20 +1886,17 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
     } else {
         let graph: Vec<(usize, usize)> = pairs.iter().map(Pair::ends).collect();
         // Among files of equal reach: one that decoded whole, then the one
-        // the content rule keeps, then one it leaves for a look, then one
+        // the content rule keeps as the copy to keep, then the one it would
+        // keep of an undecided class, then one it leaves for a look, then
+        // one it keeps for being unlike the rest (`suggest::Head`), then one
         // stored losslessly, then the most pixels, then the most bytes. What
         // `--suggest representative` keeps, and the picture every other is
         // shown against. A cut-off file was a group's head over the intact
         // copies it was cut from, and `representative` deleted them for it.
         let better: Vec<_> = (0..files.len())
             .map(|i| {
-                let said = match actions.get(i).copied().flatten() {
-                    Some(suggest::Action::Keep) => 2u8,
-                    Some(suggest::Action::Review) | None => 1,
-                    Some(suggest::Action::Delete) => 0,
-                };
                 let (w, h) = items[i].dims;
-                (items[i].read.damaged().is_none(), said, items[i].traits.lossless, w as u64 * h as u64, stats[i].len)
+                (items[i].read.damaged().is_none(), head[i], items[i].traits.lossless, w as u64 * h as u64, stats[i].len)
             })
             .collect();
         (Some(timed!(28, group::find(files.len(), &graph, &better))), Vec::new())
@@ -1979,7 +1976,7 @@ fn suggest_content(
     same: &Same,
     stated: &[(usize, usize, Stated)],
     store: Option<&cache::Store>,
-) -> (Vec<Option<suggest::Action>>, Vec<Option<usize>>) {
+) -> (Vec<Option<suggest::Action>>, Vec<Option<usize>>, Vec<suggest::Head>) {
     let pics: Vec<suggest::Picture> = items
         .iter()
         .zip(stats)

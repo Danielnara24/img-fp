@@ -2,9 +2,9 @@
 //! look at first: the `action` every report states beside a file.
 //!
 //! **The rule it answers to is that a deletion loses no picture.** A file is
-//! DELETE only when a file that stays shows all of it, or all but a thin
-//! strip, at its detail or nearly, and the two were matched well enough to
-//! say so. Everything the run cannot prove redundant stays: as REVIEW when it
+//! DELETE only when a file that stays shows all of it, as nearly as the
+//! fitted transform can tell, at its detail or nearly, and the two were
+//! matched well enough to say so. Everything the run cannot prove redundant stays: as REVIEW when it
 //! was only ever matched weakly but closely enough to be a copy, as KEEP
 //! otherwise. Measured against the benchmark corpora's generated ground
 //! truth, none of IMGS-ALL's 16,873 deletions loses anything, and on its
@@ -22,12 +22,15 @@
 //!   watermarked, which no pair could prove — and KEEP below it, where it is
 //!   another photograph of the same subject.
 //! - **"Holds"**: `g` holds `f` when all four corners of `f` land inside `g`
-//!   and `g` does not shrink `f`'s picture by more than `SHRINK` on either
-//!   axis, unless `f`'s extra pixels hold no detail an enlargement of `g`
-//!   would lack, which is an upscale (`extra`). Two crops each missing a
-//!   strip of under `CROPS` the other has count as one frame. Corners rather
-//!   than `frame_overlap`, whose 16x16 grid read a caption strip of 15% as
-//!   6%.
+//!   (by no more than the fit is usually off, `FIT_ERROR`; and `g` is the
+//!   larger frame only past the most it was ever off, `FIT_ERROR_MOST`,
+//!   neither deleting the other between) and `g` does not
+//!   shrink `f`'s picture by more than `SHRINK` on either axis, unless `f`'s
+//!   extra pixels hold no detail an enlargement of `g` would lack, which is
+//!   an upscale (`extra`). Two crops of a picture, each missing a strip the
+//!   other has, are two frames, however thin the strips: neither shows all
+//!   of the other. Corners rather than `frame_overlap`, whose 16x16 grid
+//!   read a caption strip of 15% as 6%.
 //! - **A deletion is checked over the deleted file's whole frame**
 //!   (`whole_worst`), flat areas included, which the pixel check lets
 //!   abstain. Without it, a caption bar's white strip "matched" the white
@@ -216,11 +219,46 @@ pub enum Link<'a> {
 /// whole-frame check at 32 samples a side (`WHOLE_GRID`). A worst block that
 /// clusters nothing new can still say a file is redundant.
 pub(crate) const CLEAN: f32 = 0.85;
-/// How far outside the other frame a corner may land, as a fraction of it,
-/// plus `TOL_PX` of the file's own pixels: the transform is fitted, and a
-/// thumbnail of a hundred pixels is a few pixels off at four times its size.
-const TOL: f32 = 0.02;
-const TOL_PX: f32 = 3.0;
+/// How far a fitted transform puts a frame's corners from where they are, as
+/// a fraction of the other frame's side, times the points it was fitted to
+/// (`Verdict::fit_points`): a corner may land outside the other frame by
+/// this over the points and still count as inside it. And a frame reaches
+/// past the other's, as a larger frame does, only by more than
+/// `FIT_ERROR_MOST` over the points; between the two, which is the larger
+/// is not known, and neither file deletes the other.
+///
+/// **The error is the fit's, and it falls as its points grow.** Measured on
+/// IMGS-ALL2's direct verdicts that may delete (clean, or at
+/// `WEAK_DELETES`), between files of one frame whatever was done to them
+/// (re-encodes, resizes, recolourings, blurs, noise; 131,267 pairs, read
+/// both ways): how far the fitted corners land outside the other frame,
+/// times the pair's aligned points, is 0.18 at the median, 0.68 at p99 and
+/// 1.14 at p99.9, and it is the same at 3-20 points (p99 0.61), 20-60
+/// (0.71), 60-200 (0.68) and over 200 (0.64), and for files under 150 px
+/// (0.72) as over 600 (0.60). This is the p99. It was a flat 2% of the
+/// frame plus 3 px of the file's own, unmeasured, which is the error of a
+/// fit to 35 points: a crop missing 1-2% of a photograph matched at 300
+/// points held it, and as the smaller file was kept and the original deleted
+/// (`--against`: a `repeat` of its crop). A fit the error misjudges the
+/// other way makes two files of one frame neither in the other, which costs
+/// a deletion and loses nothing.
+///
+/// **Inside and larger are two bars.** With one, the 1% of files of one
+/// frame past it read as a frame a hair larger than the other, and a larger
+/// frame may delete what it holds as a crop, which the rules for files of
+/// one frame do not then ask: a lossy HEIF deleted the lossless WebP of its
+/// frame and size (both 500x667, 335 points, the WebP's corner 1.3 working
+/// pixels out), and 10 of IMGS-ALL's 364 families lost their last lossless
+/// copy so. Swept with one bar: at the p99.9 (1.14) 5 did, at 2.0 none, but
+/// the deletions resting only on a composite or a turned copy rose from 75
+/// to 87: no single bar is right on both sides.
+pub(crate) const FIT_ERROR: f32 = 0.7;
+/// The most the same measure read for any of those 131,267 pairs: past it,
+/// a frame reaches beyond the other's (`Side::f_past`). The fifteen pairs
+/// over 2 were nearly all a copy squashed to another shape; p99.99 is 2.24.
+/// Set high it costs only deletions: a crop missing a strip under it is kept
+/// beside its original, both, rather than deleted for it.
+pub(crate) const FIT_ERROR_MOST: f32 = 4.6;
 /// Below this many octaves (log2) of shrinking, two files are the same size:
 /// a 15% resample, one axis or both. Smaller resamples than this hold too
 /// little difference in detail for `extra` to measure: a copy squashed 9%
@@ -234,11 +272,6 @@ const SAME: f32 = 0.2;
 /// picture lacked and nothing was deleted. On the benchmark corpora it moves
 /// no deletion that loses content.
 const SHRINK: f32 = 0.5;
-/// How much of each of two frames may lie outside the other, as a fraction
-/// of its area, for the two to count as one frame: two crops of a picture,
-/// each missing a thin strip the other has. 15% lost twice the composites
-/// for a few more deletions.
-const CROPS: f32 = 0.10;
 /// The correlation below which a file nothing could delete is not a REVIEW
 /// but a KEEP: under it, the found corpus's REVIEWs were mostly two
 /// specimens of one species, and over it mostly one photograph tinted or
@@ -372,9 +405,15 @@ struct Side {
     exact: bool,
     /// `exact` and proven so (`Link::Exact`), not merely read alike.
     proven: bool,
-    /// All of `f`'s frame lands in `to`'s, and the reverse.
+    /// All of `f`'s frame lands in `to`'s, and the reverse, as nearly as the
+    /// fit can tell (`FIT_ERROR`).
     f_in: bool,
     in_f: bool,
+    /// `f`'s frame reaches past `to`'s by more than the fit could be off
+    /// (`FIT_ERROR_MOST`), and the reverse: the larger frame. Between this
+    /// and `f_in` neither is known.
+    f_past: bool,
+    past_f: bool,
     /// How much `to` enlarges `f` along each of `f`'s axes, in octaves of
     /// the files' own pixels.
     sx: f32,
@@ -383,9 +422,6 @@ struct Side {
     f_out: f32,
     /// The pair is clean: no block of its overlap disagrees.
     clean: bool,
-    /// Each frame is in the other only as two crops of one picture are,
-    /// each missing a strip the other has (`CROPS`): not the same frame.
-    mutual: bool,
 }
 
 /// The action for every file in a pair, by index; `None` for the rest.
@@ -394,8 +430,9 @@ pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation
     suggest_pinned(pics, links, min_correlation, colour, &[]).0
 }
 
-/// `suggest`, with some files kept whatever the rest say, and beside each
-/// DELETE the file it rests on: the one that holds it and stays.
+/// `suggest`, with some files kept whatever the rest say, beside each
+/// DELETE the file it rests on (the one that holds it and stays), and for
+/// every file how fit it is to head its group (`Head`).
 ///
 /// A pinned file is `--against`'s library. It is KEEP, it is never deleted,
 /// and where it holds the same frame as files that are not pinned it is the
@@ -409,7 +446,7 @@ pub fn suggest_pinned(
     min_correlation: f32,
     colour: impl Fn(usize) -> f32 + Sync,
     pinned: &[bool],
-) -> (Vec<Option<Action>>, Vec<Option<usize>>) {
+) -> (Vec<Option<Action>>, Vec<Option<usize>>, Vec<Head>) {
     let n = pics.len();
     let mut sides: Vec<Vec<Side>> = vec![Vec::new(); n];
     // Every pair, weak ones too, for what the frames say about which file is
@@ -434,7 +471,7 @@ pub fn suggest_pinned(
             Link::Exact | Link::Twin => {
                 let ls = k.max(1e-6).log2();
                 let proven = matches!(link, Link::Exact);
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: true, proven, f_in: true, in_f: true, sx: ls, sy: ls, f_out: 0.0, clean: true, mutual: false };
+                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: true, proven, f_in: true, in_f: true, f_past: false, past_f: false, sx: ls, sy: ls, f_out: 0.0, clean: true };
                 (s, Side { to: *a as u32, forward: false, sx: -ls, sy: -ls, ..s })
             }
             Link::Edge(v, m, inverted) => {
@@ -447,17 +484,16 @@ pub fn suggest_pinned(
                 let mi = invert_affine(m);
                 let a_out = outside(m, pa.work, pb.work);
                 let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
-                let a_in_b = out_by(m, pa.work, pb.work) <= TOL + TOL_PX / pa.dims.0.min(pa.dims.1).max(1) as f32;
-                let b_in_a = mi.is_some_and(|mi| out_by(&mi, pb.work, pa.work) <= TOL + TOL_PX / pb.dims.0.min(pb.dims.1).max(1) as f32);
-                // Two crops of one picture, each missing a strip the other has:
-                // one frame. A composite holds its picture whole, so it is
-                // never this; nor is a pair too weak to delete on, or two
-                // specimens framed alike would make every file "plain".
-                let deletes = !mirrored(m) && v.blk >= min_correlation && (clean || v.blk >= WEAK_DELETES);
-                let mutual = deletes && !a_in_b && !b_in_a && a_out <= CROPS && b_out <= CROPS;
-                let (a_in_b, b_in_a) = (a_in_b || mutual, b_in_a || mutual);
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, sx, sy, f_out: a_out, clean, mutual };
-                (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, sx: -sx, sy: -sy, f_out: b_out, ..s })
+                // A corner may land outside by what the fit may be off by
+                // (`FIT_ERROR`), and by nothing where nothing says.
+                // and past it by more than it could be (`FIT_ERROR_MOST`).
+                let points = v.fit_points();
+                let (near, far) = if points > 0.0 { (FIT_ERROR / points, FIT_ERROR_MOST / points) } else { (0.0, 0.0) };
+                let (a_by, b_by) = (out_by(m, pa.work, pb.work), mi.map_or(f32::INFINITY, |mi| out_by(&mi, pb.work, pa.work)));
+                let (a_in_b, b_in_a) = (a_by <= near, b_by <= near);
+                let (a_past, b_past) = (a_by > far, b_by > far);
+                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, f_past: a_past, past_f: b_past, sx, sy, f_out: a_out, clean };
+                (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, f_past: b_past, past_f: a_past, sx: -sx, sy: -sy, f_out: b_out, ..s })
             }
         };
         let usable = match link {
@@ -535,7 +571,30 @@ pub fn suggest_pinned(
     }
     let action = (0..n).map(|i| facts[i].map(|f| f.action(ctx.is_pinned(i)))).collect();
     let keeper = facts.iter().map(|f| f.and_then(|f| f.deleted_by())).collect();
-    (action, keeper)
+    let head = (0..n).map(|i| facts[i].map_or(Head::Review, |f| f.head(ctx.is_pinned(i)))).collect();
+    (action, keeper, head)
+}
+
+/// How fit a file is to head its group (`group::find`'s `better`), by what
+/// the content rule made of it: in order, a file deleted, one kept for being
+/// unlike the rest, one left for a look, the one of those its class would
+/// keep if anything decided, and a kept copy.
+///
+/// **A KEEP is two things.** A file kept as the copy to keep (a deletion
+/// rests on it, or one of its pairs is clean) is the group's picture; a file
+/// kept because its best match agrees under `REVIEW` is another photograph
+/// of something like it, or an edit too far from the rest to be a copy. As
+/// one KEEP the second headed groups of the first: a copy with a sticker
+/// over part of the picture, matched at 0.88, headed its original and a
+/// watermarked copy (both REVIEW, undecided), and `--suggest
+/// representative` deleted both for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Head {
+    Deleted,
+    Unlike,
+    Review,
+    Chosen,
+    Kept,
 }
 
 /// What settling found of one file in a pair, from which its action is read
@@ -599,6 +658,17 @@ enum Refusal {
 }
 
 impl Facts {
+    fn head(&self, pinned: bool) -> Head {
+        match self.action(pinned) {
+            Action::Delete => Head::Deleted,
+            Action::Keep if pinned || self.deletes || self.clean => Head::Kept,
+            Action::Keep => Head::Unlike,
+            // Of an undecided class, the file settling chose (`choose`).
+            Action::Review if self.state == State::Keep => Head::Chosen,
+            Action::Review => Head::Review,
+        }
+    }
+
     fn deleted_by(&self) -> Option<usize> {
         match self.state {
             State::Delete(k) => Some(k),
@@ -730,8 +800,9 @@ impl Ctx<'_> {
         self.frame(f, g) && self.frame(g, f)
     }
 
+    /// All of `f`'s frame lands in `g`'s, and `g`'s reaches past it.
     fn strict_in(&self, f: usize, g: usize) -> bool {
-        self.frame(f, g) && !self.frame(g, f)
+        self.frame(f, g) && self.side(f, g).is_some_and(|e| e.past_f)
     }
 
     /// `k` is the size of `d` and softer than it by more than `SOFT_GAP`:
@@ -834,7 +905,7 @@ impl Ctx<'_> {
         if e.exact {
             return false;
         }
-        if !e.in_f {
+        if e.past_f {
             return true;
         }
         let l = e.sx.min(e.sy);
@@ -969,6 +1040,23 @@ impl Ctx<'_> {
                 undecided.extend(c.classes[c.class[d]].iter().copied());
             }
         }
+        // So is a file whose frame and another's are one or not as nearly as
+        // the fit can say (`FIT_ERROR`, `FIT_ERROR_MOST`), and which each show
+        // the other over its whole frame (`whole_worst`): which is the larger
+        // is not known, and neither deleted the other. Kept, both, a turned
+        // copy and its original, between which the fit is less sure than
+        // between plain copies, said nothing; as a pair of one frame they
+        // were REVIEW, which is what they are. The whole-frame check keeps
+        // out a composite matched at few points, whose canvas the fit's room
+        // there could not tell from its error: it does not show its canvas.
+        let unsure = |i: usize, e: &Side| {
+            let j = e.to as usize;
+            !e.exact
+                && ((!e.f_in && !e.f_past) || (!e.in_f && !e.past_f))
+                && c.whole(i, j) <= WHOLE_RESIDUAL
+                && c.whole(j, i) <= WHOLE_RESIDUAL
+        };
+        undecided.extend(members.iter().copied().filter(|&i| self.sides[i].iter().any(|e| unsure(i, e))));
         members
             .iter()
             .map(|&i| {
@@ -1034,21 +1122,21 @@ impl Ctx<'_> {
         reps.sort_unstable();
         reps.dedup();
         let lossless = |f: usize| twins(f).iter().any(|&g| self.pics[g].traits.lossless);
-        // How much of the others' frames a file leaves out, to the nearest
-        // two per cent: of files that hold each other only nearly, the one
-        // that loses least.
-        let lost = |f: usize| -> u32 {
-            let s: f32 = reps.iter().filter(|&&g| g != f).filter_map(|&g| self.side(g, f)).map(|e| (e.f_out - TOL).max(0.0)).sum();
-            (s / 0.02).round() as u32
+        // How much of the others' frames a file leaves out, counting only
+        // those it does not hold (inside it as far as the fit can tell,
+        // `FIT_ERROR`): of candidates that do not all hold each other (the
+        // pinned files a deletion may name), the one that loses least.
+        let lost = |f: usize| -> f32 {
+            reps.iter().filter(|&&g| g != f).filter_map(|&g| self.side(g, f)).filter(|e| !e.exact && !e.f_in).map(|e| e.f_out).sum()
         };
-        let mut order: Vec<(u32, bool, bool, u64, f32, usize)> = reps
+        let mut order: Vec<(f32, bool, bool, u64, f32, usize)> = reps
             .iter()
             .map(|&f| (lost(f), lossless(f), self.pics[f].traits.exif, self.pics[f].bytes, mid.get(&f).copied().unwrap_or(0.0), f))
             .collect();
         // Least left out, lossless, EXIF, smaller, nearer the middle; ties
         // to the lower index.
         order.sort_by(|a, b| {
-            a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.4.total_cmp(&b.4)).then(a.5.cmp(&b.5))
+            a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.4.total_cmp(&b.4)).then(a.5.cmp(&b.5))
         });
         // Colour over grey, asked in that order and only as far as needed: a
         // JPEG's colour is not measured by the decode, and is decoded here.
@@ -1097,7 +1185,7 @@ impl<'c, 'a> Component<'c, 'a> {
             .map(|&f| {
                 let holds_plain = ctx.all_sides[f].iter().any(|e| {
                     let g = e.to as usize;
-                    !in_other(e) && frame_any(g, f) && is_plain(g)
+                    e.f_past && frame_any(g, f) && is_plain(g)
                 });
                 (f, !holds_plain)
             })
@@ -1129,15 +1217,11 @@ impl<'c, 'a> Component<'c, 'a> {
     }
 
     /// How many different pictures of the frame `k` and `d` share class `c`
-    /// holds, a set of the same bytes or pixels counted once. Of two files of
-    /// one frame, the two and each other file that is that frame to both,
-    /// not a crop of it each misses a strip of (`mutual`): counting the class
-    /// whole, a crop from the other side made a third picture, and a q92
-    /// file was deleted for its own q88 re-encode, which beside each other
-    /// alone were undecided. Of two such crops, the class whole, as before:
-    /// counted the narrow way, every pair of slight crops of one photograph
-    /// was undecided, and kept from deletion what the original would delete
-    /// (200 files of IMGS-ALL, `rotate_small`, `print_scan`, `crop_slight`).
+    /// holds, a set of the same bytes or pixels counted once. Of two files
+    /// each the other's frame, the two and each other file that is that
+    /// frame to both: counting the class whole, a file of it framed a little
+    /// otherwise made a third picture, and a q92 file was deleted for its own
+    /// q88 re-encode, which beside each other alone were undecided.
     ///
     /// **Counted up to three**, all `refusal` asks (fewer than three or not).
     /// Counted whole it was quadratic in the class, and asked of every pair
@@ -1145,7 +1229,7 @@ impl<'c, 'a> Component<'c, 'a> {
     /// now 0.9.
     fn pictures_of_one_frame(&self, c: usize, k: usize, d: usize) -> usize {
         let x = self.ctx;
-        let strict = |f: usize, g: usize| x.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f && !e.mutual));
+        let strict = |f: usize, g: usize| x.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f));
         let narrow = strict(k, d);
         let of = self.classes[c].iter().copied().filter(|&g| !narrow || g == k || g == d || (strict(g, k) && strict(g, d))).collect::<Vec<_>>();
         of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| x.side(f, g).is_some_and(|e| e.exact))).take(3).count()
@@ -1303,9 +1387,22 @@ fn softness(t: &Traits) -> f32 {
 }
 
 /// `h`, measured at 1, 2, 4 and 8 pixels, at distance `d`, interpolated in
-/// log-log and held to [1, 8].
+/// log-log; held at 8 above it, and below a pixel in proportion to the
+/// distance.
+///
+/// **Below a pixel it is an interpolation's**, which is what `extra` asks of
+/// it there: the picture between two neighbouring pixels is drawn from them,
+/// and a difference across part of the gap is that part of the difference
+/// across it (exactly so for a linear interpolation, to first order for any
+/// smooth one). Held at one pixel, an enlargement past eight times was
+/// compared at eight of its pixels with its original at one, not at the
+/// fraction of a pixel those eight are: a 14x enlargement read as more
+/// detail than its original and was kept, the original deleted.
 fn at_distance(h: &[f32], d: f32) -> f32 {
-    let t = d.clamp(1.0, 8.0).log2();
+    if d < 1.0 {
+        return h[0].max(1e-4) * d.max(0.0);
+    }
+    let t = d.min(8.0).log2();
     let i = (t as usize).min(2);
     let u = t - i as f32;
     let (a, b) = (h[i].max(1e-4).log2(), h[i + 1].max(1e-4).log2());
@@ -1669,7 +1766,7 @@ mod tests {
         let pics = [pic(2_000), pic(2_000), pic(1_500)];
         let v = verdict(1.0, 1.0);
         let links = [(0, 1, Link::Exact), (0, 2, Link::Edge(&v, IDENTITY, false)), (1, 2, Link::Edge(&v, IDENTITY, false))];
-        let (got, keeper) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
+        let (got, keeper, _) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
         assert_eq!(got, [Some(Action::Review), Some(Action::Delete), Some(Action::Review)], "{got:?}");
         assert_eq!(keeper[1], Some(0));
         // Alone, the pair is undecided as before.
@@ -1691,7 +1788,7 @@ mod tests {
         let v = verdict(1.0, 1.0);
         let links: Vec<(usize, usize, Link)> =
             (0..4).flat_map(|a| (a + 1..4).map(move |b| (a, b))).map(|(a, b)| (a, b, Link::Edge(&v, IDENTITY, false))).collect();
-        let (got, keeper) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
+        let (got, keeper, _) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
         assert_eq!(got[0], Some(Action::Keep), "{got:?}");
         assert!((1..4).all(|i| keeper[i] != Some(1) || got[1] == Some(Action::Keep)));
         // Alike in softness, the smallest is kept as before.
@@ -1754,11 +1851,11 @@ mod tests {
         let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes, damaged: false };
         // Unpinned, the smaller file 1 would be kept; pinned, the larger is.
         let pics = [pic(2_000), pic(1_000)];
-        let (got, keeper) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, false]);
+        let (got, keeper, _) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, false]);
         assert_eq!(got, [Some(Action::Keep), Some(Action::Delete)]);
         assert_eq!(keeper, [None, Some(0)]);
         // Two pinned files are both kept, whatever they hold of each other.
-        let (got, _) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, true]);
+        let (got, _, _) = suggest_pinned(&pics, &[(0, 1, Link::Exact)], 0.6, |_| 30.0, &[true, true]);
         assert_eq!(got, [Some(Action::Keep), Some(Action::Keep)]);
     }
 
@@ -1827,7 +1924,7 @@ mod tests {
         let got = suggest(&pics, &links, 0.6, |_| 30.0);
         assert_eq!(got.iter().filter(|a| **a == Some(Action::Delete)).count(), 2, "{got:?}");
         assert!(suggest(&pics[..2], &[(0, 1, Link::Exact)], 0.6, |_| 30.0).contains(&Some(Action::Delete)));
-        let (got, keeper) = suggest_pinned(&pics[..2], &[(0, 1, Link::Edge(&v, IDENTITY, false))], 0.6, |_| 30.0, &[true, false]);
+        let (got, keeper, _) = suggest_pinned(&pics[..2], &[(0, 1, Link::Edge(&v, IDENTITY, false))], 0.6, |_| 30.0, &[true, false]);
         assert_eq!((got, keeper), (vec![Some(Action::Keep), Some(Action::Delete)], vec![None, Some(0)]));
     }
 
@@ -1883,6 +1980,88 @@ mod tests {
             }
             println!("sigma {sigma}: {:.1} us ({s})", t0.elapsed().as_secs_f64() * 1e6 / n as f64);
         }
+    }
+
+    /// A thumbnail at the working size of a smooth picture, `dx` working
+    /// pixels in from the left and `w` wide: crops of one picture.
+    fn ramp(dx: u32, w: u32) -> Thumb {
+        Thumb::new(w as u16, 96, 1.0, (0..96u32).flat_map(|y| (0..w).map(move |x| (40 + (x + dx) + y) as u8)).collect())
+    }
+
+    /// A crop missing a strip of its original does not hold it, however
+    /// thin the strip, where the fit was to enough points to see it
+    /// (`FIT_ERROR`): the original is kept, and deletes the crop where the
+    /// strip is past what the fit could be off by (`FIT_ERROR_MOST`). With a 2%
+    /// tolerance the two were one frame, the crop was kept as the smaller
+    /// file, and the original deleted.
+    #[test]
+    fn a_crop_missing_a_strip_does_not_hold_its_original() {
+        let tr = colourful();
+        let (to, tc) = (ramp(0, 128), ramp(2, 126));
+        let orig = Picture { dims: (1280, 960), work: (128, 96), thumb: &to, traits: &tr, bytes: 9_000, damaged: false };
+        let crop = Picture { dims: (1260, 960), work: (126, 96), thumb: &tc, traits: &tr, bytes: 4_000, damaged: false };
+        let v = Verdict { n_in: 300, ..verdict(1.0, 1.0) };
+        let m = [1.0, 0.0, -2.0, 0.0, 1.0, 0.0];
+        let got = suggest(&[orig, crop], &[(0, 1, Link::Edge(&v, m, false))], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Delete)]);
+        // Fitted to fewer points, the strip is more than the fit is usually
+        // off by and less than it ever was: which frame is the larger is not
+        // known, neither file is deleted, and both are for a look.
+        let v = Verdict { n_in: 100, ..v };
+        let got = suggest(&[orig, crop], &[(0, 1, Link::Edge(&v, m, false))], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Review), Some(Action::Review)]);
+        // To fewer still, the strip is within what the fit is usually off
+        // by: one frame, as files of one frame are.
+        let v = Verdict { n_in: 20, ..v };
+        let got = suggest(&[orig, crop], &[(0, 1, Link::Edge(&v, m, false))], 0.6, |_| 30.0);
+        assert_ne!(got, [Some(Action::Keep), Some(Action::Delete)]);
+    }
+
+    /// Two crops of one picture, each missing a strip the other has, are two
+    /// frames: neither is deleted for the other. They were one frame while
+    /// each strip was under a tenth (`CROPS`), and one went with its strip.
+    #[test]
+    fn of_two_crops_each_missing_a_strip_neither_is_deleted() {
+        let tr = colourful();
+        let (tl, tr_) = (ramp(0, 123), ramp(5, 123));
+        let pic = |t, bytes| Picture { dims: (1230, 960), work: (123, 96), thumb: t, traits: &tr, bytes, damaged: false };
+        let v = Verdict { n_in: 300, ..verdict(1.0, 1.0) };
+        let m = [1.0, 0.0, -5.0, 0.0, 1.0, 0.0];
+        let got = suggest(&[pic(&tl, 5_000), pic(&tr_, 4_000)], &[(0, 1, Link::Edge(&v, m, false))], 0.6, |_| 30.0);
+        assert!(!got.contains(&Some(Action::Delete)), "{got:?}");
+    }
+
+    /// An enlargement holds no detail its original lacks at any factor: its
+    /// detail at each distance is the original's there, interpolated below
+    /// a pixel. Held at a pixel, past eight times it read as more.
+    #[test]
+    fn an_interpolation_holds_no_extra_detail_at_any_factor() {
+        let h = |d: f32| 10.0 * d.sqrt();
+        let f = Traits { detail: [h(1.0), h(2.0), h(4.0), h(8.0), h(1.0), h(2.0)], ..Default::default() };
+        for s in [1.5f32, 3.0, 7.0, 8.0, 9.0, 14.0, 32.0] {
+            let at = |d: f32| at_distance(&f.detail[..4], d / s);
+            let g = Traits { detail: [at(1.0), at(2.0), at(4.0), at(8.0), at(1.0), at(2.0)], ..Default::default() };
+            let e = extra(&f, &g, s);
+            assert!(e.abs() < 1e-3, "{s}x: {e}");
+        }
+        assert!((at_distance(&f.detail[..4], 0.25) - h(1.0) / 4.0).abs() < 1e-4);
+    }
+
+    /// A file kept for being unlike the rest does not head them: an original
+    /// and its watermarked copy, undecided, and a copy with a sticker over
+    /// part of the picture that agrees with them under `REVIEW`. The sticker
+    /// copy is KEEP, and as a KEEP headed the group.
+    #[test]
+    fn a_file_kept_for_being_unlike_the_rest_does_not_head_them() {
+        let (t, tr) = (thumb(), colourful());
+        let pic = |bytes| Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes, damaged: false };
+        let pics = [pic(3_000), pic(3_200), pic(3_400)];
+        let (wm, st) = (verdict(0.97, 0.5), verdict(0.88, 0.3));
+        let links = [(0, 1, Link::Edge(&wm, IDENTITY, false)), (0, 2, Link::Edge(&st, IDENTITY, false)), (1, 2, Link::Edge(&st, IDENTITY, false))];
+        let (got, _, head) = suggest_pinned(&pics, &links, 0.6, |_| 30.0, &[]);
+        assert_eq!(got, [Some(Action::Review), Some(Action::Review), Some(Action::Keep)]);
+        assert_eq!(head[2], Head::Unlike);
+        assert!(head[0] > head[2] && head[1] > head[2], "{head:?}");
     }
 }
 
