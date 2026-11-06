@@ -149,7 +149,13 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// the plane reduced as stored and turned after, other features.
 /// 20: an icon of several sizes has `Traits::frames`, and an icon is lossless
 /// only as the entry read is; a record of 19 says one picture, lossless.
-const MAGIC: &[u8; 8] = b"IMGFPC20";
+/// 21: no change to the record. Records written by builds before 0.81.0
+/// under 20 read differently from a fresh analysis: IMGS-ALL2 read from a
+/// cache 0.76.0 filled gave F1 0.9343 (recall 88.78%) against 0.9414
+/// (90.06%) for the same build analysing cold, ~43,600 true pairs apart.
+/// The analysis changed after 0.76.0 without a new format; which build
+/// changed it was not traced. A new name makes every cache analyse again.
+const MAGIC: &[u8; 8] = b"IMGFPC21";
 const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
 
 /// The format this build reads and writes, for messages.
@@ -248,7 +254,7 @@ impl PartialEq for Key {
     }
 }
 
-/// The default cache file's name, which carries the format: `analysis-IMGFPC20.bin`.
+/// The default cache file's name, which carries the format: `analysis-IMGFPC21.bin`.
 ///
 /// **Each format has a default file of its own**, so that a format change
 /// starts a new file beside the old one instead of meeting it. With one name

@@ -1066,6 +1066,54 @@ fn distinct_inliers(a: &Features, pairs: &[(u32, u32)], mask: &[bool], pts: &mut
     pts.len() as u32
 }
 
+/// How far, in octaves, the median inlier's keypoint size may be from the
+/// size the transform gives it: one octave, the pyramid's own step.
+///
+/// A transform that shrinks one whole picture into a spot of the other gathers
+/// the shrunk picture's keypoints onto the few the spot holds: the inlier
+/// tolerance is a share of the larger frame's diagonal, ten times wider in a
+/// picture shrunk tenfold, so keypoints from a fifth of it land within reach of
+/// each one in the spot, and guided matching gives each its nearest descriptor.
+/// Points are counted by their position in the shrunk picture, so 27-67 of them
+/// rested on 6-13 keypoints of the spot, and the pixel check, at the spot's
+/// 25 x 10 thumbnail pixels, reads the shrunk picture as a two-tone layout that
+/// agrees with any spot of that layout (0.70-0.76). On INRIA Holidays photos
+/// alone that joined three pairs of different scenes (a riverfront and horses
+/// on a ridge, a city slope and a crater lake, misty mountains and a mountain
+/// lake), and those inliers' sizes were 2.0-3.2 octaves (median) off the
+/// transform's scale: fine keypoints matched to coarse ones.
+///
+/// On real copies they agree: over 1,008 true verdicts of IMGS-ALL2 (80 seeds,
+/// 14 transforms, `thumbnail`, `embed_tiny`, `contact_sheet`, `crop_micro`
+/// among them) the median is within 0.3 octave of zero for all but one seed (a
+/// 3.4:1 panorama, +1.18 on one small copy); pooled inliers p05 -0.15, p95
+/// +0.37. Measured with the bar (`benchmark/out/v56-seed`, section 7): the
+/// three Holidays joins gone, sibling joins and IMGS-ALL / IMGS5 small
+/// families unchanged; IMGS-ALL true pairs -143 of 1.31 M, IMGS-ALL2 +2,
+/// cross-family pairs and merges identical on both. Counting inliers one to
+/// one instead left one of the three and lost 817 / 2,213 true pairs, mostly
+/// tiny embeds, which have few keypoints in their spot too.
+pub const SIZE_AGREEMENT: f32 = 1.0;
+
+/// The median over the inliers of log2(B's keypoint size / (A's keypoint size
+/// times the transform's scale)): about 0 when the inliers are the same
+/// features at the transform's scale.
+#[cfg_attr(dispatch, inline(always))]
+fn median_size_offset(a: &Features, b: &Features, m: &Affine, pairs: &[(u32, u32)], mask: &[bool]) -> f32 {
+    let s = det(m).abs().sqrt().max(1e-12);
+    let mut o: Vec<f32> = pairs
+        .iter()
+        .zip(mask)
+        .filter(|&(_, &k)| k)
+        .map(|(&(i, j), _)| (b.kps[j as usize].sigma / (a.kps[i as usize].sigma.max(1e-6) * s)).log2())
+        .collect();
+    if o.is_empty() {
+        return 0.0;
+    }
+    let mid = o.len() / 2;
+    *o.select_nth_unstable_by(mid, |p, q| p.total_cmp(q)).1
+}
+
 /// Whether the correspondences actually reach around the region they claim.
 ///
 /// A fitted transform is evidence about the region its inliers came from.
@@ -2249,6 +2297,13 @@ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
     if v.n_in < floor(gate.0) {
         return v;
     }
+    // The inliers must be the features the transform says they are, at the
+    // size it gives them; see `SIZE_AGREEMENT`. A verdict whose points are not
+    // has no points.
+    if median_size_offset(p.fa, p.fb, &m_query, matches, &scratch.mask).abs() > SIZE_AGREEMENT {
+        v.n_in = 0;
+        return v;
+    }
     v.centred = timed!(18, encloses_centre(p.fa, p.fb, &m_query, matches, &scratch.mask));
     let (oa, ob) = timed!(19, overlap(&m, aw, ah, bw, bh));
     v.ov_a = oa;
@@ -2548,6 +2603,31 @@ mod tests {
         assert!(sliver.scale > 1.0 / MAX_SCALE, "the mean alone let it through");
         assert_eq!(policy.standing(&sliver), Standing::Rejected);
         assert_eq!(policy.standing(&with([20.0, 0.0, 0.0, 0.0, 1.0, 0.0])), Standing::Rejected, "stretched past it");
+    }
+
+    /// A picture shrunk tenfold into a spot of another: its true copy's
+    /// keypoints are a tenth its size there, and pass; keypoints of the spot
+    /// at the shrunk picture's own size (fine ones gathered onto coarse ones,
+    /// the Holidays joins) are past `SIZE_AGREEMENT`, mirrored or not.
+    #[test]
+    fn inliers_must_be_the_size_the_transform_gives_them() {
+        let kp = |x: f32, y: f32, sigma: f32| Keypoint { x, y, sigma, angle: 0.0 };
+        let a: Vec<Keypoint> = (0..40).map(|i| kp((i % 8) as f32 * 60.0 + 10.0, (i / 8) as f32 * 70.0 + 10.0, 1.6 + (i % 5) as f32)).collect();
+        let m: Affine = [0.1, 0.0, 200.0, 0.0, 0.1, 150.0];
+        let at = |k: &Keypoint, size: f32| kp(m[0] * k.x + m[2], m[4] * k.y + m[5], size);
+        let feats = |kps: Vec<Keypoint>| Features { w: 512, h: 384, kps: kps.into(), desc: vec![0u8; 40 * DESC_LEN].into(), ends: Vec::new() };
+        let fa = feats(a.clone());
+        let pairs: Vec<(u32, u32)> = (0..40).map(|i| (i, i)).collect();
+        let mask = vec![true; 40];
+        let copy = feats(a.iter().map(|k| at(k, k.sigma * 0.1)).collect());
+        let off = median_size_offset(&fa, &copy, &m, &pairs, &mask);
+        assert!(off.abs() < 1e-3, "a true copy: {off}");
+        let gathered = feats(a.iter().map(|k| at(k, k.sigma)).collect());
+        let off = median_size_offset(&fa, &gathered, &m, &pairs, &mask);
+        assert!(off > SIZE_AGREEMENT && (off - 10f32.log2()).abs() < 1e-3, "fine onto coarse: {off}");
+        let mirrored: Affine = [-0.1, 0.0, 251.0, 0.0, 0.1, 150.0];
+        assert!(median_size_offset(&fa, &copy, &mirrored, &pairs, &mask).abs() < 1e-3, "a mirror's determinant is negative");
+        assert!(median_size_offset(&fa, &gathered, &mirrored, &pairs, &mask) > SIZE_AGREEMENT);
     }
 
     /// The pyramid one output at a time, each pixel the [1 3 3 1]/8 filter

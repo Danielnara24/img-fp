@@ -1622,6 +1622,61 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     35,719 -> 35,540. The base figures here (355, 75; pairs loss 59) differ
     from 0.79.0's entry (358, 52; 57); not traced. Not run:
     IMGS-PROVENANCE, cost (ABBA). `Edge` is 4 bytes larger.
+- **0.81.0, the keypoint-size bar** (`verify::SIZE_AGREEMENT`, one
+  octave; cache format IMGFPC21; `out/v56-seed`, RESULTS sections 6-9). Fresh seeds
+  first: INRIA Holidays (1,491 photos, 500 scenes) split by scene into
+  **HOLI-DEV** (`~/Documents/HOLI-DEV`, 814 photos, 263 scenes) and
+  **HOLI-TEST** (677, 237; held out, read once below), 12 generated variants
+  a photo (`~/Documents/FRESH/generate.sh`); `families.py --corpus hdev |
+  htest` reads a scene as a family and counts siblings and unrelated joins
+  apart. On HOLI-DEV, photos alone, 0.80.0 joined 3 pairs of different
+  scenes, each one photo shrunk 3-15x into 1-3% of the other with inliers
+  2.0-3.2 octaves off the transform's scale (see *How it works*). The bar:
+  HOLI-DEV different-scene joins 3 -> 0, siblings 968.3 -> 968.7; IMGS-ALL,
+  IMGS5 small families identical, IMGS-ALL2 57.0 -> 56.7. Cached, against
+  0.80.0: IMGS-ALL F1 0.9721 both (TP -143, FP +1), IMGS-ALL2 0.9343 ->
+  0.9342 (TP +2, FP +39 traps), cross-family and merges identical; keep rule
+  0 lost both, 356 / 364 and 355 / 364 unchanged, DELETE 19,757 -> 19,757 and
+  15,241 -> 15,243; `pairs.py` identical but `contact_sheet` REVIEW 301 ->
+  299. Cost, cached IMGS-ALL2 (ABBA, 60 s apart, no temperature wait): 0.80.0
+  663 / 634 CPU-s, new 656 / 660. **HOLI-TEST, once**: 0.80.0 joins 1 pair of
+  different scenes on photos alone (a harbour and an alpine valley, mirrored,
+  37 points, scale 7.6, 0.756), the bar 0; siblings 713.3 -> 711.0 (pair
+  precision n1 52.55 -> 52.82%, n2 60.85 -> 60.84%). The released build
+  reproduces the measured switch-on runs byte for byte (IMGS-ALL, IMGS-ALL2).
+  **Every bar's step** (cliffs, cached, `run11.sh`, `cliff_table.out`): no
+  merge added anywhere; one gone (IMGS-ALL2 red_rocks_sign1/2, 318-350, at
+  correlation 0.5-0.3); points, overlap and `-k` steps F1 within 0.0001; at
+  low correlation FP -1,154 (IMGS-ALL, 0.2) / -2,006 (IMGS-ALL2, 0.2), TP
+  +2,090 / +3,039. `--detail` 1024 / 2048 on IMGS-ALL2: F1 0.9439 / 0.9445
+  both builds; containment from one cache 512 -> 1024 loses 1 true pair
+  (`DSC48489.png` | `received_48203.jpg`, not looked at), adds 6,338; 1024
+  -> 2048 0. **DISC21 shard 0** (50k dev queries against `references_0`,
+  529 true copies, bar 0.5 run with `--dump`, `disc/score.py`): no true copy
+  lost at any correlation step 0.2-0.9; false 424 -> 329 at 0.5 (µAP 64.3 ->
+  65.7, R@P90 49.5 -> 52.9), 85 -> 81 at 0.7 (56.4 both), 11,447 -> 8,748
+  at 0.2; dumped verdicts 493 k -> 299 k. Proxy at 0.5: false 80 -> 47, µAP
+  72.7 -> 73.3; at 0.7 identical. Cold cost ABBA on IMGS-ALL (3,132 / 3,415
+  base, 3,428 / 3,529 new) not readable: idle 84.5 C, the base runs 283
+  apart; cached matching (above) level.
+  **Cache format bumped to IMGFPC21 for the analysis, not the bar**: this
+  session's baseline read IMGS-ALL F1 0.9721 / IMGS-ALL2 0.9343 on the
+  `DISC21/fixtest` caches (filled by 0.76.0), not 0.9748 / 0.9415 as
+  recorded. The same build analysing IMGS-ALL2 cold gives 0.9414 (recall
+  90.06%, 88.78% cached), ~43,600 true pairs apart (30,689 cold only,
+  12,960 cached only). The analysis changed after 0.76.0 under one format
+  (0.77.0's "byte-identical at 512" was proved on cached corpora, which
+  cannot see it); which build changed it was not traced. Every cached A/B
+  of this session (cliffs included) read those caches on both sides, so
+  its differences stand, but its absolute figures are the old records'.
+  **Measure on caches the measured build filled.**
+  Also measured and not shipped: a pair's verdict made independent of the
+  folder by seeding correspondences from a fixed hash of each descriptor
+  instead of the scan's vocabulary (`IMGFP_SEED`, 14 bits x 3 tables): direct
+  verdicts the same alone and among 9,285 found photos (HOLI-DEV 240 / 249
+  identical evidence, 146 / 219 with words), recall +0.1 on IMGS-ALL2, +50%
+  cached matching CPU; and counting inliers one to one (rejected, *How it
+  works*). Scaffolding in `out/v56-seed/scaffolding.patch`.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
@@ -2206,6 +2261,17 @@ Each was measured; changing one needs a re-measure.
   lie in two clusters keeps only the most-linked cluster's links clean. A
   shared distant mountain merged Macizo1/2 (two clean links into one file are
   no bridge).
+- **Inliers are the size the transform gives them** (`verify::SIZE_AGREEMENT`,
+  one octave, the pyramid's step): a verdict whose inliers' median
+  log2(size in B / (size in A x the transform's scale)) is further off has no
+  points. A picture shrunk 3-15x into a spot of another gathered fine
+  keypoints onto the spot's few coarse ones (the tolerance is the larger
+  frame's, ten times wider in a picture shrunk tenfold; 27-67 points on 6-13
+  keypoints), and the pixel check at the spot's 25 x 10 thumbnail pixels
+  agreed at 0.70-0.76: three different-scene pairs joined on INRIA Holidays,
+  medians +2.0 to +3.2 octaves. True verdicts within 0.3 of zero (one
+  panorama +1.18). Counting inliers one to one instead lost tiny embeds
+  (`out/v56-seed`, section 7).
 - **A claim is a transform plus pixel agreement**, never a score over a
   threshold (rejects `tile_shuffle`).
 - **Pixel check**: blocks flat in both pictures abstain, a block flat in
@@ -2876,7 +2942,7 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC20.bin`
+- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC21.bin`
   (named for its format, so upgrades start a new file). Records keyed by
   canonical path + size + mtime + ctime (the kernel's seconds and
   nanoseconds, signed: before 0.72.0 a file dated before 1970 had no key, was
