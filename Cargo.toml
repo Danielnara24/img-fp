@@ -62,6 +62,21 @@ libloading = "0.8"
 # data, to tell a cut-off file from a whole one (`decode::jpeg::cut_off`).
 memchr = "2"
 rayon = "1.12.0"
+# A file's identity in the cache: its content hashed, so a moved, renamed or
+# chmod'ed file keeps its analysis, and so two files of one hash are the same
+# bytes (see `same::exact_groups`). Cryptographic, so no file can be made to
+# collide with another, which a FNV hash once let two pictures do.
+blake3 = "1.8"
+# The cache's index (`cache.rs`): which file is which content, and where each
+# analysis sits in the pack. Built from the bundled source, so no system
+# SQLite is needed or met. The analyses themselves are not in it: measured on
+# 9,000 records, SQLite blobs were 2.7% larger and 3-4x slower to write than
+# the pack's appends.
+rusqlite = { version = "0.41", features = ["bundled"] }
+# A record's three streams (`cache::pack`). On 3,000 records of the found
+# corpus: 2.9% smaller than deflate at its fastest, packed 3.2x and unpacked
+# 4x faster.
+zstd = { version = "0.13", default-features = false }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
 walkdir = "2.5.0"

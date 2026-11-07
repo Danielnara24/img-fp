@@ -1,180 +1,140 @@
 //! On-disk cache of the per-image analysis.
 //!
 //! Describing an image is by far the most expensive stage, and it depends only
-//! on the file and the extraction settings. Caching it makes a rescan of a
-//! mostly-unchanged directory nearly free, and makes tuning the matching
-//! stages practical.
+//! on the file's bytes and the analysis that reads them. Caching it makes a
+//! rescan of a mostly-unchanged directory nearly free, and makes tuning the
+//! matching stages practical.
 //!
-//! The format is a header naming the format, then one record per file. A
-//! record is keyed by canonical path, size, modification time and change
-//! time, so an edited file is re-described rather than trusted, and it says
-//! which extraction settings made it.
+//! **An analysis is kept by what the file holds, not by where it is.** Each is
+//! stored under its file's content hash (BLAKE3, `same::Hash`), the analysis
+//! that made it (`analysis::version`) and the settings it was made at. Which
+//! file holds which content is a second table: canonical path, the stat key
+//! the walk read (size, modification and change time), the hash, and a
+//! sample of the bytes (`decode::sample`: three pieces of the file, which is
+//! all a file of a size the index knows is read for until its sample says it
+//! may be a file the index knows). A file
+//! whose key is the one kept takes its hash from there and is not read at
+//! all; any other is hashed (read, not decoded) and its analysis found by
+//! what it holds. So a moved, renamed, chmod'ed or newly hard-linked file, a
+//! folder mounted elsewhere or a backup restored costs a read, not an
+//! analysis; copies share one analysis; and the stat key only ever says
+//! whether *this path* still holds what it held, never which file another
+//! path is. Until 0.82.0 a record was keyed by path and stat key alone, every
+//! one of those was analysed again, and the one attempt to find a moved file
+//! by its key (0.69.0) gave two pictures one analysis, since files written
+//! together share a change time to the tick.
 //!
-//! **The settings are a record's, not the file's.** They used to be in the
-//! header, and a run at any other `--work-size` found the whole file stale and
-//! replaced it with an empty one: one scan at 640 cost the analysis of every
-//! folder the machine had ever scanned at 512, silently, and going back to 512
-//! cost it again. Now a run reads the records made at its own settings and
-//! carries the rest over untouched, as it does a record for a file it did not
-//! walk, so the two never mix and neither costs the other anything. (The
-//! working size is no option now: 512, or 256 under `--fast`.) A `--detail`
-//! is not a setting of its own: a record at any detail is read by a run at
-//! another as far as that run goes (`Settings::reads_as`).
+//! **Two files, each for what it does best.** The index is SQLite: small
+//! rows, looked up and changed by many runs at once, kept whole across a
+//! crash. The analyses are an append-only pack, read with one `pread` each:
+//! measured on 9,000 records of 35 KB, SQLite holding them as blobs was 2.7%
+//! larger than the records, 3-4x slower to write and twice as slow to read
+//! cold, against 0.3%, 0.24 s and 0.35 s for appends to a file. The pack holds
+//! nothing but records, each beginning with its hash, which a read checks: an
+//! index and a pack that disagree cost a record, never a wrong analysis.
 //!
-//! **What a record costs, because it is more than people expect.** An analysis
-//! is 128 bytes of descriptor and 20 bytes of keypoint for each of up to 600
-//! keypoints, plus a thumbnail of up to 128x128. That is ~148 bytes per
-//! keypoint, and a *small* photograph is the worst case rather than the best:
-//! `upsample_below` enlarges a small picture before describing it, so a
-//! 224x224 file yields some 530 keypoints — 95 KB of analysis for a 25 KB
-//! JPEG. Nothing about the encoding causes that; it is how much analysis
-//! the picture produces, and the knob connected to it is the enlargement, not
-//! this file.
+//! Beside a cache `X`: `X.lock` (held shared by every run that has the cache,
+//! and alone by one that rewrites the packs), `X.pack.N` (the packs), and
+//! `X.matched` (`matched.rs`). A run appends to the newest pack when no other
+//! run is writing to it, and to a pack of its own when one is; a run that has
+//! the cache alone folds such packs into the newest, and rewrites the packs
+//! when what nothing reads is a quarter of them.
 //!
-//! **So what was left for the encoding was the quarter the old one wasted.**
-//! Measured on 300 files of the found corpus, where a record averaged 93.1 KB
-//! of which the descriptors were 71.5%, the thumbnail 17.2% and the keypoints
-//! 11.2%:
+//! **The settings are a record's.** A run reads the records made at its own
+//! working size and thumbnail and carries the rest, so a run with `--fast`
+//! costs the default's records nothing. A `--detail` is not a setting of its
+//! own: a record at any detail is read by a run at another as far as that run
+//! goes (`Settings`), and the finer replaces the coarser.
 //!
-//! - **The descriptors are near-incompressible, and that is a measurement
-//!   rather than a guess.** Their bytes carry 5.81 bits of order-0 entropy
-//!   each, so deflate reaches 0.758 of raw and there is nowhere much to go:
-//!   `zstd -1` gets 0.728, `zstd -19` 0.675 at 12 s for 20 MB, and the best
-//!   context model tried — previous bin, orientation index — only lowers the
-//!   entropy to 5.48 bits, which is 0.685. Not one descriptor in 159,701 was
-//!   a duplicate of another. A range coder would buy 7% of the file for 150
-//!   lines that have to be exactly reversible; deflate buys 18% for none.
-//! - **The keypoints are five f32 fields and compress as bytes, not as
-//!   floats.** Interleaved they are 0.823; split so that all the exponent
-//!   bytes are adjacent, all the high mantissa bytes, and so on, 0.763.
-//! - **The thumbnail is a picture and wants a picture's predictor.** Raw it
-//!   deflates to 0.852 — 128x128 of detail is not repetitive — and Paeth
-//!   filtered first, 0.681. (Plain "up" is 0.700 and "left" 0.728.)
+//! **What a record costs.** An analysis is 128 bytes of descriptor and 16 of
+//! keypoint for each of up to 600 keypoints, plus a thumbnail of up to
+//! 128x128: ~144 bytes a keypoint, and a *small* photograph is the worst case,
+//! since `upsample_below` enlarges it first (a 224x224 file yields some 530
+//! keypoints, 95 KB raw for a 25 KB JPEG). The packing (`pack`):
 //!
-//! Together that is **0.755** of the old format on the found corpus and
-//! **0.720** on the benchmark one, which is 70 KB and 35 KB an image. The
-//! whole of the difference from 1.00 is those three lines; there is no fourth
-//! one worth writing.
+//! - **The descriptors are near-incompressible.** Their bytes carry 5.81 bits
+//!   of order-0 entropy each; the best context model tried reaches 5.48. zstd
+//!   at its fastest takes them to 0.765 of raw where deflate took 0.80.
+//! - **The keypoints are four f32 fields and compress as bytes, split by byte
+//!   position** (all exponent bytes together, and so on): 0.763 against 0.823
+//!   interleaved, under deflate.
+//! - **The thumbnail is a picture and wants a picture's predictor**: Paeth
+//!   filtered first, 0.681 against 0.852 raw, under deflate.
 //!
-//! Records unpack in parallel, in batches, and pack on the worker that made
-//! them, so neither the clock nor the peak notices — and a run whose records
-//! all came from the cache does not write to it at all, which is what keeps a
-//! threshold sweep from paying for a deflate of the whole corpus a dozen times
-//! over.
+//! Each in a zstd stream of its own at level 1. On 3,000 records of the found
+//! corpus that is 0.709 of raw against deflate's 0.730, packed 3.2x and
+//! unpacked 4x faster (deflate was most of a cached run's cache read). Levels
+//! 2-5 are larger as well as slower: the descriptors leave an LZ nothing.
 //!
-//! **A record is appended the moment it exists**, not saved with the rest at
-//! the end, so that Ctrl-C costs nothing: whatever the analysis had finished
-//! is already in the file, and the interrupt only waits for the one write in
-//! flight. See `Store`, and `seal` for what the handler does. The price is
-//! that the file can hold records nothing will read — one superseded by a
-//! later record for the same path, one for a file that has gone — and the run
-//! compacts it when it does, by copying bytes rather than packing them again.
+//! **A record is appended the moment it exists**, and its index row is
+//! committed as soon as the index is free (`Db::commit_waiting`; rows that
+//! come during a commit go in the next), or at an interrupt (`seal`). So
+//! Ctrl-C costs nothing, and a process killed outright the rows of the commit
+//! under way: what the analysis finished is kept.
 
+use crate::analysis::Item;
 use crate::decode::Traits;
 use crate::problems::{Note, Problems};
+use crate::same::{Content, Hash};
 use crate::sift::{Features, Keypoint, DESC_LEN};
-use crate::verify::Thumb;
+use crate::thumb::Thumb;
 use anyhow::{anyhow, bail, Result};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, Write};
-use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-/// The last two bytes are the format's version. A file carrying the prefix and
-/// another version is a cache this build cannot read, which is a cache of
-/// *another version* and not a damaged one: it was written by img-fp, older or
-/// newer, and another copy of img-fp on the machine is using it.
+/// The index's schema, as its file says (`PRAGMA user_version`) and as the
+/// default cache's name carries it. Only the index's own layout and the
+/// pack's are this number's: what an analysis is made by is kept on every
+/// record (`analysis::version`), so a new analysis needs no new number.
 ///
-/// **It is left as it is.** It used to be replaced by an empty file, which
-/// is right for an old cache nobody will read again and wrong for the common
-/// case: a window from the release and a command line from `cargo install`,
-/// one version apart, sharing the default cache, each emptying the other's
-/// on every run — a 30 MB cache came out of one run at 145 KB, with exit 0
-/// and nothing said. Now the run keeps nothing, says why, and `--clear-cache`
-/// or another `--cache` is how to start a new one. Since the default file's
-/// name carries the format (`file_name`), that is met only through a
-/// `--cache` naming another version's file: two versions never share the
-/// default.
-///
-/// 04: thumbnails are stretched to the full byte range (`Thumb::build`).
-/// 05: a small picture is enlarged no further than the working size
-/// (`analysis::enlarge_below`), which changes every record below 512.
-/// 06: a keypoint is four fields, not five: the extractor's `response`, which
-/// nothing after extraction reads, is no longer kept on it.
-/// 07: a record's key carries the file's change time (see `Key`), and its path
-/// is the file's canonical one, so that a folder named two ways is one set of
-/// records (see `lib::cache_names`).
-/// 08: grey is BT.601 luma rather than the mean of RGB, and a JPEG's is read
-/// from its Y plane (`decode::jpeg::luma`).
-/// 09: the settings moved from the header into each record, so that one file
-/// holds the analyses of several working sizes; and a record carries the
-/// picture's own size, which the report's `scale` is stated in.
-/// 10: an EXIF orientation is applied to the working plane after the
-/// reduction rather than to the decoded picture before it (`decode::picture::orient`),
-/// which moves the edge the reduction trims on every turned picture.
-/// 11: a record carries the file's `decode::Traits`, which the keep/delete
-/// suggestion reads: measured while the file is decoded, and not otherwise
-/// to be had from a cached record.
-/// 12: a picture wider than 4:3 is analysed with a longer long side, and its
-/// thumbnail with one to match (`decode::area_factor`).
-/// 13: `Traits::colour` is the colour of a 4x4 grid's cell means, which noise
-/// does not reach (`decode::measure::CellColour`); and `Traits::lossless` is said of a
-/// WebP with metadata, a JPEG-compressed TIFF and a JPEG XL by what their
-/// pictures are (each format's `decode::picture::Facts`). A record of 12 says neither.
-/// 14: a record says whether its file holds more than one picture
-/// (`decode::Traits::frames`), which a record of 13 cannot, and a 16-bit
-/// TIFF or PNG is read as `image` read it but a row at a time.
-/// 15: `Traits::lossless` is said of a TGA, an HDR and a farbfeld file as
-/// of the other lossless formats; a record of 14 called them lossy.
-/// 16: a record carries the device its file lay on (`Key::dev`), which tells
-/// a mount point left behind from a folder emptied by hand (`away`); and
-/// `Traits::exif` is said of a WebP, a PNG whose `eXIf` follows its pixels, a
-/// TIFF and a HEIF or JPEG XL whose EXIF lies past the first 128 KB, which a
-/// record of 15 said had none.
-/// 17: a record says whether its file has more than eight bits a sample
-/// (`Traits::deep`) and carries a colour profile (`Traits::profile`), and a
-/// JPEG holding further pictures (MPF) has `Traits::frames`: the keep rule
-/// reads all three, and a record of 16 says none.
-/// 18: `Traits::frames` is said of a JPEG holding a video or another JPEG
-/// after its picture (a Motion Photo), and not of one whose MPF index adds
-/// only a large thumbnail; a record of 17 says the opposite of both.
-/// 19: a picture stored turned or mirrored (an EXIF orientation) is reduced
-/// to the plane its upright copy is (`reduce::Turned`); a record of 18 holds
-/// the plane reduced as stored and turned after, other features.
-/// 20: an icon of several sizes has `Traits::frames`, and an icon is lossless
-/// only as the entry read is; a record of 19 says one picture, lossless.
-/// 21: no change to the record. Records written by builds before 0.81.0
-/// under 20 read differently from a fresh analysis: IMGS-ALL2 read from a
-/// cache 0.76.0 filled gave F1 0.9343 (recall 88.78%) against 0.9414
-/// (90.06%) for the same build analysing cold, ~43,600 true pairs apart.
-/// The analysis changed after 0.76.0 without a new format; which build
-/// changed it was not traced. A new name makes every cache analyse again.
-const MAGIC: &[u8; 8] = b"IMGFPC21";
-const MAGIC_PREFIX: &[u8; 6] = b"IMGFPC";
+/// D01: the index and packs of 0.82.0. Before it, `IMGFPC04`-`IMGFPC21`, one
+/// file of records keyed by path (see `remove_other_formats`).
+const SCHEMA: i64 = 1;
 
-/// The format this build reads and writes, for messages.
-pub const FORMAT: &str = match std::str::from_utf8(MAGIC) {
-    Ok(s) => s,
-    Err(_) => panic!(),
-};
+/// The format this build reads and writes, for messages and the default name.
+pub const FORMAT: &str = "IMGFPD01";
 
-/// Records packed or unpacked in one parallel batch. Large enough that the
-/// threads are not synchronising over nothing, small enough that a batch of
-/// held records is megabytes rather than the whole corpus — the cache of a
-/// large corpus is most of a gigabyte and assembling it in memory would double
-/// the run's peak for the length of one write.
-const BATCH: usize = 64;
+/// What an index of img-fp's says it is (`PRAGMA application_id`): `IMFP`.
+const APPLICATION_ID: i64 = 0x494d_4650;
+
+/// The prefix of every cache file img-fp wrote before 0.82.0.
+const OLD_PREFIX: &[u8; 6] = b"IMGFPC";
+
+/// How many days an analysis is kept for a file that has gone, and one made
+/// by another analysis is kept unused (user's decision, 0.82.0). A file moved
+/// and scanned at its new place within that keeps its analysis, and so does a
+/// folder on a drive left unplugged that long; two versions of img-fp used in
+/// turn each keep theirs. A policy, not a measurement: it says how long a
+/// cache remembers what it has not seen, against how much it holds for it.
+pub const GRACE_DAYS: i64 = 30;
+
+/// Records unpacked in one parallel batch: large enough that the threads are
+/// not synchronising over nothing, small enough that what is held at once is
+/// megabytes, not the corpus.
+const READ_BATCH: usize = 64;
+
+/// The bytes of the hash a record begins with, which a read checks against
+/// the index's: enough that a record read at the wrong place, or from a pack
+/// another has replaced, is never taken for another's.
+const STAMP: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-/// What the cached analysis depends on. Only the settings a run can actually
-/// change belong here; the detector's own constants are compiled in, so a
-/// binary that changes them changes the magic instead.
+/// The settings a run's analyses are made at. Only those a run can change;
+/// the analysis's own constants are in `analysis::version`.
+///
+/// A run reads a record made at its own working size and thumbnail, whatever
+/// the `--detail`: one at a finer detail holds the default's analysis and its
+/// levels after it (`Features::ends`), and a run reads it as far as its own
+/// detail goes, or analyses the file again where it holds fewer levels than
+/// the picture has up to it (`analysis::cached_at`); the record made then
+/// replaces it, under the same key.
 pub struct Settings {
     pub work_size: u32,
     /// The most keypoints a record holds: `FEATURES` at the default, more at
@@ -182,28 +142,6 @@ pub struct Settings {
     /// against (`misshapen`), not what a run reads it by (`reads_as`).
     pub features: u32,
     pub thumb: u32,
-}
-
-impl Settings {
-    /// Whether a record made at these settings is read by a run at `want`:
-    /// the same working size and thumbnail, whatever the `--detail`. A
-    /// record at a finer detail holds the default's analysis and its levels
-    /// after it (`Features::ends`), and a run reads it as far as its own
-    /// detail goes, or analyses the file again where the record holds fewer
-    /// levels than the picture has up to it (`analysis::cached_at`). Read only
-    /// at its own detail, a record was made again for every detail tried: a
-    /// scan at `--detail 1024` after one at the default analysed every file
-    /// again, 224-pixel pictures that have no finer level included, and the
-    /// file kept a set of records for each.
-    pub fn reads_as(self, want: Settings) -> bool {
-        self.work_size == want.work_size && self.thumb == want.thumb
-    }
-
-    /// What `reads_as` compares: records of one path that agree on it are
-    /// one record, the latest.
-    fn family(self) -> (u32, u32) {
-        (self.work_size, self.thumb)
-    }
 }
 
 pub struct Record {
@@ -215,73 +153,94 @@ pub struct Record {
     pub traits: Traits,
 }
 
-/// What the file says about one path at this run's settings: its key, its
-/// analysis — only for a path this run walks, see `read` — and where its
-/// record sits in the file.
-type Entry = (Key, Option<Record>, Span);
-
-/// Which paths this run walks, asked of every record at this run's settings
-/// as it is read, with the record's key.
-type Walked<'a> = &'a (dyn Fn(&Path, Key) -> bool + Sync);
-
-/// What says a file is still the file a record describes: its size, its
-/// modification time and its change time, in nanoseconds.
+/// What says a path still holds what it held: its size, its modification time
+/// and its change time, in nanoseconds.
 ///
-/// **The change time is the one that cannot be put back.** Size and mtime
-/// are both under the user's control — `cp -p`, `rsync -a`, `touch -r` and
-/// `exiftool -P` all restore a modification time — so a file rewritten with a
-/// different picture of the same size kept its record, and two files that
-/// were no longer anything alike were reported as a duplicate at correlation
-/// 1.00. The kernel sets ctime on every write, rename and chmod, and nothing
-/// in userspace sets it back. What it costs is a re-analysis after a chmod, a
-/// rename or a new hard link, and every record after a backup restore: a few
-/// milliseconds an image, against reporting a pair that is not there.
+/// **The change time is the one that cannot be put back.** Size and mtime are
+/// both under the user's control (`cp -p`, `rsync -a`, `touch -r`, `exiftool
+/// -P`), so a file rewritten with another picture of the same size would keep
+/// its hash. The kernel sets ctime on every write, rename and chmod, and
+/// nothing in userspace sets it back. A changed key costs a read of the file
+/// to hash it, not an analysis: a chmod or a rename is the same content.
 ///
-/// **The device is not part of it.** It is where the file lay when the
-/// record was made, which says nothing of whether the file changed; `away`
-/// reads it.
-#[derive(Clone, Copy, Debug)]
+/// It is only ever compared for one path: which content another path holds
+/// is its hash's to say (see the head of the file).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub len: u64,
     pub mtime: i64,
     pub ctime: i64,
-    pub dev: u64,
 }
 
-impl PartialEq for Key {
-    fn eq(&self, o: &Key) -> bool {
-        (self.len, self.mtime, self.ctime) == (o.len, o.mtime, o.ctime)
-    }
-}
-
-/// The default cache file's name, which carries the format: `analysis-IMGFPC21.bin`.
+/// The default cache's name, which carries the schema: `analysis-IMGFPD01.db`.
 ///
-/// **Each format has a default file of its own**, so that a format change
-/// starts a new file beside the old one instead of meeting it. With one name
-/// for every format, an upgrade found the old version's file there, left it
-/// alone (see the note on `MAGIC`), and so cached nothing on any run until
-/// someone thought of `--clear-cache`, which the window's users would not.
-/// Now two versions installed side by side each keep their own default, and
-/// an upgraded one starts afresh. The other formats' files in the default
-/// folder are removed (`remove_other_formats`), unless a run is using one.
-/// (Up to `IMGFPC11` the file was `analysis.bin`.)
-///
-/// A file named with `--cache` is used as named, whatever format it holds.
+/// **Each schema has a default file of its own**, so a new one starts a new
+/// file beside the old instead of meeting it, and two versions installed side
+/// by side each keep their own. Other schemas' files in the default folder
+/// are removed (`remove_other_formats`), unless a run is using one.
 pub fn file_name() -> String {
-    format!("analysis-{FORMAT}.bin")
+    format!("analysis-{FORMAT}.db")
+}
+
+/// The files of cache `path` beside it, which no output may name: its lock,
+/// its journal, its packs and the kept matching.
+pub fn files_beside(path: &Path) -> Vec<PathBuf> {
+    let mut out = vec![lock_path(path), beside(path, "-journal"), beside(path, "-wal"), beside(path, "-shm"), crate::matched::path_beside(path)];
+    out.extend(packs_on_disk(path).into_iter().map(|(_, p)| p));
+    out
+}
+
+/// The bytes cache `path` holds, index and packs: what the progress bar
+/// expects a read of it may cost.
+pub fn bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |m| m.len()) + packs_on_disk(path).iter().map(|(_, p)| std::fs::metadata(p).map_or(0, |m| m.len())).sum::<u64>()
+}
+
+/// `X.lock`, beside cache `X`.
+fn lock_path(path: &Path) -> PathBuf {
+    beside(path, ".lock")
+}
+
+/// `path` with `suffix` added to its name.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(suffix);
+    PathBuf::from(p)
+}
+
+/// The pack numbered `id` of cache `path`: `X.pack.N`.
+fn pack_path(path: &Path, id: i64) -> PathBuf {
+    beside(path, &format!(".pack.{id}"))
+}
+
+/// The packs of cache `path` there are on disk, by number, whatever the
+/// index says of them.
+fn packs_on_disk(path: &Path) -> Vec<(i64, PathBuf)> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return Vec::new() };
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let mut prefix = name.as_bytes().to_vec();
+    prefix.extend_from_slice(b".pack.");
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name();
+            let id = n.as_bytes().strip_prefix(&prefix[..])?;
+            let id: i64 = std::str::from_utf8(id).ok()?.parse().ok()?;
+            Some((id, e.path()))
+        })
+        .collect()
 }
 
 /// Remove the caches of other formats from the default folder, with the
 /// files beside them; each removed, with its format and the bytes it held.
 ///
-/// **They were kept for good.** Each format change left the last one's file
-/// behind, read by nothing (on the author's machine a 2.5 GB `IMGFPC15` beside
-/// the 1.6 GB current one), and the window's users never see the folder. A
-/// file another run holds is in use (an older version running now, which
-/// holds it shared from start to end), and is left; another version
-/// installed beside this one starts its own afresh next time it runs. Only
-/// files named as a default cache is and holding a cache's header: a file a
-/// person put there is not touched.
+/// Each format change left the last one's file behind, read by nothing (on
+/// the author's machine a 2.5 GB `IMGFPC15` beside the 1.6 GB current one),
+/// and the window's users never see the folder. A file another run holds is
+/// in use (an older version running now) and is left. Only files named as a
+/// default cache is and holding a cache's header: a file a person put there
+/// is not touched.
 pub fn remove_other_formats() -> Vec<(String, u64)> {
     let dir = default_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
@@ -290,29 +249,52 @@ pub fn remove_other_formats() -> Vec<(String, u64)> {
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        let default_named = name == "analysis.bin" || (name.starts_with("analysis-IMGFPC") && name.ends_with(".bin"));
-        if !default_named || name == mine {
-            continue;
-        }
         let path = e.path();
-        let Ok(f) = OpenOptions::new().read(true).open(&path) else { continue };
-        let mut magic = [0u8; 8];
-        if !f.metadata().is_ok_and(|m| m.is_file()) || f.read_exact_at(&mut magic, 0).is_err() || &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX || &magic == MAGIC {
-            continue;
-        }
-        if !flock(&f, LOCK_EX | LOCK_NB) {
-            continue;
-        }
-        let bytes = f.metadata().map_or(0, |m| m.len());
-        if std::fs::remove_file(&path).is_ok() {
-            for p in [heads::path_of(&path), crate::matched::path_beside(&path), crate::matched::identical_beside(&path)] {
-                let _ = std::fs::remove_file(p);
+        if name == "analysis.bin" || (name.starts_with("analysis-IMGFPC") && name.ends_with(".bin")) {
+            // Before 0.82.0: one file, held with `flock` by every run using it.
+            let Ok(f) = File::open(&path) else { continue };
+            let mut magic = [0u8; 8];
+            if !f.metadata().is_ok_and(|m| m.is_file()) || f.read_exact_at(&mut magic, 0).is_err() || &magic[..OLD_PREFIX.len()] != OLD_PREFIX {
+                continue;
             }
-            removed.push((String::from_utf8_lossy(&magic).into_owned(), bytes));
+            if !flock(&f, LOCK_EX | LOCK_NB) {
+                continue;
+            }
+            let bytes = f.metadata().map_or(0, |m| m.len());
+            if std::fs::remove_file(&path).is_ok() {
+                for s in [".heads", ".matched", ".same"] {
+                    let _ = std::fs::remove_file(beside(&path, s));
+                }
+                removed.push((String::from_utf8_lossy(&magic).into_owned(), bytes));
+            }
+        } else if name != mine && name.starts_with("analysis-IMGFPD") && name.ends_with(".db") {
+            let Some(format) = name.strip_prefix("analysis-").and_then(|n| n.strip_suffix(".db")) else { continue };
+            if schema_of(&path).is_none() {
+                continue;
+            }
+            let Ok(lock) = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path(&path)) else { continue };
+            if !flock(&lock, LOCK_EX | LOCK_NB) {
+                continue;
+            }
+            let bytes = std::fs::metadata(&path).map_or(0, |m| m.len()) + packs_on_disk(&path).iter().map(|(_, p)| std::fs::metadata(p).map_or(0, |m| m.len())).sum::<u64>();
+            remove_all(&path);
+            removed.push((format.to_string(), bytes));
         }
     }
     removed.sort();
     removed
+}
+
+/// Remove cache `path` and every file of it: the index, its journal, the
+/// packs, the lock and the kept matching.
+fn remove_all(path: &Path) {
+    for (_, p) in packs_on_disk(path) {
+        let _ = std::fs::remove_file(p);
+    }
+    for s in ["-journal", "-wal", "-shm", ".matched", ".lock"] {
+        let _ = std::fs::remove_file(beside(path, s));
+    }
+    let _ = std::fs::remove_file(path);
 }
 
 /// Where the cache lives when `--cache` does not say.
@@ -333,23 +315,19 @@ fn default_dir() -> PathBuf {
 /// Which file this run's analysis is kept in, and `None` if it cannot be kept
 /// at all.
 ///
-/// `--cache` names the FILE, because that is what it is, and because someone
-/// pointing at a scratch disk wants to know exactly what appears there. A path
-/// that is already a directory, or that is written with a trailing slash, is
-/// treated as one and gets the default name inside it: `--cache /mnt/scratch`
-/// obviously means "a cache in here", and the alternative is a cache file
-/// named `scratch`. Missing parents are created either way — the default
-/// location is made for the user, so a named one is too.
+/// `--cache` names the FILE (the index; its packs go beside it). A path that
+/// is already a directory, or that is written with a trailing slash, is
+/// treated as one and gets the default name inside it. Missing parents are
+/// created either way.
 ///
-/// Nothing here is fatal, for the reason `load` gives: a run with no cache
-/// finds exactly the same pairs, only slower. A directory that cannot be made
-/// is a problem, which is to say it is said out loud and sets the exit code,
-/// and then the run goes on without one.
+/// Nothing here is fatal: a run with no cache finds exactly the same pairs,
+/// only slower. A directory that cannot be made is a problem, said out loud,
+/// and the run goes on without one.
 ///
 /// **A file there that is not a cache is not one to use**, nor to delete:
 /// `--cache photo.jpg` (or the window's cache chooser, pointed at a photo)
-/// replaced the photo with an empty cache, saying it was "ignoring" it, and
-/// `--clear-cache` deleted it. Such a run has no cache, and says why.
+/// once replaced the photo with an empty cache. Such a run has no cache, and
+/// says why.
 pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<PathBuf> {
     let path = locate(explicit);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -365,36 +343,84 @@ pub fn resolve_path(explicit: Option<&Path>, problems: &mut Problems) -> Option<
     Some(path)
 }
 
-/// `--clear-cache`: delete the cache at `path` (one `resolve_path` gave,
-/// so a cache or nothing) and the files kept beside it: its index, the last
-/// matching and the files the last run proved byte-identical. Those are
-/// named after it, so each is deleted only if it is img-fp's.
+/// `--clear-cache`: delete the cache at `path` (one `resolve_path` gave, so a
+/// cache or nothing) with every file of it.
 pub fn clear(path: &Path, problems: &mut Problems) {
-    let beside = [heads::path_of(path), crate::matched::path_beside(path), crate::matched::identical_beside(path)];
-    for p in beside {
+    let was = path.exists();
+    remove_all(path);
+    // The files of a cache from before 0.82.0 named by `--cache`.
+    for s in [".heads", ".same"] {
+        let p = beside(path, s);
         let mut head = [0u8; 5];
         if File::open(&p).and_then(|f| f.read_exact_at(&mut head, 0)).is_ok() && &head == b"IMGFP" {
             let _ = std::fs::remove_file(&p);
         }
     }
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    if was && path.exists() {
         // Asked for and not done, and the next run will read the cache this
         // one meant to be rid of.
-        Err(e) => problems.note(Note::Cache, format_args!("could not delete {}: {e}", path.display())),
+        problems.note(Note::Cache, format_args!("could not delete {}", path.display()));
     }
 }
 
-/// Whether something is at `path` that is not a cache: a file that does not
-/// begin as one, or anything that is not a regular file. Nothing there, or
-/// a file that cannot be read (for the reading to say), is not a stranger.
-fn is_stranger(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(m) if m.is_file() => File::open(path).is_ok_and(|f| !begins_as_cache(&f)),
-        Ok(_) => true,
-        Err(_) => false,
+/// What is at `path`, as a cache: nothing (or an empty file) to make one in,
+/// an index of `SCHEMA` or of another, or a cache from before 0.82.0.
+enum Found {
+    Nothing,
+    Mine,
+    Other(String),
+    Stranger,
+}
+
+/// What `path` holds, by its first bytes.
+fn found_at(path: &Path) -> Found {
+    let f = match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => match File::open(path) {
+            Ok(f) => f,
+            // Unreadable is for the opening to say.
+            Err(_) => return Found::Nothing,
+        },
+        Ok(_) => return Found::Stranger,
+        Err(_) => return Found::Nothing,
+    };
+    let mut head = [0u8; 100];
+    let mut got = 0;
+    while got < head.len() {
+        match f.read_at(&mut head[got..], got as u64) {
+            Ok(0) => break,
+            Ok(k) => got += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Found::Nothing,
+        }
     }
+    let head = &head[..got];
+    if head.is_empty() {
+        return Found::Nothing;
+    }
+    if head.starts_with(OLD_PREFIX) {
+        return Found::Other(String::from_utf8_lossy(&head[..head.len().min(8)]).into_owned());
+    }
+    // An SQLite file: its header, then the application id (offset 68) and
+    // user version (60), big-endian.
+    if got == 100 && head.starts_with(b"SQLite format 3\0") {
+        let word = |at: usize| i32::from_be_bytes(head[at..at + 4].try_into().unwrap()) as i64;
+        if word(68) == APPLICATION_ID {
+            return if word(60) == SCHEMA { Found::Mine } else { Found::Other(format!("IMGFPD{:02}", word(60))) };
+        }
+    }
+    Found::Stranger
+}
+
+/// The schema of an index of img-fp's at `path`, any.
+fn schema_of(path: &Path) -> Option<()> {
+    matches!(found_at(path), Found::Mine | Found::Other(_)).then_some(())
+}
+
+/// Whether something is at `path` that is not a cache of img-fp's, of any
+/// version: a file that does not begin as one, or anything not a regular
+/// file. Nothing there, or an empty file, is not a stranger.
+fn is_stranger(path: &Path) -> bool {
+    matches!(found_at(path), Found::Stranger)
 }
 
 /// The file `resolve_path` names, without creating anything.
@@ -409,22 +435,20 @@ pub fn locate(explicit: Option<&Path>) -> PathBuf {
 }
 
 /// The key of a file whose metadata is in hand: the walk's own, which it has
-/// already read for every file it lists. Each later stage used to ask the
-/// filesystem again — the exact pass for the size, the cache for the key, the
-/// header probe and the report for the size once more — and three of those on
-/// one thread, which a network share charges a round trip apiece.
+/// already read for every file it lists.
 ///
 /// Both times are read as the kernel keeps them, seconds and nanoseconds,
-/// signed: a file dated before 1970 has a key like any other. Read through
-/// `SystemTime` since `UNIX_EPOCH`, as it was, such a file had none, so it
-/// was analysed again on every run and no run holding it could take the last
-/// run's matching (`matched.rs`). Times from 1970 on are the same numbers
-/// either way, so the records already kept still answer.
+/// signed: a file dated before 1970 has a key like any other.
 pub fn key_from(md: &std::fs::Metadata) -> Option<Key> {
     use std::os::unix::fs::MetadataExt;
     let mtime = md.mtime().checked_mul(1_000_000_000)?.checked_add(md.mtime_nsec())?;
     let ctime = md.ctime().checked_mul(1_000_000_000)?.checked_add(md.ctime_nsec())?;
-    Some(Key { len: md.len(), mtime, ctime, dev: md.dev() })
+    Some(Key { len: md.len(), mtime, ctime })
+}
+
+/// Today, as days since 1970: what the grace period is counted in.
+fn today() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| (d.as_secs() / 86_400) as i64)
 }
 
 // ------------------------------------------------------------ packing
@@ -454,20 +478,14 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// One record's variable-length half: three deflate streams, each carrying
-/// data laid out the way its own redundancy runs.
+/// One record's variable-length half: three zstd streams, each carrying data
+/// laid out the way its own redundancy runs (see the head of the file), then
+/// where each finer level ends, for an analysis at a finer `--detail`.
 ///
-/// The three are separate because a deflate stream has one Huffman table and
-/// these have three distributions — keypoint bytes, descriptor bytes, and a
-/// picture's residuals. Measured on 64 records of the found corpus, one mixed
-/// stream is 0.765 of raw where three are 0.753. Grouping the three across a
-/// whole batch of records rather than per record is 0.7521 against 0.7526,
-/// which is nothing: the streams are long enough already.
+/// Three, because one stream has one model and these have three
+/// distributions: keypoint bytes, descriptor bytes and a picture's residuals.
 fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     let n = f.kps.len();
-    // The keypoint floats by byte position, so that all the exponent bytes are
-    // adjacent, all the high mantissa bytes, and so on. Interleaved they
-    // deflate to 0.823 and split to 0.763.
     let mut planes = Vec::with_capacity(n * FIELDS * 4);
     let mut bits: Vec<[u8; 4]> = Vec::with_capacity(n);
     for field in 0..FIELDS {
@@ -477,8 +495,6 @@ fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
             planes.extend(bits.iter().map(|v| v[byte]));
         }
     }
-    // The thumbnail is a picture, so it gets a picture's predictor: raw it
-    // deflates to 0.852, Paeth-filtered to 0.681.
     let (w, h) = (t.w as usize, t.h as usize);
     let mut resid = Vec::with_capacity(w * h);
     let mut prev = vec![0u8; w];
@@ -493,28 +509,12 @@ fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
         }
         prev.copy_from_slice(row);
     }
-    // The descriptors go as they are. Nothing helps them: see the head of the
-    // file for the entropy that says so.
-    //
-    // At the fastest level. The descriptors are nine tenths of a record and
-    // hold nothing for an LZ to find (not one descriptor in 159,701 repeats
-    // another), so the longer match search of the default level only spends
-    // time: measured on 60 records of IMGS2, level 6 packed to 3,095,465 bytes
-    // in 222 ms and level 1 to 3,078,257 bytes in 42 ms — smaller as well as
-    // five times faster, since level 1 also gives the Huffman stage longer
-    // blocks of literals. Every record is packed by the worker that made it,
-    // so on a cold run with the cache on this was some 3 ms an image.
     let mut out = Vec::with_capacity(n * DESC_LEN);
     for stream in [&planes[..], &f.desc[..], &resid[..]] {
-        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
-        z.write_all(stream)?;
-        let z = z.finish()?;
-        out.extend_from_slice(&(z.len() as u64).to_le_bytes());
+        let z = ZSTD.with(|z| z.borrow_mut().0.compress(stream))?;
+        out.extend_from_slice(&(z.len() as u32).to_le_bytes());
         out.extend_from_slice(&z);
     }
-    // Where each level ends, after the streams, for an analysis at a finer
-    // `--detail` alone: a record at the default ends with the streams, as it
-    // always did, and only records of other settings hold this.
     if !f.ends.is_empty() {
         out.extend_from_slice(&(f.ends.len() as u32).to_le_bytes());
         for e in &f.ends {
@@ -524,24 +524,26 @@ fn pack(f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// The inverse, given the shape the record's header already carried.
+thread_local! {
+    /// Each thread's zstd contexts, made once: a context made for each stream
+    /// (three a record) cost more than unpacking it.
+    static ZSTD: std::cell::RefCell<(zstd::bulk::Compressor<'static>, zstd::bulk::Decompressor<'static>)> =
+        std::cell::RefCell::new((zstd::bulk::Compressor::new(1).expect("a zstd context"), zstd::bulk::Decompressor::new().expect("a zstd context")));
+}
+
+/// The inverse, given the shape the record's head carried.
 fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec<u8>, Vec<u8>, Vec<u32>)> {
     let (w, h) = (tw as usize, th as usize);
     let mut at = 0;
     let mut stream = |want: usize| -> Result<Vec<u8>> {
-        if at + 8 > blob.len() {
-            bail!("record truncated");
-        }
-        let len = u64::from_le_bytes(blob[at..at + 8].try_into().unwrap()) as usize;
-        at += 8;
-        if at + len > blob.len() {
-            bail!("record truncated");
-        }
-        let mut raw = Vec::with_capacity(want);
-        flate2::read::DeflateDecoder::new(&blob[at..at + len])
-            .take(want as u64 + 1)
-            .read_to_end(&mut raw)?;
+        let len = blob.get(at..at + 4).ok_or_else(|| anyhow!("record truncated"))?;
+        let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
+        at += 4;
+        let z = blob.get(at..at + len).ok_or_else(|| anyhow!("record truncated"))?;
         at += len;
+        // One byte more than wanted, so a stream holding more is told from
+        // one holding exactly enough.
+        let raw = ZSTD.with(|c| c.borrow_mut().1.decompress(z, want + 1))?;
         if raw.len() != want {
             bail!("a record's stream is {} bytes unpacked, not {want}", raw.len());
         }
@@ -553,11 +555,11 @@ fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec
     let mut ends = Vec::new();
     if at < blob.len() {
         let word = |i: usize| -> Result<u32> {
-            let b = blob.get(i..i + 4).ok_or_else(|| anyhow::anyhow!("record truncated"))?;
+            let b = blob.get(i..i + 4).ok_or_else(|| anyhow!("record truncated"))?;
             Ok(u32::from_le_bytes(b.try_into().unwrap()))
         };
         let k = word(at)? as usize;
-        if k > 8 {
+        if k > 8 || at + 4 + 4 * k != blob.len() {
             bail!("a record's levels are damaged");
         }
         for i in 0..k {
@@ -605,133 +607,117 @@ fn unpack(blob: &[u8], n: usize, tw: u16, th: u16) -> Result<(Vec<Keypoint>, Vec
     Ok((kps, desc, px, ends))
 }
 
-/// Writes the flat format a field at a time: into a record's bytes, and into
-/// a file's header.
-struct Buf<W: Write>(W);
-impl<W: Write> Buf<W> {
-    fn u32(&mut self, v: u32) -> Result<()> {
-        self.0.write_all(&v.to_le_bytes())?;
-        Ok(())
-    }
-    fn u64(&mut self, v: u64) -> Result<()> {
-        self.0.write_all(&v.to_le_bytes())?;
-        Ok(())
-    }
-    fn i64(&mut self, v: i64) -> Result<()> {
-        self.0.write_all(&v.to_le_bytes())?;
-        Ok(())
-    }
-    fn f32(&mut self, v: f32) -> Result<()> {
-        self.0.write_all(&v.to_le_bytes())?;
-        Ok(())
-    }
-    fn bytes(&mut self, v: &[u8]) -> Result<()> {
-        self.u64(v.len() as u64)?;
-        self.0.write_all(v)?;
-        Ok(())
-    }
-    fn header(&mut self) -> Result<()> {
-        self.0.write_all(MAGIC)?;
-        Ok(())
-    }
-}
+/// The fixed head of a record in a pack, after its stamp: the picture's size,
+/// its traits, and the analysis's shape.
+const HEAD: usize = 8 + 23 * 4 + 4 + 12 + 8 + 4;
 
-/// One whole record, as the file holds it.
-///
-/// The path is written as its own bytes, not as text. A name that is not
-/// UTF-8 is still a name, and two of them that read the same once made
-/// printable — `x\xfe.jpg` and `x\xff.jpg` — are two files: keyed on the
-/// printable form, one was handed the other's analysis.
-fn record(path: &Path, s: Settings, k: Key, dims: (u32, u32), tr: &Traits, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
+/// A whole record as a pack holds it: the stamp (the first `STAMP` bytes of
+/// its file's hash), the head, the packed analysis.
+fn record(hash: &Hash, dims: (u32, u32), tr: &Traits, f: &Features, t: &Thumb) -> Result<Vec<u8>> {
     let blob = pack(f, t)?;
-    let path = path.as_os_str().as_bytes();
-    let mut b = Buf(Vec::with_capacity(path.len() + 84 + blob.len()));
-    b.bytes(path)?;
-    b.u32(s.work_size)?;
-    b.u32(s.features)?;
-    b.u32(s.thumb)?;
-    b.u64(k.len)?;
-    b.i64(k.mtime)?;
-    b.i64(k.ctime)?;
-    b.u64(k.dev)?;
-    b.u32(dims.0)?;
-    b.u32(dims.1)?;
+    let mut b = Vec::with_capacity(STAMP + HEAD + blob.len());
+    b.extend_from_slice(&hash[..STAMP]);
+    let u32s = |b: &mut Vec<u8>, vs: &[u32]| vs.iter().for_each(|v| b.extend_from_slice(&v.to_le_bytes()));
+    u32s(&mut b, &[dims.0, dims.1]);
     for v in tr.detail.iter().chain([&tr.colour]).chain(tr.grid.iter()) {
-        b.f32(*v)?;
+        b.extend_from_slice(&v.to_le_bytes());
     }
-    b.u32(tr.lossless as u32 | (tr.exif as u32) << 1 | (tr.frames as u32) << 2 | (tr.deep as u32) << 3 | (tr.profile as u32) << 4)?;
-    b.u32(f.w)?;
-    b.u32(f.h)?;
-    b.u32(f.kps.len() as u32)?;
-    b.u32(t.w as u32)?;
-    b.u32(t.h as u32)?;
-    b.f32(t.scale)?;
-    b.bytes(&blob)?;
-    Ok(b.0)
+    let flags = tr.lossless as u32 | (tr.exif as u32) << 1 | (tr.frames as u32) << 2 | (tr.deep as u32) << 3 | (tr.profile as u32) << 4;
+    u32s(&mut b, &[flags, f.w, f.h, f.kps.len() as u32, t.w as u32, t.h as u32]);
+    b.extend_from_slice(&t.scale.to_le_bytes());
+    b.extend_from_slice(&blob);
+    Ok(b)
 }
 
-/// `Traits::colour` of a JPEG, which its decode to grey does not measure.
-const UNMEASURED: f32 = -1.0;
-/// A JPEG's colour as the suggestion measured it later is kept in the same
-/// field as `UNKEPT - colour`: below `UNMEASURED`, so that a build of this
-/// format that knows nothing of it reads "not measured", as it always did.
-const UNKEPT: f32 = -2.0;
+/// A record read back from its bytes: checked against its hash and the
+/// settings it was made at, and unpacked into the run's scratch file.
+fn unrecord(b: &[u8], hash: &Hash, s: Settings) -> Result<Record> {
+    if b.len() < STAMP + HEAD || b[..STAMP] != hash[..STAMP] {
+        bail!("a record is not where the index says");
+    }
+    let mut at = STAMP;
+    let mut u32_ = || {
+        let v = u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        at += 4;
+        v
+    };
+    let dims = (u32_(), u32_());
+    let mut traits = Traits::default();
+    let fields: Vec<f32> = (0..23).map(|_| f32::from_bits(u32_())).collect();
+    traits.detail.copy_from_slice(&fields[..6]);
+    traits.colour = fields[6];
+    traits.grid.copy_from_slice(&fields[7..]);
+    let flags = u32_();
+    traits.lossless = flags & 1 != 0;
+    traits.exif = flags & 2 != 0;
+    traits.frames = flags & 4 != 0;
+    traits.deep = flags & 8 != 0;
+    traits.profile = flags & 16 != 0;
+    let (w, h, n) = (u32_(), u32_(), u32_() as usize);
+    let (tw, th) = (u32_(), u32_());
+    let scale = f32::from_bits(u32_());
+    if misshapen(s, n, tw, th) {
+        bail!("a record's shape is not one these settings make");
+    }
+    let (kps, desc, px, ends) = unpack(&b[at..], n, tw as u16, th as u16)?;
+    let feats = Features { w, h, kps: kps.into(), desc: desc.into(), ends }.spilled();
+    let thumb = Thumb::new(tw as u16, th as u16, scale, px).spilled();
+    Ok(Record { feats, thumb, dims, traits })
+}
 
-/// A measured colour as a record keeps it and gives it back. Not quite the
-/// colour, since `UNKEPT - c` rounds; but the same value again through any
-/// number of rounds, so a run deciding by it decides as a later run reading
-/// it from the record will.
+/// A shape no record at `s` can have: more keypoints than it allows, or a
+/// thumbnail larger than it makes.
+fn misshapen(s: Settings, n: usize, tw: u32, th: u32) -> bool {
+    let (tw, th) = (tw as u64, th as u64);
+    let (thumb, sides) = (s.thumb as u64, s.thumb as u64 * crate::THUMB_MAX_SIDES as u64);
+    n > s.features as usize || tw * th > thumb * thumb || tw.max(th) > sides
+}
+
+/// A JPEG's colour as the suggestion measured it, kept on its index row and
+/// given back. Not quite the colour measured, since it went through the
+/// representation an earlier format kept it in (`-2 - c`); but the same value
+/// again through any number of rounds, so a run deciding by it decides as a
+/// later run reading it will.
 pub fn kept_colour(c: f32) -> f32 {
+    const UNKEPT: f32 = -2.0;
     UNKEPT - (UNKEPT - c)
-}
-
-/// Where one record sits in the cache file, from its path's length to the end
-/// of its packed half. What a compaction copies, without unpacking it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Span {
-    at: u64,
-    len: u64,
 }
 
 // ------------------------------------------------------------ interruption
 
 /// Held for the length of every append, and by the interrupt handler from the
-/// moment it runs until the process is gone. A record is therefore in the
-/// file whole or not at all, and nothing is written after the handler has
-/// said what the file holds.
+/// moment it runs until the process is gone: a record is in its pack whole,
+/// and its row committed, or neither is relied on.
 static WRITING: Mutex<()> = Mutex::new(());
 
-/// The temporary files a compaction, a fresh cache or a report is being
-/// written into, while there are any: the handler removes them, since the
-/// files they would have replaced are still there and still whole.
-///
-/// A list although a run writes one cache at a time. As a single slot, two
-/// stores written at once — which the tests do, one per test thread — took
-/// each other's entry, and whichever found the slot empty concluded it had
-/// been interrupted.
+/// The temporary files a report or a pack is being written into, while there
+/// are any: the handler removes them, since what they would have replaced is
+/// still there and still whole.
 static PARTIAL: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// Records appended by this run, for the handler to report.
 static APPENDED: AtomicUsize = AtomicUsize::new(0);
 
-fn lock<T>(m: &'static Mutex<T>) -> MutexGuard<'static, T> {
-    lock_any(m)
-}
+/// The indexes open in this process, for the handler to commit what waits.
+static OPEN: Mutex<Vec<Weak<Db>>> = Mutex::new(Vec::new());
 
-fn lock_any<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Make the cache file final, for a process about to exit on a signal, and
-/// say how many records this run put in it.
+/// Make the cache final, for a process about to exit on a signal, and say how
+/// many records this run put in it.
 ///
-/// There is nothing to write here, which is the point. Every record went into
-/// the file the moment its worker finished it, so an interrupt waits for at
-/// most the one append in flight — microseconds into the page cache — and
-/// removes a compaction's temporary file if one is half written. The returned
-/// guard is held until the process exits, so no worker appends after this.
+/// Every record went into its pack the moment its worker finished it; what
+/// is left is the rows that came while a commit was under way, committed
+/// here.
+/// The returned guard is held until the process exits, so no worker appends
+/// after this.
 pub fn seal() -> (MutexGuard<'static, ()>, usize) {
     let held = lock(&WRITING);
+    for db in lock(&OPEN).iter().filter_map(Weak::upgrade) {
+        db.flush();
+    }
     for tmp in lock(&PARTIAL).drain(..) {
         std::fs::remove_file(tmp).ok();
     }
@@ -765,1780 +751,200 @@ pub(crate) fn abandon_partial(tmp: &Path) {
     std::fs::remove_file(tmp).ok();
 }
 
-/// The temporary file `replace_with` writes for the cache at `path`, by
-/// process: `<cache stem>.tmp.<pid>`.
-fn temporary(path: &Path, pid: u32) -> PathBuf {
-    path.with_extension(format!("tmp.{pid}"))
-}
-
-/// Remove the temporary files runs killed outright left beside the cache at
-/// `path`: a compaction's copy (`temporary`), and the heads index's, the kept
-/// matching's and the identical files' (each its file's name and `.<pid>`).
-///
-/// **Asked only by a run that holds the cache alone** (`compact`, after
-/// `exclusive`). Every run holds the cache shared while it has it, and writes
-/// those files only then, so with no other holder each of them is a dead
-/// run's, whatever its process id says; a test of the id would be wrong for a
-/// cache on a share that two machines use. Ctrl-C and SIGTERM remove a
-/// half-written copy (`seal`), but SIGKILL, the OOM killer and a power cut do
-/// not, and the copy is up to the cache's own size: the window kills a
-/// cancelled scan that has not ended after three seconds. Left, nothing ever
-/// removed it. A killed compaction leaves the cache as worth compacting as it
-/// was, so the next run that can compacts and sweeps.
-fn sweep_litter(path: &Path) {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
-    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    let Some(stem) = path.file_stem() else { return };
-    let mine = std::process::id().to_string();
-    // A name, then `.`, then a process id of this run's or none.
-    let beside: Vec<Vec<u8>> = [
-        { let mut s = stem.to_owned(); s.push(".tmp."); s }, // `temporary`
-        { let mut s = heads::path_of(Path::new(name)).into_os_string(); s.push("."); s },
-        { let mut s = crate::matched::path_beside(Path::new(name)).into_os_string(); s.push("."); s },
-        { let mut s = crate::matched::identical_beside(Path::new(name)).into_os_string(); s.push("."); s },
-    ]
-    .into_iter()
-    .map(|s| s.as_bytes().to_vec())
-    .collect();
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let names: Vec<std::ffi::OsString> = entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.file_name()).collect();
-    let dead = |n: &[u8], b: &[u8]| n.strip_prefix(b).is_some_and(|pid| !pid.is_empty() && pid.iter().all(u8::is_ascii_digit) && pid != mine.as_bytes());
-    // The compaction's copy is named by the cache's stem, and another cache
-    // of that stem (`foo.bin` beside `foo.old`) would name its copies alike:
-    // then which cache a copy was for cannot be told, and it is left.
-    let mut stem_dot = stem.as_bytes().to_vec();
-    stem_dot.push(b'.');
-    let mut name_dot = name.as_bytes().to_vec();
-    name_dot.push(b'.');
-    let shared_stem = names.iter().map(|n| n.as_bytes()).any(|n| n != name.as_bytes() && n.starts_with(&stem_dot) && !n.starts_with(&name_dot) && !n.starts_with(&beside[0]));
-    for n in &names {
-        let n = n.as_bytes();
-        let litter = beside.iter().enumerate().any(|(i, b)| (i > 0 || !shared_stem) && dead(n, b));
-        if litter {
-            let _ = std::fs::remove_file(dir.join(std::ffi::OsStr::from_bytes(n)));
-        }
-    }
-}
-
-/// Write a new file at `path` through a temporary one, and hand back the new
-/// file open for appending.
-///
-/// The rename happens under `PARTIAL`'s lock, so the interrupt handler either
-/// removes the temporary file before it can be renamed — and the rename then
-/// fails, in a process that is exiting — or finds nothing to remove.
-fn replace_with(path: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<File> {
-    let tmp = temporary(path, std::process::id());
-    std::fs::remove_file(&tmp).ok();
-    lock(&PARTIAL).push(tmp.clone());
-    // Takes this call's entry out of the list, and says whether it was still
-    // there to take — the handler having removed it is how an interrupt shows.
-    let unregister = |partial: &mut Vec<PathBuf>| match partial.iter().position(|p| *p == tmp) {
-        Some(k) => {
-            partial.swap_remove(k);
-            true
-        }
-        None => false,
-    };
-    let made = (|| -> Result<File> {
-        let f = OpenOptions::new().read(true).append(true).create(true).open(&tmp)?;
-        // Held shared before it has the cache's name, as every run holds it.
-        flock(&f, LOCK_SH);
-        fill(&f)?;
-        let mut partial = lock(&PARTIAL);
-        if !unregister(&mut partial) {
-            bail!("interrupted");
-        }
-        std::fs::rename(&tmp, path)?;
-        Ok(f)
-    })();
-    if made.is_err() {
-        // A half-written temporary file is this run's litter, and the next
-        // run will not know to clear it: the name carries a process id
-        // precisely so that no other run touches it.
-        unregister(&mut lock(&PARTIAL));
-        std::fs::remove_file(&tmp).ok();
-    }
-    made
-}
-
-// ------------------------------------------------------------ the store
-
-/// Why a cache file produced nothing.
-///
-/// The two are told apart because they are handled apart. A cache written by
-/// a build with another format belongs to that build, and is left alone — see
-/// the note on `MAGIC`. A file that is not a cache at all, or that is corrupt
-/// in the middle, is a file the user pointed at and will keep pointing at, and
-/// it costs a full re-analysis every run until it is noticed.
-enum Reject {
-    /// Written by a build with another format: its magic, as text.
-    OtherVersion(String),
-    /// Not a cache at all: a file the user named by mistake.
-    NotACache,
-    /// Not a cache, or corrupt: something to say out loud.
-    Damaged(anyhow::Error),
-}
-
-impl From<anyhow::Error> for Reject {
-    fn from(e: anyhow::Error) -> Self {
-        Reject::Damaged(e)
-    }
-}
-
-/// What reading a cache file found at its end.
-struct Tail {
-    /// Where the last whole record ends.
-    end: u64,
-    /// Records read, including any that a later record for the same path
-    /// superseded.
-    count: usize,
-    /// The file stops part-way through a record. That is what a process
-    /// killed mid-append leaves, and it costs one record, not the cache.
-    truncated: bool,
-    /// Records that were framed whole but will not unpack, or claim a shape no
-    /// record of these settings can have. Each costs itself: its image is
-    /// analysed again and the next compaction leaves it out.
-    damaged: usize,
-    /// Why the file stopped making sense part-way through, when it did for a
-    /// reason other than running out: a record's framing is damaged, so no
-    /// record after it can be found. The file is cut there, as a torn tail
-    /// is, and the records before it are kept.
-    broken_at: Option<String>,
-}
-
-/// The run's cache file, open for appending for as long as the run has
-/// anything to put in it.
-///
-/// **A record goes into the file the moment its worker has made it**, rather
-/// than all of them at the end, and that is what makes an interrupt cheap: a
-/// Ctrl-C half an hour into describing a corpus finds the half hour already on
-/// disk, and exits without writing anything. The record is packed by the
-/// worker that made it, so this costs the run no deflate it did not already
-/// pay — it used to be paid in one pass after the analysis — and the file
-/// holds every record from that point on, so a rewrite is a copy.
-///
-/// **It answers for this run's files by number**: `take` hands a walked
-/// file's record over, `append` keeps one made for it, `keep_colour` writes
-/// in the record kept for it, and `finish` keeps what the run took and made
-/// and what it was not asked about while its file is there. Which records a
-/// run keeps is decided there and nowhere else.
-///
-/// The file is rewritten only when it holds something the run would not keep:
-/// a record superseded by a newer one for the same path, a file that has
-/// gone, a `--prune-cache`. Then `compact` copies the records worth keeping
-/// into a new file, sorted, byte for byte and without unpacking any of them.
-pub struct Store {
-    path: PathBuf,
-    /// The settings this run's records are made at.
-    settings: Settings,
-    /// The files this run walked, by number: what the file holds for each.
-    asked: Vec<Asked>,
-    /// Where the record each walked file's analysis is kept in sits: one
-    /// taken (`take`) or appended (`append`) by this run. The records the
-    /// run keeps for its own files are these and no others.
-    live: Mutex<Vec<Option<Span>>>,
-    /// The records this run was not asked about: the latest for each path
-    /// and settings, at this run's settings for a path it does not walk, or
-    /// at any other's. Never unpacked; carried while their file is there
-    /// (`carried`).
-    unasked: Vec<Unasked>,
-    /// Records at this run's settings the file holds, the latest for each
-    /// path, walked or not.
-    usable: usize,
-    /// `None` when the cache could not be opened for writing, and the run
-    /// keeps nothing.
-    file: Option<File>,
-    records: AtomicUsize,
-    /// Set by the first append that fails; the rest are not attempted.
-    failed: Mutex<Option<String>>,
-    broken: std::sync::atomic::AtomicBool,
-    /// Records that were framed whole and would not unpack. Each is reported
-    /// on every run that reads the file, so a file holding one is compacted
-    /// whatever else it holds; see `worth_compacting`.
-    damaged: usize,
-    /// The file is another format version's, whose magic this is, and is
-    /// left as it is; see the note on `MAGIC`.
-    other_version: Option<String>,
-    /// Where the part of the file this run has read ends. Anything after it
-    /// was appended since: by this run (`mine`), or by another run sharing
-    /// the file (`foreign`).
-    read_end: u64,
-    /// Where each record this run appended begins.
-    mine: Mutex<std::collections::HashSet<u64>>,
-    /// Where each record a compaction by this run kept moved to, by where it
-    /// was; `None` when there was none. A record left out is in neither.
-    moved: Option<HashMap<u64, u64>>,
-    /// The file again, open for writing in place (`keep_colour`): `pwrite`
-    /// on a descriptor opened to append writes at the end on Linux, whatever
-    /// offset it is given.
-    in_place: std::sync::OnceLock<Option<File>>,
-}
-
-/// One walked file, as the cache knows it.
-struct Asked {
-    /// Its name in the file (`lib::cache_names`).
-    name: PathBuf,
-    /// What the walk read of it, which a record must carry to answer for it;
-    /// `None`, nothing does, and nothing is kept for it.
-    key: Option<Key>,
-    /// The latest record at this run's settings under its name, whatever
-    /// key it carries.
-    found: Option<Span>,
-    /// That record's analysis, when its key is the file's and it has not
-    /// been taken.
-    record: Option<Record>,
-}
-
-/// A record this run was not asked about; see `Store::unasked`.
-struct Unasked {
-    path: PathBuf,
-    span: Span,
-    /// The device its file lay on (`Key::dev`).
-    dev: u64,
-    /// Made at this run's settings, for a file it did not walk.
-    here: bool,
-}
-
-/// What `Store::finish` kept and did, for the run to say.
-pub struct Kept {
-    /// The first append that failed, if one did.
-    pub failure: Option<String>,
-    /// Records carried for files this run did not walk, at its settings and
-    /// at others.
-    pub carried: usize,
-    pub other_sizes: usize,
-    /// Records this run was not asked about and did not carry.
-    pub dropped: usize,
-    pub compacted: Compacted,
-}
-
-/// Whether `Store::finish` rewrote the file.
-pub enum Compacted {
-    /// Not worth it: the file's records, and how many nothing keeps.
-    Unneeded { records: usize, unused: usize },
-    /// Put off: another run has the file open.
-    Busy,
-    Done,
-    Failed(String),
-}
-
-/// Open the cache at `path`, read what is usable out of it, and keep it open
-/// for this run's own records.
-///
-/// Every route out of here returns records rather than an error, because the
-/// cache is an optimisation: a run whose cache is missing, stale or ruined
-/// computes exactly the same pairs, only slower. What it must not do is be
-/// silent about the last of those.
-///
-/// The file is read a record at a time rather than slurped. A large corpus's
-/// cache is most of a gigabyte, and the records it holds are about to exist a
-/// second time as `Record`s; holding the bytes as well, for the length of the
-/// parse, is a copy the run does not have to make.
-///
-/// **Only the records for paths this run walks are unpacked.** The file is one
-/// per machine, so it holds every folder ever scanned, and a record for a path
-/// this run is not looking at is wanted for one thing: to be carried into the
-/// file this run leaves behind, which needs its key, its span and nothing
-/// else. Unpacking it anyway made every other corpus's analysis exist in full
-/// for the length of this run's own — about 900 MB for a nine-thousand-image
-/// folder, held while a five-thousand-image one was being analysed. Such a
-/// record is framed and skipped, and comes back with no `Record`. What that
-/// gives up is noticing a record whose compressed body is damaged before a run
-/// that walks its path: the framing is still checked here, and the body is
-/// checked the first time anything unpacks it.
-///
-/// A file another format version wrote is left as it is, and the run keeps
-/// nothing (see the note on `MAGIC`). A damaged one is replaced by an empty one straight away,
-/// rather than at the end of the run, since this run's records go into
-/// whatever file it holds from here on.
-///
-/// `files` are this run's, each by the name the cache knows it by and what
-/// the walk read of it: what the store answers for by number from here on.
-/// `met(i)` is said as the read meets a record of walked file `i` under its
-/// key (once or more): what the progress bar knows of the cache's answers
-/// before the read is done. A later record for the path may still replace it.
-///
-/// **A file found under another name than its record's is analysed again.**
-/// 0.69.0 answered it with another name's record whose key (length, mtime,
-/// ctime to the nanosecond) was its own, so a renamed folder or a drive
-/// mounted elsewhere kept its analysis. The key does not say which file it
-/// is: the kernel's change time is coarse (a clock tick), and files written
-/// or `touch`ed together share it, so same-size BMPs copied as one folder
-/// all had one key. Scanned in two runs, one took the other's analysis and
-/// the two different pictures were reported "same pixels", one DELETE. A
-/// moved file costs its analysis again; that is what is intended.
-pub fn open(path: &Path, want: Settings, files: Vec<(PathBuf, Option<Key>)>, met: &(dyn Fn(usize) + Sync), problems: &mut Problems) -> Store {
-    let (mut got, mut store) = {
-        let walked: HashMap<&Path, (usize, Option<Key>)> = files.iter().enumerate().map(|(i, f)| (f.0.as_path(), (i, f.1))).collect();
-        let walked = |p: &Path, k: Key| match walked.get(p) {
-            Some(&(i, key)) => {
-                if key == Some(k) {
-                    met(i);
-                }
-                true
-            }
-            None => false,
-        };
-        read(path, want, &walked, problems)
-    };
-    store.usable = got.len();
-    store.asked = files
-        .into_iter()
-        .map(|(name, key)| match got.remove(&name) {
-            Some((k, record, span)) => Asked { record: record.filter(|_| key == Some(k)), name, key, found: Some(span) },
-            None => Asked { name, key, found: None, record: None },
-        })
-        .collect();
-    // What is left is every record at this run's settings for a path it did
-    // not walk.
-    store.unasked.extend(got.into_iter().map(|(path, (k, _, span))| Unasked { path, span, dev: k.dev, here: true }));
-    store.live = Mutex::new(vec![None; store.asked.len()]);
-    store
-}
-
-/// The file at `path`, read: the latest record at `want` for each path,
-/// unpacked for the paths `walked` says this run walks, and the store with
-/// what else it holds (`Store::unasked`).
-fn read(path: &Path, want: Settings, walked: Walked, problems: &mut Problems) -> (HashMap<PathBuf, Entry>, Store) {
-    let mut out = HashMap::new();
-    let mut store = Store {
-        path: path.to_path_buf(),
-        settings: want,
-        asked: Vec::new(),
-        live: Default::default(),
-        unasked: Vec::new(),
-        usable: 0,
-        file: None,
-        records: AtomicUsize::new(0),
-        failed: Mutex::new(None),
-        broken: Default::default(),
-        damaged: 0,
-        other_version: None,
-        read_end: MAGIC.len() as u64,
-        mine: Default::default(),
-        moved: None,
-        in_place: Default::default(),
-    };
-    // Several runs may hold the file at once — the window's scan and one in
-    // a terminal — and each appends to it as it goes. Appending is safe
-    // together (`O_APPEND`, a record a write); replacing the file or cutting
-    // its end is not, since another run's records then go into a file that
-    // no longer has a name, or are cut in half. So every run holds the file
-    // shared for as long as it has it open, and only a run that can hold it
-    // alone replaces or cuts it; see `exclusive`.
-    for _ in 0..8 {
-        let f = match OpenOptions::new().read(true).append(true).open(path) {
-            Ok(f) => f,
-            // Not being there yet is the first run against this cache, which
-            // is every first run and not a problem. Made here, empty; the
-            // header goes in below, under the lock.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                match OpenOptions::new().read(true).append(true).create_new(true).open(path) {
-                    Ok(f) => f,
-                    // Another run made it first.
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(e) => {
-                        problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display()));
-                        return (out, store);
-                    }
-                }
-            }
-            Err(e) => {
-                // A cache that can be read and not written still answers this
-                // run. It just keeps nothing new, and that is worth saying.
-                problems.note(Note::Cache, format_args!("could not open {} for writing: {e}", path.display()));
-                // What it holds is still counted, although nothing will be
-                // appended: `stale` measures how many records a later one
-                // superseded against this, and a count of zero beside a full map
-                // was an underflow.
-                match File::open(path).map(|f| read_file(&f, path, want, walked, &mut out, &mut store.unasked, problems)) {
-                    Ok(Found::Usable(tail)) => {
-                        store.records = AtomicUsize::new(tail.count);
-                        store.damaged = tail.damaged;
-                    }
-                    Ok(Found::OtherVersion(v)) => store.other_version = Some(v),
-                    _ => {}
-                }
-                return (out, store);
-            }
-        };
-        // Waits only while another run replaces or repairs the file, and then
-        // the name may lead to its replacement: open that one instead.
-        if !flock(&f, LOCK_SH) || !names(&f, path) {
-            continue;
-        }
-        // A file just made, or one a run stopped before its header was in.
-        if f.metadata().is_ok_and(|m| m.len() == 0) {
-            if !exclusive(&f, path) {
-                continue;
-            }
-            match Buf(&f).header() {
-                Ok(()) => {
-                    flock(&f, LOCK_SH);
-                    store.file = Some(f);
-                }
-                Err(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display())),
-            }
-            return (out, store);
-        }
-        match read_file(&f, path, want, walked, &mut out, &mut store.unasked, problems) {
-            Found::Usable(tail) => {
-                store.records = AtomicUsize::new(tail.count);
-                store.damaged = tail.damaged;
-                store.read_end = tail.end;
-                // A partial record at the end would sit in front of every
-                // record appended after it, and turn a lost record into a
-                // damaged file. So would a record whose framing is damaged,
-                // which ends the part of the file that can be read.
-                if tail.truncated {
-                    if !exclusive(&f, path) {
-                        // Another run has the file, and what reads as torn may
-                        // be its record still being written. This run reads
-                        // what it found and appends nothing behind it.
-                        return (out, store);
-                    }
-                    let cut = f.set_len(tail.end);
-                    flock(&f, LOCK_SH);
-                    if let Err(e) = cut {
-                        problems.note(Note::Cache, format_args!("could not repair {}: {e}", path.display()));
-                        return (out, store);
-                    }
-                }
-                store.file = Some(f);
-                return (out, store);
-            }
-            Found::OtherVersion(v) => {
-                store.other_version = Some(v);
-                return (out, store);
-            }
-            Found::NotACache => return (out, store),
-            // Replaced by an empty one, unless another run is using it.
-            Found::Unusable => {
-                if exclusive(&f, path) {
-                    heads::remove(path);
-                    match replace_with(path, |f| Buf(f).header()) {
-                        Ok(f) => store.file = Some(f),
-                        Err(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", path.display())),
-                    }
-                }
-                return (out, store);
-            }
-        }
-    }
-    // The name kept leading to a file being replaced: this run keeps nothing.
-    (out, store)
-}
+// ------------------------------------------------------------ locks
 
 const LOCK_SH: i32 = 1;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 
-/// `flock(2)` on `f`: whether the lock is held. A blocking request is
-/// retried when a signal interrupts it. Only another holder refuses: on a
-/// filesystem that has no such locks the answer is yes, and the file is
-/// used as it was before there were any.
 fn flock(f: &File, op: i32) -> bool {
     use std::os::fd::AsRawFd;
     unsafe extern "C" {
-        fn flock(fd: i32, op: i32) -> i32;
+        fn flock(fd: i32, operation: i32) -> i32;
     }
-    loop {
-        // SAFETY: `f` is open for the length of the call.
-        if unsafe { flock(f.as_raw_fd(), op) } == 0 {
-            return true;
-        }
-        match std::io::Error::last_os_error().kind() {
-            std::io::ErrorKind::Interrupted if op & LOCK_NB == 0 => {}
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => return false,
-            _ => return true,
-        }
-    }
+    // SAFETY: a descriptor this process holds open.
+    unsafe { flock(f.as_raw_fd(), op) == 0 }
 }
 
-/// Whether `path` still names the file `f` has open.
-fn names(f: &File, path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (f.metadata(), std::fs::metadata(path)) {
-        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
-        _ => false,
-    }
+// ------------------------------------------------------------ the index
+
+/// The index, open, and the rows this run has made and not yet committed.
+struct Db {
+    conn: Mutex<Connection>,
+    pending: Mutex<Vec<Row>>,
+    failed: Mutex<Option<String>>,
+    /// The index said it is damaged: `finish` removes it, when the run has
+    /// the cache alone, so the next run starts a new one instead of failing
+    /// on it every time.
+    damaged: std::sync::atomic::AtomicBool,
 }
 
-/// Hold `f`, which this run holds shared, alone, if no other run has it open
-/// and `path` still names it: what replacing or cutting it asks. Otherwise
-/// it is held shared again and the answer is no.
-///
-/// Never waited for: two runs waiting to hold one file alone would each wait
-/// for the other to let go. A run that cannot have it leaves it as it is,
-/// which costs at most a compaction put off to the next run.
-fn exclusive(f: &File, path: &Path) -> bool {
-    // A conversion is not atomic: one refused has given up the shared lock
-    // too, so it is taken back.
-    if flock(f, LOCK_EX | LOCK_NB) && names(f, path) {
-        return true;
-    }
-    flock(f, LOCK_SH);
-    false
-}
-
-/// What reading a cache file came to.
-enum Found {
-    Usable(Tail),
-    /// Written by another format version, whose magic this is.
-    OtherVersion(String),
-    /// Not a cache at all, and that has been said: left as it is.
-    NotACache,
-    /// Nothing in it is usable, and that has been said.
-    Unusable,
-}
-
-/// Read `f` into `out`.
-fn read_file(
-    f: &File,
-    path: &Path,
-    want: Settings,
-    walked: Walked,
-    out: &mut HashMap<PathBuf, Entry>,
-    others: &mut Vec<Unasked>,
-    problems: &mut Problems,
-) -> Found {
-    let size = f.metadata().map_or(u64::MAX, |m| m.len());
-    // A megabyte at a time, and the bodies this run does not unpack skipped
-    // inside it rather than copied out (see `read_record`). A smaller buffer
-    // turns the skips into seeks, and reads a sixth of the bytes — but the
-    // reads are then a chain of small dependent ones that defeat readahead,
-    // and a scan of two files against a 1.4 GB cache, page cache cold, took
-    // 3.4 s against 1.7 for the whole file read in order. Warm, the page
-    // buffer was 0.25 s; this is 0.40-0.51 against 0.70-0.75 before, and
-    // cold 1.35-1.61. What would read only the heads is an index, which
-    // the format does not have.
-    // A file that does not begin as a cache does is not one, however short:
-    // a photo or a note named by mistake with `--cache` was replaced by an
-    // empty cache, and the message said it was being ignored.
-    if !begins_as_cache(f) {
-        let read = Err(Reject::NotACache);
-        return found(read, path, out, others, problems);
-    }
-    let index = heads::load(f, path, size);
-    let covered = index.as_ref().map_or(0, |i| i.end);
-    let mut seen = Vec::new();
-    let read = match index.and_then(|i| read_indexed(f, size, i, want, walked, out, others, &mut seen)) {
-        Some(read) => read,
-        None => {
-            // No index, or one this file does not bear out: read it whole.
-            out.clear();
-            others.clear();
-            seen.clear();
-            (|| {
-                let mut r = Rd { r: std::io::BufReader::with_capacity(1 << 20, f), pos: 0, size, ended: false };
-                (&*f).rewind().map_err(|e| Reject::Damaged(e.into()))?;
-                let mut reading = Reading::new(want, walked, out, others, &mut seen);
-                reading.magic(&mut r)?;
-                reading.stream(&mut r);
-                Ok(reading.done())
-            })()
-        }
-    };
-    if let Ok(tail) = &read {
-        heads::refresh(f, path, covered, tail, &seen);
-    }
-    found(read, path, out, others, problems)
-}
-
-/// Whether the file's first bytes are a cache's (`MAGIC_PREFIX`), or as much
-/// of them as it holds: a header cut short is a damaged cache, not a stranger.
-fn begins_as_cache(f: &File) -> bool {
-    let mut head = [0u8; MAGIC_PREFIX.len()];
-    let mut got = 0;
-    while got < head.len() {
-        match f.read_at(&mut head[got..], got as u64) {
-            Ok(0) => break,
-            Ok(k) => got += k,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            // Unreadable is for the reading to say.
-            Err(_) => return true,
-        }
-    }
-    head[..got] == MAGIC_PREFIX[..got]
-}
-
-/// What a reading of the file came to, said where it is a problem.
-fn found(read: Result<Tail, Reject>, path: &Path, out: &mut HashMap<PathBuf, Entry>, others: &mut Vec<Unasked>, problems: &mut Problems) -> Found {
-    match read {
-        Ok(tail) => {
-            if let Some(why) = &tail.broken_at {
-                problems.note(Note::Cache, format_args!(
-                    "{} is damaged part-way through ({why}); the {} record(s) before the damage are kept",
-                    path.display(),
-                    tail.count
-                ));
-            }
-            if tail.damaged > 0 {
-                problems.note(Note::Cache, format_args!(
-                    "ignoring {} damaged record(s) in {}; their images are analysed again",
-                    tail.damaged,
-                    path.display()
-                ));
-            }
-            Found::Usable(tail)
-        }
-        Err(Reject::OtherVersion(v)) => {
-            out.clear();
-            others.clear();
-            Found::OtherVersion(v)
-        }
-        Err(Reject::NotACache) => {
-            problems.note(Note::Cache, format_args!("{} is not an img-fp cache, so it is left as it is and this run keeps nothing in it", path.display()));
-            out.clear();
-            others.clear();
-            Found::NotACache
-        }
-        Err(Reject::Damaged(e)) => {
-            problems.note(Note::Cache, format_args!("ignoring {}: {e}", path.display()));
-            out.clear();
-            others.clear();
-            Found::Unusable
-        }
-    }
-}
-
-impl Store {
-    /// The record of walked file `i`, taken out of the store: there only if
-    /// it is still that file's, by the key the walk read, and only once.
-    /// What the run takes is what it keeps (`finish`): a record of a file
-    /// whose bytes another file answers for, never taken, is the same
-    /// analysis stored twice and is left out at the next compaction.
-    pub fn take(&mut self, i: usize) -> Option<Record> {
-        let a = &mut self.asked[i];
-        let record = a.record.take()?;
-        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = a.found;
-        Some(record)
-    }
-
-    /// Put walked file `i`'s analysis into the file, as soon as it is made,
-    /// keyed by what the walk read before anything was: a file changing
-    /// under the analysis is described again next time rather than trusted.
-    /// Called by the workers as they finish.
-    pub fn append(&self, i: usize, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) {
-        let a = &self.asked[i];
-        let Some(key) = a.key else { return };
-        if let Some(span) = self.put(&a.name, key, dims, traits, f, t) {
-            lock_any(&self.live)[i] = Some(span);
-        }
-    }
-
-    /// Keep `colour` in walked file `i`'s record, if this run keeps one for
-    /// it; see `write_colour`.
-    pub fn keep_colour(&self, i: usize, colour: f32) {
-        let span = lock_any(&self.live)[i];
-        if let Some(span) = span {
-            self.write_colour(span, &self.asked[i].name, colour);
-        }
-    }
-
-    /// Walked file `i`'s name in the file: its canonical path
-    /// (`lib::cache_names`), however the run spelled it.
-    pub fn name(&self, i: usize) -> &Path {
-        &self.asked[i].name
-    }
-
-    /// Records at this run's settings the file holds, the latest for each
-    /// path.
-    pub fn usable(&self) -> usize {
-        self.usable
-    }
-
-    /// Whether the file holds records this run will not keep, as far as can
-    /// be told before the analysis and without asking which files have gone:
-    /// one superseded or damaged, or a walked file's not taken. What the
-    /// progress bar expects of `finish`, and nothing else.
-    pub fn stale(&self) -> bool {
-        let found = self.asked.iter().filter(|a| a.found.is_some()).count();
-        let live = lock_any(&self.live);
-        self.records().saturating_sub(found + self.unasked.len()) > 0
-            || self.asked.iter().zip(live.iter()).any(|(a, l)| a.found.is_some() && l.is_none())
-    }
-
-    /// Settle the file at the end of the analysis: it keeps this run's
-    /// records (`take`, `append`), every record it was not asked about whose
-    /// file is still there (`carried`), and what another run appended
-    /// meanwhile; and it is rewritten to hold just that when what else it
-    /// holds is worth a copy of the rest (`worth_compacting`).
-    ///
-    /// `--prune-cache` (`prune`) keeps only this run's.
-    pub fn finish(&mut self, prune: bool) -> Kept {
-        let failure = self.failure();
-        // Every record worth keeping is already in the file, since each went
-        // in as it was made. The file is rewritten only when what else it
-        // holds — records superseded, for files that have gone, or pruned —
-        // is worth a copy of the rest. A threshold sweep, a dozen runs over
-        // one unchanged corpus, finds the file already says what it would
-        // write and writes nothing.
-        //
-        // The names are lent to the compaction and handed back: the colours
-        // the suggestion measures later are kept by them.
-        let (asked, unasked) = (std::mem::take(&mut self.asked), std::mem::take(&mut self.unasked));
-        let live = lock_any(&self.live).clone();
-        let carried = if prune { Vec::new() } else { carried(&unasked) };
-        let entries: Vec<(&Path, Span)> = asked
-            .iter()
-            .zip(live)
-            .filter_map(|(a, s)| Some((a.name.as_path(), s?)))
-            .chain(carried.iter().map(|u| (u.path.as_path(), u.span)))
-            .collect();
-        let compacted = if !self.worth_compacting(&entries, prune) {
-            Compacted::Unneeded { records: self.records(), unused: self.records().saturating_sub(entries.len()) }
-        } else {
-            match self.compact(&entries) {
-                Ok(true) => Compacted::Done,
-                Ok(false) => Compacted::Busy,
-                Err(e) => Compacted::Failed(e.to_string()),
-            }
-        };
-        let other_sizes = carried.iter().filter(|u| !u.here).count();
-        let kept = Kept { failure, carried: carried.len() - other_sizes, other_sizes, dropped: unasked.len() - carried.len(), compacted };
-        drop((entries, carried));
-        (self.asked, self.unasked) = (asked, unasked);
-        kept
-    }
-
-    /// Put one analysis into the file, and say where it went. The packing
-    /// runs outside the lock, and only the write is inside it.
-    fn put(&self, path: impl AsRef<Path>, key: Key, dims: (u32, u32), traits: &Traits, f: &Features, t: &Thumb) -> Option<Span> {
-        self.file.as_ref()?;
-        if self.broken.load(Ordering::Relaxed) {
-            return None;
-        }
-        match record(path.as_ref(), self.settings, key, dims, traits, f, t) {
-            Ok(rec) => self.write(rec),
-            Err(e) => {
-                self.broke(e);
-                None
-            }
-        }
-    }
-
-    /// Append one record's bytes, and say where they went.
-    fn write(&self, rec: Vec<u8>) -> Option<Span> {
-        let file = self.file.as_ref()?;
-        if self.broken.load(Ordering::Relaxed) {
-            return None;
-        }
-        let wrote = (|| -> Result<Span> {
-            let _held = lock(&WRITING);
-            let mut w = file;
-            w.write_all(&rec)?;
-            // Where this file description's offset stands, which in append
-            // mode is the end of what it just wrote — whatever another run
-            // appending to the same file has done meanwhile.
-            let end = w.stream_position()?;
-            Ok(Span { at: end - rec.len() as u64, len: rec.len() as u64 })
-        })();
-        match wrote {
-            Ok(span) => {
-                lock_any(&self.mine).insert(span.at);
-                self.records.fetch_add(1, Ordering::Relaxed);
-                APPENDED.fetch_add(1, Ordering::Relaxed);
-                Some(span)
-            }
-            Err(e) => {
-                self.broke(e);
-                None
-            }
-        }
-    }
-
-    /// The first append that fails is kept to be said; the rest are not
-    /// attempted.
-    fn broke(&self, e: anyhow::Error) {
-        if !self.broken.swap(true, Ordering::Relaxed) {
-            *self.failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
-        }
-    }
-
-    /// The format the file was written in, when it is another version's and
-    /// this run therefore reads nothing from it and keeps nothing in it.
-    pub fn other_version(&self) -> Option<&str> {
-        self.other_version.as_deref()
-    }
-
-    /// Records the file holds, whether or not anything will keep them.
-    fn records(&self) -> usize {
-        self.records.load(Ordering::Relaxed)
-    }
-
-    /// The first append that failed, if one did.
-    fn failure(&self) -> Option<String> {
-        self.failed.lock().unwrap_or_else(PoisonError::into_inner).take()
-    }
-
-    #[cfg(test)]
-    pub fn writable(&self) -> bool {
-        self.file.is_some() && !self.broken.load(Ordering::Relaxed)
-    }
-
-    /// Whether rewriting the file to hold `entries` is worth what it costs.
-    ///
-    /// **A rewrite loses nothing and re-describes nothing**: it copies the
-    /// records worth keeping, byte for byte. What it costs is that copy, and
-    /// it used to be paid for any record at all that nothing would read again
-    /// — one deleted photograph made the next run copy every other folder's
-    /// analysis to drop it, 263 MB for one record of 9 KB, and the window's
-    /// first scan after a trip to the Trash paid it every time.
-    ///
-    /// So the dead records stay in the file until they are a quarter of it.
-    /// That is not a figure read off a corpus; it is the trade every
-    /// log-structured store makes, and a quarter states both sides of it: the
-    /// file is never more than a third larger than what it holds, and a
-    /// rewrite copies at most three bytes worth keeping for every byte it
-    /// drops. A dead record is harmless meanwhile — a later record for the
-    /// same path replaces it as the file is read, and one for a file that has
-    /// gone is passed over as it was. Two things compact whatever the share:
-    /// `--prune-cache`, which asks for it, and a damaged record, which is
-    /// otherwise reported on every run.
-    fn worth_compacting(&self, entries: &[(&Path, Span)], prune: bool) -> bool {
-        let Some(f) = &self.file else { return false };
-        if self.records() == entries.len() || self.broken.load(Ordering::Relaxed) {
-            return false;
-        }
-        if prune || self.damaged > 0 {
-            return true;
-        }
-        let Ok(size) = f.metadata().map(|m| m.len()) else { return true };
-        // The records' bytes, the header aside.
-        let held = size.saturating_sub(MAGIC.len() as u64);
-        // Another run's records, appended since this one read the file, are
-        // as live as this run's own: they are its analysis.
-        let live: u64 = entries.iter().map(|e| e.1.len).chain(self.foreign().iter().map(|e| e.1.len)).sum();
-        held.saturating_sub(live) * 4 >= held
-    }
-
-    /// Rewrite the file to hold `entries` and nothing else, sorted, so that
-    /// the same corpus in the same state compacts to the same bytes.
-    ///
-    /// Every entry is already in the file, so this is a copy: nothing is
-    /// unpacked or deflated again, and an interrupt part-way through leaves
-    /// the file it was copying from exactly as it was.
-    ///
-    /// `false` when it was put off: not while another run has the file open,
-    /// since its records would go on into the file this replaces, which by
-    /// then has no name. A run that has the file alone does it.
-    ///
-    /// The records another run appended since this one read the file are
-    /// kept too. That run has finished — nothing else holds the file — and
-    /// what it described is in nothing this run was handed: dropped, a scan
-    /// in the window lost the analysis of a folder a terminal had scanned
-    /// meanwhile, and its bytes, counted as dead, were what made the copy
-    /// look worth making.
-    fn compact(&mut self, entries: &[(&Path, Span)]) -> Result<bool> {
-        let Some(src) = &self.file else { return Ok(false) };
-        if !exclusive(src, &self.path) {
-            return Ok(false);
-        }
-        sweep_litter(&self.path);
-        let foreign = self.foreign();
-        let mut entries: Vec<(&Path, Span)> = entries.iter().copied().chain(foreign.iter().map(|(p, s)| (p.as_path(), *s))).collect();
-        // By the path's bytes, which is the order the text sort gave before
-        // paths were kept as bytes; and two records for one path in the
-        // order they were written, since the later is the one a reader keeps.
-        // Two are possible only when another run described a file this run
-        // also has a record for.
-        entries.sort_unstable_by(|a, b| a.0.as_os_str().cmp(b.0.as_os_str()).then(a.1.at.cmp(&b.1.at)));
-        let mut moved = HashMap::with_capacity(entries.len());
-        let new = replace_with(&self.path, |f| {
-            let mut b = Buf(std::io::BufWriter::with_capacity(1 << 20, f));
-            b.header()?;
-            let mut buf = Vec::new();
-            let mut to = MAGIC.len() as u64;
-            for &(p, s) in entries.iter() {
-                buf.resize(s.len as usize, 0);
-                src.read_exact_at(&mut buf, s.at)?;
-                // A span is where a record of its path begins; anything else
-                // would copy the middle of one.
-                let name = p.as_os_str().as_bytes();
-                if buf.get(..8) != Some(&(name.len() as u64).to_le_bytes()[..]) || buf.get(8..8 + name.len()) != Some(name) {
-                    bail!("a record is not where it was read");
-                }
-                b.0.write_all(&buf)?;
-                moved.insert(s.at, to);
-                to += s.len;
-            }
-            b.0.flush()?;
-            Ok(())
-        })?;
-        heads::remove(&self.path);
-        self.moved = Some(moved);
-        self.read_end = new.metadata().map_or(u64::MAX, |m| m.len());
-        self.file = Some(new);
-        self.records = AtomicUsize::new(entries.len());
-        lock_any(&self.mine).clear();
-        Ok(true)
-    }
-
-    /// Keep `colour`, a JPEG's colour as `decode::colour_of` measured it and
-    /// `kept_colour` gave it back, in the record at `span` for `path`, where
-    /// the next run reads it as `Traits::colour_kept`.
-    ///
-    /// **The suggestion decodes a JPEG whole to learn its colour**, which its
-    /// analysis, decoded to grey, never measured; and nothing kept the answer,
-    /// so every rescan decoded every JPEG the suggestion asked about again: a
-    /// cached rescan of 120 grey JPEGs spent 0.8 s there against 0.1 s for the
-    /// same pictures as PNG, four times the CPU of the rest of the run. The
-    /// answer is a fact about the file's bytes, which the record's key
-    /// vouches for, so it goes into the record: four bytes written in place
-    /// over the decode's "not measured", in the one field that means colour.
-    ///
-    /// Written only over a record that is where it is said to be, for that
-    /// path, still saying "not measured"; anything else is left as it is,
-    /// and costs no more than a decode next time. A record a compaction by
-    /// this run left out is not written at all. Under the append lock, so an
-    /// interrupt finds nothing half written after it.
-    fn write_colour(&self, span: Span, path: &Path, colour: f32) {
-        let Some(src) = &self.file else { return };
-        if self.broken.load(Ordering::Relaxed) {
-            return;
-        }
-        let at = match &self.moved {
-            Some(m) => match m.get(&span.at) {
-                Some(&at) => at,
-                None => return,
-            },
-            None => span.at,
-        };
-        let Some(dst) = self
-            .in_place
-            .get_or_init(|| {
-                use std::os::unix::fs::MetadataExt;
-                let f = OpenOptions::new().write(true).open(&self.path).ok()?;
-                let (a, b) = (f.metadata().ok()?, src.metadata().ok()?);
-                ((a.dev(), a.ino()) == (b.dev(), b.ino())).then_some(f)
-            })
-            .as_ref()
-        else {
-            return;
-        };
-        let name = path.as_os_str().as_bytes();
-        // The path's length and the path, then settings (12), key (24),
-        // device (8), size (8) and detail (24), and the colour.
-        let field = at + 8 + name.len() as u64 + 12 + 24 + 8 + 8 + 24;
-        if field + 4 > at + span.len {
-            return;
-        }
-        let mut head = vec![0u8; 8 + name.len()];
-        let mut was = [0u8; 4];
-        if src.read_exact_at(&mut head, at).is_err() || src.read_exact_at(&mut was, field).is_err() {
-            return;
-        }
-        if head[..8] != (name.len() as u64).to_le_bytes() || head[8..] != *name || was != UNMEASURED.to_le_bytes() {
-            return;
-        }
-        let _held = lock(&WRITING);
-        let _ = dst.write_all_at(&(UNKEPT - colour).to_le_bytes(), field);
-    }
-
-    /// The records after `read_end` that this run did not append: another
-    /// run's, made while this one had the file open. Read by `pread`, so the
-    /// descriptor's own offset, which the appends go through, is not moved.
-    /// A record being written as this reads, or cut off, ends the list.
-    fn foreign(&self) -> Vec<(PathBuf, Span)> {
-        let Some(f) = &self.file else { return Vec::new() };
-        let Ok(size) = f.metadata().map(|m| m.len()) else { return Vec::new() };
-        let mine = lock_any(&self.mine);
-        let mut r = Rd { r: At { f, pos: self.read_end }, pos: self.read_end, size, ended: false };
-        let mut out = Vec::new();
-        loop {
-            let at = r.pos;
-            match read_record(&mut r, |_| false) {
-                Ok(Some((head, _))) if !mine.contains(&at) => out.push((head.path, Span { at, len: r.pos - at })),
-                Ok(Some(_)) => {}
-                _ => break,
-            }
-        }
-        out
-    }
-}
-
-/// A file read from an offset with `pread`; see `Store::foreign`.
-struct At<'a> {
-    f: &'a File,
-    pos: u64,
-}
-
-impl Read for At<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.f.read_at(buf, self.pos)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Skip for At<'_> {
-    fn skip(&mut self, n: u64) -> std::io::Result<()> {
-        self.pos += n;
-        Ok(())
-    }
-}
-
-/// One record's fixed-size half, which is what the reader needs before it can
-/// make sense of the packed half.
-struct Head {
-    path: PathBuf,
+/// A row this run made: an analysis appended to a pack, and the file it is
+/// for.
+struct Row {
+    hash: Content,
+    version: [u8; 16],
     settings: Settings,
+    pack: i64,
+    at: u64,
+    len: u64,
+    made_by: Option<&'static str>,
+    today: i64,
+    name: PathBuf,
     key: Key,
-    dims: (u32, u32),
-    traits: Traits,
-    w: u32,
-    h: u32,
-    n: usize,
-    tw: u32,
-    th: u32,
-    scale: f32,
 }
 
-/// A reader that knows where it is, how long the file is, and whether it ran
-/// out of file.
-struct Rd<R: Read> {
-    r: R,
-    pos: u64,
-    size: u64,
-    ended: bool,
+/// Whether SQLite says the index file is damaged or is no database: what no
+/// later run will read either.
+fn is_damage(e: &rusqlite::Error) -> bool {
+    matches!(e.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))
 }
-impl<R: Read> Rd<R> {
-    /// Whether `n` more bytes are in the file, asked before anything is
-    /// allocated to hold them. A length read from the file is only as good
-    /// as the file, and one damaged into a petabyte used to be handed to the
-    /// allocator, which aborts the process rather than fail — on every run,
-    /// until the cache was deleted by hand. One that runs past the end is
-    /// what a torn append leaves too, and it is treated the same way.
-    fn need(&mut self, n: u64) -> Result<()> {
-        if self.pos.checked_add(n).is_none_or(|end| end > self.size) {
-            self.ended = true;
-            bail!("cache truncated");
+
+impl Db {
+    /// Keep a failure to be said, once, and whether it was damage.
+    fn note(&self, e: &rusqlite::Error) {
+        if is_damage(e) {
+            self.damaged.store(true, Ordering::Relaxed);
         }
-        Ok(())
-    }
-    fn fill(&mut self, v: &mut [u8]) -> Result<()> {
-        match self.r.read_exact(v) {
-            Ok(()) => {
-                self.pos += v.len() as u64;
-                Ok(())
-            }
-            Err(e) => {
-                self.ended = e.kind() == std::io::ErrorKind::UnexpectedEof;
-                Err(anyhow!("cache truncated"))
-            }
-        }
-    }
-    /// Pass over `n` bytes without reading them, which `need` has already
-    /// found are in the file.
-    fn skip(&mut self, n: u64) -> Result<()>
-    where
-        R: Skip,
-    {
-        self.r.skip(n).map_err(|_| anyhow!("cache truncated"))?;
-        self.pos += n;
-        Ok(())
-    }
-    fn take(&mut self, n: usize) -> Result<Vec<u8>> {
-        let mut v = vec![0u8; n];
-        self.fill(&mut v)?;
-        Ok(v)
-    }
-    fn arr<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let mut v = [0u8; N];
-        self.fill(&mut v)?;
-        Ok(v)
-    }
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.arr()?))
-    }
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.arr()?))
-    }
-    fn i64(&mut self) -> Result<i64> {
-        Ok(i64::from_le_bytes(self.arr()?))
-    }
-    fn f32(&mut self) -> Result<f32> {
-        Ok(f32::from_le_bytes(self.arr()?))
-    }
-    /// The one place a clean end of file is expected rather than an error.
-    fn len_or_eof(&mut self) -> Result<Option<usize>> {
-        let mut v = [0u8; 8];
-        let mut got = 0;
-        while got < 8 {
-            match self.r.read(&mut v[got..]) {
-                Ok(0) if got == 0 => return Ok(None),
-                Ok(0) => {
-                    self.ended = true;
-                    bail!("cache truncated")
-                }
-                Ok(k) => got += k,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        self.pos += 8;
-        Ok(Some(u64::from_le_bytes(v) as usize))
-    }
-}
-
-/// A reader that can pass over bytes it has no use for. A `BufReader` over a
-/// file moves within its buffer when it can and seeks when it cannot; a plain
-/// `Seek` would discard the buffer every time.
-trait Skip {
-    fn skip(&mut self, n: u64) -> std::io::Result<()>;
-}
-
-impl<R: Read + Seek> Skip for std::io::BufReader<R> {
-    fn skip(&mut self, n: u64) -> std::io::Result<()> {
-        self.seek_relative(i64::try_from(n).map_err(std::io::Error::other)?)
-    }
-}
-
-/// A record's path is written before its shape, so a file claiming an absurd
-/// one must not be allowed to ask for that much memory first.
-const MAX_PATH: usize = 1 << 16;
-
-/// One record, and its packed half when `body` asks for it. A record this run
-/// will not unpack — made at other settings, or for a path it does not walk —
-/// is wanted for its key and its span alone, and its body is passed over
-/// rather than copied into a buffer of its own: the file holds every folder
-/// the machine has scanned, and every one of them was allocated, copied and
-/// dropped on every run, whatever the run was looking at.
-fn read_record<R: Read>(r: &mut Rd<R>, body: impl Fn(&Head) -> bool) -> Result<Option<(Head, Vec<u8>)>>
-where
-    R: Skip,
-{
-    let Some(len) = r.len_or_eof()? else { return Ok(None) };
-    if len > MAX_PATH {
-        bail!("record claims a {len}-byte path");
-    }
-    r.need(len as u64)?;
-    let path = PathBuf::from(OsString::from_vec(r.take(len)?));
-    let settings = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
-    let key = Key { len: r.u64()?, mtime: r.i64()?, ctime: r.i64()?, dev: r.u64()? };
-    let dims = (r.u32()?, r.u32()?);
-    let mut traits = Traits::default();
-    for v in traits.detail.iter_mut().chain([&mut traits.colour]).chain(traits.grid.iter_mut()) {
-        *v = r.f32()?;
-    }
-    // A JPEG's colour measured by a later run, kept below the decode's own
-    // "not measured" (`keep_colour`).
-    if traits.colour < UNMEASURED - 0.5 {
-        traits.colour_kept = Some(UNKEPT - traits.colour);
-        traits.colour = UNMEASURED;
-    }
-    let flags = r.u32()?;
-    traits.lossless = flags & 1 != 0;
-    traits.exif = flags & 2 != 0;
-    traits.frames = flags & 4 != 0;
-    traits.deep = flags & 8 != 0;
-    traits.profile = flags & 16 != 0;
-    let (w, h, n) = (r.u32()?, r.u32()?, r.u32()? as usize);
-    let (tw, th) = (r.u32()?, r.u32()?);
-    let scale = r.f32()?;
-    let packed = r.u64()?;
-    r.need(packed)?;
-    // Held as read, not narrowed, so that `read_stream` can tell a thumbnail
-    // side of 65,600 from one of 64.
-    let head = Head { path, settings, key, dims, traits, w, h, n, tw, th, scale };
-    let blob = if body(&head) {
-        r.take(packed as usize)?
-    } else {
-        r.skip(packed)?;
-        Vec::new()
-    };
-    Ok(Some((head, blob)))
-}
-
-/// Reading the file's records, in the order they were written, wherever
-/// they are read from: the whole file in order (`stream`), or the heads the
-/// index holds and the bodies this run unpacks (`read_indexed`).
-struct Reading<'a, 'o> {
-    want: Settings,
-    walked: Walked<'a>,
-    out: &'o mut HashMap<PathBuf, Entry>,
-    others: &'o mut Vec<Unasked>,
-    /// The latest record for each path made at other settings, and where it
-    /// is in `others`.
-    other_at: HashMap<(PathBuf, (u32, u32)), usize>,
-    tail: Tail,
-    batch: Vec<(Head, Vec<u8>, Span)>,
-    /// Every record met, for the index (`heads::refresh`).
-    seen: &'o mut Vec<heads::Entry>,
-}
-
-impl<'a, 'o> Reading<'a, 'o> {
-    fn new(want: Settings, walked: Walked<'a>, out: &'o mut HashMap<PathBuf, Entry>, others: &'o mut Vec<Unasked>, seen: &'o mut Vec<heads::Entry>) -> Self {
-        let tail = Tail { end: MAGIC.len() as u64, count: 0, truncated: false, damaged: 0, broken_at: None };
-        Reading { want, walked, out, others, other_at: HashMap::new(), tail, batch: Vec::with_capacity(BATCH), seen }
+        lock(&self.failed).get_or_insert_with(|| e.to_string());
     }
 
-    /// The header: this format's, or the reason not to read on.
-    fn magic<R: Read>(&mut self, r: &mut Rd<R>) -> Result<(), Reject> {
-        let magic: [u8; 8] = r.arr().map_err(|_| anyhow!("its header is cut off"))?;
-        if &magic[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
-            return Err(Reject::NotACache);
-        }
-        if &magic != MAGIC {
-            // A cache this build cannot read, written by a build that could. See
-            // the note on MAGIC: that is the format changing, not a damaged file.
-            return Err(Reject::OtherVersion(String::from_utf8_lossy(&magic).into_owned()));
-        }
-        Ok(())
+    /// Commit what waits, waiting for a commit under way to end first. A
+    /// failure is kept to be said, once.
+    fn flush(&self) {
+        let conn = lock(&self.conn);
+        self.commit(&conn);
     }
 
-    /// Whether a record's body is unpacked: made at this run's settings, for
-    /// a path it walks.
-    fn wants(&self, settings: Settings, path: &Path, key: Key) -> bool {
-        settings.reads_as(self.want) && (self.walked)(path, key)
-    }
-
-    /// Every record from where `r` stands to the end of the file.
-    fn stream<R: Read + Skip>(&mut self, r: &mut Rd<R>) {
+    /// Commit what waits unless a commit is under way, which takes it: each
+    /// worker's row is committed as soon as the index is free, and rows that
+    /// come while one commit runs go together in the next. So a process
+    /// killed outright (SIGKILL, the OOM killer) loses the rows of a commit or
+    /// two, not a batch's worth of analyses, and no worker ever waits on a
+    /// commit.
+    fn commit_waiting(&self) {
         loop {
-            let at = r.pos;
-            let (want, walked) = (self.want, self.walked);
-            match read_record(r, |h| h.settings.reads_as(want) && walked(&h.path, h.key)) {
-                Ok(None) => break,
-                Ok(Some((head, blob))) => {
-                    self.tail.end = r.pos;
-                    let span = Span { at, len: r.pos - at };
-                    self.seen.push(heads::Entry::of(&head, span));
-                    self.record(head, blob, span);
+            let Ok(conn) = self.conn.try_lock() else { return };
+            self.commit(&conn);
+            drop(conn);
+            // A row that came while the index was held, whose worker found it
+            // busy and left it: it is this one's to commit.
+            if lock(&self.pending).is_empty() {
+                return;
+            }
+        }
+    }
+
+    fn commit(&self, conn: &Connection) {
+        let rows = std::mem::take(&mut *lock(&self.pending));
+        if rows.is_empty() {
+            return;
+        }
+        let done = (|| -> rusqlite::Result<()> {
+            let tx = conn.unchecked_transaction()?;
+            {
+                let mut a = tx.prepare_cached(
+                    "INSERT OR REPLACE INTO analyses (hash, version, work, thumb, features, pack, at, len, made_by, colour, used) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
+                )?;
+                let mut f = tx.prepare_cached("INSERT OR REPLACE INTO files (path, len, mtime, ctime, hash, sample, gone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)")?;
+                for r in &rows {
+                    let s = r.settings;
+                    a.execute(params![&r.hash.hash[..], &r.version[..], s.work_size, s.thumb, s.features, r.pack, r.at as i64, r.len as i64, r.made_by, r.today])?;
+                    f.execute(params![r.name.as_os_str().as_bytes(), r.key.len as i64, r.key.mtime, r.key.ctime, &r.hash.hash[..], r.hash.sample as i64])?;
                 }
-                Err(_) if r.ended => {
-                    self.tail.truncated = true;
-                    break;
-                }
-                // The framing is damaged, so nothing after this point can be
-                // found. Everything before it is still good, and it used to be
-                // thrown away with the rest: the whole file was rejected and
-                // replaced, taking every other folder's records with it.
-                Err(e) => {
-                    self.tail.truncated = true;
-                    self.tail.broken_at = Some(e.to_string());
-                    break;
-                }
             }
-        }
-    }
-
-    /// One record framed whole, and its body if `wants` asked for it.
-    fn record(&mut self, head: Head, blob: Vec<u8>, span: Span) {
-        self.tail.count += 1;
-        // A record framed whole whose shape its own settings cannot
-        // produce: its own bytes are damaged, and the records around
-        // it are not. It is counted, so that the run sees the file
-        // holds something to compact away, and not kept.
-        if misshapen(&head) {
-            self.tail.damaged += 1;
-            return;
-        }
-        // Made at other settings: kept where it is, for whichever run
-        // asks at those settings next.
-        let s = head.settings;
-        if !s.reads_as(self.want) {
-            self.other(head.path, s, span, head.key.dev);
-            return;
-        }
-        self.batch.push((head, blob, span));
-        if self.batch.len() == BATCH {
-            self.tail.damaged += unpack_batch(&mut self.batch, self.walked, self.out);
-        }
-    }
-
-    fn other(&mut self, path: PathBuf, s: Settings, span: Span, dev: u64) {
-        match self.other_at.entry((path, s.family())) {
-            std::collections::hash_map::Entry::Occupied(e) => {
-                let u = &mut self.others[*e.get()];
-                (u.span, u.dev) = (span, dev);
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                self.others.push(Unasked { path: e.key().0.clone(), span, dev, here: false });
-                e.insert(self.others.len() - 1);
-            }
-        }
-    }
-
-    fn done(mut self) -> Tail {
-        self.tail.damaged += unpack_batch(&mut self.batch, self.walked, self.out);
-        self.tail
-    }
-}
-
-/// A record whose shape its own settings cannot produce. A thumbnail's side
-/// may pass the setting on a picture wider than 4:3 (`decode::area_factor`),
-/// but never its area, nor `lib::THUMB_MAX_SIDES` times it.
-fn misshapen(head: &Head) -> bool {
-    let s = head.settings;
-    let (tw, th) = (head.tw as u64, head.th as u64);
-    let (thumb, sides) = (s.thumb as u64, s.thumb as u64 * crate::THUMB_MAX_SIDES as u64);
-    head.n > s.features as usize || tw * th > thumb * thumb || tw.max(th) > sides
-}
-
-/// The file read through its index (`heads`): the heads of the records it
-/// covers from the index, the bodies this run unpacks by `pread`, and what
-/// was appended after it in order. `None` where the file does not bear the
-/// index out, and it is read whole instead.
-///
-/// **Only the bodies this run unpacks are read.** Read in order, a scan of
-/// four files against a 529 MB cache read all 529 MB, page cache cold, to
-/// learn the paths and keys in the heads: 0.65 s against 0.10 s without the
-/// cache, and on a spinning disk with a cache of a few gigabytes, tens of
-/// seconds for any scan at all. A smaller buffer made the skips seeks, and
-/// the chain of small reads defeated readahead (twice as slow cold). Where
-/// this run unpacks most of the file anyway, it is read in order as before.
-#[allow(clippy::too_many_arguments)]
-fn read_indexed(
-    f: &File,
-    size: u64,
-    index: heads::Index,
-    want: Settings,
-    walked: Walked,
-    out: &mut HashMap<PathBuf, Entry>,
-    others: &mut Vec<Unasked>,
-    seen: &mut Vec<heads::Entry>,
-) -> Option<Result<Tail, Reject>> {
-    let mut magic = [0u8; 8];
-    f.read_exact_at(&mut magic, 0).ok()?;
-    if &magic != MAGIC {
-        return None;
-    }
-    let mut reading = Reading::new(want, walked, out, others, seen);
-    let wanted: Vec<&heads::Entry> = index.entries.iter().filter(|e| !e.misshapen && reading.wants(e.settings, &e.path, e.key)).collect();
-    if wanted.iter().map(|e| e.span.len).sum::<u64>() * 2 > size {
-        return None;
-    }
-    // The bodies, a run of neighbours at a time, checked against the index
-    // as they are read: a head that is not the index's ends the reading.
-    let mut bodies: HashMap<u64, (Head, Vec<u8>)> = HashMap::with_capacity(wanted.len());
-    let mut k = 0;
-    while k < wanted.len() {
-        let from = wanted[k].span.at;
-        let mut to = k + 1;
-        while to < wanted.len() && wanted[to].span.at == wanted[to - 1].span.at + wanted[to - 1].span.len && wanted[to].span.at - from < 8 << 20 {
-            to += 1;
-        }
-        let end = wanted[to - 1].span.at + wanted[to - 1].span.len;
-        let mut buf = vec![0u8; (end - from) as usize];
-        f.read_exact_at(&mut buf, from).ok()?;
-        let mut r = Rd { r: std::io::Cursor::new(&buf[..]), pos: from, size: end, ended: false };
-        for e in &wanted[k..to] {
-            let (head, blob) = read_record(&mut r, |_| true).ok()??;
-            if head.path != e.path || head.key != e.key || head.key.dev != e.key.dev || head.settings != e.settings || r.pos != e.span.at + e.span.len {
-                return None;
-            }
-            bodies.insert(e.span.at, (head, blob));
-        }
-        k = to;
-    }
-    for e in &index.entries {
-        reading.seen.push(e.clone());
-        reading.tail.end = e.span.at + e.span.len;
-        if e.misshapen {
-            reading.tail.count += 1;
-            reading.tail.damaged += 1;
-            continue;
-        }
-        match bodies.remove(&e.span.at) {
-            Some((head, blob)) => reading.record(head, blob, e.span),
-            None if !e.settings.reads_as(want) => {
-                reading.tail.count += 1;
-                reading.other(e.path.clone(), e.settings, e.span, e.key.dev);
-            }
-            // At this run's settings for a path it does not walk: its key
-            // and where it is, which `unpack_batch` keeps of such a record.
-            None => {
-                reading.tail.count += 1;
-                reading.out.insert(e.path.clone(), (e.key, None, e.span));
-            }
-        }
-    }
-    // What was appended after the index was written.
-    if index.end < size {
-        let mut b = std::io::BufReader::with_capacity(1 << 20, f);
-        b.seek(std::io::SeekFrom::Start(index.end)).ok()?;
-        let mut r = Rd { r: b, pos: index.end, size, ended: false };
-        reading.stream(&mut r);
-    }
-    Some(Ok(reading.done()))
-}
-
-impl Skip for std::io::Cursor<&[u8]> {
-    fn skip(&mut self, n: u64) -> std::io::Result<()> {
-        self.seek_relative(i64::try_from(n).map_err(std::io::Error::other)?)
-    }
-}
-
-/// The index beside a cache file: the head of every record it covers (path,
-/// settings, key, where it lies), so that a run reads the bodies it unpacks
-/// and nothing else (`read_indexed`).
-///
-/// **The cache file is what is true; the index is a hint it must bear
-/// out.** It is not written as records are appended, and so needs no lock
-/// and no order with the appends of other runs: a run that read past what
-/// the index covers by `WORTH` writes a new one, beside it and renamed into
-/// place, covering the records it read. It is used only when it names the
-/// file as it is — the same device, inode and birth time, no shorter than
-/// what it covers, and the last 4 KB it covers as they were — and every
-/// body read through it must have the head the index gives, or the file is
-/// read whole as it was before there was one. A compaction removes it.
-pub(crate) mod heads {
-    use super::{Head, Key, Settings, Span, Tail, MAGIC};
-    use std::fs::File;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::os::unix::fs::{FileExt, MetadataExt};
-    use std::path::{Path, PathBuf};
-
-    const INDEX_MAGIC: &[u8; 8] = b"IMGFPH01";
-
-    /// How far past what an index covers a run reads before it writes a new
-    /// one. Below it the file is read whole in about the time an index takes
-    /// to write; a cache of a few hundred photographs never has one.
-    const WORTH: u64 = 16 << 20;
-
-    /// The bytes before the end of what an index covers that it holds a hash
-    /// of, as a check that they are still the file's.
-    const CHECKED: u64 = 4096;
-
-    #[derive(Clone, Debug)]
-    pub(super) struct Entry {
-        pub(super) span: Span,
-        pub(super) settings: Settings,
-        pub(super) key: Key,
-        pub(super) path: PathBuf,
-        /// `super::misshapen`, which a head alone says.
-        pub(super) misshapen: bool,
-    }
-
-    impl Entry {
-        pub(super) fn of(h: &Head, span: Span) -> Entry {
-            Entry { span, settings: h.settings, key: h.key, path: h.path.clone(), misshapen: super::misshapen(h) }
-        }
-    }
-
-    pub(super) struct Index {
-        pub(super) entries: Vec<Entry>,
-        /// Where the last record it covers ends.
-        pub(super) end: u64,
-    }
-
-    /// The index beside the cache file `cache`.
-    pub fn path_of(cache: &Path) -> PathBuf {
-        let mut p = cache.as_os_str().to_owned();
-        p.push(".heads");
-        PathBuf::from(p)
-    }
-
-    /// Remove the index beside `cache`: after a compaction, which moves every
-    /// record, or with the cache itself.
-    pub fn remove(cache: &Path) {
-        let _ = std::fs::remove_file(path_of(cache));
-    }
-
-    /// FNV-1a: stable across builds, which a std hasher is not promised to be.
-    fn hash(b: &[u8]) -> u64 {
-        b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3))
-    }
-
-    fn birth(m: &std::fs::Metadata) -> i64 {
-        m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i64)
-    }
-
-    /// The hash of what `f` holds just before `end`.
-    fn checked(f: &File, end: u64) -> Option<u64> {
-        let from = end.saturating_sub(CHECKED).max(MAGIC.len() as u64);
-        let mut b = vec![0u8; end.checked_sub(from)? as usize];
-        f.read_exact_at(&mut b, from).ok()?;
-        Some(hash(&b))
-    }
-
-    /// The index beside `cache`, if it is one for `f` (of `size` bytes) as
-    /// `f` is now; see the module's note.
-    pub(super) fn load(f: &File, cache: &Path, size: u64) -> Option<Index> {
-        let b = std::fs::read(path_of(cache)).ok()?;
-        let (body, sum) = b.split_at_checked(b.len().checked_sub(8)?)?;
-        if hash(body).to_le_bytes() != sum {
-            return None;
-        }
-        let mut r = Bytes { b: body, at: 0 };
-        if r.take(8)? != INDEX_MAGIC || r.take(8)? != MAGIC {
-            return None;
-        }
-        let m = f.metadata().ok()?;
-        let (dev, ino, born, end, check) = (r.u64()?, r.u64()?, r.u64()? as i64, r.u64()?, r.u64()?);
-        if (dev, ino, born) != (m.dev(), m.ino(), birth(&m)) || end > size || checked(f, end)? != check {
-            return None;
-        }
-        let n = r.u64()? as usize;
-        let mut entries = Vec::with_capacity(n.min(body.len() / 64));
-        let mut next = MAGIC.len() as u64;
-        for _ in 0..n {
-            let span = Span { at: r.u64()?, len: r.u64()? };
-            let settings = Settings { work_size: r.u32()?, features: r.u32()?, thumb: r.u32()? };
-            let key = Key { len: r.u64()?, mtime: r.u64()? as i64, ctime: r.u64()? as i64, dev: r.u64()? };
-            let misshapen = r.take(1)? != [0];
-            let len = r.u32()? as usize;
-            let path = PathBuf::from(std::ffi::OsString::from_vec(r.take(len)?.to_vec()));
-            // The records it covers lie end to end from the header.
-            if span.at != next || span.len == 0 {
-                return None;
-            }
-            next = span.at + span.len;
-            entries.push(Entry { span, settings, key, path, misshapen });
-        }
-        (next == end && r.at == body.len()).then_some(Index { entries, end })
-    }
-
-    /// Write a new index for `f` when this run read past what the old one
-    /// covered (`covered`, 0 for none) by `WORTH`, covering what it read
-    /// (`seen`, every record to `tail.end`). Nothing is said when it cannot
-    /// be written: the next run reads the file whole, as without one.
-    pub(super) fn refresh(f: &File, cache: &Path, covered: u64, tail: &Tail, seen: &[Entry]) {
-        if tail.broken_at.is_some() || tail.end < covered.max(MAGIC.len() as u64) + WORTH {
-            return;
-        }
-        let Some(m) = f.metadata().ok() else { return };
-        let mut next = MAGIC.len() as u64;
-        if seen.iter().any(|e| std::mem::replace(&mut next, e.span.at + e.span.len) != e.span.at) || next != tail.end {
-            return;
-        }
-        let Some(check) = checked(f, tail.end) else { return };
-        let mut b = Vec::with_capacity(64 + seen.len() * 96);
-        b.extend_from_slice(INDEX_MAGIC);
-        b.extend_from_slice(MAGIC);
-        for v in [m.dev(), m.ino(), birth(&m) as u64, tail.end, check, seen.len() as u64] {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        for e in seen {
-            for v in [e.span.at, e.span.len] {
-                b.extend_from_slice(&v.to_le_bytes());
-            }
-            for v in [e.settings.work_size, e.settings.features, e.settings.thumb] {
-                b.extend_from_slice(&v.to_le_bytes());
-            }
-            for v in [e.key.len, e.key.mtime as u64, e.key.ctime as u64, e.key.dev] {
-                b.extend_from_slice(&v.to_le_bytes());
-            }
-            b.push(e.misshapen as u8);
-            let name = e.path.as_os_str().as_bytes();
-            b.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            b.extend_from_slice(name);
-        }
-        b.extend_from_slice(&hash(&b).to_le_bytes());
-        let to = path_of(cache);
-        let mut tmp = to.as_os_str().to_owned();
-        tmp.push(format!(".{}", std::process::id()));
-        let tmp = PathBuf::from(tmp);
-        if std::fs::write(&tmp, &b).and_then(|()| std::fs::rename(&tmp, &to)).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-
-    struct Bytes<'a> {
-        b: &'a [u8],
-        at: usize,
-    }
-
-    impl<'a> Bytes<'a> {
-        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-            let s = self.b.get(self.at..self.at.checked_add(n)?)?;
-            self.at += n;
-            Some(s)
-        }
-        fn u64(&mut self) -> Option<u64> {
-            Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
-        }
-        fn u32(&mut self) -> Option<u32> {
-            Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+            tx.commit()
+        })();
+        if let Err(e) = done {
+            self.note(&e);
         }
     }
 }
 
-/// Unpacking is deflate plus a thumbnail's mip pyramid, which is real work on
-/// a corpus this size, and every record is independent of every other.
-///
-/// A later record for a path replaces an earlier one: that is a file which
-/// changed, and was described again and appended.
-///
-/// A record that will not unpack is left out and counted, and costs nothing
-/// but itself: its image is analysed again, as if it had never been cached.
-/// One such record used to reject the whole file — every folder the machine
-/// had scanned, for one damaged image.
-fn unpack_batch(batch: &mut Vec<(Head, Vec<u8>, Span)>, walked: Walked, out: &mut HashMap<PathBuf, Entry>) -> usize {
-    let done: Vec<Result<(PathBuf, Entry)>> = batch
-        .par_iter()
-        .map(|(h, blob, span)| {
-            if !walked(&h.path, h.key) {
-                return Ok((h.path.clone(), (h.key, None, *span)));
-            }
-            let (kps, desc, px, ends) = unpack(blob, h.n, h.tw as u16, h.th as u16)?;
-            Ok((
-                h.path.clone(),
-                (
-                    h.key,
-                    Some(Record {
-                        feats: Features { w: h.w, h: h.h, kps: kps.into(), desc: desc.into(), ends }.spilled(),
-                        thumb: Thumb::new(h.tw as u16, h.th as u16, h.scale, px).spilled(),
-                        dims: h.dims,
-                        traits: h.traits,
-                    }),
-                    *span,
-                ),
-            ))
-        })
-        .collect();
-    batch.clear();
-    let mut damaged = 0;
-    for r in done {
-        match r {
-            Ok((path, rec)) => {
-                out.insert(path, rec);
-            }
-            Err(_) => damaged += 1,
+/// Open the index at `path`, making its tables if it has none. `Err` for one
+/// of another schema (its format) or one that will not open.
+fn connect(path: &Path, share: bool) -> Result<Connection, Opened> {
+    let fail = |e: rusqlite::Error| Opened::Failed(e.to_string());
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(fail)?;
+    c.busy_timeout(std::time::Duration::from_secs(60)).map_err(fail)?;
+    // A write-ahead log, whose commits sync nothing (only its checkpoints
+    // do) and which a power cut cannot leave inconsistent: it costs the last
+    // batches, whose records are analysed again. With a rollback journal each
+    // batch's commit was an fsync, which on ext4 also flushed the packs' and
+    // the scratch file's pages: 7.9 s of a cold found-corpus run, and 32 s of
+    // workers waiting behind it. Not on a network share, where a log's shared
+    // memory does not work: there a rollback journal, synced.
+    c.pragma_update(None, "journal_mode", if share { "TRUNCATE" } else { "WAL" }).map_err(fail)?;
+    // A pack is never synced; a row whose record a power cut lost is caught
+    // by its stamp (`unrecord`) and costs that record.
+    c.pragma_update(None, "synchronous", "NORMAL").map_err(fail)?;
+    // The index is read through a mapping and a page cache that hold it: it
+    // is some 380 bytes a file, and read a page at a time through SQLite's
+    // default 2 MB cache, counting 33,000 rows took 127 ms. Not mapped on a
+    // share, where another machine's writes do not reach a mapping.
+    c.pragma_update(None, "mmap_size", if share { 0 } else { 1i64 << 30 }).map_err(fail)?;
+    c.pragma_update(None, "cache_size", -65536i64).map_err(fail)?;
+    let tx = c.unchecked_transaction().map_err(fail)?;
+    let app: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0)).map_err(fail)?;
+    let schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(fail)?;
+    if app == 0 && schema == 0 {
+        // New, or made empty: the run that gets here first makes it.
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS files (
+                path BLOB PRIMARY KEY, len INTEGER NOT NULL, mtime INTEGER NOT NULL, ctime INTEGER NOT NULL,
+                hash BLOB NOT NULL, sample INTEGER NOT NULL, gone INTEGER) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS files_by_hash ON files (hash);
+             CREATE TABLE IF NOT EXISTS analyses (
+                hash BLOB NOT NULL, version BLOB NOT NULL, work INTEGER NOT NULL, thumb INTEGER NOT NULL,
+                features INTEGER NOT NULL, pack INTEGER NOT NULL, at INTEGER NOT NULL, len INTEGER NOT NULL,
+                made_by TEXT, colour REAL, used INTEGER NOT NULL,
+                PRIMARY KEY (hash, version, work, thumb)) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS packs (id INTEGER PRIMARY KEY);",
+        )
+        .map_err(fail)?;
+        tx.pragma_update(None, "application_id", APPLICATION_ID).map_err(fail)?;
+        tx.pragma_update(None, "user_version", SCHEMA).map_err(fail)?;
+    } else if app != APPLICATION_ID {
+        return Err(Opened::Failed("not an img-fp cache".into()));
+    } else if schema != SCHEMA {
+        return Err(Opened::Other(format!("IMGFPD{schema:02}")));
+    }
+    tx.commit().map_err(fail)?;
+    Ok(c)
+}
+
+/// Whether `path` lies on a filesystem another machine may share: by the
+/// type `/proc/self/mountinfo` gives the deepest mount holding it. A FUSE
+/// mount counts as one (sshfs, rclone), which costs a local FUSE mount only a
+/// sync at each commit.
+fn on_network_share(path: &Path) -> bool {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let Ok(dir) = std::fs::canonicalize(dir) else { return false };
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else { return false };
+    let mut best: Option<(usize, &str)> = None;
+    for line in info.lines() {
+        let mut halves = line.splitn(2, " - ");
+        let (Some(pre), Some(post)) = (halves.next(), halves.next()) else { continue };
+        let (Some(point), Some(fstype)) = (pre.split(' ').nth(4), post.split(' ').next()) else { continue };
+        let point = unescape(point);
+        if dir.starts_with(&point) && best.is_none_or(|(n, _)| point.as_os_str().len() >= n) {
+            best = Some((point.as_os_str().len(), fstype));
         }
     }
-    damaged
+    best.is_some_and(|(_, t)| {
+        t.starts_with("nfs") || t.starts_with("fuse") || matches!(t, "cifs" | "smb3" | "smbfs" | "9p" | "ceph" | "afs" | "glusterfs" | "lustre" | "ncpfs" | "coda" | "davfs")
+    })
 }
 
-/// Which of `unasked`, the records a run was not asked about, it carries:
-/// those whose file is still there, or lies on a drive that is not plugged
-/// in. One rule, for a file this run did not walk and for a record made at
-/// other settings alike.
-///
-/// The cache is one file per machine rather than one per corpus, so a run over
-/// `~/Pictures` must not throw away what the last run over `~/Downloads` paid
-/// for: what the file keeps is this run's analysis *plus* this. Without it a
-/// default cache would be worse than none, silently, for anyone who scans two
-/// directories in turn. Nor a run at another `--work-size` what this one made,
-/// and the other way round.
-///
-/// The existence check (`gone`) is what keeps the file from growing forever. A record
-/// is worth keeping while the file it describes is there to be matched again;
-/// once the file is gone the record can never be used, only carried, and it
-/// is why `--prune-cache` is a flag rather than the default.
-///
-/// **A file on a drive that is not plugged in is not gone.** Its records
-/// used to count as dead like any other, and once they were a quarter of the
-/// file the next scan of anything else compacted them away: a photo library
-/// on an external disk, scanned and then unplugged, was analysed from scratch
-/// the next time it was plugged in. So a record whose file is missing is kept
-/// when the file lies on a volume that is not mounted (`away`). Records
-/// made at other settings were asked `gone` alone, and lost there what the
-/// rest kept.
-fn carried(unasked: &[Unasked]) -> Vec<&Unasked> {
-    let gone = gone(unasked.iter().map(|u| u.path.as_path()));
-    if gone.is_empty() {
-        return unasked.iter().collect();
-    }
-    let mounts = Mounts::here();
-    // Each folder asked once, however many of its records are missing.
-    let mut folders: HashMap<&Path, bool> = HashMap::new();
-    let mut volumes: HashMap<PathBuf, bool> = HashMap::new();
-    let mut kept = Vec::with_capacity(unasked.len());
-    for u in unasked {
-        if !gone.contains(u.path.as_path()) || u.path.parent().is_some_and(|f| *folders.entry(f).or_insert_with(|| away(&u.path, u.dev, &mounts, &mut volumes))) {
-            kept.push(u);
-        }
-    }
-    kept
-}
-
-/// Whether a missing file, and so every missing file of its folder, lies on
-/// a volume that is not mounted, by any of three signs, each asked once a
-/// volume (`volumes`):
-///
-/// - it is where systems mount drives (`volume_root`), and nothing is there
-///   now (`unmounted`): udisks removes the folder it made, so this is the
-///   one sign left of a drive under `/media`;
-/// - it is under a mount point `/etc/fstab` names, and that is not mounted;
-///   when it is, the third sign is still asked, since a share can be
-///   mounted inside it (`~/nas` on a `/home` partition: Fedora's default
-///   layout lists `/home`, and such a share's records were dropped);
-/// - the folder is not there, and the nearest folder above it that is, is
-///   empty and nothing is mounted on it: the mount point an sshfs, NFS or
-///   SMB share, or a disk mounted by hand, leaves behind (`~/nas`, `/srv`).
-///
-/// The first was all there was, so a share mounted anywhere else lost every
-/// record each time it was away. A folder that is there with the file gone
-/// from it is a deletion, whatever is above it.
-///
-/// **The third asks the device the file lay on (`dev`, the record's).** An
-/// empty folder is also what deleting the one folder another held leaves
-/// (`rm -r photos/2019` from a `photos` holding nothing else), and those
-/// records were kept as a share's, on every run, for good. A share's files
-/// lay on another device than the folder it was mounted on; deleted files
-/// lay on the folder's own.
-fn away(file: &Path, dev: u64, mounts: &Mounts, volumes: &mut HashMap<PathBuf, bool>) -> bool {
-    let Some(folder) = file.parent() else { return false };
-    let mut asked = |root: PathBuf, empty_too: bool| {
-        *volumes.entry(root).or_insert_with_key(|r| !mounts.mounted(r) && (!empty_too || unmounted(r)))
-    };
-    if volume_root(file).is_some_and(|r| asked(r, true)) {
-        return true;
-    }
-    if mounts.configured(folder).is_some_and(|r| asked(r.to_path_buf(), false)) {
-        return true;
-    }
-    use std::os::unix::fs::MetadataExt;
-    left_behind(folder).is_some_and(|r| std::fs::metadata(&r).is_ok_and(|m| m.dev() != dev) && asked(r, true))
-}
-
-/// The nearest folder above `folder` that is there, when `folder` is not;
-/// not `/`.
-fn left_behind(folder: &Path) -> Option<PathBuf> {
-    let missing = |p: &Path| matches!(std::fs::symlink_metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
-    if !missing(folder) {
-        return None;
-    }
-    let mut at = folder.parent()?;
-    while missing(at) {
-        at = at.parent()?;
-    }
-    (at.parent().is_some() && at.is_dir()).then(|| at.to_path_buf())
-}
-
-/// What is mounted now (`/proc/self/mountinfo`) and where `/etc/fstab` says
-/// something is mounted. Both empty where there is no such file.
-struct Mounts {
-    now: std::collections::HashSet<PathBuf>,
-    configured: Vec<PathBuf>,
-}
-
-impl Mounts {
-    fn here() -> Mounts {
-        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
-        Mounts::of(&read("/proc/self/mountinfo"), &read("/etc/fstab"))
-    }
-
-    /// From the two files' text: mountinfo's fifth field, fstab's second,
-    /// each with its octal escapes (`\040` a space) read.
-    fn of(mountinfo: &str, fstab: &str) -> Mounts {
-        let field = |line: &str, n: usize| line.split_whitespace().nth(n).map(unescape);
-        let now = mountinfo.lines().filter_map(|l| field(l, 4)).collect();
-        let configured = fstab
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .filter_map(|l| field(l, 1))
-            .filter(|p| p.is_absolute() && p.parent().is_some())
-            .collect();
-        Mounts { now, configured }
-    }
-
-    fn mounted(&self, p: &Path) -> bool {
-        self.now.contains(p)
-    }
-
-    /// The deepest mount point `/etc/fstab` names that holds `p`.
-    fn configured(&self, p: &Path) -> Option<&Path> {
-        self.configured.iter().filter(|m| p.starts_with(m)).max_by_key(|m| m.components().count()).map(PathBuf::as_path)
-    }
+#[cfg(test)]
+thread_local! {
+    /// A test's answer to `on_network_share`, for this thread's opens.
+    static AS_SHARE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// A mount table's field, its `\NNN` octal escapes read.
 fn unescape(s: &str) -> PathBuf {
-    use std::os::unix::ffi::OsStringExt;
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -2558,23 +964,755 @@ fn unescape(s: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
-/// Which of `paths`, the files records name, are no longer there: the
-/// filesystem says so, and not merely that it cannot be asked right now.
+/// Why an index did not open.
+enum Opened {
+    Other(String),
+    Failed(String),
+}
+
+// ------------------------------------------------------------ the store
+
+/// The run's cache: the index open, the packs read from and the one appended
+/// to, and what it knows of each of the run's files by number.
+///
+/// **It answers for the run's files by number**: `hash_of` gives a file's
+/// hash where its key says the index still knows it, `read` finds the
+/// analyses of the files' hashes and unpacks them, `take` hands one over,
+/// `append` keeps one made for a file, `keep_colour` keeps a JPEG's colour,
+/// and `finish` decides what stays. Which records a run keeps is decided
+/// there and nowhere else.
+pub struct Store {
+    path: PathBuf,
+    db: Option<Arc<Db>>,
+    /// `X.lock`, held shared while the store is open.
+    held: Option<File>,
+    settings: Settings,
+    version: [u8; 16],
+    today: i64,
+    asked: Vec<Asked>,
+    /// Analyses of the run's files' hashes, at its settings, the read found.
+    usable: usize,
+    other_version: Option<String>,
+    /// The pack this run appends to, opened at its first append.
+    writer: Mutex<Option<Writer>>,
+    /// The files whose analysis the run took or made: what it keeps.
+    live: Mutex<Vec<bool>>,
+    /// The hash of each file whose row went in with the analysis made for
+    /// it, which `finish` does not write again: the hash its decode took,
+    /// where it was not read before (`same::content_hashes`).
+    rowed: Mutex<Vec<Option<Content>>>,
+}
+
+/// One walked file, as the index knows it.
+struct Asked {
+    /// Its name in the index (`lib::cache_names`).
+    name: PathBuf,
+    /// What the walk read of it; `None`, nothing is kept for it.
+    key: Option<Key>,
+    /// Its row in the index, as it was: key and hash.
+    row: Option<(Key, Content)>,
+    /// Its content this run, once known (`read`).
+    hash: Option<Content>,
+    /// The analysis read for it, until taken.
+    record: Option<Record>,
+    /// The day its analysis's row says it was last used, when it was read.
+    used: Option<i64>,
+}
+
+/// Where a wanted file's analysis is: file, pack, offset, length, the day it
+/// was last used, and the colour kept on it.
+type Place = (usize, i64, u64, u64, i64, Option<f64>);
+
+/// The pack a run appends to: its number, the file, held `flock`ed alone, and
+/// where the next record goes.
+struct Writer {
+    id: i64,
+    file: File,
+    end: u64,
+}
+
+/// What `Store::finish` kept and did, for the run to say.
+pub struct Kept {
+    /// The first write that failed, if one did.
+    pub failure: Option<String>,
+    /// Files this run did not walk whose rows were kept.
+    pub carried: usize,
+    /// Of those, the ones that have gone and are kept for the grace period.
+    pub gone: usize,
+    /// Rows of files and analyses dropped.
+    pub dropped: usize,
+    pub compacted: Compacted,
+}
+
+/// Whether `Store::finish` rewrote the packs.
+pub enum Compacted {
+    /// Not worth it: the bytes the packs hold, and how many nothing reads.
+    Unneeded { bytes: u64, unused: u64 },
+    /// Put off: another run has the cache open.
+    Busy,
+    /// Side packs folded into the newest, without a rewrite.
+    Folded,
+    Done,
+    Failed(String),
+}
+
+/// Open the cache at `path` for this run's `files` (each by the name the
+/// index knows it by and what the walk read of it): read which of them the
+/// index still knows by their key, and keep it open for what the run adds.
+///
+/// Every route out of here returns a store rather than an error, because the
+/// cache is an optimisation: a run whose cache is missing or ruined computes
+/// exactly the same pairs, only slower. What it must not be is silent about
+/// the last of those. A cache of another version is left as it is and the run
+/// keeps nothing in it, since that version may be in use.
+pub fn open(path: &Path, settings: Settings, version: [u8; 16], files: Vec<(PathBuf, Option<Key>)>, problems: &mut Problems) -> Store {
+    let asked: Vec<Asked> = files.into_iter().map(|(name, key)| Asked { name, key, row: None, hash: None, record: None, used: None }).collect();
+    let n = asked.len();
+    let mut store = Store {
+        path: path.to_path_buf(),
+        db: None,
+        held: None,
+        settings,
+        version,
+        today: today(),
+        asked,
+        usable: 0,
+        other_version: None,
+        writer: Mutex::new(None),
+        live: Mutex::new(vec![false; n]),
+        rowed: Mutex::new(vec![None; n]),
+    };
+    if let Found::Other(v) = found_at(path) {
+        store.other_version = Some(v);
+        return store;
+    }
+    let held = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path(path));
+    let held = match held {
+        Ok(f) => f,
+        Err(e) => {
+            problems.note(Note::Cache, format_args!("could not open {}: {e}", lock_path(path).display()));
+            return store;
+        }
+    };
+    flock(&held, LOCK_SH);
+    let share = on_network_share(path);
+    #[cfg(test)]
+    let share = AS_SHARE.with(|s| s.get()).unwrap_or(share);
+    // The index open, and each walked file's row in it, by its name.
+    type Rows = Vec<Option<(Key, Content)>>;
+    let load = |asked: &[Asked]| -> Result<(Connection, Rows), Opened> {
+        let conn = connect(path, share)?;
+        let rows: rusqlite::Result<Rows> = (|| {
+            let mut q = conn.prepare("SELECT len, mtime, ctime, hash, sample FROM files WHERE path = ?1")?;
+            asked
+                .iter()
+                .map(|a| {
+                    q.query_row([a.name.as_os_str().as_bytes()], |r| {
+                        let hash: Vec<u8> = r.get(3)?;
+                        Ok((Key { len: r.get::<_, i64>(0)? as u64, mtime: r.get(1)?, ctime: r.get(2)? }, hash, r.get::<_, i64>(4)? as u64))
+                    })
+                    .optional()
+                    .map(|o| o.and_then(|(k, h, sample)| Some((k, Content { hash: Hash::try_from(&h[..]).ok()?, sample }))))
+                })
+                .collect()
+        })();
+        let rows = rows.map_err(|e| Opened::Failed(e.to_string()))?;
+        Ok((conn, rows))
+    };
+    let (conn, rows) = match load(&store.asked) {
+        Ok(got) => got,
+        Err(Opened::Other(v)) => {
+            store.other_version = Some(v);
+            return store;
+        }
+        Err(Opened::Failed(e)) => {
+            // Damaged, or not a database after all: it costs the analysis,
+            // so it is said, and replaced by an empty cache when nothing else
+            // has it open.
+            problems.note(Note::Cache, format_args!("{} could not be read ({e}); starting a new cache", path.display()));
+            if !flock(&held, LOCK_EX | LOCK_NB) {
+                return store;
+            }
+            remove_all(path);
+            flock(&held, LOCK_SH);
+            match load(&store.asked) {
+                Ok(got) => got,
+                Err(_) => return store,
+            }
+        }
+    };
+    for (a, r) in store.asked.iter_mut().zip(rows) {
+        a.row = r;
+    }
+    let db = Arc::new(Db { conn: Mutex::new(conn), pending: Mutex::new(Vec::new()), failed: Mutex::new(None), damaged: Default::default() });
+    lock(&OPEN).push(Arc::downgrade(&db));
+    store.db = Some(db);
+    store.held = Some(held);
+    store
+}
+
+impl Store {
+    /// The length and sample of each file the index knows: a walked file of
+    /// another length and sample cannot hold the content of any analysis kept
+    /// (`same::content_hashes`).
+    pub fn samples(&self) -> HashSet<(u64, u64)> {
+        let Some(db) = &self.db else { return HashSet::new() };
+        let conn = lock(&db.conn);
+        let got: rusqlite::Result<HashSet<(u64, u64)>> = (|| {
+            let mut q = conn.prepare("SELECT DISTINCT len, sample FROM files")?;
+            let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)))?;
+            rows.collect()
+        })();
+        got.unwrap_or_default()
+    }
+
+    /// Walked file `i`'s hash, where the index knows it: its row's, when the
+    /// walk read the key the row was made with.
+    pub fn hash_of(&self, i: usize) -> Option<Content> {
+        let a = &self.asked[i];
+        a.row.filter(|(k, _)| Some(*k) == a.key).map(|(_, h)| h)
+    }
+
+    /// Learn each walked file's hash (`None` for a file not hashed), and read
+    /// the analyses of those `wanted` says to: the newest at this run's
+    /// settings made by this build's analysis (`version`), not by another
+    /// version of a library outside it (`made_by`). `met(i)` is said for
+    /// each file the index answers, before its record is read, for the
+    /// progress bar; `read_bytes(n)` as each batch is read.
+    pub fn read(&mut self, hashes: Vec<Option<Content>>, wanted: &(dyn Fn(usize) -> bool + Sync), met: &(dyn Fn(usize) + Sync), problems: &mut Problems) -> u64 {
+        for (a, h) in self.asked.iter_mut().zip(hashes) {
+            a.hash = h;
+        }
+        let Some(db) = &self.db else { return 0 };
+        let s = self.settings;
+        // Where each wanted file's analysis is, if it has one.
+        let found: rusqlite::Result<Vec<Place>> = (|| {
+            let conn = lock(&db.conn);
+            let mut q = conn.prepare_cached("SELECT pack, at, len, made_by, used, colour FROM analyses WHERE hash = ?1 AND version = ?2 AND work = ?3 AND thumb = ?4")?;
+            let mut out = Vec::new();
+            for (i, a) in self.asked.iter().enumerate() {
+                let Some(h) = a.hash.filter(|_| wanted(i)) else { continue };
+                let row = q
+                    .query_row(params![&h.hash[..], &self.version[..], s.work_size, s.thumb], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, Option<f64>>(5)?))
+                    })
+                    .optional()?;
+                let Some((pack, at, len, made_by, used, colour)) = row else { continue };
+                // Pixels another version of libheif made are not this one's.
+                if made_by.is_some_and(|m| Some(m.as_str()) != crate::heif::version()) {
+                    continue;
+                }
+                met(i);
+                out.push((i, pack, at, len, used, colour));
+            }
+            Ok(out)
+        })();
+        let mut found = match found {
+            Ok(f) => f,
+            Err(e) => {
+                problems.note(Note::Cache, format_args!("could not read {}: {e}", self.path.display()));
+                return 0;
+            }
+        };
+        self.usable = found.len();
+        // In each pack's order, so a cold read runs forward through the file.
+        found.sort_unstable_by_key(|&(_, pack, at, ..)| (pack, at));
+        let mut packs: HashMap<i64, Option<File>> = HashMap::new();
+        for &(_, pack, ..) in &found {
+            packs.entry(pack).or_insert_with(|| File::open(pack_path(&self.path, pack)).ok());
+        }
+        let bytes: u64 = found.iter().map(|f| f.3).sum();
+        let (settings, asked) = (self.settings, &self.asked);
+        let got: Vec<(usize, Option<Record>, i64)> = found
+            .par_chunks(READ_BATCH)
+            .flat_map_iter(|chunk| {
+                let mut b = Vec::new();
+                chunk
+                    .iter()
+                    .map(|&(i, pack, at, len, used, colour)| {
+                        let rec = packs[&pack].as_ref().and_then(|f| {
+                            b.resize(len as usize, 0);
+                            f.read_exact_at(&mut b, at).ok()?;
+                            let mut r = unrecord(&b, &asked[i].hash?.hash, settings).ok()?;
+                            // A colour kept on the row, which the record's
+                            // own traits do not carry.
+                            r.traits.colour_kept = colour.map(|c| c as f32);
+                            Some(r)
+                        });
+                        (i, rec, used)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut damaged = 0;
+        for (i, rec, used) in got {
+            match rec {
+                Some(r) => {
+                    self.asked[i].record = Some(r);
+                    self.asked[i].used = Some(used);
+                }
+                None => damaged += 1,
+            }
+        }
+        if damaged > 0 {
+            // Each costs itself: its file is analysed again, and the record
+            // made then replaces the row.
+            problems.note(Note::Cache, format_args!("{}: {damaged} record(s) would not read and are made again", self.path.display()));
+            self.usable -= damaged;
+        }
+        bytes
+    }
+
+    /// The analysis of walked file `i`, taken out of the store: there only if
+    /// the read found one for its hash, and only once.
+    pub fn take(&mut self, i: usize) -> Option<Record> {
+        let rec = self.asked[i].record.take()?;
+        self.live.get_mut().unwrap_or_else(PoisonError::into_inner)[i] = true;
+        Some(rec)
+    }
+
+    /// Put walked file `i`'s analysis into a pack as soon as it is made, under
+    /// its hash, and its row with the next batch. Not if the file has changed
+    /// since the walk read its key: then what was hashed may not be what was
+    /// described. Called by the workers as they finish.
+    pub fn append(&self, i: usize, it: &Item) {
+        let Some(db) = &self.db else { return };
+        let a = &self.asked[i];
+        let (Some(key), Some(hash)) = (a.key, a.hash.or(it.hash)) else { return };
+        if std::fs::metadata(&a.name).ok().and_then(|m| key_from(&m)) != Some(key) {
+            return;
+        }
+        let rec = match record(&hash.hash, it.dims, &it.traits, &it.feats, &it.thumb) {
+            Ok(r) => r,
+            Err(e) => {
+                lock(&db.failed).get_or_insert_with(|| e.to_string());
+                return;
+            }
+        };
+        let _w = lock(&WRITING);
+        let mut writer = lock(&self.writer);
+        if writer.is_none() {
+            match self.pack_to_write(db) {
+                Ok(w) => *writer = Some(w),
+                Err(e) => {
+                    match e.downcast_ref::<rusqlite::Error>() {
+                        Some(e) => db.note(e),
+                        None => {
+                            lock(&db.failed).get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        let w = writer.as_mut().unwrap();
+        if let Err(e) = w.file.write_all_at(&rec, w.end) {
+            lock(&db.failed).get_or_insert_with(|| e.to_string());
+            return;
+        }
+        let row = Row {
+            hash,
+            version: self.version,
+            settings: self.settings,
+            pack: w.id,
+            at: w.end,
+            len: rec.len() as u64,
+            made_by: it.made_by,
+            today: self.today,
+            name: a.name.clone(),
+            key,
+        };
+        w.end += rec.len() as u64;
+        drop(writer);
+        APPENDED.fetch_add(1, Ordering::Relaxed);
+        lock(&self.live)[i] = true;
+        lock(&self.rowed)[i] = Some(hash);
+        lock(&db.pending).push(row);
+        // Committed with the append lock let go: the other workers append
+        // meanwhile, and an interrupt commits whatever this has not.
+        drop(_w);
+        db.commit_waiting();
+    }
+
+    /// The pack to append to: the newest, when no other run is writing to
+    /// it, else a new one of this run's own.
+    fn pack_to_write(&self, db: &Db) -> Result<Writer> {
+        let conn = lock(&db.conn);
+        let newest: Option<i64> = conn.query_row("SELECT MAX(id) FROM packs", [], |r| r.get(0))?;
+        let file = newest.and_then(|id| OpenOptions::new().read(true).write(true).open(pack_path(&self.path, id)).ok().map(|f| (id, f)));
+        if let Some((id, file)) = file.filter(|(_, f)| flock(f, LOCK_EX | LOCK_NB)) {
+            let end = file.metadata()?.len();
+            return Ok(Writer { id, file, end });
+        }
+        conn.execute("INSERT INTO packs (id) VALUES (NULL)", [])?;
+        let id = conn.last_insert_rowid();
+        let file = OpenOptions::new().read(true).write(true).create_new(true).open(pack_path(&self.path, id))?;
+        flock(&file, LOCK_EX);
+        Ok(Writer { id, file, end: 0 })
+    }
+
+    /// Keep `colour` on walked file `i`'s analysis, if the run keeps one for
+    /// it. Every file of its content shares it.
+    pub fn keep_colour(&self, i: usize, colour: f32) {
+        let Some(db) = &self.db else { return };
+        let a = &self.asked[i];
+        let Some(h) = a.hash.or(lock(&self.rowed)[i]).filter(|_| lock(&self.live)[i]) else { return };
+        db.flush();
+        let s = self.settings;
+        let conn = lock(&db.conn);
+        if let Err(e) = conn.execute(
+            "UPDATE analyses SET colour = ?1 WHERE hash = ?2 AND version = ?3 AND work = ?4 AND thumb = ?5",
+            params![colour as f64, &h.hash[..], &self.version[..], s.work_size, s.thumb],
+        ) {
+            db.note(&e);
+        }
+    }
+
+    /// Walked file `i`'s name in the index: its canonical path
+    /// (`lib::cache_names`), however the run spelled it.
+    pub fn name(&self, i: usize) -> &Path {
+        &self.asked[i].name
+    }
+
+    /// Analyses of the run's files the read found at its settings.
+    pub fn usable(&self) -> usize {
+        self.usable
+    }
+
+    /// The format the cache was written in, when it is another version's and
+    /// this run therefore reads nothing from it and keeps nothing in it.
+    pub fn other_version(&self) -> Option<&str> {
+        self.other_version.as_deref()
+    }
+
+    /// Whether `finish` will have rows to write, as far as can be told before
+    /// the analysis: a walked file whose row is not what the run read of it.
+    /// What the progress bar expects, and nothing else.
+    pub fn stale(&self) -> bool {
+        self.db.is_some() && self.asked.iter().any(|a| a.hash.is_some() && a.key.is_some() && a.row != a.key.zip(a.hash))
+    }
+
+    /// Settle the cache at the end of the analysis.
+    ///
+    /// The index keeps a row for every walked file the run hashed (its key
+    /// and hash), and for every file it did not walk while the file is there,
+    /// or for `GRACE_DAYS` after a run first found it gone; an analysis while
+    /// a kept row holds its hash, and one by another analysis than this
+    /// build's for `GRACE_DAYS` unused. `--prune-cache` (`prune`) keeps only
+    /// the run's own rows and analyses.
+    ///
+    /// The packs are rewritten, by a run that has the cache alone, when what
+    /// no row reads is a quarter of them: the trade every log-structured
+    /// store makes, the file never more than a third larger than what it
+    /// holds and a rewrite copying at most three bytes worth keeping for each
+    /// it drops. A pack another run wrote beside the others is folded into
+    /// the largest, a copy of the smaller packs' records alone.
+    pub fn finish(&mut self, prune: bool) -> Kept {
+        let mut kept = Kept { failure: None, carried: 0, gone: 0, dropped: 0, compacted: Compacted::Unneeded { bytes: 0, unused: 0 } };
+        let Some(db) = self.db.clone() else { return kept };
+        db.flush();
+        // This run's own pack is let go of, so a compaction can have it.
+        drop(lock(&self.writer).take());
+        let done = self.settle(&db, prune);
+        if let Err(e) = &done {
+            db.note(e);
+        }
+        if let Ok((carried, gone, dropped)) = done {
+            (kept.carried, kept.gone, kept.dropped) = (carried, gone, dropped);
+        }
+        kept.compacted = match self.compact(&db, prune) {
+            Ok(c) => c,
+            Err(e) => {
+                if e.downcast_ref::<rusqlite::Error>().is_some_and(is_damage) {
+                    db.damaged.store(true, Ordering::Relaxed);
+                }
+                Compacted::Failed(e.to_string())
+            }
+        };
+        kept.failure = lock(&db.failed).clone();
+        if db.damaged.load(Ordering::Relaxed) {
+            // Every later run would fail on it as this one did: removed, when
+            // no other run has it, and the next starts a new cache.
+            let alone = self.held.as_ref().is_some_and(|h| flock(h, LOCK_EX | LOCK_NB));
+            let e = kept.failure.take().unwrap_or_default();
+            kept.failure = Some(if alone {
+                self.db = None;
+                drop(db);
+                remove_all(&self.path);
+                format!("its index is damaged ({e}), so it is removed and the next run starts a new cache")
+            } else {
+                format!("its index is damaged ({e}); the next run that has it alone starts a new cache")
+            });
+        }
+        kept
+    }
+
+    /// The index's rows as `finish` keeps them: (rows of other files carried,
+    /// of them gone, rows dropped).
+    fn settle(&self, db: &Db, prune: bool) -> rusqlite::Result<(usize, usize, usize)> {
+        let today = self.today;
+        let live = lock(&self.live).clone();
+        let rowed = lock(&self.rowed).clone();
+        let conn = lock(&db.conn);
+        let tx = conn.unchecked_transaction()?;
+        let mut dropped = 0;
+        // Each walked file's row as the run found it: its key and hash, there.
+        {
+            let mut put = tx.prepare("INSERT OR REPLACE INTO files (path, len, mtime, ctime, hash, sample, gone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)")?;
+            let mut del = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+            for (a, _) in self.asked.iter().zip(&rowed).filter(|(_, r)| r.is_none()) {
+                match a.key.zip(a.hash) {
+                    Some((k, h)) if a.row != Some((k, h)) => {
+                        put.execute(params![a.name.as_os_str().as_bytes(), k.len as i64, k.mtime, k.ctime, &h.hash[..], h.sample as i64])?;
+                    }
+                    Some(_) => {}
+                    // Not hashed this run (unreadable, or no picture): what
+                    // the row said is not known to hold.
+                    None if a.row.is_some() => dropped += del.execute([a.name.as_os_str().as_bytes()])?,
+                    None => {}
+                }
+            }
+            // An analysis the run used is used today; told only once a day.
+            let mut used = tx.prepare("UPDATE analyses SET used = ?1 WHERE hash = ?2 AND version = ?3 AND work = ?4 AND thumb = ?5")?;
+            let s = self.settings;
+            for (a, _) in self.asked.iter().zip(&live).filter(|(a, l)| **l && a.hash.is_some() && a.used.is_some_and(|u| u < today)) {
+                used.execute(params![today, &a.hash.unwrap().hash[..], &self.version[..], s.work_size, s.thumb])?;
+            }
+        }
+        // The rows of files this run did not walk, if there are any: when
+        // the index holds no more rows than the walked files that have one,
+        // there are none, and the rows are not read (a rescan of 33,000
+        // files spent most of its finish reading them).
+        let rows: i64 = tx.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+        let walked_rows = self.asked.iter().zip(&rowed).filter(|(a, r)| a.key.is_some() && a.hash.or(**r).is_some()).count();
+        let walked: HashSet<&[u8]> = if rows as usize > walked_rows { self.asked.iter().map(|a| a.name.as_os_str().as_bytes()).collect() } else { HashSet::new() };
+        let others: Vec<(PathBuf, Option<i64>)> = if walked.is_empty() { Vec::new() } else {
+            let mut q = tx.prepare("SELECT path, gone FROM files")?;
+            let rows = q.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<i64>>(1)?)))?;
+            rows.filter_map(|r| r.ok()).filter(|(p, _)| !walked.contains(&p[..])).map(|(p, g)| (PathBuf::from(std::ffi::OsString::from_vec(p)), g)).collect()
+        };
+        let (mut carried, mut gone_n) = (0, 0);
+        if prune {
+            let mut del = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+            for (p, _) in &others {
+                dropped += del.execute([p.as_os_str().as_bytes()])?;
+            }
+            // Only this run's analyses: its hashes, at its version and settings.
+            tx.execute("CREATE TEMP TABLE IF NOT EXISTS keep (hash BLOB PRIMARY KEY)", [])?;
+            tx.execute("DELETE FROM keep", [])?;
+            {
+                let mut k = tx.prepare("INSERT OR IGNORE INTO keep (hash) VALUES (?1)")?;
+                for (h, _) in self.asked.iter().zip(&rowed).map(|(a, r)| a.hash.or(*r)).zip(&live).filter(|(_, l)| **l) {
+                    if let Some(h) = h {
+                        k.execute([&h.hash[..]])?;
+                    }
+                }
+            }
+            let s = self.settings;
+            dropped += tx.execute(
+                "DELETE FROM analyses WHERE version != ?1 OR work != ?2 OR thumb != ?3 OR hash NOT IN (SELECT hash FROM keep)",
+                params![&self.version[..], s.work_size, s.thumb],
+            )?;
+        } else {
+            let gone = gone(others.iter().map(|(p, _)| p.as_path()));
+            let mut mark = tx.prepare("UPDATE files SET gone = ?2 WHERE path = ?1")?;
+            let mut del = tx.prepare("DELETE FROM files WHERE path = ?1")?;
+            for (p, was) in &others {
+                let path = p.as_os_str().as_bytes();
+                match (gone.contains(p.as_path()), *was) {
+                    (true, Some(since)) if today - since >= GRACE_DAYS => {
+                        dropped += del.execute([path])?;
+                        continue;
+                    }
+                    (true, None) => {
+                        mark.execute(params![path, today])?;
+                    }
+                    (false, Some(_)) => {
+                        mark.execute(params![path, None::<i64>])?;
+                    }
+                    _ => {}
+                }
+                carried += 1;
+                gone_n += gone.contains(p.as_path()) as usize;
+            }
+            dropped += tx.execute("DELETE FROM analyses WHERE version != ?1 AND used <= ?2", params![&self.version[..], today - GRACE_DAYS])?;
+        }
+        // An analysis no row holds the hash of is no file's. Only a row this
+        // run dropped or gave another hash can have left one: a run that did
+        // neither does not look (it was most of a cold run's finish).
+        let rehashed = self.asked.iter().zip(&rowed).any(|(a, r)| a.row.is_some_and(|(_, h)| Some(h) != a.hash.or(*r)));
+        if prune || dropped > 0 || rehashed {
+            dropped += tx.execute("DELETE FROM analyses WHERE NOT EXISTS (SELECT 1 FROM files WHERE files.hash = analyses.hash)", [])?;
+        }
+        tx.commit()?;
+        Ok((carried, gone_n, dropped))
+    }
+
+    /// Fold side packs into the largest and rewrite the packs when worth it,
+    /// if the run has the cache alone.
+    fn compact(&self, db: &Db, prune: bool) -> Result<Compacted> {
+        let conn = lock(&db.conn);
+        let live: HashMap<i64, u64> = {
+            let mut q = conn.prepare("SELECT pack, SUM(len) FROM analyses GROUP BY pack")?;
+            let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let listed: Vec<i64> = {
+            let mut q = conn.prepare("SELECT id FROM packs ORDER BY id")?;
+            let rows = q.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let on_disk = packs_on_disk(&self.path);
+        let size = |id: i64| std::fs::metadata(pack_path(&self.path, id)).map_or(0, |m| m.len());
+        let bytes: u64 = listed.iter().map(|&id| size(id)).sum();
+        let used: u64 = live.values().sum();
+        let unused = bytes.saturating_sub(used);
+        let litter = on_disk.iter().any(|(id, _)| !listed.contains(id));
+        let rewrite = (unused > 0 && prune) || (bytes > 0 && unused * 4 >= bytes);
+        let fold = listed.len() > 1;
+        if !rewrite && !fold && !litter {
+            return Ok(Compacted::Unneeded { bytes, unused });
+        }
+        let Some(held) = &self.held else { return Ok(Compacted::Busy) };
+        if !flock(held, LOCK_EX | LOCK_NB) {
+            // Converting a lock is not atomic: the shared lock is taken again.
+            flock(held, LOCK_SH);
+            return Ok(Compacted::Busy);
+        }
+        // A pack no row of the index names is a run's that was killed before
+        // it committed one, or a rewrite's that was: nobody's.
+        for (id, p) in &on_disk {
+            if !listed.contains(id) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        let outcome = if rewrite {
+            self.rewrite(&conn, &listed, None).map(|()| Compacted::Done)
+        } else if fold {
+            // Into the largest: the others are what a run beside another
+            // wrote, a few records, and the largest is the cache.
+            let into = *listed.iter().max_by_key(|&&id| (size(id), id)).unwrap();
+            let from: Vec<i64> = listed.iter().copied().filter(|&id| id != into).collect();
+            self.rewrite(&conn, &from, Some(into)).map(|()| Compacted::Folded)
+        } else {
+            Ok(Compacted::Unneeded { bytes, unused })
+        };
+        flock(held, LOCK_SH);
+        outcome
+    }
+
+    /// Copy every record the index names in packs `from` into one pack (`into`,
+    /// appended to, or a new one), point their rows at it in one commit, and
+    /// remove the packs copied from. Records are copied as bytes, not
+    /// unpacked. An interrupt before the commit leaves the old packs named and
+    /// whole, and the new one nobody's (removed next time); after it, the old
+    /// ones nobody's.
+    fn rewrite(&self, conn: &Connection, from: &[i64], into: Option<i64>) -> Result<()> {
+        let rows: Vec<(Vec<u8>, Vec<u8>, i64, i64, i64, i64, i64)> = {
+            let mut q = conn.prepare(&format!(
+                "SELECT hash, version, work, thumb, pack, at, len FROM analyses WHERE pack IN ({}) ORDER BY pack, at",
+                from.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+            ))?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let (id, out, mut end) = match into {
+            Some(id) => {
+                let f = OpenOptions::new().read(true).write(true).open(pack_path(&self.path, id))?;
+                let end = f.metadata()?.len();
+                (id, f, end)
+            }
+            None => {
+                conn.execute("INSERT INTO packs (id) VALUES (NULL)", [])?;
+                let id = conn.last_insert_rowid();
+                let f = OpenOptions::new().read(true).write(true).create_new(true).open(pack_path(&self.path, id))?;
+                (id, f, 0)
+            }
+        };
+        let fresh = into.is_none();
+        let made = pack_path(&self.path, id);
+        if fresh {
+            begin_partial(&made);
+        }
+        let copied = (|| -> Result<Vec<u64>> {
+            let mut packs: HashMap<i64, File> = HashMap::new();
+            let mut at = Vec::with_capacity(rows.len());
+            let mut buf = Vec::new();
+            for r in &rows {
+                let src = match packs.entry(r.4) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => e.insert(File::open(pack_path(&self.path, r.4))?),
+                };
+                buf.resize(r.6 as usize, 0);
+                src.read_exact_at(&mut buf, r.5 as u64)?;
+                out.write_all_at(&buf, end)?;
+                at.push(end);
+                end += r.6 as u64;
+            }
+            Ok(at)
+        })();
+        let at = match copied {
+            Ok(at) => at,
+            Err(e) => {
+                if fresh {
+                    abandon_partial(&made);
+                }
+                return Err(e);
+            }
+        };
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut q = tx.prepare("UPDATE analyses SET pack = ?1, at = ?2 WHERE hash = ?3 AND version = ?4 AND work = ?5 AND thumb = ?6")?;
+            for (r, &at) in rows.iter().zip(&at) {
+                q.execute(params![id, at as i64, &r.0, &r.1, r.2, r.3])?;
+            }
+            let mut d = tx.prepare("DELETE FROM packs WHERE id = ?1")?;
+            for &p in from {
+                d.execute([p])?;
+            }
+        }
+        if fresh {
+            // Named by the index once this commits: not the handler's to
+            // remove after.
+            let mut partial = lock(&PARTIAL);
+            if let Some(k) = partial.iter().position(|p| *p == made) {
+                partial.swap_remove(k);
+            } else {
+                bail!("interrupted");
+            }
+            tx.commit()?;
+        } else {
+            tx.commit()?;
+        }
+        for &p in from {
+            let _ = std::fs::remove_file(pack_path(&self.path, p));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        if let Some(db) = &self.db {
+            db.flush();
+        }
+    }
+}
+
+/// Which of `paths`, files rows name, are no longer there: the filesystem
+/// says so, and not merely that it cannot be asked right now.
 ///
 /// `Path::exists` is false on any error, so a file in a folder made
-/// unreadable, on an sshfs mount whose connection dropped ("Transport
-/// endpoint is not connected") or behind a stale NFS handle counted as
-/// deleted, and once such records were a quarter of the file the next scan
-/// of anything else compacted them away. Only a folder's listing without the
+/// unreadable, on an sshfs mount whose connection dropped or behind a stale
+/// NFS handle would count as deleted. Only a folder's listing without the
 /// name, or a folder that is itself no longer there (or no longer a folder),
 /// says a file has gone.
 ///
-/// **A folder at a time.** Every run asks this of every record of every
-/// folder the cache has seen but the run did not scan, and it was a `stat` a
-/// file: a round trip apiece on a network share, for a library there of
-/// thousands of photographs on every scan of anything else. A listing of
-/// each folder is one or a few, whatever it holds.
-fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> std::collections::HashSet<&'a Path> {
+/// **A folder at a time.** Every run asks this of every row of every folder
+/// the cache has seen but the run did not scan, and a `stat` a file is a
+/// round trip apiece on a network share. A listing of each folder is one or
+/// a few, whatever it holds.
+fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> HashSet<&'a Path> {
     let mut by_folder: HashMap<&Path, Vec<&Path>> = HashMap::new();
     for p in paths {
         by_folder.entry(p.parent().unwrap_or(Path::new("/"))).or_default().push(p);
@@ -2582,7 +1720,7 @@ fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> std::collections::HashSet<
     by_folder
         .into_par_iter()
         .flat_map_iter(|(folder, files)| {
-            let names: Option<std::collections::HashSet<std::ffi::OsString>> = match std::fs::read_dir(folder) {
+            let names: Option<HashSet<std::ffi::OsString>> = match std::fs::read_dir(folder) {
                 Ok(list) => list.map(|e| e.map(|e| e.file_name())).collect::<std::io::Result<_>>().ok(),
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Some(Default::default()),
                 Err(_) => None,
@@ -2592,47 +1730,10 @@ fn gone<'a>(paths: impl Iterator<Item = &'a Path>) -> std::collections::HashSet<
         .collect()
 }
 
-/// The folder a removable drive or a network share holding `path` is mounted
-/// at, when `path` lies where systems mount them: `/media/USER/NAME` (udisks
-/// on Debian and Ubuntu), `/run/media/USER/NAME` (udisks elsewhere),
-/// `/mnt/NAME`, `/run/user/UID/gvfs/NAME` (GNOME's network shares) and
-/// `/Volumes/NAME` (macOS).
-fn volume_root(path: &Path) -> Option<PathBuf> {
-    use std::path::Component;
-    let parts: Vec<&std::ffi::OsStr> = path
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(n) => Some(n),
-            _ => None,
-        })
-        .collect();
-    if !path.is_absolute() {
-        return None;
-    }
-    let take = |n: usize| (parts.len() > n).then(|| Path::new("/").join(parts[..n].iter().collect::<PathBuf>()));
-    match parts.as_slice() {
-        [first, ..] if *first == "media" => take(3),
-        [first, second, ..] if *first == "run" && *second == "media" => take(4),
-        [first, ..] if *first == "mnt" => take(2),
-        [first, second, _, gvfs, ..] if *first == "run" && *second == "user" && *gvfs == "gvfs" => take(5),
-        [first, ..] if *first == "Volumes" => take(2),
-        _ => None,
-    }
-}
-
-/// Whether nothing is mounted at `root`: it is not there (udisks removes the
-/// folder it made), or it is an empty folder (a mount point under `/mnt`
-/// stays behind).
-fn unmounted(root: &Path) -> bool {
-    match std::fs::read_dir(root) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::Read;
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("img-fp-cache-test-{}-{name}", std::process::id()));
@@ -2641,127 +1742,93 @@ mod tests {
         d
     }
 
-    /// A dead run's temporary files beside the cache go, and nothing else:
-    /// not this run's own, not files that only look alike, not another
-    /// cache's, and not a copy that could be another cache's of one stem.
-    #[test]
-    fn a_killed_runs_temporary_files_are_swept_and_nothing_else() {
-        let dir = scratch("litter");
-        let cache = dir.join("analysis.bin");
-        let me = std::process::id();
-        let touch = |n: &str| std::fs::write(dir.join(n), b"x").unwrap();
-        let litter = ["analysis.tmp.4242", "analysis.bin.heads.17", "analysis.bin.matched.99", "analysis.bin.same.1"];
-        let kept = [
-            "analysis.bin".to_string(),
-            "analysis.bin.heads".into(),
-            "analysis.bin.matched".into(),
-            "analysis.bin.same".into(),
-            format!("analysis.tmp.{me}"),
-            "analysis.tmp.12x".into(),
-            "analysis.tmp.".into(),
-            "other.tmp.4242".into(),
-            "other.bin.matched.5".into(),
-            "photo.jpg".into(),
-        ];
-        for n in litter.iter().copied().chain(kept.iter().map(String::as_str)) {
-            touch(n);
+    const SETTINGS: Settings = Settings { work_size: 384, features: 600, thumb: 128 };
+    const V: [u8; 16] = [1; 16];
+
+    fn analysis(n: usize, seed: u8) -> Item {
+        let kps: Vec<Keypoint> = (0..n).map(|i| Keypoint { x: i as f32, y: seed as f32, sigma: 1.6, angle: 0.0 }).collect();
+        let desc: Vec<u8> = (0..n * DESC_LEN).map(|i| (i as u8).wrapping_add(seed)).collect();
+        Item {
+            feats: Arc::new(Features { w: 64, h: 48, kps: kps.into(), desc: desc.into(), ends: Vec::new() }),
+            thumb: Arc::new(Thumb::new(8, 6, 0.125, vec![seed; 48])),
+            dims: (320, 240),
+            read: Read::Whole,
+            traits: Traits { colour: -1.0, ..Default::default() },
+            made_by: None,
+            hash: None,
         }
-        sweep_litter(&cache);
-        for n in litter {
-            assert!(!dir.join(n).exists(), "{n} is litter");
-        }
-        for n in &kept {
-            assert!(dir.join(n).exists(), "{n} is not");
-        }
-        // Another cache of the stem: its copies cannot be told from ours.
-        touch("analysis.old");
-        touch("analysis.tmp.4242");
-        touch("analysis.bin.same.2");
-        sweep_litter(&cache);
-        assert!(dir.join("analysis.tmp.4242").exists() && !dir.join("analysis.bin.same.2").exists());
-        assert_eq!(temporary(&cache, 4242), dir.join("analysis.tmp.4242"), "the name `replace_with` writes");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `--cache` names the file, except when what it names is obviously a
-    /// place to put one. The alternative to this rule is a cache file named
-    /// after the scratch disk someone pointed at.
-    #[test]
-    fn a_named_path_is_a_file_unless_it_is_a_directory() {
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let dir = scratch("named");
-
-        let named_file = dir.join("mine.bin");
-        assert_eq!(resolve_path(Some(&named_file), &mut problems).unwrap(), named_file);
-
-        // An existing directory, and a path written as one.
-        assert_eq!(
-            resolve_path(Some(&dir), &mut problems).unwrap(),
-            dir.join(file_name())
-        );
-        let trailing = PathBuf::from(format!("{}/", dir.join("sub").display()));
-        assert_eq!(
-            resolve_path(Some(&trailing), &mut problems).unwrap(),
-            dir.join("sub").join(file_name())
-        );
-        // And the parent of a named file is created, as the default one is.
-        let deep = dir.join("one/two/three.bin");
-        assert_eq!(resolve_path(Some(&deep), &mut problems).unwrap(), deep);
-        assert!(dir.join("one/two").is_dir());
-        assert!(!problems.any());
-
-        std::fs::remove_dir_all(&dir).ok();
+    /// What a run does with the store, as the pipeline does it: open it for
+    /// `files`, hash each file the index does not know by its key, read the
+    /// analyses, and for each file `make` says to, take its analysis or make
+    /// one. Each file's analysis as the run had it: `Some(true)` read,
+    /// `Some(false)` made, `None` neither.
+    fn run(path: &Path, version: [u8; 16], files: &[PathBuf], make: impl Fn(usize) -> Option<Item>) -> (Store, Vec<Option<bool>>, Problems<'static>) {
+        let log = Box::leak(Box::new(crate::problems::Log::default()));
+        let mut problems = Problems::new(log);
+        let named = files.iter().map(|f| (f.clone(), std::fs::metadata(f).ok().and_then(|m| key_from(&m)))).collect();
+        let mut store = open(path, SETTINGS, version, named, &mut problems);
+        let samples = store.samples();
+        let stats: Vec<crate::walk::Stat> = files.iter().map(|f| crate::walk::Stat { len: std::fs::metadata(f).map_or(0, |m| m.len()), key: None }).collect();
+        let hashes = crate::same::content_hashes(files, &stats, |_| true, |i| store.hash_of(i), |l| samples.iter().any(|s| s.0 == l), |l, s| samples.contains(&(l, s)), || ());
+        let late: Vec<Option<Content>> = (0..files.len()).map(|i| hashes[i].or_else(|| crate::same::content_hash(&files[i]))).collect();
+        store.read(hashes, &|_| true, &|_| (), &mut problems);
+        let got = (0..files.len())
+            .map(|i| match store.take(i) {
+                Some(_) => Some(true),
+                None => make(i).map(|it| {
+                    // As a decode gives it.
+                    store.append(i, &Item { hash: late[i], ..it });
+                    false
+                }),
+            })
+            .collect();
+        (store, got, problems)
     }
 
-    /// The packing is three lossless transforms and a deflate, and every one
-    /// of them has an inverse that has to give back the bits it was handed —
-    /// a cache that reconstructs an analysis *nearly* would be a tool that
-    /// finds different pairs depending on whether it has run before.
+    fn write(p: &Path, b: &[u8]) {
+        std::fs::write(p, b).unwrap();
+    }
+
+    /// Shapes worth covering: a thumbnail one pixel wide (every Paeth
+    /// predictor degenerates), one with no keypoints at all (the featureless
+    /// images the corpus really contains), and an ordinary one.
     #[test]
     fn a_packed_record_comes_back_bit_for_bit() {
-        // Shapes worth covering: a thumbnail one pixel wide (every Paeth
-        // predictor degenerates), one with no keypoints at all (the featureless
-        // images the corpus really contains), and an ordinary one.
         for (n, w, h) in [(0usize, 1usize, 1usize), (1, 1, 7), (3, 7, 1), (137, 40, 31)] {
             let kps: Vec<Keypoint> = (0..n)
                 .map(|i| {
                     let f = i as f32;
-                    Keypoint {
-                        x: f * 1.37 + 0.5,
-                        y: 383.0 - f * 0.919,
-                        sigma: 1.6 * (1.0 + f / 64.0),
-                        angle: (f * 17.3) % 360.0,
-                    }
+                    Keypoint { x: f * 1.37 + 0.5, y: 383.0 - f * 0.919, sigma: 1.6 * (1.0 + f / 64.0), angle: (f * 17.3) % 360.0 }
                 })
                 .collect();
-            // Descriptor and thumbnail bytes that use the whole range, so that
-            // a Paeth residual and a byte plane both have something to get
-            // wrong at the edges.
             let desc: Vec<u8> = (0..n * DESC_LEN).map(|i| ((i * 37 + i / 128) % 256) as u8).collect();
             let px: Vec<u8> = (0..w * h).map(|i| ((i * 91) % 256) as u8).collect();
             let feats = Features { w: 640, h: 480, kps: kps.clone().into(), desc: desc.clone().into(), ends: Vec::new() };
             let thumb = Thumb::new(w as u16, h as u16, 0.25, px);
-
-            let blob = pack(&feats, &thumb).unwrap();
-            let (kps, desc, px, _) = unpack(&blob, n, w as u16, h as u16).unwrap();
-            assert_eq!(desc, feats.desc);
-            assert_eq!(px, thumb.px);
-            assert_eq!(kps.len(), feats.kps.len());
-            for (got, want) in kps.iter().zip(feats.kps.iter()) {
-                assert_eq!(got.x.to_bits(), want.x.to_bits());
-                assert_eq!(got.y.to_bits(), want.y.to_bits());
-                assert_eq!(got.sigma.to_bits(), want.sigma.to_bits());
-                assert_eq!(got.angle.to_bits(), want.angle.to_bits());
+            let traits = Traits { detail: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], colour: 0.5, lossless: true, frames: true, profile: true, ..Default::default() };
+            let hash = [9u8; 32];
+            let b = record(&hash, (4000, 3000), &traits, &feats, &thumb).unwrap();
+            let r = unrecord(&b, &hash, SETTINGS).unwrap();
+            assert_eq!(r.feats.desc, feats.desc);
+            assert_eq!(r.thumb.px, thumb.px);
+            assert_eq!((r.thumb.w, r.thumb.h, r.thumb.scale.to_bits()), (thumb.w, thumb.h, thumb.scale.to_bits()));
+            assert_eq!((r.dims, r.feats.w, r.feats.h), ((4000, 3000), 640, 480));
+            assert_eq!(r.traits.detail, traits.detail);
+            assert_eq!((r.traits.colour, r.traits.lossless, r.traits.exif, r.traits.frames, r.traits.deep, r.traits.profile), (0.5, true, false, true, false, true));
+            assert_eq!(r.feats.kps.len(), feats.kps.len());
+            for (got, want) in r.feats.kps.iter().zip(feats.kps.iter()) {
+                assert_eq!([got.x, got.y, got.sigma, got.angle].map(f32::to_bits), [want.x, want.y, want.sigma, want.angle].map(f32::to_bits));
             }
+            assert!(unrecord(&b, &[8u8; 32], SETTINGS).is_err(), "another file's hash");
         }
     }
 
     /// An analysis at a finer `--detail` keeps where its levels end, after the
-    /// streams; one at the default packs to exactly what it always did, so a
-    /// build that knows nothing of levels reads it as before.
+    /// streams; levels that do not make sense are damage.
     #[test]
-    fn a_records_levels_come_back_and_a_default_record_is_unchanged() {
+    fn a_records_levels_come_back() {
         let n = 9;
         let kps: Vec<Keypoint> = (0..n).map(|i| Keypoint { x: i as f32, y: 2.0, sigma: 1.6, angle: 10.0 }).collect();
         let desc: Vec<u8> = (0..n * DESC_LEN).map(|i| (i % 251) as u8).collect();
@@ -2770,7 +1837,6 @@ mod tests {
         let finer = Features { ends: vec![5, 7, 9], ..plain.clone() };
         let (a, b) = (pack(&plain, &thumb).unwrap(), pack(&finer, &thumb).unwrap());
         assert_eq!(&b[..a.len()], &a[..], "the levels follow the streams");
-        assert_eq!(b.len(), a.len() + 4 * 4);
         assert_eq!(unpack(&a, n, 4, 3).unwrap().3, Vec::<u32>::new());
         assert_eq!(unpack(&b, n, 4, 3).unwrap().3, vec![5, 7, 9]);
         let bad = Features { ends: vec![5, 3], ..plain.clone() };
@@ -2779,558 +1845,560 @@ mod tests {
         assert!(unpack(&pack(&over, &thumb).unwrap(), n, 4, 3).is_err(), "a level past the keypoints");
     }
 
-    /// A truncated record is a damaged cache, not a panic and not a silently
-    /// short one.
+    /// A truncated record is damage, not a panic and not a silently short
+    /// one; so is one claiming a shape its settings do not make.
     #[test]
-    fn a_short_record_is_rejected_rather_than_trusted() {
-        let feats = Features { w: 8, h: 8, ..Default::default() };
-        let thumb = Thumb::new(4, 4, 1.0, vec![7; 16]);
-        let blob = pack(&feats, &thumb).unwrap();
-        assert!(unpack(&blob[..blob.len() - 1], 0, 4, 4).is_err());
-        assert!(unpack(&blob, 0, 8, 8).is_err(), "a record that claims more than it holds");
+    fn a_short_or_misshapen_record_is_rejected_rather_than_trusted() {
+        let it = analysis(3, 1);
+        let hash = [3u8; 32];
+        let b = record(&hash, it.dims, &it.traits, &it.feats, &it.thumb).unwrap();
+        for cut in [1, 10, b.len() - STAMP - 1] {
+            assert!(unrecord(&b[..b.len() - cut], &hash, SETTINGS).is_err(), "cut {cut}");
+        }
+        let few = Settings { features: 2, ..SETTINGS };
+        assert!(unrecord(&b, &hash, few).is_err(), "more keypoints than its settings allow");
     }
 
-    /// The cache serves every directory the machine scans, so a run writes
-    /// back what it did not look at — but only while the file is still there
-    /// to be matched again; at this run's settings or another's alike.
+    /// `--cache` names the file, except when what it names is obviously a
+    /// place to put one.
     #[test]
-    fn what_a_run_was_not_asked_about_is_carried_while_it_is_there() {
+    fn a_named_path_is_a_file_unless_it_is_a_directory() {
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        let dir = scratch("named");
+        let named_file = dir.join("mine.db");
+        assert_eq!(resolve_path(Some(&named_file), &mut problems).unwrap(), named_file);
+        assert_eq!(resolve_path(Some(&dir), &mut problems).unwrap(), dir.join(file_name()));
+        let trailing = PathBuf::from(format!("{}/", dir.join("sub").display()));
+        assert_eq!(resolve_path(Some(&trailing), &mut problems).unwrap(), dir.join("sub").join(file_name()));
+        let deep = dir.join("one/two/three.db");
+        assert_eq!(resolve_path(Some(&deep), &mut problems).unwrap(), deep);
+        assert!(dir.join("one/two").is_dir());
+        assert!(!problems.any());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file that is no cache is neither used nor deleted; a cache of
+    /// another version is left as it is and the run keeps nothing in it.
+    #[test]
+    fn a_stranger_is_not_used_and_another_versions_cache_is_left_alone() {
+        let dir = scratch("stranger");
+        let photo = dir.join("photo.jpg");
+        write(&photo, b"\xff\xd8\xff\xe0 a picture");
+        let log = crate::problems::Log::default();
+        let mut problems = Problems::new(&log);
+        assert!(resolve_path(Some(&photo), &mut problems).is_none());
+        assert!(problems.any());
+        assert!(!is_stranger(&dir.join("nothing-yet.db")));
+        let empty = dir.join("empty.db");
+        write(&empty, b"");
+        assert!(!is_stranger(&empty));
+
+        let old = dir.join("old.bin");
+        write(&old, b"IMGFPC21 the records of 0.81.0");
+        let pic = dir.join("a.jpg");
+        write(&pic, b"a");
+        let (store, got, _) = run(&old, V, std::slice::from_ref(&pic), |_| Some(analysis(2, 1)));
+        assert_eq!(store.other_version(), Some("IMGFPC21"));
+        assert_eq!(got, [Some(false)]);
+        drop(store);
+        assert_eq!(std::fs::read(&old).unwrap(), b"IMGFPC21 the records of 0.81.0");
+        assert!(packs_on_disk(&old).is_empty());
+
+        // An index of another schema, likewise.
+        let other = dir.join("other.db");
+        {
+            let c = Connection::open(&other).unwrap();
+            c.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+            c.pragma_update(None, "user_version", SCHEMA + 1).unwrap();
+            c.execute_batch("CREATE TABLE t (x)").unwrap();
+        }
+        let (store, _, _) = run(&other, V, std::slice::from_ref(&pic), |_| Some(analysis(2, 1)));
+        assert_eq!(store.other_version(), Some(format!("IMGFPD{:02}", SCHEMA + 1).as_str()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A run keeps what it made; the next reads it back, once a file, and the
+    /// index knows each file by its key so reads none of them.
+    #[test]
+    fn an_analysis_made_is_read_back_by_the_next_run() {
+        let dir = scratch("back");
+        let path = dir.join(file_name());
+        let files: Vec<PathBuf> = ["a.jpg", "b.jpg"].iter().map(|n| dir.join(n)).collect();
+        write(&files[0], b"first picture");
+        write(&files[1], b"second picture");
+        let (mut store, got, problems) = run(&path, V, &files, |i| Some(analysis(5 + i, i as u8)));
+        assert_eq!(got, [Some(false), Some(false)]);
+        let kept = store.finish(false);
+        assert!(kept.failure.is_none() && !problems.any());
+        drop(store);
+
+        let (mut store, got, _) = run(&path, V, &files, |_| None);
+        assert_eq!(got, [Some(true), Some(true)]);
+        assert!(store.hash_of(0).is_some() && store.hash_of(1).is_some(), "known by their keys");
+        assert!(!store.stale());
+        assert!(store.take(0).is_none(), "taken once");
+        drop(store);
+        // The record is the analysis made.
+        let (mut s, _, _) = {
+            let log = Box::leak(Box::new(crate::problems::Log::default()));
+            let mut problems = Problems::new(log);
+            let named = files.iter().map(|f| (f.clone(), std::fs::metadata(f).ok().and_then(|m| key_from(&m)))).collect();
+            let mut s = open(&path, SETTINGS, V, named, &mut problems);
+            let h = (0..2).map(|i| s.hash_of(i)).collect();
+            s.read(h, &|_| true, &|_| (), &mut problems);
+            (s, (), problems)
+        };
+        assert_eq!(s.take(1).unwrap().feats.desc, analysis(6, 1).feats.desc);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file moved or renamed, chmod'ed, or copied under another name keeps
+    /// its analysis: found by what it holds.
+    #[test]
+    fn a_moved_changed_or_copied_file_keeps_its_analysis() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("moved");
+        let path = dir.join(file_name());
+        let a = dir.join("a.jpg");
+        write(&a, b"one picture");
+        let (mut store, got, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(4, 7)));
+        assert_eq!(got, [Some(false)]);
+        store.finish(false);
+        drop(store);
+
+        std::fs::create_dir_all(dir.join("moved")).unwrap();
+        let b = dir.join("moved/b.jpg");
+        std::fs::rename(&a, &b).unwrap();
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let c = dir.join("copy.jpg");
+        std::fs::copy(&b, &c).unwrap();
+        let (mut store, got, _) = run(&path, V, &[b.clone(), c.clone()], |_| Some(analysis(4, 7)));
+        assert_eq!(got, [Some(true), Some(true)], "the copy is its content's too");
+        assert!(store.hash_of(0).is_none(), "its key was another path's");
+        store.finish(false);
+        drop(store);
+        let (store, got, _) = run(&path, V, &[c.clone()], |_| None);
+        assert_eq!(got, [Some(true)]);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two files of one size touched together share their key to the
+    /// nanosecond; each is still only its own content (0.69.0 gave one the
+    /// other's analysis).
+    #[test]
+    fn files_of_one_key_are_not_each_other() {
+        let dir = scratch("onekey");
+        let path = dir.join(file_name());
+        let (a, b) = (dir.join("sub1/p.bmp"), dir.join("sub2/p.bmp"));
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        write(&a, b"picture one!");
+        write(&b, b"picture two!");
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        store.finish(false);
+        drop(store);
+        let (store, got, _) = run(&path, V, std::slice::from_ref(&b), |_| None);
+        assert_eq!(got, [None]);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file rewritten with its size and mtime put back is read again (its
+    /// change time moved), and the old analysis is not its.
+    #[test]
+    fn a_rewritten_file_is_not_its_old_content() {
+        let dir = scratch("rewritten");
+        let path = dir.join(file_name());
+        let a = dir.join("a.jpg");
+        write(&a, b"before");
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        store.finish(false);
+        drop(store);
+        let mtime = std::fs::metadata(&a).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(&a, b"after!");
+        File::options().write(true).open(&a).unwrap().set_modified(mtime).unwrap();
+        let (store, got, _) = run(&path, V, std::slice::from_ref(&a), |_| None);
+        assert!(store.hash_of(0).is_none());
+        assert_eq!(got, [None]);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An analysis is not kept when the file changed between the walk and its
+    /// description: what was hashed may not be what was described.
+    #[test]
+    fn a_file_changed_under_the_analysis_is_not_kept() {
+        let dir = scratch("under");
+        let path = dir.join(file_name());
+        let a = dir.join("a.jpg");
+        write(&a, b"before");
+        let (mut store, got, _) = run(&path, V, std::slice::from_ref(&a), |_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            write(&a, b"during");
+            Some(analysis(3, 1))
+        });
+        assert_eq!(got, [Some(false)]);
+        store.finish(false);
+        drop(store);
+        let (store, got, _) = run(&path, V, std::slice::from_ref(&a), |_| None);
+        assert_eq!(got, [None]);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Another analysis (`version`) reads none of this one's, and each is kept
+    /// unused for the grace period; another library's pixels are not read.
+    #[test]
+    fn another_analysis_reads_nothing_and_is_kept_for_a_while() {
+        let dir = scratch("version");
+        let path = dir.join(file_name());
+        let a = dir.join("a.heic");
+        write(&a, b"a picture");
+        let other = [2u8; 16];
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        store.finish(false);
+        drop(store);
+        let (mut store, got, _) = run(&path, other, std::slice::from_ref(&a), |_| Some(analysis(3, 2)));
+        assert_eq!(got, [Some(false)]);
+        store.finish(false);
+        drop(store);
+        let (mut store, got, _) = run(&path, V, std::slice::from_ref(&a), |_| None);
+        assert_eq!(got, [Some(true)], "the first's still there");
+        // Long after: the other version's goes, this one's (used) stays.
+        store.today += GRACE_DAYS + 1;
+        store.finish(false);
+        drop(store);
+        let (store, got, _) = run(&path, other, std::slice::from_ref(&a), |_| None);
+        assert_eq!(got, [None]);
+        drop(store);
+
+        // A libheif other than the one loaded made it: not read.
+        let b = dir.join("b.heic");
+        write(&b, b"b picture");
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&b), |_| Some(Item { made_by: Some("libheif 0.0.0-test"), ..analysis(3, 1) }));
+        store.finish(false);
+        drop(store);
+        let (store, got, _) = run(&path, V, std::slice::from_ref(&b), |_| None);
+        assert_eq!(got, [None]);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The cache serves every folder the machine scans: a file this run did
+    /// not walk is kept while it is there, and for the grace period after a
+    /// run first finds it gone; `--prune-cache` keeps only this run's.
+    #[test]
+    fn what_a_run_did_not_walk_is_kept_while_there_and_a_while_after() {
         let dir = scratch("carry");
-        let here = dir.join("here.jpg");
-        std::fs::write(&here, b"x").unwrap();
-        let gone = dir.join("gone.jpg");
-        let unasked = |path: &Path, here: bool| Unasked { path: path.to_path_buf(), span: Span { at: 0, len: 0 }, dev: 0, here };
-        // And a drive that is not plugged in, which `volume_root` reads off
-        // where systems mount them; nothing is mounted at this one.
-        let away = Path::new("/media/img-fp-test-nobody/Photos/a.jpg");
-        let all = [unasked(&here, true), unasked(&gone, true), unasked(&here, false), unasked(&gone, false), unasked(away, true), unasked(away, false)];
-        let kept: Vec<(&Path, bool)> = carried(&all).into_iter().map(|u| (u.path.as_path(), u.here)).collect();
-        assert_eq!(kept, [(here.as_path(), true), (here.as_path(), false), (away, true), (away, false)], "the files that are still there");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A missing file on a drive that is not mounted keeps its record; the
-    /// volume is the folder the drive is mounted at, by where systems mount
-    /// them, and it is unmounted when it is not there or holds nothing.
-    #[test]
-    fn a_record_on_an_unplugged_drive_is_kept() {
-        let root = |p: &str| volume_root(Path::new(p));
-        assert_eq!(root("/media/u/Photos/2019/a.jpg"), Some("/media/u/Photos".into()));
-        assert_eq!(root("/run/media/u/Photos/a.jpg"), Some("/run/media/u/Photos".into()));
-        assert_eq!(root("/mnt/nas/a.jpg"), Some("/mnt/nas".into()));
-        assert_eq!(root("/run/user/1000/gvfs/smb-share:server=x,share=p/a.jpg"), Some("/run/user/1000/gvfs/smb-share:server=x,share=p".into()));
-        assert_eq!(root("/Volumes/Card/DCIM/a.jpg"), Some("/Volumes/Card".into()));
-        assert_eq!(root("/home/u/Pictures/a.jpg"), None, "a home folder is not a drive that comes and goes");
-        assert_eq!(root("/media/u"), None, "nor is the folder drives are mounted in");
-        assert_eq!(root("media/u/Photos/a.jpg"), None);
-
-        let dir = scratch("volumes");
-        let empty = dir.join("empty");
-        std::fs::create_dir_all(&empty).unwrap();
-        let full = dir.join("full");
-        std::fs::create_dir_all(full.join("DCIM")).unwrap();
-        assert!(unmounted(&dir.join("not-there")));
-        assert!(unmounted(&empty), "a mount point left behind");
-        assert!(!unmounted(&full), "mounted, and the file is gone from it");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Anywhere else, a share or disk is away when `/etc/fstab` names its
-    /// mount point and nothing is mounted there, or when the files' folder
-    /// is gone and the nearest folder above it is an empty one nothing is
-    /// mounted on. A folder still there, the file gone from it, is a
-    /// deletion.
-    #[test]
-    fn a_record_on_a_share_mounted_anywhere_is_kept_while_it_is_away() {
-        let m = Mounts::of(
-            "22 1 0:5 / / rw - ext4 /dev/sda1 rw\n40 22 0:9 / /srv/my\\040disk rw - ext4 /dev/sdb1 rw\n",
-            "# comment /nowhere\nUUID=a / ext4 defaults 0 1\nUUID=b /srv/my\\040disk ext4 noauto 0 2\nnas:/p /srv/nas nfs noauto 0 0\n/swapfile none swap sw 0 0\n",
-        );
-        assert!(m.mounted(Path::new("/srv/my disk")) && !m.mounted(Path::new("/srv/nas")));
-        assert_eq!(m.configured(Path::new("/srv/nas/2019")), Some(Path::new("/srv/nas")));
-        assert_eq!(m.configured(Path::new("/srv/my disk/a")), Some(Path::new("/srv/my disk")));
-        assert_eq!(m.configured(Path::new("/home/u")), None, "/ is no drive that comes and goes");
-        let mut volumes = HashMap::new();
-        assert!(away(Path::new("/srv/nas/2019/a.jpg"), 0, &m, &mut volumes), "named in fstab, not mounted");
-
-        let dir = scratch("left-behind");
-        let (nas, here) = (dir.join("nas"), dir.join("here"));
-        std::fs::create_dir_all(&nas).unwrap();
-        std::fs::create_dir_all(&here).unwrap();
-        std::fs::write(here.join("other.jpg"), b"x").unwrap();
-        let none = Mounts::of("", "");
-        let mut volumes = HashMap::new();
-        assert!(away(&nas.join("photos/2019/a.jpg"), 0, &none, &mut volumes), "an empty mount point left behind");
-        assert!(!away(&here.join("photos/a.jpg"), 0, &none, &mut volumes), "a folder deleted from one that holds more");
-        assert!(!away(&here.join("a.jpg"), 0, &none, &mut volumes), "the folder is there: the file was deleted");
-        let mounted = Mounts::of(&format!("1 1 0:1 / {} rw - fuse.sshfs h: rw\n", nas.display()), "");
-        assert!(!away(&nas.join("photos/a.jpg"), 0, &mounted, &mut HashMap::new()), "an empty share mounted: the files are gone");
-        assert_eq!(left_behind(Path::new("/img-fp-not-there/a")), None, "never /");
-        // An empty folder whose own device the files lay on: the folder they
-        // were in was deleted from it, and nothing was mounted there.
-        use std::os::unix::fs::MetadataExt;
-        let own = std::fs::metadata(&nas).unwrap().dev();
-        assert!(!away(&nas.join("photos/2019/a.jpg"), own, &none, &mut HashMap::new()), "a folder deleted, its parent left empty");
-        // A drive fstab names, mounted: the files are gone from it.
-        let disk = dir.join("my disk");
-        std::fs::create_dir_all(disk.join("other")).unwrap();
-        let on = Mounts::of(&format!("40 22 0:9 / {} rw - ext4 /dev/sdb1 rw\n", disk.display()), &format!("UUID=b {} ext4 noauto 0 2\n", disk.display()));
-        assert!(!away(&disk.join("2019/a.jpg"), 0, &on, &mut HashMap::new()), "mounted: the files are gone");
-        // The same share's mount point on a partition fstab names and that
-        // is mounted, as `/home` is.
-        let tmp = std::env::temp_dir();
-        let home = Mounts::of(&format!("22 1 0:5 / {} rw - ext4 /dev/sda2 rw\n", tmp.display()), &format!("UUID=h {} ext4 defaults 0 2\n", tmp.display()));
-        assert!(away(&nas.join("photos/2019/a.jpg"), 0, &home, &mut HashMap::new()), "a share left behind inside a mounted partition");
-        assert!(!away(&here.join("photos/a.jpg"), 0, &home, &mut HashMap::new()), "and a folder deleted there is still deleted");
-
-        // Carried through it, a file this run was not asked about.
-        let unasked = Unasked { path: nas.join("photos/a.jpg"), span: Span { at: 0, len: 0 }, dev: 0, here: true };
-        assert_eq!(carried(std::slice::from_ref(&unasked)).len(), 1);
-        std::fs::write(nas.join("lost.txt"), b"x").unwrap();
-        assert_eq!(carried(std::slice::from_ref(&unasked)).len(), 0, "something is there now, and the file is not");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    const SETTINGS: Settings = Settings { work_size: 384, features: 600, thumb: 128 };
-
-    fn analysis(n: usize, seed: u8) -> (Features, Thumb) {
-        let kps = (0..n)
-            .map(|i| Keypoint { x: i as f32, y: seed as f32, sigma: 1.6, angle: 0.0 })
-            .collect();
-        let desc = (0..n * DESC_LEN).map(|i| (i as u8).wrapping_add(seed)).collect();
-        (Features { w: 64, h: 48, kps, desc, ends: Vec::new() }, Thumb::new(8, 6, 0.125, vec![seed; 48]))
-    }
-
-    /// Records the file holds at other settings, as `read` found them.
-    fn others(store: &Store) -> usize {
-        store.unasked.iter().filter(|u| !u.here).count()
-    }
-
-    fn reopen(path: &Path) -> (HashMap<PathBuf, Entry>, Store, bool) {
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let (got, store) = read(path, SETTINGS, &|_, _| true, &mut problems);
-        (got, store, problems.any())
-    }
-
-    /// A file found under another name than its record's — its folder moved
-    /// — is answered by that record when the key is the file's to the
-    /// nanosecond, and the record is written again under the new name; a key
-    /// a coarse clock could give two files answers for no other name.
-    #[test]
-    fn records_this_run_does_not_walk_are_framed_not_unpacked() {
-        let dir = scratch("walked");
         let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f1, t1) = analysis(3, 1);
-        let (f2, t2) = analysis(5, 2);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
+        let files: Vec<PathBuf> = ["here.jpg", "gone.jpg", "mine.jpg"].iter().map(|n| dir.join(n)).collect();
+        for (i, f) in files.iter().enumerate() {
+            write(f, format!("picture {i}").as_bytes());
+        }
+        let (mut store, _, _) = run(&path, V, &files, |i| Some(analysis(3, i as u8)));
+        store.finish(false);
         drop(store);
-        let (all, _, _) = reopen(&path);
+        let moved = dir.join("later/gone.jpg");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&files[1], &moved).unwrap();
+        let (mut store, _, _) = run(&path, V, &files[2..], |_| None);
+        let kept = store.finish(false);
+        assert_eq!((kept.carried, kept.gone), (2, 1));
+        drop(store);
+        // Within the grace, the moved file is found at its new place.
+        let (mut store, got, _) = run(&path, V, std::slice::from_ref(&moved), |_| None);
+        assert_eq!(got, [Some(true)]);
+        drop(store.finish(false));
+        drop(store);
 
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, SETTINGS, &|p, _| p == Path::new("a.jpg"), &mut problems);
-        assert!(!problems.any() && store.records() == 3 && got.len() == 2);
-        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f1.desc);
-        let b = &got[Path::new("b.jpg")];
-        assert!(b.1.is_none());
-        assert_eq!((b.0.len, b.2.at, b.2.len), (3, all[Path::new("b.jpg")].2.at, all[Path::new("b.jpg")].2.len));
+        // A file gone past the grace is dropped, and its analysis with it.
+        std::fs::remove_file(&moved).unwrap();
+        let (mut store, _, _) = run(&path, V, &files[2..], |_| None);
+        store.finish(false);
+        drop(store);
+        let (mut store, _, _) = run(&path, V, &files[2..], |_| None);
+        store.today += GRACE_DAYS;
+        let kept = store.finish(false);
+        assert_eq!((kept.carried, kept.gone), (1, 0));
+        drop(store);
+        write(&moved, b"picture 1");
+        let (store, got, _) = run(&path, V, std::slice::from_ref(&moved), |_| None);
+        assert_eq!(got, [None]);
+        drop(store);
+
+        let (mut store, _, _) = run(&path, V, &files[2..], |_| None);
+        let kept = store.finish(true);
+        assert_eq!(kept.carried, 0);
+        drop(store);
+        let (store, got, _) = run(&path, V, &files[..1], |_| None);
+        assert_eq!(got, [None], "pruned");
+        drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A file under another name than its record's is analysed again, even
-    /// when the record's key is its own to the nanosecond: files written
-    /// together share one (see `open`).
+    /// A JPEG's colour measured later is kept on its analysis, for every file
+    /// of its content, as `kept_colour` gave it.
     #[test]
-    fn another_names_record_is_not_taken_whatever_its_key() {
-        let dir = scratch("other-name");
-        let path = dir.join(file_name());
-        let (f, t) = analysis(6, 4);
-        let key = Key { len: 10, mtime: 7, ctime: 1_700_000_000_123_456_789, dev: 3 };
-        let (_, store, _) = reopen(&path);
-        store.put(dir.join("sub1/p1.bmp"), key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        drop(store);
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let mut store = open(&path, SETTINGS, vec![(dir.join("sub2/p3.bmp"), Some(key))], &|_| panic!("nothing answers for it"), &mut problems);
-        assert!(store.take(0).is_none());
-        drop(store);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// What a worker appends, the next run reads — and a later record for the
-    /// same path wins, since that is a file described again after it changed.
-    #[test]
-    fn appended_records_are_read_back_and_the_last_one_wins() {
-        let dir = scratch("append");
-        let path = dir.join(file_name());
-        let (got, store, bad) = reopen(&path);
-        assert!(got.is_empty() && !bad);
-        let (f1, t1) = analysis(3, 1);
-        let (f2, t2) = analysis(5, 2);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("a.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
-        assert_eq!(store.records(), 3);
-        drop(store);
-
-        let (got, store, bad) = reopen(&path);
-        assert!(!bad);
-        assert_eq!(store.records(), 3, "the superseded record is still in the file");
-        assert_eq!(got.len(), 2);
-        let a = &got[Path::new("a.jpg")];
-        assert_eq!((a.0.len, a.1.as_ref().unwrap().feats.kps.len()), (3, 5));
-        assert_eq!(a.1.as_ref().unwrap().feats.desc, f2.desc);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A JPEG's colour, measured after its record was written, is kept in the
-    /// record and read back as kept, the decode's own "not measured" left as
-    /// it was; through a compaction too; and never over a record that is not
-    /// the one named, nor one that already says a colour.
-    #[test]
-    fn a_colour_measured_later_is_kept_in_the_record() {
+    fn a_colour_measured_later_is_kept() {
         let dir = scratch("colour");
         let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(3, 1);
-        let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
-        let png = Traits { colour: 7.5, ..Default::default() };
-        let a = store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &jpeg, &f, &t).unwrap();
-        let b = store.put("b.png", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &png, &f, &t).unwrap();
-        let c = store.put("c.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &jpeg, &f, &t).unwrap();
-        let measured = kept_colour(12.345);
-        assert_eq!(kept_colour(measured), measured, "the same value through any number of rounds");
-        store.write_colour(a, Path::new("a.jpg"), measured);
-        store.write_colour(b, Path::new("b.png"), 3.0);
-        store.write_colour(c, Path::new("not-c.jpg"), 3.0);
+        let a = dir.join("a.jpg");
+        write(&a, b"a picture");
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        store.finish(false);
+        store.keep_colour(0, kept_colour(1.7));
         drop(store);
-        let (got, mut store, bad) = reopen(&path);
-        assert!(!bad);
-        let traits = |got: &HashMap<PathBuf, Entry>, p: &str| got[Path::new(p)].1.as_ref().unwrap().traits;
-        assert_eq!((traits(&got, "a.jpg").colour, traits(&got, "a.jpg").colour_kept), (UNMEASURED, Some(measured)));
-        assert_eq!((traits(&got, "b.png").colour, traits(&got, "b.png").colour_kept), (7.5, None), "a measured colour is not written over");
-        assert_eq!(traits(&got, "c.jpg").colour_kept, None, "nor a record for another path");
-
-        // Compacted to `c.jpg` and `a.jpg` (in path order), `c.jpg` moves to
-        // the front, and is written where it went; `b.png`, left out, is not.
-        let entries: Vec<(&Path, Span)> = ["c.jpg", "a.jpg"].iter().map(|p| (Path::new(*p), got[Path::new(*p)].2)).collect();
-        assert_eq!(store.compact(&entries).unwrap(), true);
-        store.write_colour(got[Path::new("c.jpg")].2, Path::new("c.jpg"), 2.0);
-        store.write_colour(got[Path::new("b.png")].2, Path::new("b.png"), 2.0);
+        let c = dir.join("c.jpg");
+        std::fs::copy(&a, &c).unwrap();
+        let (mut store, _, _) = {
+            let log = Box::leak(Box::new(crate::problems::Log::default()));
+            let mut problems = Problems::new(log);
+            let named = vec![(c.clone(), std::fs::metadata(&c).ok().and_then(|m| key_from(&m)))];
+            let mut s = open(&path, SETTINGS, V, named, &mut problems);
+            s.read(vec![crate::same::content_hash(&c)], &|_| true, &|_| (), &mut problems);
+            (s, (), problems)
+        };
+        assert_eq!(store.take(0).unwrap().traits.colour_kept, Some(kept_colour(1.7)));
         drop(store);
-        let (again, _, bad) = reopen(&path);
-        assert!(!bad && again.len() == 2);
-        assert_eq!(traits(&again, "c.jpg").colour_kept, Some(2.0));
-        assert_eq!(traits(&again, "a.jpg").colour_kept, Some(measured));
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A cache that can be read and not written still answers the run, and
-    /// still counts what it holds: `stale` takes the records it superseded as
-    /// the difference between that count and the map, which was an underflow
-    /// when the count came back as zero.
+    /// Rows not yet committed are committed when the store goes, and when the
+    /// process is interrupted (`seal`).
     #[test]
-    fn a_read_only_cache_counts_what_it_holds() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("readonly");
+    fn rows_waiting_are_committed_at_an_interrupt() {
+        let dir = scratch("seal");
         let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f1, t1) = analysis(3, 1);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("a.jpg", Key { len: 2, mtime: 2, ctime: 2, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put("b.jpg", Key { len: 3, mtime: 3, ctime: 3, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        drop(store);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let (got, store, bad) = reopen(&path);
-        assert!(bad, "not being able to write it is said");
-        assert!(!store.writable());
-        assert_eq!(got.len(), 2);
-        assert_eq!(store.records(), 3);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A process killed part-way through an append leaves half a record. That
-    /// costs the one record: the rest are read, the tail is cut off, and what
-    /// is appended afterwards is readable.
-    #[test]
-    fn a_torn_final_record_costs_that_record_and_nothing_else() {
-        let dir = scratch("torn");
-        let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(4, 3);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        drop(store);
-        for cut in [1, 9, b.len / 2, b.len - 1] {
-            let file = OpenOptions::new().write(true).open(&path).unwrap();
-            file.set_len(b.at + cut).unwrap();
-            drop(file);
-            let (got, store, bad) = reopen(&path);
-            assert!(!bad, "a torn tail is not a damaged cache");
-            assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
-            assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at);
-            store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-            drop(store);
-            let (got, _, bad) = reopen(&path);
-            assert!(!bad && got.len() == 2);
+        let a = dir.join("a.jpg");
+        write(&a, b"a picture");
+        let (store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        let db = store.db.clone().unwrap();
+        assert_eq!(lock(&db.pending).len(), 0, "committed as it was kept");
+        // A worker whose commit finds the index busy leaves its row waiting.
+        {
+            let _busy = lock(&db.conn);
+            std::thread::scope(|t| t.spawn(|| store.append(0, &Item { hash: Some(Content::of(b"a picture")), ..analysis(3, 1) })).join().unwrap());
+            assert_eq!(lock(&db.pending).len(), 1);
         }
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Where a record's packed length sits: after its path, its settings, the
-    /// key, the picture's size and the six fields of its shape.
-    /// The bytes of a record's head before its keypoint count: the path,
-    /// the settings, the key, the device, the dimensions and the traits.
-    const TRAITS: u64 = 23 * 4 + 4;
-    fn packed_len_at(s: Span, path: &str) -> u64 {
-        s.at + 8 + path.len() as u64 + 12 + 24 + 8 + 8 + TRAITS + 6 * 4
-    }
-
-    /// A length damaged into something the file cannot hold is a torn tail,
-    /// not an allocation: the records before it are kept and the run goes on.
-    /// It used to abort the process — "memory allocation of 1125899906842624
-    /// bytes failed" — on every run until the cache was deleted by hand.
-    #[test]
-    fn an_impossible_length_is_a_torn_tail_not_an_abort() {
-        let dir = scratch("absurd");
-        let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(4, 3);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        {
+            let (_held, _) = seal();
+        }
+        assert_eq!(lock(&db.pending).len(), 0);
+        std::mem::forget(store);
+        let (store, got, _) = run(&path, V, std::slice::from_ref(&a), |_| None);
+        assert_eq!(got, [Some(true)]);
         drop(store);
-        let file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.write_all_at(&(1u64 << 50).to_le_bytes(), packed_len_at(b, "b.jpg")).unwrap();
-        drop(file);
-        let (got, store, _) = reopen(&path);
-        assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
-        assert_eq!(store.records(), 1);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), b.at, "cut where the damage starts");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Damaged framing part-way through keeps what comes before it and says
-    /// so, rather than rejecting the whole file.
     #[test]
-    fn damaged_framing_keeps_the_records_before_it() {
-        let dir = scratch("framing");
+    fn a_process_killed_outright_keeps_what_it_finished() {
+        let dir = scratch("killed");
         let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(4, 3);
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let files: Vec<PathBuf> = (0..5).map(|k| dir.join(format!("{k}.jpg"))).collect();
+        for (k, f) in files.iter().enumerate() {
+            write(f, format!("picture {k}").as_bytes());
+        }
+        let (store, got, _) = run(&path, V, &files, |i| Some(analysis(4, i as u8)));
+        assert_eq!(got, [Some(false); 5]);
+        // No finish, no drop, no seal: as SIGKILL leaves it.
+        std::mem::forget(store);
+        let (store, got, _) = run(&path, V, &files, |_| None);
+        assert_eq!(got, [Some(true); 5]);
         drop(store);
-        // A path length past `MAX_PATH` but inside the file's size.
-        let file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.write_all_at(&((MAX_PATH as u64) + 1).to_le_bytes(), b.at).unwrap();
-        drop(file);
-        let (got, store, bad) = reopen(&path);
-        assert!(bad, "damage that is not a torn tail is said");
-        assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("a.jpg")]);
-        assert_eq!(store.records(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// One record whose body will not unpack costs that record and nothing
-    /// else — not the records of the other folders the same cache serves.
     #[test]
-    fn a_damaged_record_costs_itself_and_not_the_cache() {
-        let dir = scratch("body");
+    fn a_damaged_index_is_replaced_rather_than_failed_on() {
+        let dir = scratch("damaged-index");
         let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(40, 3);
-        store.put("other/x.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("a.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let b = store.put("b.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let shape = store.put("c.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
+        let files: Vec<PathBuf> = (0..40).map(|k| dir.join(format!("{k}.jpg"))).collect();
+        for (k, f) in files.iter().enumerate() {
+            write(f, format!("picture {k}").as_bytes());
+        }
+        let (mut store, _, _) = run(&path, V, &files, |i| Some(analysis(4, i as u8)));
+        store.finish(false);
         drop(store);
-        let file = OpenOptions::new().write(true).open(&path).unwrap();
-        // b's first stream: its length is intact, its deflate is not.
-        let body = packed_len_at(b, "b.jpg") + 8 + 8;
-        file.write_all_at(&[0xff; 24], body).unwrap();
-        // c claims more keypoints than a run of these settings describes.
-        file.write_all_at(&(SETTINGS.features + 1).to_le_bytes(), shape.at + 8 + 5 + 12 + 24 + 8 + 8 + TRAITS + 8).unwrap();
-        drop(file);
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, SETTINGS, &|p, _| !p.starts_with("other"), &mut problems);
-        assert!(problems.any(), "a damaged record is worth saying");
-        let mut names: Vec<_> = got.keys().cloned().collect();
-        names.sort();
-        assert_eq!(names, [PathBuf::from("a.jpg"), PathBuf::from("other/x.jpg")]);
-        assert_eq!(store.records(), 4, "counted, so that the run compacts it away");
-        assert!(store.writable());
-        // However little of the file it is.
-        let keep: Vec<(&Path, Span)> = Vec::new();
-        assert!(store.worth_compacting(&keep, false));
+        // Every page after the header's overwritten: the header still says
+        // it is ours, and nothing in it reads.
+        let len = std::fs::metadata(&path).unwrap().len();
+        let f = OpenOptions::new().write(true).open(&path).unwrap();
+        f.write_all_at(&vec![0x5A; len as usize - 100], 100).unwrap();
+        drop(f);
+        let (mut store, got, problems) = run(&path, V, &files, |i| Some(analysis(4, i as u8)));
+        assert!(problems.any(), "said");
+        assert!(got.iter().all(|g| *g == Some(false)), "analysed again");
+        assert!(store.finish(false).failure.is_none(), "and the new cache works");
+        drop(store);
+        let (store, got, problems) = run(&path, V, &files, |_| None);
+        assert!(!problems.any());
+        assert!(got.iter().all(|g| *g == Some(true)));
+        drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A wide picture's thumbnail is longer than the setting on one side
-    /// (`decode::area_factor`), and is a record like any other: read back,
-    /// not called damaged.
     #[test]
-    fn a_wide_thumbnail_is_not_damage() {
-        let dir = scratch("wide");
-        let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, _) = analysis(10, 2);
-        let t = Thumb::new(400, 30, 0.125, vec![2; 400 * 30]);
-        store.put("wide.jpg", Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (3200, 240), &Traits::default(), &f, &t).unwrap();
-        drop(store);
-        let (got, _, bad) = reopen(&path);
-        assert!(!bad, "a wide thumbnail is not damage");
-        assert_eq!(got.keys().collect::<Vec<_>>(), [Path::new("wide.jpg")]);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Records nothing will read are left in the file until they are a quarter
-    /// of it, and `--prune-cache` compacts whatever the share.
-    #[test]
-    fn a_file_is_compacted_once_a_quarter_of_it_is_unused() {
+    fn a_cache_on_a_share_keeps_and_reads_as_a_local_one() {
         let dir = scratch("share");
         let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(20, 5);
-        let names: Vec<String> = (0..8).map(|i| format!("{i}.jpg")).collect();
-        let spans: Vec<Span> =
-            names.iter().map(|p| store.put(p, Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap()).collect();
-        let keeping = |k: usize| -> Vec<(&Path, Span)> { (0..k).map(|i| (Path::new(names[i].as_str()), spans[i])).collect() };
-        assert!(!store.worth_compacting(&keeping(8), false), "nothing unused");
-        assert!(!store.worth_compacting(&keeping(7), false), "one record of eight is not a quarter");
-        assert!(store.worth_compacting(&keeping(7), true), "unless asked");
-        assert!(store.worth_compacting(&keeping(6), false), "two of eight is");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Two runs holding one cache: neither replaces the file while the other
-    /// has it, so what the other appends afterwards is still in it. A
-    /// compaction used to rename a new file over the one the other run was
-    /// appending to, and every record it made from then on was lost.
-    #[test]
-    fn a_cache_another_run_holds_is_not_replaced_under_it() {
-        let dir = scratch("two-runs");
-        let path = dir.join(file_name());
-        let (f, t) = analysis(20, 5);
-        let key = Key { len: 1, mtime: 1, ctime: 1, dev: 0 };
-        let (_, mut a, _) = reopen(&path);
-        let (_, b, _) = reopen(&path);
-        a.put("old.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        // `a` drops `old.jpg` while `b` has the file: it is left as it is.
-        assert!(!a.compact(&mut []).unwrap(), "put off");
-        b.put("b.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        drop((a, b));
-        let (got, mut store, _) = reopen(&path);
-        assert!(got.contains_key(Path::new("b.jpg")), "b's record is in the file the name leads to");
-        assert!(got.contains_key(Path::new("old.jpg")), "and nothing was compacted away under b");
-        // Alone, a run compacts as before.
-        assert!(store.compact(&mut []).unwrap());
+        let (a, b) = (dir.join("a.jpg"), dir.join("b.jpg"));
+        write(&a, b"a picture");
+        write(&b, b"b picture");
+        AS_SHARE.with(|s| s.set(Some(true)));
+        let (mut first, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(40, 1)));
+        let (mut second, _, _) = run(&path, V, std::slice::from_ref(&b), |_| Some(analysis(3, 2)));
+        let mode: String = lock(&first.db.as_ref().unwrap().conn).pragma_query_value(None, "journal_mode", |r| r.get(0)).unwrap();
+        assert_eq!(mode, "truncate");
+        assert!(matches!(second.finish(false).compacted, Compacted::Busy));
+        drop(second);
+        assert!(matches!(first.finish(false).compacted, Compacted::Folded));
+        drop(first);
+        // A rollback journal, left empty between commits.
+        assert!(!beside(&path, "-wal").exists());
+        assert_eq!(std::fs::metadata(beside(&path, "-journal")).map_or(0, |m| m.len()), 0);
+        let (store, got, _) = run(&path, V, &[a.clone(), b.clone()], |_| None);
+        assert_eq!(got, [Some(true), Some(true)]);
         drop(store);
-        let (got, _, _) = reopen(&path);
-        assert!(got.is_empty());
+        AS_SHARE.with(|s| s.set(None));
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Another run that appended to the cache and finished while this one
-    /// had it open: what it appended is not this run's to keep or drop, and a
-    /// compaction keeps it. It used to copy only what this run knew of, and
-    /// the other run's records, counted as dead, were what set it off.
     #[test]
-    fn a_compaction_keeps_what_another_run_appended_meanwhile() {
-        let dir = scratch("two-runs-finished");
+    fn a_local_cache_leaves_no_log_once_closed() {
+        let dir = scratch("closed");
         let path = dir.join(file_name());
-        let (f, t) = analysis(20, 5);
-        let (f2, t2) = analysis(20, 6);
-        let key = Key { len: 1, mtime: 1, ctime: 1, dev: 0 };
-        let newer = Key { len: 2, mtime: 2, ctime: 2, dev: 0 };
-        let (_, mut a, _) = reopen(&path);
-        let mine = a.put("mine.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        a.put("dead.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let shared = a.put("shared.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        let (_, b, _) = reopen(&path);
-        b.put("other.jpg", key, (320, 240), &Traits::default(), &f, &t).unwrap();
-        // The other run described a file this one has a record for, after it.
-        b.put("shared.jpg", newer, (320, 240), &Traits::default(), &f2, &t2).unwrap();
-        drop(b);
-        let keep = [(Path::new("mine.jpg"), mine), (Path::new("shared.jpg"), shared)];
-        // Only `dead.jpg` is dead: the other run's two records are live.
-        assert!(!a.worth_compacting(&keep, false), "a fifth of the file is dead, not three fifths");
-        assert!(a.compact(&keep).unwrap());
-        drop(a);
-        let (got, store, _) = reopen(&path);
-        assert!(got.contains_key(Path::new("other.jpg")), "the other run's record is kept");
-        assert!(got.contains_key(Path::new("mine.jpg")) && !got.contains_key(Path::new("dead.jpg")));
-        let s = &got[Path::new("shared.jpg")];
-        assert_eq!((s.0.len, &s.1.as_ref().unwrap().feats.desc), (2, &f2.desc), "the later record still wins");
-        assert_eq!(store.records(), 4);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// What a run keeps is what it took and what it made, and what it was
-    /// not asked about while its file is there: a walked file's record that
-    /// no longer fits it, or that the run left untaken (a copy whose bytes
-    /// another file answers for), is not kept, nor one for a file that has
-    /// gone. A colour kept afterwards goes into the record where it went.
-    #[test]
-    fn a_run_keeps_what_it_took_and_made() {
-        let dir = scratch("run");
-        let path = dir.join(file_name());
-        let [a, b, c, other, gone] = ["a.jpg", "b.jpg", "c.jpg", "other.jpg", "gone.jpg"].map(|n| dir.join(n));
-        for f in [&a, &b, &c, &other] {
-            std::fs::write(f, b"x").unwrap();
-        }
-        let (f, t) = analysis(6, 4);
-        let (f2, t2) = analysis(3, 9);
-        let jpeg = Traits { colour: UNMEASURED, ..Default::default() };
-        let (old, new) = (Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, Key { len: 2, mtime: 2, ctime: 2, dev: 0 });
-        let (_, store, _) = reopen(&path);
-        for p in [&a, &b, &c, &other, &gone] {
-            store.put(p, old, (320, 240), &jpeg, &f, &t).unwrap();
-        }
+        let a = dir.join("a.jpg");
+        write(&a, b"a picture");
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        assert!(beside(&path, "-wal").exists(), "a log while open");
+        store.finish(false);
         drop(store);
+        assert!(!beside(&path, "-wal").exists() && !beside(&path, "-shm").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
+    #[test]
+    fn two_runs_writing_at_once_keep_both_and_are_folded() {
+        let dir = scratch("two");
+        let path = dir.join(file_name());
+        let (a, b) = (dir.join("a.jpg"), dir.join("b.jpg"));
+        write(&a, b"a picture");
+        write(&b, b"b picture");
+        let (mut first, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(40, 1)));
+        let (mut second, _, _) = run(&path, V, std::slice::from_ref(&b), |_| Some(analysis(3, 2)));
+        assert_eq!(packs_on_disk(&path).len(), 2);
+        let first_pack = packs_on_disk(&path).into_iter().min_by_key(|(id, _)| *id).unwrap().0;
+        assert!(matches!(second.finish(false).compacted, Compacted::Busy), "the first still has it");
+        drop(second);
+        assert!(matches!(first.finish(false).compacted, Compacted::Folded));
+        drop(first);
+        assert_eq!(packs_on_disk(&path).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), [first_pack], "folded into the larger");
+        let (store, got, _) = run(&path, V, &[a.clone(), b.clone()], |_| None);
+        assert_eq!(got, [Some(true), Some(true)]);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The packs are rewritten once a quarter of them is read by nothing, and
+    /// not before; what is kept reads back, and a pack nobody names goes.
+    #[test]
+    fn the_packs_are_rewritten_once_a_quarter_is_unused() {
+        let dir = scratch("compact");
+        let path = dir.join(file_name());
+        let files: Vec<PathBuf> = (0..8).map(|i| dir.join(format!("{i}.jpg"))).collect();
+        for (i, f) in files.iter().enumerate() {
+            write(f, format!("picture {i}").as_bytes());
+        }
+        let (mut store, _, _) = run(&path, V, &files, |i| Some(analysis(20, i as u8)));
+        store.finish(false);
+        drop(store);
+        write(&pack_path(&path, 99), b"a killed run's");
+        // One of eight gone and dropped (pruned): an eighth unused.
+        let (mut store, _, _) = run(&path, V, &files[1..], |_| None);
+        assert!(matches!(store.finish(true).compacted, Compacted::Done), "pruned, and litter");
+        drop(store);
+        assert!(!pack_path(&path, 99).exists());
+        let (mut store, _, _) = run(&path, V, &files[1..], |_| None);
+        assert!(matches!(store.finish(false).compacted, Compacted::Unneeded { unused: 0, .. }));
+        drop(store);
+        // Two of seven rewritten: a quarter and more unused.
+        for f in &files[1..3] {
+            write(f, b"changed");
+        }
+        let (mut store, got, _) = run(&path, V, &files[1..], |i| Some(analysis(20, 100 + i as u8)));
+        assert_eq!(got[..3], [Some(false), Some(false), Some(true)]);
+        let before = bytes(&path);
+        assert!(matches!(store.finish(false).compacted, Compacted::Done));
+        drop(store);
+        assert!(bytes(&path) < before);
+        let (store, got, _) = run(&path, V, &files[1..], |_| None);
+        assert!(got.iter().all(|g| *g == Some(true)));
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A record the index names that is not where it says (a pack damaged or
+    /// replaced) costs itself, and is made again.
+    #[test]
+    fn a_damaged_record_costs_itself() {
+        let dir = scratch("damaged");
+        let path = dir.join(file_name());
+        let files: Vec<PathBuf> = ["a.jpg", "b.jpg"].iter().map(|n| dir.join(n)).collect();
+        write(&files[0], b"one");
+        write(&files[1], b"two");
+        let (mut store, _, _) = run(&path, V, &files, |i| Some(analysis(5, i as u8)));
+        store.finish(false);
+        drop(store);
+        let (id, pack) = packs_on_disk(&path).pop().unwrap();
+        let _ = id;
+        let f = OpenOptions::new().write(true).open(&pack).unwrap();
+        f.write_all_at(&[0xAA; 4], 0).unwrap();
+        let (store, got, problems) = run(&path, V, &files, |_| Some(analysis(5, 9)));
+        assert!(problems.any());
+        assert_eq!(got.iter().filter(|g| **g == Some(true)).count(), 1);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Names that are not UTF-8 are their own files.
+    #[test]
+    fn names_that_are_not_utf8_keep_their_own_rows() {
+        let dir = scratch("utf8");
+        let path = dir.join(file_name());
+        let names: Vec<PathBuf> = [b"x\xfe.jpg", b"x\xff.jpg"].iter().map(|n| dir.join(std::ffi::OsStr::from_bytes(*n))).collect();
+        write(&names[0], b"one");
+        write(&names[1], b"two");
+        let (mut store, _, _) = run(&path, V, &names, |i| Some(analysis(3, i as u8)));
+        store.finish(false);
+        drop(store);
+        let (store, got, _) = run(&path, V, &names, |_| None);
+        assert_eq!(got, [Some(true), Some(true)]);
+        assert!(store.hash_of(0).is_some() && store.hash_of(0) != store.hash_of(1));
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `--clear-cache` removes the cache and every file of it, and nothing
+    /// else.
+    #[test]
+    fn clearing_removes_every_file_of_the_cache() {
+        let dir = scratch("clear");
+        let path = dir.join(file_name());
+        let a = dir.join("a.jpg");
+        write(&a, b"a picture");
+        let (mut store, _, _) = run(&path, V, std::slice::from_ref(&a), |_| Some(analysis(3, 1)));
+        store.finish(false);
+        drop(store);
+        write(&crate::matched::path_beside(&path), b"IMGFPM02");
         let log = crate::problems::Log::default();
         let mut problems = Problems::new(&log);
-        let files = vec![(a.clone(), Some(old)), (b.clone(), Some(old)), (c.clone(), Some(new))];
-        let mut store = open(&path, SETTINGS, files, &|_| (), &mut problems);
-        assert_eq!(store.usable(), 5);
-        assert!(store.take(0).is_some_and(|r| r.feats.desc == f.desc));
-        assert!(store.take(0).is_none(), "taken once");
-        assert!(store.take(2).is_none(), "c has changed since its record");
-        assert!(store.stale(), "b's record is not taken and c's no longer fits");
-        store.append(2, (320, 240), &jpeg, &f2, &t2);
-        let kept = store.finish(false);
-        assert_eq!((kept.carried, kept.other_sizes, kept.dropped), (1, 0, 1), "other.jpg carried, gone.jpg not");
-        assert!(matches!(kept.compacted, Compacted::Done), "three of six records are dead");
-        store.keep_colour(0, 5.0);
-        store.keep_colour(1, 5.0);
-        drop(store);
-
-        let (got, store, bad) = reopen(&path);
-        assert!(!bad && store.records() == 3);
-        let mut names: Vec<&Path> = got.keys().map(PathBuf::as_path).collect();
-        names.sort();
-        assert_eq!(names, [a.as_path(), c.as_path(), other.as_path()]);
-        assert_eq!(got[&c].0, new);
-        assert_eq!(got[&c].1.as_ref().unwrap().feats.desc, f2.desc);
-        assert_eq!(got[&a].1.as_ref().unwrap().traits.colour_kept, Some(5.0), "written where the compaction put it");
-        drop(store);
-
-        // Pruned: only what the run took or made.
-        let mut store = open(&path, SETTINGS, vec![(a.clone(), Some(old))], &|_| (), &mut problems);
-        assert!(store.take(0).is_some() && !store.stale());
-        let kept = store.finish(true);
-        assert_eq!((kept.carried, kept.dropped), (0, 2));
-        drop(store);
-        let (got, _, _) = reopen(&path);
-        assert_eq!(got.keys().collect::<Vec<_>>(), [&a]);
-        assert!(!problems.any());
+        clear(&path, &mut problems);
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("a.jpg")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3340,7 +2408,7 @@ mod tests {
     fn gone_is_asked_a_folder_at_a_time() {
         let dir = scratch("gone");
         let (here, deleted) = (dir.join("a.jpg"), dir.join("b.jpg"));
-        std::fs::write(&here, b"x").unwrap();
+        write(&here, b"x");
         let in_gone_folder = dir.join("removed/c.jpg");
         let in_file = here.join("d.jpg");
         let asked = [here.as_path(), deleted.as_path(), in_gone_folder.as_path(), in_file.as_path()];
@@ -3352,9 +2420,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A record whose file cannot be looked at right now — a folder made
-    /// unreadable here; a dropped sshfs or NFS mount in life — is carried,
-    /// not taken for a file deleted.
+    /// A file in a folder that cannot be listed is not gone: it cannot be
+    /// asked.
     #[test]
     fn a_file_that_cannot_be_reached_is_not_gone() {
         use std::os::unix::fs::PermissionsExt;
@@ -3362,178 +2429,20 @@ mod tests {
         let locked = dir.join("locked");
         std::fs::create_dir_all(&locked).unwrap();
         let f = locked.join("a.jpg");
-        std::fs::write(&f, b"x").unwrap();
-        let m = [
-            Unasked { path: f.clone(), span: Span { at: 8, len: 10 }, dev: 0, here: true },
-            Unasked { path: dir.join("deleted.jpg"), span: Span { at: 18, len: 10 }, dev: 0, here: false },
-        ];
+        write(&f, b"x");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let reachable = std::fs::metadata(&f).is_ok();
-        let kept: Vec<PathBuf> = carried(&m).into_iter().map(|u| u.path.clone()).collect();
+        let reachable = std::fs::read_dir(&locked).is_ok();
+        let found: Vec<PathBuf> = gone([f.as_path()].into_iter()).into_iter().map(Path::to_path_buf).collect();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
-        // Root reads through any mode, and then the file is simply there.
         if !reachable {
-            assert_eq!(kept, vec![f]);
+            assert!(found.is_empty());
         }
     }
 
-    /// The default file is named for the format, so that a format change
-    /// starts a new file rather than meeting the old one and caching nothing.
     #[test]
-    fn the_default_file_is_named_for_its_format() {
-        assert_eq!(file_name(), format!("analysis-{FORMAT}.bin"));
-        assert_eq!(locate(None).file_name().unwrap().to_str().unwrap(), file_name());
-        assert_eq!(locate(None).parent().unwrap(), default_dir());
-    }
-
-    /// Compaction keeps exactly what it is handed, copied rather than packed
-    /// again, and a cache from another format version is left as it is: read
-    /// for nothing, written to by nothing.
-    #[test]
-    fn compaction_keeps_what_it_is_given_and_another_versions_file_is_left_alone() {
-        let dir = scratch("compact");
-        let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(6, 4);
-        let spans: Vec<Span> = ["c.jpg", "a.jpg", "b.jpg", "a.jpg"]
-            .iter()
-            .map(|p| store.put(p, Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap())
-            .collect();
-        let mut store = store;
-        let mut keep = vec![(Path::new("c.jpg"), spans[0]), (Path::new("a.jpg"), spans[3])];
-        assert!(store.compact(&mut keep).unwrap());
-        drop(store);
-        let (got, store, bad) = reopen(&path);
-        assert!(!bad);
-        assert_eq!(store.records(), 2);
-        let mut names: Vec<_> = got.keys().cloned().collect();
-        names.sort();
-        assert_eq!(names, [PathBuf::from("a.jpg"), PathBuf::from("c.jpg")]);
-        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f.desc);
-        drop(store);
-
-        let file = OpenOptions::new().write(true).open(&path).unwrap();
-        let size = std::fs::metadata(&path).unwrap().len();
-        for other in [b"IMGFPC08", b"IMGFPC99"] {
-            file.write_all_at(other, 0).unwrap();
-            let (got, store, bad) = reopen(&path);
-            assert!(got.is_empty() && !bad && store.records() == 0);
-            assert_eq!(store.other_version(), Some(std::str::from_utf8(other).unwrap()));
-            let (f, t) = analysis(6, 4);
-            assert!(store.put("d.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).is_none());
-            assert!(!store.worth_compacting(&[], true));
-            drop(store);
-            assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "the file is not touched");
-        }
-        drop(file);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A run at another working size reads none of this one's records and
-    /// destroys none of them either: they are carried, unread, and the next
-    /// run at this size finds them where they were. A run at 640 used to
-    /// replace the whole file, every folder's analysis with it.
-    #[test]
-    fn records_made_at_other_settings_are_kept_not_read() {
-        let dir = scratch("settings");
-        let path = dir.join(file_name());
-        let (_, store, _) = reopen(&path);
-        let (f, t) = analysis(6, 4);
-        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("b.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        drop(store);
-
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let other = Settings { work_size: 640, ..SETTINGS };
-        let (got, store) = read(&path, other, &|_, _| true, &mut problems);
-        assert!(got.is_empty() && !problems.any());
-        assert_eq!((store.records(), others(&store)), (2, 2));
-        let (f2, t2) = analysis(3, 9);
-        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
-        drop(store);
-
-        // Back at the first size: its two records, and the 640 one carried.
-        let (got, store, bad) = reopen(&path);
-        assert!(!bad);
-        assert_eq!((got.len(), store.records(), others(&store)), (2, 3, 1));
-        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f.desc);
-        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().dims, (320, 240));
-        // A compaction that keeps both kinds keeps both.
-        let mut store = store;
-        let mut keep: Vec<(&Path, Span)> = got.iter().map(|(p, e)| (p.as_path(), e.2)).collect();
-        let others: Vec<(PathBuf, Span)> = store.unasked.iter().map(|u| (u.path.clone(), u.span)).collect();
-        keep.extend(others.iter().map(|(p, s)| (p.as_path(), *s)));
-        assert!(store.compact(&mut keep).unwrap());
-        drop(store);
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, other, &|_, _| true, &mut problems);
-        assert_eq!((got.len(), store.records()), (1, 3));
-        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A record made at another `--detail` (another feature cap at the same
-    /// working size) is read, not carried: the latest of a path's records is
-    /// the one a run takes, whichever detail made it, and the file holds one
-    /// live record a file.
-    #[test]
-    fn records_at_another_detail_are_read() {
-        let dir = scratch("detail");
-        let path = dir.join(file_name());
-        let finer = Settings { features: SETTINGS.features * 2, ..SETTINGS };
-        let log = crate::problems::Log::default();
-        let mut problems = Problems::new(&log);
-        let (_, store) = read(&path, finer, &|_, _| true, &mut problems);
-        let (f, t) = analysis(6, 4);
-        let (f2, t2) = analysis(9, 5);
-        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        store.put("b.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f, &t).unwrap();
-        drop(store);
-        // At the default: both read, nothing carried.
-        let (got, store, bad) = reopen(&path);
-        assert!(!bad);
-        assert_eq!((got.len(), store.records(), others(&store)), (2, 2, 0));
-        store.put("a.jpg", Key { len: 7, mtime: 7, ctime: 7, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
-        drop(store);
-        // Finer again: a.jpg's is the default's record written after.
-        let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, finer, &|_, _| true, &mut problems);
-        assert_eq!((got.len(), store.records(), others(&store)), (2, 3, 0));
-        assert_eq!(got[Path::new("a.jpg")].1.as_ref().unwrap().feats.desc, f2.desc);
-        drop(store);
-        // Another working size reads neither, and carries one a path.
-        let mut problems = Problems::new(&log);
-        let (got, store) = read(&path, Settings { work_size: 256, ..SETTINGS }, &|_, _| true, &mut problems);
-        assert_eq!((got.len(), others(&store)), (0, 2));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Two names that are not UTF-8 and read the same once made printable
-    /// are two files, and each keeps its own analysis. Keyed on the printable
-    /// form, the second record superseded the first, and the first file was
-    /// then handed the second's analysis on the next run.
-    #[test]
-    fn names_that_are_not_utf8_keep_their_own_records() {
-        let dir = scratch("bytes");
-        let path = dir.join(file_name());
-        let fe = PathBuf::from(OsString::from_vec(b"x\xfe.jpg".to_vec()));
-        let ff = PathBuf::from(OsString::from_vec(b"x\xff.jpg".to_vec()));
-        assert_eq!(fe.display().to_string(), ff.display().to_string());
-        let (_, store, _) = reopen(&path);
-        let (f1, t1) = analysis(3, 1);
-        let (f2, t2) = analysis(5, 2);
-        store.put(&fe, Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f1, &t1).unwrap();
-        store.put(&ff, Key { len: 1, mtime: 1, ctime: 1, dev: 0 }, (320, 240), &Traits::default(), &f2, &t2).unwrap();
-        drop(store);
-        let (got, _, bad) = reopen(&path);
-        assert!(!bad);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[&fe].1.as_ref().unwrap().feats.desc, f1.desc);
-        assert_eq!(got[&ff].1.as_ref().unwrap().feats.desc, f2.desc);
-        std::fs::remove_dir_all(&dir).ok();
+    fn the_default_file_is_named_for_its_schema() {
+        assert_eq!(file_name(), "analysis-IMGFPD01.db");
+        assert_eq!(FORMAT, format!("IMGFPD{SCHEMA:02}"));
     }
 }
-

@@ -1310,11 +1310,11 @@ pub struct WordList {
 }
 
 /// Bits of an entry that hold the keypoint index; see `WordList`.
-const KP_BITS: u32 = 11;
+const KP_BITS: u32 = crate::analysis::MOST_KEYPOINTS.trailing_zeros();
 const KP_MASK: u32 = (1 << KP_BITS) - 1;
 
 /// The most keypoints an image may have for its entries to number them.
-pub(crate) const MOST_KEYPOINTS: usize = 1 << KP_BITS;
+pub(crate) use crate::analysis::MOST_KEYPOINTS;
 
 impl WordList {
     /// What one entry costs.

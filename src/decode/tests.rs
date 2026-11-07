@@ -1238,7 +1238,7 @@ fn line(path: &Path) -> String {
         None => "probe none".into(),
     });
     for work in [512, 160] {
-        out.push(match decode_guarded(|| decode_with(path, work, probe.as_ref())) {
+        out.push(match decode_guarded(|| decode_with(path, work, probe.as_ref(), false)) {
             Ok(d) => {
                 let t = d.traits;
                 format!(

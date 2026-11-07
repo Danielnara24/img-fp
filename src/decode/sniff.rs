@@ -250,10 +250,10 @@ fn head_is_image(head: &[u8], path: &Path) -> bool {
 /// head alone; `true` when it may be a picture, and when the file cannot be
 /// read, which is the decode's to report.
 ///
-/// The exact pass asks it of a wildcard walk's same-size files before reading
-/// them whole: those are what the pass compares byte for byte, and under
-/// `-x '*'` two copies of a 4 GB video are one comparison of 8 GB, for a pair
-/// the run then drops as no picture at all.
+/// The exact pass asks it of a wildcard walk's files before reading them
+/// whole to hash them (`same::content_hashes`): under `-x '*'` two copies of a
+/// 4 GB video are 8 GB read, for a pair the run then drops as no picture at
+/// all.
 pub fn may_be_image(path: &Path) -> bool {
     use std::io::Read;
     let mut head = Vec::with_capacity(HEAD);

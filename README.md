@@ -465,7 +465,7 @@ to stderr.
 | `-t`, `--threads <N>` | Worker threads (`0`, or more than there are cores, = all cores) | `0` |
 | `-v`, `--verbose` | Print timings for each stage | off |
 | `--log-file <PATH>` | Write every skipped file, problem and stage timing to this file. Truncated at the start of each run. `-` writes it to stdout | |
-| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC21.bin` |
+| `--cache <PATH>` | Use this cache file instead of the default one | `$XDG_CACHE_HOME/img-fp/analysis-IMGFPD01.db` |
 | `--no-cache` | Don't read or write the cache | off |
 | `--clear-cache` | Delete the cache before running | off |
 | `--completions <SHELL>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` and exit | |
@@ -501,12 +501,18 @@ Byte-identical copies of them are still found.
 
 ## Cache
 
-The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC21.bin`
-(or `~/.cache/img-fp/analysis-IMGFPC21.bin`), so later runs over the same images are much
-faster. One cache serves every folder you scan and every `--detail` you use,
-and entries for deleted files are dropped automatically. Images in a folder
-that is renamed or moved, or on a drive mounted at another place, are
-analysed again.
+The analysis of each image is cached in `$XDG_CACHE_HOME/img-fp/analysis-IMGFPD01.db`
+(or `~/.cache/img-fp/analysis-IMGFPD01.db`) and the files beside it named after
+it, so later runs over the same images are much faster. One cache serves every
+folder you scan and every `--detail` you use.
+
+An image is recognised by its content, so one that is renamed, moved, copied,
+or on a drive mounted at another place keeps its analysis: it is read again to
+recognise it, but not analysed again. The analysis of an image that has been
+deleted, or of a drive that has not been plugged in, is kept for 30 days and
+then dropped. After an upgrade that analyses images differently, images are
+analysed again as they are scanned, and the old analyses are dropped after 30
+days unused.
 Use `--clear-cache` to start over.
 
 The part of the name after `analysis-` is the cache format, which changes

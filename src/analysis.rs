@@ -6,13 +6,41 @@
 //! why. Everything after the analysis reads that one field; what it means to
 //! the run (a skip, a problem, a record worth keeping) is asked of it.
 
-use crate::{cache, decode, sift, timed, THUMB_LONG, THUMB_MAX_SIDES};
+use crate::{cache, decode, sift, timed};
 use crate::sift::Features;
-use crate::verify::Thumb;
+use crate::thumb::Thumb;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+pub(crate) const THUMB_LONG: usize = 128;
+/// The pixel check's thumbnail is `THUMB_LONG` times `decode::area_factor`
+/// on its long side, and never more than this many times `THUMB_LONG`: a
+/// strip of a few hundred thousand pixels by one would otherwise ask for a
+/// side past what a thumbnail's `u16` holds.
+pub(crate) const THUMB_MAX_SIDES: usize = 16;
+
+/// Local features described per image.
+///
+/// Not an option, because it has no usable range. Measured over 300 to 900 at
+/// a fixed vocabulary, it moves F1 by 0.007 and never changes a verdict that
+/// matters: 0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977. Above 600 it buys
+/// nothing and costs 11% of the run; below it, nothing either, until the point
+/// where it stops being about features at all.
+///
+/// It used to look load-bearing — 400 features merged seven pairs of families
+/// on the benchmark corpus — and that was the vocabulary. Both this and
+/// `--work-size` move the descriptor count, the descriptor count sized the
+/// tree, and the tree could only be sized to a factor of sixteen. With
+/// `VocabParams::for_corpus` holding occupancy instead, the cliff is gone and
+/// what is left is a plateau, which is not a thing to put on a command line.
+pub(crate) const FEATURES: usize = 600;
+
+/// The most keypoints an analysis may hold: what an index entry's 11 bits
+/// number (`index::KP_BITS` is read from it). Here because `features_at`
+/// caps a finer detail's count at it, so it is part of what an analysis is.
+pub(crate) const MOST_KEYPOINTS: usize = 1 << 11;
 
 /// One image's analysis.
 ///
@@ -31,6 +59,12 @@ pub(crate) struct Item {
     pub(crate) read: Read,
     /// What the keep/delete suggestion reads beyond the analysis.
     pub(crate) traits: decode::Traits,
+    /// The library outside the build that made the pixels
+    /// (`decode::Decoded::made_by`), which a cached record carries.
+    pub(crate) made_by: Option<&'static str>,
+    /// The file's content hash, when the analysis was asked to take it from
+    /// the bytes it read (`decode::Decoded::hash`).
+    pub(crate) hash: Option<decode::Content>,
 }
 
 /// What reading a file came to: an analysis, whole or of a part, or none
@@ -77,7 +111,7 @@ impl Read {
 
 impl From<cache::Record> for Item {
     fn from(rec: cache::Record) -> Item {
-        Item { feats: rec.feats.into(), thumb: rec.thumb.into(), dims: rec.dims, read: Read::Whole, traits: rec.traits }
+        Item { feats: rec.feats.into(), thumb: rec.thumb.into(), dims: rec.dims, read: Read::Whole, traits: rec.traits, made_by: None, hash: None }
     }
 }
 
@@ -109,6 +143,19 @@ impl Item {
     }
 }
 
+/// What a cached analysis was made by, as the cache keys it: the build's
+/// analysis (`IMGFP_ANALYSIS`, the hash `build.rs` makes of the sources that
+/// compute it, the decoders' versions, the compiler and the target) and the
+/// description's parameters as this run passes them. A record made under
+/// another is never read: the build or a parameter that could make another
+/// analysis says so itself, where a format number had to be raised by hand.
+pub(crate) fn version(p: &sift::Params) -> [u8; 16] {
+    let mut h = blake3::Hasher::new();
+    h.update(env!("IMGFP_ANALYSIS").as_bytes());
+    h.update(format!("{p:?}").as_bytes());
+    h.finalize().as_bytes()[..16].try_into().expect("16 bytes")
+}
+
 /// Thread time spent decoding and describing, in microseconds, for the log.
 pub(crate) static T_DECODE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static T_SIFT: AtomicU64 = AtomicU64::new(0);
@@ -131,18 +178,18 @@ pub(crate) fn enlarge_below(work: usize, upsample_below: usize) -> usize {
 /// finer than it up to `detail` (`finer_levels`); and how long the decode
 /// took. At `detail` no finer than `work` (the default) it is the analysis
 /// at `work` alone.
-pub(crate) fn analyse(path: &Path, work: usize, detail: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> (Item, Duration) {
+pub(crate) fn analyse(path: &Path, work: usize, detail: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes, hash: bool) -> (Item, Duration) {
     let ups = header.map(|h| finer_levels(h.w as usize, h.h as usize, work, detail)).unwrap_or_default();
     if ups.is_empty() {
-        return analyse_plain(path, work, p, header, planes);
+        return analyse_plain(path, work, p, header, planes, hash);
     }
-    analyse_finer(path, work, &ups, p, header, planes)
+    analyse_finer(path, work, &ups, p, header, planes, hash)
 }
 
 /// `analyse`, as plain.
-pub(crate) fn analyse_plain(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes) -> (Item, Duration) {
+pub(crate) fn analyse_plain(path: &Path, work: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes, hash: bool) -> (Item, Duration) {
     let t0 = Instant::now();
-    let r = decode::decode_guarded(|| decode::decode_with(path, work, header));
+    let r = decode::decode_guarded(|| decode::decode_with(path, work, header, hash));
     let decode = t0.elapsed();
     T_DECODE.fetch_add(decode.as_micros() as u64, Ordering::Relaxed);
     let item = match r {
@@ -161,7 +208,7 @@ pub(crate) fn analyse_plain(path: &Path, work: usize, p: &sift::Params, header: 
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
             let traits = decode::Traits { grid: grey_grid(&d.work), ..d.traits };
             let read = d.damaged.map_or(Read::Whole, Read::Damaged);
-            Item { feats, thumb, dims: d.size, read, traits }
+            Item { feats, thumb, dims: d.size, read, traits, made_by: d.made_by, hash: d.hash }
         }
         Err(e) => {
             let read = decode::refused(&e).map_or_else(|| Read::Failed(crate::why(&e)), Read::Refused);
@@ -218,8 +265,8 @@ pub(crate) fn finer_levels(w: usize, h: usize, work: usize, detail: usize) -> Ve
 /// 13,656; the further features found little and joined sibling pictures.
 pub(crate) fn features_at(size: usize, work: usize) -> usize {
     let r = size as f64 / work.max(1) as f64;
-    let n = crate::FEATURES as f64 * (1.0 + (r - 1.0).max(0.0) / 4.0);
-    (n.round() as usize).min(crate::index::MOST_KEYPOINTS - 1)
+    let n = FEATURES as f64 * (1.0 + (r - 1.0).max(0.0) / 4.0);
+    (n.round() as usize).min(MOST_KEYPOINTS - 1)
 }
 
 /// `analyse` with finer levels: the analysis at `work` exactly as
@@ -227,14 +274,14 @@ pub(crate) fn features_at(size: usize, work: usize) -> usize {
 /// keypoints finer than the level below can find, up to `features_at` its
 /// size. The levels' ends are kept (`Features::ends`), so a run at a coarser
 /// `detail` reads its own analysis as a prefix of this one.
-fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, header: Option<&decode::Probe>, twins: &Planes) -> (Item, Duration) {
+fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, header: Option<&decode::Probe>, twins: &Planes, hash: bool) -> (Item, Duration) {
     let t0 = Instant::now();
     let works: Vec<usize> = std::iter::once(work).chain(ups.iter().filter(|u| !u.whole).map(|u| u.size)).chain(ups.iter().any(|u| u.whole).then_some(0)).collect();
-    let r = decode::decode_guarded(|| decode::decode_levels(path, &works, header));
+    let r = decode::decode_guarded(|| decode::decode_levels(path, &works, header, hash));
     let decode = t0.elapsed();
     T_DECODE.fetch_add(decode.as_micros() as u64, Ordering::Relaxed);
     let item = match r {
-        Ok((planes, size, damaged, traits)) => {
+        Ok((planes, size, damaged, traits, made_by, hash)) => {
             let t1 = Instant::now();
             let base = &planes[0];
             let (feats, thumb, grid) = twins.levels(&planes, || {
@@ -273,7 +320,7 @@ fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, head
             T_SIFT.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
             let traits = decode::Traits { grid, ..traits };
             let read = damaged.map_or(Read::Whole, Read::Damaged);
-            Item { feats, thumb, dims: size, read, traits }
+            Item { feats, thumb, dims: size, read, traits, made_by, hash }
         }
         Err(e) => {
             let read = decode::refused(&e).map_or_else(|| Read::Failed(crate::why(&e)), Read::Refused);
@@ -378,6 +425,51 @@ impl Planes {
 mod tests {
     use super::*;
 
+    /// `build.rs` hashes the analysis's sources into `IMGFP_ANALYSIS`, under
+    /// which every cached record is kept. A module those sources read and
+    /// the list leaves out could change an analysis without changing the
+    /// hash, and a cache would hand the old one back: so none of them may
+    /// name a module of the crate outside the list, but these, which hold no
+    /// value an analysis is made of: the timing macro and the profiler,
+    /// failures' text (`why`), the scratch file the arrays live in, the
+    /// progress bar's pace, and the cache's `Record`, the analysis as stored.
+    #[test]
+    fn the_analysis_reads_only_its_sources() {
+        let sources: Vec<&str> = env!("IMGFP_ANALYSIS_SOURCES").split(':').collect();
+        let module = |p: &str| -> String {
+            let p = p.trim_start_matches("src/").trim_end_matches(".rs");
+            p.split('/').next().unwrap().to_string()
+        };
+        let mut allowed: std::collections::HashSet<String> = sources.iter().filter(|s| s.starts_with("src/")).map(|s| module(s)).collect();
+        for m in ["timed", "prof", "why", "spill", "progress", "cache"] {
+            allowed.insert(m.to_string());
+        }
+        let root = env!("CARGO_MANIFEST_DIR");
+        let mut outside = Vec::new();
+        for s in sources.iter().filter(|s| s.ends_with(".rs") && s.starts_with("src/")) {
+            let text = std::fs::read_to_string(format!("{root}/{s}")).unwrap();
+            // A file's tests build no analysis.
+            let code = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+            let mut rest = code;
+            while let Some(at) = rest.find("crate::") {
+                rest = &rest[at + "crate::".len()..];
+                let names: Vec<&str> = if let Some(inner) = rest.strip_prefix('{') {
+                    inner[..inner.find('}').unwrap()].split(',').map(|n| n.trim().split("::").next().unwrap()).collect()
+                } else {
+                    vec![&rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len())]]
+                };
+                for n in names.into_iter().filter(|n| !n.is_empty()) {
+                    if !allowed.contains(n) {
+                        outside.push(format!("{s}: crate::{n}"));
+                    }
+                }
+            }
+        }
+        assert!(outside.is_empty(), "the analysis reads modules build.rs does not hash: {outside:?}");
+        assert!(sources.iter().any(|s| s.ends_with("decode/jpeg.rs")), "a folder's files are listed");
+        assert!(!sources.iter().any(|s| s.ends_with("decode/tests.rs")));
+    }
+
     /// A grey PNG with texture at every scale, written to a fresh file.
     fn picture(name: &str, w: u32, h: u32) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("img-fp-analysis-{}", std::process::id()));
@@ -435,9 +527,9 @@ mod tests {
     #[test]
     fn a_finer_detail_holds_the_coarser_ones_analysis() {
         let path = picture("p.png", 2400, 1800);
-        let p = sift::Params { max_features: crate::FEATURES, ..Default::default() };
+        let p = sift::Params { max_features: FEATURES, ..Default::default() };
         let header = decode::probe(&path);
-        let at = |detail| analyse(&path, 512, detail, &p, header.as_ref(), &Planes::default()).0;
+        let at = |detail| analyse(&path, 512, detail, &p, header.as_ref(), &Planes::default(), false).0;
         let (d512, d1024, d2048) = (at(512), at(1024), at(2048));
         assert!(d512.feats.ends.is_empty() && d512.feats.len() > 100);
         assert_eq!(d1024.feats.ends.len(), 2);
@@ -459,8 +551,8 @@ mod tests {
         // analysis at any detail.
         let small = picture("s.png", 480, 360);
         let header = decode::probe(&small);
-        let a = analyse(&small, 512, 512, &p, header.as_ref(), &Planes::default()).0;
-        let b = analyse(&small, 512, 2048, &p, header.as_ref(), &Planes::default()).0;
+        let a = analyse(&small, 512, 512, &p, header.as_ref(), &Planes::default(), false).0;
+        let b = analyse(&small, 512, 2048, &p, header.as_ref(), &Planes::default(), false).0;
         assert!(b.feats.ends.is_empty() && same_features(&a.feats, &b.feats));
 
         // A record read at another detail: cut to the levels the run's goes

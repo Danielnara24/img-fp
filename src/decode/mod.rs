@@ -82,6 +82,57 @@ pub struct Decoded {
     pub damaged: Option<String>,
     /// What the keep/delete suggestion asks of the file beyond its analysis.
     pub traits: Traits,
+    /// The library outside this build that made the pixels, by name and
+    /// version: libheif's for a HEIF file, `None` for every format the build
+    /// decodes itself. Another version can give other pixels, so a cached
+    /// analysis carries it (`cache.rs`).
+    pub made_by: Option<&'static str>,
+    /// The file's content hash and sample, when asked for: the bytes are in
+    /// memory here, and a file read once for its hash and again for its
+    /// pixels was every cold run's corpus read twice.
+    pub hash: Option<Content>,
+}
+
+/// What a file holds, as the cache keeps it: its bytes hashed whole
+/// (BLAKE3), and a sample of them (`sample`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Content {
+    pub hash: [u8; 32],
+    pub sample: u64,
+}
+
+impl Content {
+    /// The content of `bytes`, a whole file.
+    pub fn of(bytes: &[u8]) -> Content {
+        let len = bytes.len() as u64;
+        let pieces = sample_spans(len).map(|(at, n)| &bytes[at as usize..(at + n) as usize]);
+        Content { hash: *blake3::hash(bytes).as_bytes(), sample: sample(len, &pieces) }
+    }
+}
+
+/// The bytes of a file a sample is read from: its first, middle and last
+/// `SAMPLE_PIECE`, or the whole of a file of three pieces or fewer.
+pub const SAMPLE_PIECE: u64 = 16 << 10;
+
+/// Where `sample` reads a file of `len` bytes: three (offset, length) spans.
+pub fn sample_spans(len: u64) -> [(u64, u64); 3] {
+    if len <= 3 * SAMPLE_PIECE {
+        return [(0, len), (len, 0), (len, 0)];
+    }
+    [(0, SAMPLE_PIECE), (len / 2 - SAMPLE_PIECE / 2, SAMPLE_PIECE), (len - SAMPLE_PIECE, SAMPLE_PIECE)]
+}
+
+/// A file's sample: its length and the `sample_spans` of it, hashed, as 64
+/// bits. Two files of one sample may be the same bytes, and only those are
+/// read whole before their decode (`same::content_hashes`); two of
+/// different samples are not.
+pub fn sample(len: u64, pieces: &[&[u8]; 3]) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(&len.to_le_bytes());
+    for p in pieces {
+        h.update(p);
+    }
+    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().unwrap())
 }
 
 /// A file `decode` turns away for what it is, not for failing to decode:
@@ -137,13 +188,13 @@ fn open(kind: Kind, bytes: &[u8]) -> Result<Picture<'_>> {
 /// Decode a file to a working-resolution gray image.
 #[cfg(test)]
 pub fn decode(path: &Path, work_size: usize) -> Result<Decoded> {
-    decode_with(path, work_size, probe(path).as_ref())
+    decode_with(path, work_size, probe(path).as_ref(), false)
 }
 
 /// `decode`, given what `probe` read of the file's header, which decides how
 /// much of the decode budget to claim before the file is read; `None` claims
 /// the file's bytes alone.
-pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Result<Decoded> {
+pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>, hash: bool) -> Result<Decoded> {
     // The head first, so a file that is no picture is turned away without
     // queueing for room it would never use: under `-x '*'` that is every
     // video in the folder, and each would wait for the budget to empty.
@@ -168,13 +219,15 @@ pub fn decode_with(path: &Path, work_size: usize, header: Option<&Probe>) -> Res
     traits.exif = exif;
     traits.deep = deep;
     traits.profile = profile;
-    Ok(Decoded { work, size, damaged: damaged.map(String::from), traits })
+    let made_by = if kind == Kind::Heif { crate::heif::version() } else { None };
+    let hash = hash.then(|| Content::of(&bytes));
+    Ok(Decoded { work, size, damaged: damaged.map(String::from), traits, made_by, hash })
 }
 
 /// `decode_with` at each of `works` (`0`: the picture's own pixels), from
 /// one read of the file: the first plane is `decode_with`'s at that size, to
 /// the bit, and a cut-off file is trimmed and sized by it.
-pub fn decode_levels(path: &Path, works: &[usize], header: Option<&Probe>) -> Result<(Vec<Gray>, (u32, u32), Option<String>, Traits)> {
+pub fn decode_levels(path: &Path, works: &[usize], header: Option<&Probe>, hash: bool) -> Result<(Vec<Gray>, (u32, u32), Option<String>, Traits, Option<&'static str>, Option<Content>)> {
     let (f, head, len) = timed!(0, sniff::open_if_image(path)?);
     let est: u64 = header.map_or(0, |p| works.iter().map(|&w| budget::decode_estimate(p, w)).max().unwrap_or(0) + works.iter().skip(1).map(|&w| reduce::working_bytes(p.w as usize, p.h as usize, w)).sum::<u64>());
     let _claim = budget::Claim::new(len + est);
@@ -199,7 +252,9 @@ pub fn decode_levels(path: &Path, works: &[usize], header: Option<&Probe>) -> Re
     traits.exif = exif;
     traits.deep = deep;
     traits.profile = profile;
-    Ok((planes, size, damaged.map(String::from), traits))
+    let made_by = if kind == Kind::Heif { crate::heif::version() } else { None };
+    let hash = hash.then(|| Content::of(&bytes));
+    Ok((planes, size, damaged.map(String::from), traits, made_by, hash))
 }
 
 /// The decoders' fill for what a cut-off file does not hold: mid-grey, on the

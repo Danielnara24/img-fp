@@ -58,6 +58,7 @@ mod same;
 mod stated;
 mod suggest;
 mod table;
+mod thumb;
 pub use outcome::{Evidence, Outcome, Relation};
 pub use suggest::{Action, Lapse, Mode as SuggestMode};
 pub use cache::file_name as cache_file_name;
@@ -266,10 +267,11 @@ struct Args {
 
     /// Use this cache file instead of the default one.
     ///
-    /// The default is `analysis-FORMAT.bin` in `$XDG_CACHE_HOME/img-fp`, or in
+    /// The default is `analysis-FORMAT.db` in `$XDG_CACHE_HOME/img-fp`, or in
     /// `~/.cache/img-fp`, where FORMAT is the cache format this version
-    /// writes, so each version keeps a default file of its own. A folder gets
-    /// the default file name inside it.
+    /// writes, so each version keeps a default file of its own. The analyses
+    /// are kept in files beside it named after it. A folder gets the default
+    /// file name inside it.
     // Allowed beside `--no-cache` only to say which file `--clear-cache`
     // deletes; see `validate`.
     #[arg(long, value_name = "PATH")]
@@ -286,9 +288,10 @@ struct Args {
     #[arg(long)]
     clear_cache: bool,
 
-    /// Drop cached entries this scan did not use: images it did not find, and
-    /// analyses made with `--fast` when this scan is without it, or the
-    /// other way round.
+    /// Drop cached entries this scan did not use: images it did not find,
+    /// images that have gone, analyses made with `--fast` when this scan is
+    /// without it, or the other way round, and analyses made by other
+    /// versions.
     ///
     /// Skipped when the scan could not read everything it was given.
     #[arg(long, hide = true)]
@@ -432,28 +435,7 @@ fn cache_names(files: &[PathBuf], known: Vec<Option<PathBuf>>) -> Vec<PathBuf> {
 /// summary that names every one of them.
 const EXIT_WITH_PROBLEMS: i32 = 2;
 
-const THUMB_LONG: usize = 128;
-/// The pixel check's thumbnail is `THUMB_LONG` times `decode::area_factor`
-/// on its long side, and never more than this many times `THUMB_LONG`: a
-/// strip of a few hundred thousand pixels by one would otherwise ask for a
-/// side past what a thumbnail's `u16` holds.
-pub(crate) const THUMB_MAX_SIDES: usize = 16;
-
-/// Local features described per image.
-///
-/// Not an option, because it has no usable range. Measured over 300 to 900 at
-/// a fixed vocabulary, it moves F1 by 0.007 and never changes a verdict that
-/// matters: 0.971, 0.975, 0.975, 0.976, 0.976, 0.978, 0.977. Above 600 it buys
-/// nothing and costs 11% of the run; below it, nothing either, until the point
-/// where it stops being about features at all.
-///
-/// It used to look load-bearing — 400 features merged seven pairs of families
-/// on the benchmark corpus — and that was the vocabulary. Both this and
-/// `--work-size` move the descriptor count, the descriptor count sized the
-/// tree, and the tree could only be sized to a factor of sixteen. With
-/// `VocabParams::for_corpus` holding occupancy instead, the cliff is gone and
-/// what is left is a plateau, which is not a thing to put on a command line.
-const FEATURES: usize = 600;
+use analysis::{FEATURES, THUMB_LONG, THUMB_MAX_SIDES};
 
 /// The finest `--detail` (`parse_detail`).
 const FINEST_DETAIL: usize = 4096;

@@ -63,6 +63,7 @@ struct Api {
     plane_readonly: unsafe extern "C" fn(*const Img, c_int, *mut c_int) -> *const u8,
     image_width: unsafe extern "C" fn(*const Img, c_int) -> c_int,
     image_height: unsafe extern "C" fn(*const Img, c_int) -> c_int,
+    get_version: unsafe extern "C" fn() -> *const std::ffi::c_char,
 }
 
 // SAFETY: the table holds function pointers into a library that is never
@@ -77,6 +78,21 @@ unsafe impl Sync for Api {}
 const NAMES: [&str; 2] = ["libheif.so.1", "libheif.so"];
 #[cfg(target_os = "macos")]
 const NAMES: [&str; 2] = ["libheif.1.dylib", "libheif.dylib"];
+
+/// The version of the libheif loaded, `None` without one: what made the
+/// pixels of every HEIF file, so a cached analysis says it
+/// (`decode::Decoded::made_by`). Two versions decode the same file to other
+/// pixels (1.17.6 and 1.23.6 moved IMGS3's groups), and an analysis kept
+/// under one is not another's.
+pub fn version() -> Option<&'static str> {
+    static V: OnceLock<Option<String>> = OnceLock::new();
+    V.get_or_init(|| {
+        let api = api().ok()?;
+        let p = unsafe { (api.get_version)() };
+        (!p.is_null()).then(|| format!("libheif {}", unsafe { CStr::from_ptr(p) }.to_string_lossy()))
+    })
+    .as_deref()
+}
 
 /// What a decode says when there is no libheif to ask.
 pub fn missing() -> String {
@@ -122,6 +138,7 @@ unsafe fn load(lib: libloading::Library) -> Option<Api> {
         plane_readonly: sym!("heif_image_get_plane_readonly"),
         image_width: sym!("heif_image_get_width"),
         image_height: sym!("heif_image_get_height"),
+        get_version: sym!("heif_get_version"),
         _lib: lib,
     })
 }

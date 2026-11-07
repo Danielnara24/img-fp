@@ -19,15 +19,19 @@
 //! builds of one; `img-fp` and `img-fp-gui` of one build share it), the
 //! settings the matching reads, and for every file in the order it is
 //! numbered its canonical path (`lib::cache_names`, the cache's name for it),
-//! its key, what reading it came to and which side of `--against` it is on.
+//! its content hash (`same::Hash`), what reading it came to and which side of
+//! `--against` it is on. The hash, not the stat key it was until 0.82.0: a
+//! chmod, a `touch` or a backup restored is the same content, and matched
+//! everything again.
 //! Not the path as the run spelled it: the matching reads no path, and with
 //! it a scan of `photos`, `./photos/` or `/home/me/photos` matched everything
 //! again, and a scan from the window (absolute paths) never took one the CLI
 //! made with relative ones. Two spellings of one folder that number its files
 //! in another order are two fingerprints, and match again. Not the thread count: the claims are the same at any
 //! (IMGS-ALL, cached, at `-t 3` and `-t 8`: the same report to the byte), and
-//! with it a run at another `-t` matched everything again. A file without a
-//! key is not vouched for by anything, and a run holding one keeps nothing.
+//! with it a run at another `-t` matched everything again. A file with an
+//! analysis and no hash is not vouched for by anything, and a run holding one
+//! keeps nothing.
 //! One run is kept, the last; a run with `--dump`, which records every
 //! verdict, neither reads nor keeps one.
 
@@ -83,9 +87,9 @@ pub struct Asked {
 }
 
 impl Fingerprint {
-    /// `None` where nothing can vouch for the run's inputs: a file with no
-    /// key.
-    pub fn of(asked: &Asked, names: &[&Path], keys: &[Option<crate::cache::Key>], items: &[Item], library: &[bool]) -> Option<Fingerprint> {
+    /// `None` where nothing can vouch for the run's inputs: a file with an
+    /// analysis and no content hash.
+    pub fn of(asked: &Asked, names: &[&Path], hashes: &[Option<crate::same::Hash>], items: &[Item], library: &[bool]) -> Option<Fingerprint> {
         use std::os::unix::ffi::OsStrExt;
         let mut h = Hash::new();
         h.bytes(MAGIC);
@@ -106,10 +110,7 @@ impl Fingerprint {
             h.u64(read);
             h.u64(library.get(i).copied().unwrap_or(false) as u64);
             if read <= 1 {
-                let k = keys[i]?;
-                for v in [k.len, k.mtime as u64, k.ctime as u64] {
-                    h.u64(v);
-                }
+                h.bytes(&hashes[i]?);
             }
         }
         Some(Fingerprint(h.0, h.1))
@@ -251,109 +252,6 @@ impl<'a> Bytes<'a> {
     }
 }
 
-/// The file beside `cache` the files the last run proved byte-identical are
-/// kept in (`proven_identical`).
-pub fn identical_beside(cache: &Path) -> PathBuf {
-    let mut p = cache.as_os_str().to_owned();
-    p.push(".same");
-    PathBuf::from(p)
-}
-
-const SAME_MAGIC: &[u8; 8] = b"IMGFPS01";
-
-/// The pairs of this run's files (by number, from `names` and `keys`, a
-/// file's canonical name and key) that the last run compared byte for byte
-/// and found identical, where neither has changed since: each a file and the
-/// one it was found the same as.
-///
-/// **A rescan read every copy whole again.** The byte pass (`same::exact_groups`)
-/// runs before the cache is asked, and it is a byte comparison, by design: a
-/// shared hash is a reason to compare, not a verdict. So a folder of 47
-/// duplicate photographs, nothing changed, was 251 MB read on every run, 0.66
-/// s of a 0.72 s rescan on this machine's SSD, and a share's worth of minutes.
-/// The comparison is still what proves two files the same; what is kept is
-/// that it was made, and it holds while both files are as they were when it
-/// was, by the key the analysis cache already trusts (size, modification and
-/// change time to the nanosecond, under the canonical name). One run is kept,
-/// the last, as for the matching.
-pub fn proven_identical(path: &Path, names: &[PathBuf], keys: &[Option<crate::cache::Key>]) -> Vec<(usize, usize)> {
-    use std::os::unix::ffi::OsStrExt;
-    let Some(kept) = load_identical(path) else { return Vec::new() };
-    let by_name: std::collections::HashMap<&[u8], usize> = names.iter().enumerate().map(|(i, n)| (n.as_os_str().as_bytes(), i)).collect();
-    let now = |name: &[u8], key: (u64, i64, i64)| {
-        let &i = by_name.get(name)?;
-        let k = keys[i]?;
-        ((k.len, k.mtime, k.ctime) == key).then_some(i)
-    };
-    kept.iter().filter_map(|(a, ka, b, kb)| Some((now(a, *ka)?, now(b, *kb)?))).filter(|(a, b)| a != b).collect()
-}
-
-type Kept = (Vec<u8>, (u64, i64, i64), Vec<u8>, (u64, i64, i64));
-
-fn load_identical(path: &Path) -> Option<Vec<Kept>> {
-    let b = std::fs::read(path).ok()?;
-    let (body, sum) = b.split_at_checked(b.len().checked_sub(16)?)?;
-    let mut h = Hash::new();
-    h.bytes(body);
-    if [h.0.to_le_bytes(), h.1.to_le_bytes()].concat() != sum {
-        return None;
-    }
-    let mut r = Bytes { b: body, at: 0 };
-    if r.take(8)? != SAME_MAGIC {
-        return None;
-    }
-    let n = r.u64()? as usize;
-    let mut out = Vec::with_capacity(n.min(body.len() / 64));
-    let file = |r: &mut Bytes| -> Option<(Vec<u8>, (u64, i64, i64))> {
-        let len = r.u32()? as usize;
-        let name = r.take(len)?.to_vec();
-        Some((name, (r.u64()?, r.u64()? as i64, r.u64()? as i64)))
-    };
-    for _ in 0..n {
-        let (a, ka) = file(&mut r)?;
-        let (b, kb) = file(&mut r)?;
-        out.push((a, ka, b, kb));
-    }
-    (r.at == body.len()).then_some(out)
-}
-
-/// Keep this run's sets of byte-identical files (`groups`, by number) for
-/// the next (`proven_identical`), in place of the last run's: each file but
-/// the first of a set, beside the first. Written beside and renamed; one
-/// that cannot be written is the next run comparing again, and is not said.
-pub fn keep_identical(path: &Path, groups: &[Vec<usize>], names: &[PathBuf], keys: &[Option<crate::cache::Key>]) {
-    use std::os::unix::ffi::OsStrExt;
-    let mut entries = Vec::new();
-    for g in groups {
-        let Some((&head, rest)) = g.split_first() else { continue };
-        let Some(kh) = keys[head] else { continue };
-        entries.extend(rest.iter().filter_map(|&i| Some((i, keys[i]?, head, kh))));
-    }
-    let mut b = Vec::with_capacity(16 + entries.len() * 128);
-    b.extend_from_slice(SAME_MAGIC);
-    b.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-    for (i, ki, j, kj) in entries {
-        for (f, k) in [(i, ki), (j, kj)] {
-            let name = names[f].as_os_str().as_bytes();
-            b.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            b.extend_from_slice(name);
-            for v in [k.len, k.mtime as u64, k.ctime as u64] {
-                b.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-    let mut h = Hash::new();
-    h.bytes(&b);
-    b.extend_from_slice(&h.0.to_le_bytes());
-    b.extend_from_slice(&h.1.to_le_bytes());
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    if std::fs::write(&tmp, &b).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,27 +300,6 @@ mod tests {
         b[20] ^= 1;
         std::fs::write(&p, b).unwrap();
         assert!(load(&p, fp).is_none(), "damaged");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The sets kept are given back for the files whose names and keys are
-    /// as they were, and nothing for a file changed since.
-    #[test]
-    fn identical_files_are_kept_for_as_long_as_neither_changes() {
-        use crate::cache::Key;
-        let dir = std::env::temp_dir().join(format!("img-fp-same-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("c.same");
-        let key = |n: i64| Some(Key { len: 10, mtime: n, ctime: n, dev: 0 });
-        let names: Vec<PathBuf> = ["/x/a", "/x/b", "/x/c", "/y/d"].iter().map(PathBuf::from).collect();
-        keep_identical(&p, &[vec![0, 1, 2]], &names, &[key(1), key(2), key(3), key(4)]);
-        // The next run numbers its files otherwise, and c has changed.
-        let next: Vec<PathBuf> = ["/x/c", "/x/a", "/x/b"].iter().map(PathBuf::from).collect();
-        let mut got = proven_identical(&p, &next, &[key(9), key(1), key(2)]);
-        got.sort();
-        assert_eq!(got, vec![(2, 1)]);
-        std::fs::write(&p, b"IMGFPS01 damaged").unwrap();
-        assert!(proven_identical(&p, &next, &[key(9), key(1), key(2)]).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

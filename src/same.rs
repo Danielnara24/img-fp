@@ -3,8 +3,8 @@
 //! Three kinds of sameness, each finer than the analysis can be fooled by and
 //! each found once:
 //!
-//! - **The same bytes** (`exact_groups`), before anything is decoded: sizes,
-//!   then a sample of each, then the bytes.
+//! - **The same bytes** (`exact_groups`), before anything is decoded: one
+//!   content hash (`content_hashes`, the cache's where it knows the file).
 //! - **The same analysis**: files not the same bytes that decoded to one
 //!   working plane, a photograph saved again as PNG, TIFF or lossless WebP
 //!   (`same_analysis`). The analysis is grey.
@@ -410,341 +410,159 @@ fn same_colour(files: &[PathBuf], items: &[Item], chroma: &std::sync::Mutex<Hash
 
 // ---------------------------------------------------------------- the same bytes
 
-
-/// FNV-1a over the file's bytes. Only files sharing a size are read, so on a
-/// normal corpus this touches almost nothing.
+/// A file's content, hashed: BLAKE3, all 256 bits.
 ///
-/// Read a piece at a time rather than whole. Files that share a size are the
-/// ones read here, and those include exactly the large ones — uncompressed
-/// TIFFs or BMPs from one scanner are all one size, and so are two copies of
-/// a disk image under `-x '*'` — so reading each whole, eight at once, held
-/// eight of them in memory for a hash.
-fn content_hash(path: &Path) -> Option<u128> {
-    hash_reader(std::fs::File::open(path).ok()?, 1 << 20)
-}
+/// What the cache keeps an analysis under, and what says two files are the
+/// same bytes. Cryptographic, so no file can be made to collide with another:
+/// the FNV hash this replaced could (new bytes entered only half its state),
+/// two pictures differing in twelve thousand bytes were made to agree, and so
+/// a shared hash was only a reason to compare the files byte for byte. Now it
+/// is the verdict (user's decision, 0.82.0), and a rescan reads nothing to
+/// find copies whose keys have not changed.
+pub(crate) type Hash = [u8; 32];
+pub(crate) use crate::decode::Content;
 
-/// The hash of everything `r` yields, `piece` bytes at a time. `piece` is a
-/// multiple of eight, so every full read ends on a word boundary and the
-/// words are the words of the whole stream.
-fn hash_reader(mut r: impl std::io::Read, piece: usize) -> Option<u128> {
-    debug_assert!(piece % 8 == 0 && piece > 0);
-    let mut h: u128 = 0x6c62272e07bb0142_62b821756295c58d;
-    let mut buf = vec![0u8; piece];
-    let mut total = 0u64;
+/// The content of the file at `path`, read a megabyte at a time: its hash
+/// and its sample (`decode::Content`); `None` when it cannot be read.
+pub(crate) fn content_hash(path: &Path) -> Option<Content> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut h = blake3::Hasher::new();
+    // The sample's pieces, gathered as they pass.
+    let spans = decode::sample_spans(len);
+    let mut pieces: [Vec<u8>; 3] = Default::default();
+    let mut at = 0u64;
+    // No larger than the file and a byte: a megabyte zeroed for each small
+    // picture was most of the pass.
+    let mut buf = vec![0u8; (len as usize).saturating_add(1).min(1 << 20)];
     loop {
-        // Fill the piece whole unless the file ends: a short read in the
-        // middle would split a word across two reads.
-        let mut got = 0;
-        while got < piece {
-            match r.read(&mut buf[got..]) {
-                Ok(0) => break,
-                Ok(k) => got += k,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return None,
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(k) => {
+                h.update(&buf[..k]);
+                for ((from, n), piece) in spans.iter().zip(pieces.iter_mut()) {
+                    let (lo, hi) = ((*from).max(at), (from + n).min(at + k as u64));
+                    if lo < hi {
+                        piece.extend_from_slice(&buf[(lo - at) as usize..(hi - at) as usize]);
+                    }
+                }
+                at += k as u64;
             }
-        }
-        for chunk in buf[..got].chunks(8) {
-            let mut v = 0u64;
-            for (i, &b) in chunk.iter().enumerate() {
-                v |= (b as u64) << (i * 8);
-            }
-            h ^= v as u128;
-            h = h.wrapping_mul(0x0000000001000000_000000000000013B);
-        }
-        total += got as u64;
-        if got < piece {
-            break;
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
         }
     }
-    h ^= total as u128;
-    Some(h)
+    if at != len {
+        // It changed while it was read: what was hashed is not one file.
+        return None;
+    }
+    let [p0, p1, p2] = &pieces;
+    Some(Content { hash: *h.finalize().as_bytes(), sample: decode::sample(len, &[p0, p1, p2]) })
 }
 
-/// Sets of byte-identical files, by index. `stats` is the walk's, for each
-/// file's size; `comparable` says whether a file is worth reading at all, and
-/// is asked only of files that share a size with another.
+/// The sample of the file at `path` (`decode::sample`), read as three
+/// pieces of it; `None` when it cannot be read.
+fn sample_of(path: &Path, len: u64) -> Option<u64> {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::File::open(path).ok()?;
+    let spans = decode::sample_spans(len);
+    let mut pieces: [Vec<u8>; 3] = Default::default();
+    for ((at, n), piece) in spans.iter().zip(pieces.iter_mut()) {
+        piece.resize(*n as usize, 0);
+        f.read_exact_at(piece, *at).ok()?;
+    }
+    let [p0, p1, p2] = &pieces;
+    Some(decode::sample(len, &[p0, p1, p2]))
+}
+
+/// Each file's content where it is needed before anything is decoded:
+/// `known(i)`, the cache's, where it has one; else, if `comparable` says it
+/// may be a picture and it holds a byte, the file read whole and hashed when
+/// it may be another's bytes: another file of the run, or a file the cache
+/// knows (`kept`: an analysis is kept only while a file of its content is,
+/// and a moved file is known by its content), has its length and its sample
+/// (`decode::sample`, three pieces of the file). A file of a length no other
+/// has is not sampled. Any other file is no copy and has no analysis kept,
+/// and is hashed from the bytes its decode reads (`decode::Decoded::hash`):
+/// read whole up front as well, each was read twice, and so was a cold
+/// run's whole corpus once it outgrew memory. `kept_length` says whether
+/// the cache knows a file of a length; `tick` is said for each file read
+/// whole here.
 ///
-/// An empty file is in no set: it holds no picture to be a copy of, and a
-/// folder of failed downloads (empty `.jpg`s) was one group, every file but
-/// one of it DELETE, beside each file's own "not an image".
-///
-/// `proven` are pairs of files already shown to be byte-identical, unchanged
-/// since a comparison the last run made (`matched::proven_identical`). Each
-/// set they join is read as its first file: the copies are not read at all,
-/// and the first only if another file of its size is still to be told apart
-/// from it.
-pub(crate) fn exact_groups(
+/// Under a wildcard, a file is read only if its head may be a picture or
+/// its name says it is one: anything else fails to decode and is dropped, and
+/// reading two copies of a video whole to find that out was gigabytes for
+/// nothing. An empty file holds no picture to be a copy of: a folder of
+/// failed downloads (empty `.jpg`s) was once one group, every file but one
+/// DELETE.
+pub(crate) fn content_hashes(
     files: &[PathBuf],
     stats: &[walk::Stat],
     comparable: impl Fn(usize) -> bool + Sync,
-    proven: &[(usize, usize)],
-) -> Vec<Vec<usize>> {
-    // The sets the proven pairs join, each answered by its lowest file.
-    let mut head: Vec<usize> = (0..files.len()).collect();
-    fn root(head: &mut [usize], mut i: usize) -> usize {
-        while head[i] != i {
-            head[i] = head[head[i]];
-            i = head[i];
-        }
-        i
+    known: impl Fn(usize) -> Option<Content> + Sync,
+    kept_length: impl Fn(u64) -> bool + Sync,
+    kept: impl Fn(u64, u64) -> bool + Sync,
+    tick: impl Fn() + Sync,
+) -> Vec<Option<Content>> {
+    let mut lengths: HashMap<u64, usize> = HashMap::new();
+    for st in stats.iter().filter(|st| st.len > 0) {
+        *lengths.entry(st.len).or_default() += 1;
     }
-    for &(a, b) in proven.iter().filter(|&&(a, b)| stats[a].len == stats[b].len && stats[a].len > 0) {
-        let (ra, rb) = (root(&mut head, a), root(&mut head, b));
-        head[ra.max(rb)] = ra.min(rb);
-    }
-    let heads: Vec<usize> = (0..files.len()).map(|i| root(&mut head, i)).collect();
-    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, &h) in heads.iter().enumerate().filter(|&(i, &h)| i != h) {
-        members.entry(h).or_insert_with(|| vec![h]).push(i);
-    }
-    let found = exact_groups_read(files, stats, comparable, |i| heads[i] == i);
-    // Each set read as its first file stands for all of it, and a set no
-    // other file joined is a set still.
-    let mut joined = std::collections::HashSet::new();
-    let mut out: Vec<Vec<usize>> = found
-        .into_iter()
-        .map(|g| {
-            let mut all: Vec<usize> = g.iter().flat_map(|h| members.get(h).cloned().unwrap_or_else(|| vec![*h])).collect();
-            joined.extend(g);
-            all.sort_unstable();
-            all
-        })
-        .collect();
-    out.extend(members.into_iter().filter(|(h, _)| !joined.contains(h)).map(|(_, mut m)| {
-        m.sort_unstable();
-        m
-    }));
-    out.sort();
-    out
-}
-
-/// `exact_groups` over the files `asked` says to read.
-fn exact_groups_read(files: &[PathBuf], stats: &[walk::Stat], comparable: impl Fn(usize) -> bool + Sync, asked: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
-    let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, st) in stats.iter().enumerate().filter(|&(i, st)| st.len > 0 && asked(i)) {
-        by_size.entry(st.len).or_default().push(i);
-    }
-    // Files that share a size are told apart first by a few pieces of each,
-    // and only files that agree on those are read whole. Every same-size file
-    // used to be hashed whole on every run, cached or not, and uncompressed
-    // pictures from one scanner or camera are all one size: thirty 9 MB BMPs,
-    // nothing changed, all of them in the cache, were 270 MB read to find that
-    // no two were alike. A sample that differs is proof enough that the files
-    // do, and almost every pair of different files differs in its first piece.
-    let sampled: Vec<((u64, u128), usize)> = by_size
-        .into_iter()
-        .filter(|(_, v)| v.len() > 1)
-        .collect::<Vec<_>>()
-        .par_iter()
-        .flat_map_iter(|(len, group)| {
-            let comparable = &comparable;
-            group
-                .iter()
-                .filter(move |&&i| comparable(i))
-                .filter_map(move |&i| sample_hash(&files[i], *len).map(|h| ((*len, h), i)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let mut by_sample: HashMap<(u64, u128), Vec<usize>> = HashMap::new();
-    for (k, i) in sampled {
-        by_sample.entry(k).or_default().push(i);
-    }
-    // A shared hash is a reason to compare, not a verdict. FNV is no defence
-    // against a file made to collide — new bytes enter only the low half of
-    // its state, so two files differing in a word and the word after it can
-    // be made to agree, and two pictures differing in twelve thousand bytes
-    // were reported `identical` — and "identical" is the one claim a person
-    // acts on without looking. So the files of a group are compared byte for
-    // byte, all of them side by side (`byte_classes`), each read once.
-    //
-    // They were hashed whole first and then each compared with the first of
-    // its class, which read the first again for every copy: six identical
-    // 30 MB files were 480 MB read where 180 MB tells them apart. A group too
-    // large to hold open at once (`most_open`) is still hashed first, and
-    // each class compared a batch at a time beside its first file.
-    let most = most_open();
-    let mut out: Vec<Vec<usize>> = by_sample
-        .into_values()
-        .filter(|v| v.len() > 1)
-        .collect::<Vec<_>>()
+    // Each file's content where it is known, else its sample where its
+    // length is shared.
+    let first: Vec<(Option<Content>, Option<u64>)> = (0..files.len())
         .into_par_iter()
-        .flat_map_iter(|mut group| {
-            group.sort_unstable();
-            if group.len() <= most {
-                return compare_files(files, &group);
+        .map(|i| {
+            if let Some(c) = known(i) {
+                return (Some(c), Some(c.sample));
             }
-            let mut by_hash: HashMap<u128, Vec<usize>> = HashMap::new();
-            for i in group {
-                if let Some(h) = content_hash(&files[i]) {
-                    by_hash.entry(h).or_default().push(i);
-                }
+            let len = stats[i].len;
+            if len == 0 || !(kept_length(len) || lengths.get(&len).is_some_and(|&n| n > 1)) || !comparable(i) {
+                return (None, None);
             }
-            let mut found = Vec::new();
-            for class in by_hash.into_values().filter(|v| v.len() > 1) {
-                let (first, rest) = (class[0], &class[1..]);
-                let mut with_first = vec![first];
-                for batch in rest.chunks(most - 1) {
-                    let asked: Vec<usize> = std::iter::once(first).chain(batch.iter().copied()).collect();
-                    for c in compare_files(files, &asked) {
-                        if c[0] == first {
-                            with_first.extend_from_slice(&c[1..]);
-                        } else {
-                            found.push(c);
-                        }
-                    }
-                }
-                if with_first.len() > 1 {
-                    with_first.sort_unstable();
-                    found.push(with_first);
-                }
-            }
-            found
+            (None, sample_of(&files[i], len))
         })
         .collect();
+    let mut samples: HashMap<(u64, u64), usize> = HashMap::new();
+    for (i, (_, s)) in first.iter().enumerate() {
+        if let Some(s) = s {
+            *samples.entry((stats[i].len, *s)).or_default() += 1;
+        }
+    }
+    first
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, (c, s))| {
+            if c.is_some() {
+                return c;
+            }
+            let key = (stats[i].len, s?);
+            if samples[&key] < 2 && !kept(key.0, key.1) {
+                return None;
+            }
+            tick();
+            content_hash(&files[i])
+        })
+        .collect()
+}
+
+/// Sets of byte-identical files, by index: the files of one hash, two or
+/// more, each set ascending and the sets in order.
+pub(crate) fn exact_groups(hashes: &[Option<Hash>]) -> Vec<Vec<usize>> {
+    let mut by_hash: HashMap<&Hash, Vec<usize>> = HashMap::new();
+    for (i, h) in hashes.iter().enumerate() {
+        if let Some(h) = h {
+            by_hash.entry(h).or_default().push(i);
+        }
+    }
+    let mut out: Vec<Vec<usize>> = by_hash.into_values().filter(|g| g.len() > 1).collect();
     out.sort();
-    out
-}
-
-/// Bytes read from each place `sample_hash` looks.
-const SAMPLE_PIECE: u64 = 16 << 10;
-
-/// A hash of four pieces of a file of length `len`: its start, its end, and
-/// two places between. A file no longer than the four pieces is hashed whole.
-///
-/// Four rather than the start alone, because the files this is for are the
-/// ones least likely to differ there: an uncompressed scan's first rows are its
-/// header and its white margin, and so are its last.
-fn sample_hash(path: &Path, len: u64) -> Option<u128> {
-    use std::os::unix::fs::FileExt;
-    let f = std::fs::File::open(path).ok()?;
-    if len <= 4 * SAMPLE_PIECE {
-        return hash_reader(f, 1 << 16);
-    }
-    let mut buf = vec![0u8; 4 * SAMPLE_PIECE as usize];
-    for (k, at) in [0, len / 3, 2 * len / 3, len - SAMPLE_PIECE].into_iter().enumerate() {
-        let piece = &mut buf[k * SAMPLE_PIECE as usize..(k + 1) * SAMPLE_PIECE as usize];
-        f.read_exact_at(piece, at).ok()?;
-    }
-    hash_reader(&buf[..], 1 << 16)
-}
-
-/// Bytes a comparison holds in its pieces at once, all files together: what
-/// comparing two files a megabyte each at a time held.
-const COMPARE_BYTES: usize = 2 << 20;
-
-/// The least a file is read at a time while compared: the kernel's own
-/// readahead window, 128 KB, so a piece is not smaller than what one read
-/// brings in anyway.
-const LEAST_PIECE: usize = 128 << 10;
-
-/// The most files one comparison holds open: as many as `COMPARE_BYTES` gives
-/// a piece of `LEAST_PIECE` each, and no more than each worker's share of
-/// half the descriptors the process may open.
-fn most_open() -> usize {
-    let fds = open_file_limit().map_or(usize::MAX, |n| n / 2 / rayon::current_num_threads().max(1));
-    (COMPARE_BYTES / LEAST_PIECE).min(fds).max(2)
-}
-
-/// The process's soft limit on open files, if it says one.
-fn open_file_limit() -> Option<usize> {
-    // `RLIMIT_NOFILE` is not one number on every architecture, as
-    // `O_TMPFILE` is not (`spill.rs`): on Linux MIPS it is 5 (7 there is
-    // `RLIMIT_NPROC`) and on SPARC 6; elsewhere on Linux 7; on the BSDs and
-    // macOS 8.
-    #[cfg(all(target_os = "linux", any(target_arch = "mips", target_arch = "mips32r6", target_arch = "mips64", target_arch = "mips64r6")))]
-    const RLIMIT_NOFILE: i32 = 5;
-    #[cfg(all(target_os = "linux", any(target_arch = "sparc", target_arch = "sparc64")))]
-    const RLIMIT_NOFILE: i32 = 6;
-    #[cfg(all(
-        target_os = "linux",
-        not(any(
-            target_arch = "mips", target_arch = "mips32r6", target_arch = "mips64", target_arch = "mips64r6", target_arch = "sparc",
-            target_arch = "sparc64"
-        ))
-    ))]
-    const RLIMIT_NOFILE: i32 = 7;
-    #[cfg(not(target_os = "linux"))]
-    const RLIMIT_NOFILE: i32 = 8;
-    // And `rlim_t` is an `unsigned long` on Linux, 32 bits on a 32-bit
-    // build (read as two `u64`s, the soft and hard limits were one number);
-    // 64 bits on the BSDs and macOS.
-    #[cfg(target_os = "linux")]
-    type Rlim = std::ffi::c_ulong;
-    #[cfg(not(target_os = "linux"))]
-    type Rlim = u64;
-    unsafe extern "C" {
-        fn getrlimit(resource: i32, rlim: *mut [Rlim; 2]) -> i32;
-    }
-    let mut r: [Rlim; 2] = [0; 2];
-    // SAFETY: `r` is the two `rlim_t`s the call fills.
-    #[allow(clippy::useless_conversion)]
-    (unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } == 0).then(|| usize::try_from(u64::from(r[0])).unwrap_or(usize::MAX))
-}
-
-/// The files of `group` (all one length) in sets of the same bytes, each set
-/// ascending; a file that cannot be read is in none.
-fn compare_files(files: &[PathBuf], group: &[usize]) -> Vec<Vec<usize>> {
-    let open: Vec<(usize, std::fs::File)> = group.iter().filter_map(|&i| Some((i, std::fs::File::open(&files[i]).ok()?))).collect();
-    let piece = (COMPARE_BYTES / open.len().max(1)).max(LEAST_PIECE);
-    byte_classes(open, piece)
-}
-
-/// Split `readers` into the sets that yield the same bytes, of two or more,
-/// reading each once, side by side, `piece` bytes at a time: a set splits
-/// where its members' pieces differ, and is done when they end together. A
-/// reader that fails is in no set.
-fn byte_classes<R: std::io::Read>(readers: Vec<(usize, R)>, piece: usize) -> Vec<Vec<usize>> {
-    let fill = |r: &mut R, buf: &mut Vec<u8>| -> Option<()> {
-        buf.resize(piece, 0);
-        let mut got = 0;
-        while got < piece {
-            match r.read(&mut buf[got..]) {
-                Ok(0) => break,
-                Ok(k) => got += k,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return None,
-            }
-        }
-        buf.truncate(got);
-        Some(())
-    };
-    let mut out = Vec::new();
-    let mut pending: Vec<Vec<(usize, R, Vec<u8>)>> = vec![readers.into_iter().map(|(i, r)| (i, r, Vec::new())).collect()];
-    while let Some(set) = pending.pop() {
-        let mut parts: Vec<Vec<(usize, R, Vec<u8>)>> = Vec::new();
-        for (i, mut r, mut buf) in set {
-            if fill(&mut r, &mut buf).is_none() {
-                continue;
-            }
-            match parts.iter_mut().find(|p| p[0].2 == buf) {
-                Some(p) => p.push((i, r, buf)),
-                None => parts.push(vec![(i, r, buf)]),
-            }
-        }
-        for p in parts.into_iter().filter(|p| p.len() > 1) {
-            if p[0].2.len() < piece {
-                let mut ids: Vec<usize> = p.into_iter().map(|(i, _, _)| i).collect();
-                ids.sort_unstable();
-                out.push(ids);
-            } else {
-                pending.push(p);
-            }
-        }
-    }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    /// The limit read is the one the shell reports for the process.
-    #[test]
-    fn the_open_file_limit_is_the_shells() {
-        let out = std::process::Command::new("sh").args(["-c", "ulimit -n"]).output().unwrap();
-        let said = String::from_utf8(out.stdout).unwrap();
-        let said = said.trim();
-        let want = if said == "unlimited" { None } else { Some(said.parse::<usize>().unwrap()) };
-        assert_eq!(open_file_limit().filter(|&n| n != usize::MAX), want);
-    }
     use super::*;
     use crate::claims::How;
     use crate::sift::{self, Features, DESC_LEN};
@@ -768,6 +586,8 @@ mod tests {
             dims: (640, 480),
             read: Default::default(),
             traits: Default::default(),
+            made_by: None,
+            hash: None,
         }
     }
 
@@ -879,145 +699,90 @@ mod tests {
         assert_eq!(kinds, [(0, 1, Identical), (3, 4, Identical), (0, 2, SameCoding), (1, 2, SameCoding)]);
     }
 
-    /// The hash read a piece at a time is the hash of the whole: every length
-    /// around a piece boundary, a word boundary, and none at all.
-    #[test]
-    fn a_hash_read_in_pieces_is_the_hash_of_the_whole() {
-        fn whole(data: &[u8]) -> u128 {
-            let mut h: u128 = 0x6c62272e07bb0142_62b821756295c58d;
-            for chunk in data.chunks(8) {
-                let mut v = 0u64;
-                for (i, &b) in chunk.iter().enumerate() {
-                    v |= (b as u64) << (i * 8);
-                }
-                h ^= v as u128;
-                h = h.wrapping_mul(0x0000000001000000_000000000000013B);
-            }
-            h ^ data.len() as u128
-        }
-        let data: Vec<u8> = (0..300u32).map(|i| (i * 131 % 251) as u8).collect();
-        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 100, 300] {
-            for piece in [8usize, 16, 24, 64, 1 << 20] {
-                assert_eq!(hash_reader(&data[..len], piece), Some(whole(&data[..len])), "len {len} piece {piece}");
-            }
-        }
-        // A reader that hands over a byte at a time still fills each piece.
-        struct Trickle<'a>(&'a [u8]);
-        impl std::io::Read for Trickle<'_> {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                let Some((&b, rest)) = self.0.split_first() else { return Ok(0) };
-                if buf.is_empty() {
-                    return Ok(0);
-                }
-                buf[0] = b;
-                self.0 = rest;
-                Ok(1)
-            }
-        }
-        assert_eq!(hash_reader(Trickle(&data), 16), Some(whole(&data)));
+
+
+
+
+
+    fn stats(files: &[PathBuf]) -> Vec<walk::Stat> {
+        files.iter().map(|f| walk::Stat { len: std::fs::metadata(f).map_or(0, |m| m.len()), key: None }).collect()
     }
 
-    /// Files sharing a hash are grouped only when their bytes agree. The two
-    /// streams here are built to collide under the hash — a change in bits
-    /// 40 to 55 of one word, cancelled by the next — and are not identical.
-    #[test]
-    fn a_hash_collision_is_not_an_identical_pair() {
-        let a: Vec<u8> = (0..64u32).map(|i| (i * 37 % 251) as u8).collect();
-        let mut b = a.clone();
-        // The state before word 2, by the same arithmetic as `hash_reader`.
-        let mut h: u128 = 0x6c62272e07bb0142_62b821756295c58d;
-        let p: u128 = 0x0000000001000000_000000000000013B;
-        let word = |d: &[u8], k: usize| u64::from_le_bytes(d[k * 8..k * 8 + 8].try_into().unwrap());
-        for k in 0..2 {
-            h = (h ^ word(&a, k) as u128).wrapping_mul(p);
-        }
-        let wa = word(&a, 2);
-        let wb = wa ^ (0x1234u64 << 40);
-        let (ha, hb) = ((h ^ wa as u128).wrapping_mul(p), (h ^ wb as u128).wrapping_mul(p));
-        assert_eq!((ha ^ hb) >> 64, 0, "the difference stays in the low half");
-        b[16..24].copy_from_slice(&wb.to_le_bytes());
-        b[24..32].copy_from_slice(&(word(&a, 3) ^ (ha ^ hb) as u64).to_le_bytes());
-        assert_ne!(a, b);
-        assert_eq!(hash_reader(&a[..], 8), hash_reader(&b[..], 8), "a collision, as built");
-        let classes = |rs: Vec<&[u8]>| byte_classes(rs.into_iter().enumerate().collect(), 16);
-        assert_eq!(classes(vec![&a[..], &b[..]]), Vec::<Vec<usize>>::new());
-        assert_eq!(classes(vec![&a[..], &a[..]]), vec![vec![0, 1]]);
-        assert_eq!(classes(vec![&a[..], &a[..63]]), Vec::<Vec<usize>>::new());
-        assert_eq!(classes(vec![&a[..48], &a[..48]]), vec![vec![0, 1]], "a length that ends on a piece");
-        // Several at once: two sets, apart from the first piece on and from
-        // the last, and a file alone.
-        let mut c = a.clone();
-        c[63] ^= 1;
-        let mut got = classes(vec![&a[..], &b[..], &c[..], &a[..], &b[..], &c[..], &a[..]]);
-        got.sort();
-        assert_eq!(got, vec![vec![0, 3, 6], vec![1, 4], vec![2, 5]]);
+    /// Files are grouped exactly when their bytes agree: three copies of one
+    /// file, a pair, a file differing from them in one bit far from either
+    /// end, and an empty file, which is no copy of anything.
+    fn hashes(c: &[Option<Content>]) -> Vec<Option<Hash>> {
+        c.iter().map(|c| c.map(|c| c.hash)).collect()
     }
 
-    /// Same-size files are grouped exactly when their bytes agree, whatever the
-    /// sample said: files that differ only between the sampled pieces, three
-    /// copies of one file, a pair, and files short enough to be hashed whole.
     #[test]
-    fn identical_files_are_found_whatever_the_sample_says() {
+    fn identical_files_are_the_files_of_one_hash() {
         let dir = std::env::temp_dir().join(format!("img-fp-exact-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let big: Vec<u8> = (0..300_000u32).map(|i| (i * 31 % 251) as u8).collect();
         let mut middle = big.clone();
-        // Between the start and the first third, where no piece is read.
         middle[50_000] ^= 1;
         let small = b"short file".to_vec();
         let mut small_other = small.clone();
         small_other[3] = b'X';
+        let mut first = big.clone();
+        first[0] ^= 1;
         let named: Vec<(&str, &[u8])> = vec![
             ("a", &big), ("a_copy1", &big), ("a_copy2", &big), ("a_middle", &middle),
-            ("s", &small), ("s_copy", &small), ("s_other", &small_other),
+            ("s", &small), ("s_copy", &small), ("s_other", &small_other), ("e1", b""), ("e2", b""), ("a_first", &first),
         ];
-        let files: Vec<PathBuf> = named
-            .iter()
-            .map(|(n, b)| {
-                let p = dir.join(n);
-                std::fs::write(&p, b).unwrap();
-                p
-            })
-            .collect();
-        let groups = |files: &[PathBuf]| {
-            let stats: Vec<walk::Stat> =
-                files.iter().map(|f| walk::Stat { len: std::fs::metadata(f).unwrap().len(), key: None }).collect();
-            exact_groups(files, &stats, |_| true, &[])
-        };
-        assert_eq!(groups(&files), vec![vec![0, 1, 2], vec![4, 5]]);
-        // A pair alone is compared straight away.
-        assert_eq!(groups(&[files[0].clone(), files[3].clone()]), Vec::<Vec<usize>>::new());
-        assert_eq!(groups(&[files[0].clone(), files[1].clone()]), vec![vec![0, 1]]);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Files the last run proved identical are a set without being read
-    /// (two that are not there at all); a set of them takes in a new copy of
-    /// its first file, compared as before; a proven pair whose sizes now
-    /// differ proves nothing.
-    #[test]
-    fn files_proven_identical_are_not_read_again() {
-        let dir = std::env::temp_dir().join(format!("img-fp-exact-proven-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let body: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 253) as u8).collect();
-        let files: Vec<PathBuf> = ["a", "a_copy", "a_new", "gone1", "gone2", "short"].iter().map(|n| dir.join(n)).collect();
-        for f in &files[..3] {
-            std::fs::write(f, &body).unwrap();
+        let files: Vec<PathBuf> = named.iter().map(|(n, b)| { let p = dir.join(n); std::fs::write(&p, b).unwrap(); p }).collect();
+        for all in [false, true] {
+            let h = content_hashes(&files, &stats(&files), |_| true, |_| None, |_| all, |_, _| all, || ());
+            assert_eq!(exact_groups(&hashes(&h)), vec![vec![0, 1, 2], vec![4, 5]], "all: {all}");
+            assert!(h[7].is_none() && h[8].is_none(), "empty files are not hashed");
+            // A change outside the sample: read whole, and not a copy.
+            assert!(h[3].is_some());
+            // A change inside it: no copy, so not read whole.
+            assert_eq!(h[9].is_some(), all);
         }
-        std::fs::write(&files[5], b"short").unwrap();
-        let len = |i: usize| if i == 5 { 5 } else { body.len() as u64 };
-        let stats: Vec<walk::Stat> = (0..files.len()).map(|i| walk::Stat { len: len(i), key: None }).collect();
-        let proven = [(1, 0), (3, 4), (5, 0)];
-        assert_eq!(exact_groups(&files, &stats, |_| true, &proven), vec![vec![0, 1, 2], vec![3, 4]]);
-        assert_eq!(exact_groups(&files, &stats, |_| true, &[]), vec![vec![0, 1, 2]], "unproven, the missing files are no set");
+        let whole = |b: &[u8]| Content::of(b);
+        assert_eq!(content_hash(&files[0]), Some(whole(&big)), "read in pieces or held whole, one content");
+        assert_eq!(content_hash(&files[4]), Some(whole(&small)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Under a wildcard, two copies of a file that is no picture are not read
-    /// to be compared, and so are no group; two copies of one that names an
-    /// image are compared as before, whatever is in them.
+    /// A file of a size no other file and no file the cache knows has is not
+    /// read: it is no copy and has nothing kept. A hash the cache knows is
+    /// taken, and the file not read: here it is not there.
     #[test]
-    fn a_wildcard_walk_compares_only_what_may_be_a_picture() {
+    fn only_what_the_run_needs_is_read() {
+        let dir = std::env::temp_dir().join(format!("img-fp-exact-need-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files: Vec<PathBuf> = ["a", "b", "c", "d", "gone"].iter().map(|n| dir.join(n)).collect();
+        std::fs::write(&files[0], b"one").unwrap();
+        std::fs::write(&files[1], b"one").unwrap();
+        std::fs::write(&files[2], b"two").unwrap();
+        std::fs::write(&files[3], b"three").unwrap();
+        let mut st = stats(&files);
+        st[4].len = 3;
+        let read = std::sync::atomic::AtomicUsize::new(0);
+        let tick = || { read.fetch_add(1, std::sync::atomic::Ordering::Relaxed); };
+        let h = content_hashes(&files, &st, |_| true, |_| None, |_| false, |_, _| false, tick);
+        assert!(h[0].is_some() && h[1].is_some(), "a copy");
+        assert!(h[2].is_none(), "c shares a's size, not its sample");
+        assert!(h[3].is_none(), "d's size is its own");
+        assert_eq!(read.load(std::sync::atomic::Ordering::Relaxed), 2);
+        // The cache knows the gone file's content, and a file of d's.
+        let k = Content { hash: [7u8; 32], sample: 1 };
+        let d = Content::of(b"three");
+        let h = content_hashes(&files, &st, |_| true, |i| (i == 4).then_some(k), |len| len == 5, |len, s| (len, s) == (5, d.sample), tick);
+        assert_eq!(h[3], Some(d));
+        assert_eq!(h[4], Some(k));
+        assert_eq!(read.load(std::sync::atomic::Ordering::Relaxed), 2 + 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Under a wildcard, two copies of a file that is no picture are not read,
+    /// and so are no group; two copies of one that names an image are, as
+    /// before, whatever is in them.
+    #[test]
+    fn a_wildcard_walk_hashes_only_what_may_be_a_picture() {
         let dir = std::env::temp_dir().join(format!("img-fp-exact-head-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let video = vec![7u8; 100_000];
@@ -1026,9 +791,9 @@ mod tests {
         for f in &files {
             std::fs::write(f, &video).unwrap();
         }
-        let stats: Vec<walk::Stat> = files.iter().map(|_| walk::Stat { len: video.len() as u64, key: None }).collect();
         let comparable = |i: usize| crate::extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
-        assert_eq!(exact_groups(&files, &stats, comparable, &[]), vec![vec![2, 3]]);
+        let h = content_hashes(&files, &stats(&files), comparable, |_| None, |_| true, |_, _| true, || ());
+        assert_eq!(exact_groups(&hashes(&h)), vec![vec![2, 3]]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

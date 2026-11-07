@@ -1677,6 +1677,96 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   identical evidence, 146 / 219 with words), recall +0.1 on IMGS-ALL2, +50%
   cached matching CPU; and counting inliers one to one (rejected, *How it
   works*). Scaffolding in `out/v56-seed/scaffolding.patch`.
+- **The cache by content** (after 0.81.0, uncommitted; schema
+  `IMGFPD01`; see *The analysis and the cache*; scratch runs under the
+  session scratchpad `runs/`). User's decisions: SQLite for the index, the
+  analysis version computed from its sources, BLAKE3 equality as "identical",
+  a 30-day grace for gone files; and the new cache as fast or faster to read
+  and write and no larger. Done: `thumb.rs` (`Thumb` and its builder out of
+  `verify.rs`), the analysis's constants into `analysis.rs`, `IMGFP_ANALYSIS`
+  and the boundary test; `decode::Decoded::made_by` (libheif's version) and
+  `hash`; `cache.rs` rewritten (index + zstd packs); `same.rs`'s byte pass is
+  `content_hashes` + `exact_groups` by hash (sample hash, byte compare,
+  `most_open`, `open_file_limit` gone); `.same` and `.heads` gone;
+  `matched::Fingerprint` by hash. Code lines (no comments, blanks or tests)
+  in the files touched 6,278 -> 5,603 (`cache.rs` 1,609 -> 1,121).
+  Proved: reports identical to HEAD (less `runtime_seconds`) on Desktop
+  (cold without a cache, cold filling one, the rescan taking the matching,
+  a rescan reading every record at another bar), the found corpus (the
+  same four) and IMGS-ALL (the last three); all 90 `pairs.py` reports;
+  `--against` IMGS-AGAINST cold and cached (JSON, text, `--last --list`);
+  `--dump` cold and cached (CSV byte-identical); `--last` txt / csv / json /
+  `--suggest correlation`. Size: Desktop 33.50 -> 32.64 MB, found 642.9 ->
+  625.6 MB, IMGS-ALL 1.939 -> 1.896 GB (-2.2 to -2.7%). Speed: found
+  corpus cold 1,209 -> 1,142 CPU-s (zstd packs 3.2x faster than deflate);
+  a rescan reading every record 9.8-12.0 -> 4.8-5.1 CPU-s whole run;
+  IMGS-ALL cache read, three ABBA rounds of a rescan reading every record
+  (warm, cold, warm): base 31.0 / 27.1, 52.1 / 32.1, 50.6 / 39.6 s, new
+  32.8 / 28.9, 37.9 / 32.9, 43.0 / 45.0 s (means 38.8 / 36.8; the stage is
+  mostly writing the analyses into the scratch file, `spill.rs`, the same in
+  both), whole rescan 100-102 -> 79-80 CPU-s; identical files on a rescan
+  0.28-1.17 -> 0.04 s (hashes from the index, nothing read). glibc floor of
+  the CLI built in manylinux_2_28 still 2.28 (SQLite and zstd included); its
+  report identical. Binary 9.2 -> 12.0 MB (SQLite, zstd). Seen on the way, not this change's:
+  rustc 1.99 warns on `lib.rs`'s `check_cpu` `write` declaration (`*const
+  u8` for `*const c_void`). Found on the way and fixed: a
+  zstd context made per stream (the read was slower than base until each
+  thread kept one), a 1 MB buffer zeroed per file hashed, the index read a
+  page at a time through SQLite's 2 MB cache (`COUNT(*)` 127 ms -> 35 ms),
+  a cold run hashing every file up front (each file read twice once the
+  corpus outgrew memory; now only files that may be copies or the index
+  may know by size are, the rest hashed by their decode), a fold copying
+  the main pack into a side pack, and a commit per 64 rows that was an
+  fsync (rollback journal) made under the append lock: found corpus cold
+  ABBA 144.5 / 166.9 / 167.1 / 161.8 s (base / new / new / base), the
+  commits 7.9 s and workers waiting behind them 32 thread-s; with a
+  write-ahead log and the commit after the lock 3.4 s and 0.5 s, and cold
+  ABBA 162.0 / 161.2 / 159.3 / 163.0 s wall, 1,104 / 1,097 / 1,093 / 1,115
+  CPU-s. Behaviour, end to end: a renamed folder
+  of 636 analyses 0; chmod + `touch` of 50 files analyses 0 and takes the
+  kept matching; six same-size BMPs `touch`ed together, scanned as `sub1`
+  then `sub2`, then together: no pair (0.69.0 reported "same pixels");
+  `kill -9` mid-analysis keeps all but the uncommitted batch (576 / 635;
+  the old cache kept every appended record: a SIGKILL lost up to 63
+  analyses, Ctrl-C and SIGTERM none).
+  **Then, the costs taken back** (same session): (a) the analysis version
+  hashes only the crates the analysis calls and their dependencies, the
+  target and its CPU features (was the whole `Cargo.lock`, `rustc -vV` and
+  every flag: a dependency bump anywhere or a new stable compiler would have
+  analysed every user's library again); rustc 1.92 and 1.99 builds write
+  Desktop's packs byte for byte alike at `-t 1`. (b) A row is committed as
+  soon as the index is free (`Db::commit_waiting`), not 64 at a time: Desktop
+  `kill -9`ed after 250 described kept 259; found corpus cold, eight runs
+  BAAB + ABBA, wall 154.0 / 160.0 / 162.1 / 159.7 s base, 159.0 / 160.6 /
+  158.3 / 159.1 new (means 158.95 / 159.25), CPU 1,089 / 1,077 mean. (c) A
+  damaged index is replaced (at open; later, by `finish` when alone), was a
+  failure every run. (d) On a share: no mapping, and the mode is tested
+  (`a_cache_on_a_share_keeps_and_reads_as_a_local_one`, forced); not run on
+  a real share (no sshfs here). (e) A file whose size is shared is sampled
+  (16 KB first, middle, last) and read whole only when its sample is shared
+  too: identical-files stage on a cold found corpus 0.62 -> 0.17 s (base
+  0.17), each of IMGS-ALL's 3,552 size-sharing files (0.67 GB) was read twice.
+  (f) Cross checks build no C: `LIBSQLITE3_SYS_USE_PKG_CONFIG=1
+  ZSTD_SYS_USE_PKG_CONFIG=1 PKG_CONFIG_ALLOW_CROSS=1 cargo check --target
+  aarch64-unknown-linux-gnu --all-targets`, and for `aarch64-apple-darwin`
+  also `CARGO_FEATURE_PURE=1` (blake3's NEON C); both clean. Reports of
+  Desktop (cold, cold filling, rescan, other bar) and the found corpus cold
+  identical to HEAD's; renamed folder 0 analysed, chmod + `touch` 0 analysed
+  and the matching taken. Remeasured after (a)-(f), base = HEAD: IMGS-ALL
+  reports identical (cold filling, rescan, other bar), cache 1.939 -> 1.896
+  GB; IMGS-ALL cold, six runs base / every-commit / 64 MB checkpoint
+  interval / same / every-commit / base: 625.0 (features 2,250 thread-s, the
+  machine slow) / 476.4 / 473.6 / 486.4 / 477.5 / 473.4 s, describing 341-353
+  s each but the first base's 475: a lone pair once read 487 / 587 s, which
+  was the machine, and the checkpoint interval changes nothing (kept at
+  SQLite's default). IMGS-ALL cache read, three ABBA rounds (warm, cold,
+  warm): base 45.7 / 66.2, 46.5 / 49.8, 40.1 / 40.5 s, new 38.4 / 48.0,
+  35.7 / 41.7, 54.6 / 38.8 (means 48.1 / 42.9), whole run 100 -> 77 CPU-s.
+  Found corpus rescans, ABBA x4: wall 4.16 / 3.94 s mean, CPU 11.7 / 7.0,
+  read stage 2.95 / 3.31 s (a new run right after a base one read slower,
+  4.4-4.8 s, the second of a pair 2.2-2.4; the two caches do not fit in
+  memory together). Left: a cache of 0.81.0 is not read (analysed
+  again once), and the binary is 2.8 MB larger.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
@@ -1788,11 +1878,12 @@ src/
                 the byte pass (`exact_groups`: size, sample, hash, bytes)
   group.rs      pairs -> groups around a representative
   walk.rs       roots -> files (lists, -x, --exclude, symlinks, dedupe by inode)
-  cache.rs      on-disk analysis cache: answers for a run's files by number,
-                and decides what the file keeps (`Store::finish`); its
-                index of heads (`heads`)
-  matched.rs    the last run's matching, taken by a run with nothing changed;
-                and the files it proved byte-identical (`<cache>.same`)
+  cache.rs      on-disk analysis cache: an SQLite index (path -> key, content
+                hash; hash + analysis version + settings -> place in a pack)
+                and append-only zstd packs; answers for a run's files by
+                number, and decides what is kept (`Store::finish`)
+  matched.rs    the last run's matching, taken by a run with nothing changed
+  thumb.rs      the thumbnail an analysis keeps (`Thumb::build`)
   outcome.rs    a finished scan (groups by number, or against a library each
                 scanned file's pairs; evidence, content rule's suggestions),
                 as the report, --last and the window read it
@@ -1999,60 +2090,82 @@ or `Failed(why)`. Skips, problems, the report's `failures`, what may be
 cached and what is matched all read that one field (`tell_problems`,
 `Read::ok`, `damaged`, `error`); nothing compares error strings.
 
-The cache is opened with the run's files (canonical name, key) and answers
-for them by number: `take(i)` hands over a record whose key is the file's
-(once; the pipeline takes a byte group's first record for its original),
-`append(i, ..)` keeps one made for it, `keep_colour(i, c)` writes a JPEG's
-colour where its record now is. `finish(prune)` is the one keep rule:
-this run's taken and made records, plus every record it was not asked
-about whose file is there (`carried`), plus what another run appended
-meanwhile; compacted when the rest is a quarter. `stale()` is only the
-progress bar's guess at whether it will write.
+**An analysis is kept by what the file holds** (0.82.0): under its file's
+BLAKE3 content hash (`same::Hash`), the analysis that made it
+(`analysis::version`: `IMGFP_ANALYSIS`, which `build.rs` hashes from the
+analysis's sources less whole-line comments, the crates they call and those
+crates' dependencies at their `Cargo.lock` versions (`analysis_crates`; 63
+of 219, less `COMPUTES_NOTHING`), the target and its CPU features, plus the
+`sift::Params` the run passes; not the compiler nor other flags: a rustc 1.92
+and a 1.99 build write Desktop's packs byte for byte alike) and the working
+size and thumbnail. Which path holds which content is a second table: path,
+stat key (size, mtime, ctime), hash, sample (`decode::sample`: length and
+the first, middle and last 16 KB, hashed to 64 bits), and the day a run first
+found it gone. A walked file whose key is its row's takes the row's content
+and is not read; a file another walked file shares a size with (a possible
+copy) or the index knows a file of that size (a possible move) is sampled,
+and read whole up front only when its length and sample are another walked
+file's or a row's (`same::content_hashes`); every other file is hashed by
+its decode from the bytes it already holds (`decode::Decoded::hash`), since
+no analysis can be kept for it and it is no copy: hashed up front as well, a
+cold run read its corpus twice, and with sizes alone the 3,552 IMGS-ALL
+files sharing a size (0.67 GB) still were. Equal hashes are byte-identical files (`exact_groups`), no
+byte comparison (user's decision). So a moved, renamed, chmod'ed or
+hard-linked file, a remounted drive or a restored backup costs a read, not
+an analysis, and copies share one record. The stat key is only ever compared
+for its own path, which is why 0.69.0's ctime collision cannot recur.
 
-Beside the file, `<cache>.heads` (`cache::heads`) holds every record's
-head (path, settings, key, span) up to where it was written: a run reads the
-heads from it, `pread`s only the bodies it unpacks (`read_indexed`), and
-reads what was appended after it in order; one that unpacks more than half
-the file reads it whole, as before. It is a hint the file must bear out:
-used only for the same device, inode and birth time, no shorter than it
-covers, the last 4 KB it covers unchanged, and every body read through it
-with the head it gives; otherwise the file is read whole. Written (beside
-and renamed, no lock) by a run that read 16 MB (`WORTH`) past what it
-covered; removed by a compaction, which also checks each span starts with
-its path before copying it. Before 0.71.0 every run read the whole file to
-learn the heads: four files against a 529 MB cache read all of it, 0.81 s
-cold against 0.10 s now (648 blocks against 1,036,216). A smaller buffer
-was tried and lost cold (readahead); the index is what the code had said
-was missing.
+Storage: the index is SQLite (rusqlite, bundled; a write-ahead log,
+synchronous NORMAL, so a commit syncs nothing and a power cut costs the last
+batches, never the index; on a network share, `on_network_share` by
+`/proc/self/mountinfo`'s type, a rollback journal, synced: a log's shared
+memory does not work there, and not mapped; locally mapped, `mmap_size`,
+and a 64 MB page cache); the
+records are append-only packs `X.pack.N`, read with one `pread`
+each and packed with zstd level 1 (three streams: keypoint byte planes,
+descriptors, Paeth thumbnail residuals). Measured before choosing: SQLite
+holding the records as blobs was +2.7% size, 3-4x slower writes and 2x
+slower cold reads than appends (9,000 x 35 KB); zstd-1 against deflate-fast
+on 3,000 found-corpus records 0.709 / 0.730 of raw, packing 3.2x and
+unpacking 4x faster. Each record begins with 16 bytes of its hash, checked
+on read: an index and pack that disagree cost a record. A row is committed
+as soon as the index is free (`Db::commit_waiting`: a worker that finds a
+commit under way leaves its row to it, so none waits), and by `seal` at an
+interrupt: a SIGKILL loses the rows of the commit under way (636-file
+Desktop killed after 250 described: 259 kept). A damaged index (SQLite's
+`CORRUPT` / `NOTADB`, at open or later) is removed by the run that has the
+cache alone and the next starts afresh. `X.lock` is held shared by every
+run; a run that gets it alone at `finish` folds other runs' side packs into
+the newest (a run appends to the newest pack when it can `flock` it, else to
+one of its own) and rewrites the packs when a quarter is unread. Kept: a row
+of a walked file; of a file not walked while it is there and `GRACE_DAYS`
+(30, user's decision) after a run first found it gone (this replaced
+`away`, `left_behind` and `Key::dev`); an analysis while some row holds its
+hash, one by another analysis version `GRACE_DAYS` unused (`used` day,
+updated once a day). `--prune-cache` keeps only the run's. A libheif-decoded
+record carries libheif's version (`made_by`) and is not read under another.
+
+Until 0.82.0 (`IMGFPC04`-`21`): one append-only file of records keyed by
+path + key, a `.heads` index of it, a `.same` file of pairs proven
+identical, records copied for byte copies, `away` heuristics for unplugged
+drives, and a format number bumped by hand when the analysis changed (missed
+after 0.76.0: stale baselines). `remove_other_formats` deletes those files
+from the default folder.
 
 `<cache>.matched` (`matched.rs`) is the last run's matching: its claims and
 its console notes, under a `Fingerprint` of everything the matching reads
-(the build, `IMGFP_BUILD`: a hash `build.rs` makes of every source file,
-the manifest, the lock file, the compiler, the target, its features and the
-flags, which `img-fp` and `img-fp-gui` of one build share; the bars, `-k`,
-`--skip-mirrored`, the work size, the detail, and each file's path, key, read state and
-side). A run with the same fingerprint takes it after the analysis and goes
-on to the assembly, which is worked out as always (groups, keep rule,
-report with its `pairs`); not with `--dump`, nor a file with no key. IMGS3
-unchanged rescan 26 s -> 10-13 s, reports identical to a cold run's. Until
-0.72.0 the fingerprint hashed the running program's bytes (read whole every
-run, and never the same for the window's worker and the CLI) and the thread
-count (IMGS-ALL matched again at `-t 3` writes the `-t 8` report to the
-byte), so a scan from the window or at another `-t` matched everything again.
+(the build, `IMGFP_BUILD`, which `img-fp` and `img-fp-gui` of one build
+share; the bars, `-k`, `--skip-mirrored`, the work size, the detail, and each
+file's path, content hash, read state and side). A run with the same
+fingerprint takes it after the analysis and goes on to the assembly; not
+with `--dump`, nor a file with an analysis and no hash. Keyed by content
+hash since 0.82.0 (it was the stat key), so a chmod or `touch` keeps it.
 
-`<cache>.same` (`matched::proven_identical`) is which files the last run
-compared byte for byte and found identical, by canonical name and key. The
-byte pass (`same::exact_groups`) takes a pair whose two keys are unchanged
-as proven and reads neither file (a set is read as its first file, and only
-if another file of its size is still to be told apart from it). The proof
-is still the byte comparison; what is kept is that it was made, trusted for
-as long as the analysis cache trusts a key. Before 0.72.0 every rescan read
-every copy whole before the cache was asked: 47 duplicate pairs, 251 MB,
-0.66 s of a 0.72 s rescan on SSD; now 0.10 s.
-
-**Adding a record kind or a reason to keep one**: a field of `Asked` or
-`Unasked` and a condition in `finish` / `carried`. Not bookkeeping in the
-pipeline (names, spans, counts of the cache's map).
+**Adding a record kind or a reason to keep one**: a column of `analyses` or
+`files` and a condition in `Store::settle`. Not bookkeeping in the pipeline.
+**Adding to what an analysis computes from**: a file under the sources
+`build.rs` lists (`ANALYSIS_SOURCES`); `the_analysis_reads_only_its_sources`
+fails when an analysis source names a module outside them.
 
 ## The claim graph (`claims.rs`, `verify::Policy`)
 
@@ -2346,8 +2459,10 @@ Each was measured; changing one needs a re-measure.
   descriptor both in the sample got a leaf each, and a logo shared no word
   with its own copy.
 - **Inverted file indexes every word**; no frequency cap.
-- **"Identical" is a byte comparison**, after a 4x16 KB sample hash; under a
-  wildcard only possible pictures are read (`decode::may_be_image`).
+- **"Identical" is one BLAKE3 content hash** (0.82.0, user's decision; it
+  was a byte comparison after a sample hash, since the FNV hash then used
+  could be made to collide); under a wildcard only possible pictures are
+  read (`decode::may_be_image`).
 - **Byte-identical copies and same-analysis twins** (`same.rs`: one
   `Same` answers "is this file another's" for the whole run) are matched
   through one original and get its pairs via `Same::expand`; the pairs
@@ -2631,6 +2746,11 @@ keeps code out of line** (closures to `LocalKey::with`, `Option::map`,
 generic `extend`) silently runs the plain copy; check with `objdump`, counting
 `ymm` per symbol. Test both copies agree:
 `RUSTFLAGS="-C target-cpu=x86-64" cargo test --release --lib`.
+Other targets are checked from here without their C (SQLite, zstd and
+blake3 build C, and there is no cross C toolchain): `LIBSQLITE3_SYS_USE_PKG_CONFIG=1
+ZSTD_SYS_USE_PKG_CONFIG=1 PKG_CONFIG_ALLOW_CROSS=1 cargo check --target
+aarch64-unknown-linux-gnu --all-targets`, and `CARGO_FEATURE_PURE=1` as well
+for `aarch64-apple-darwin`.
 
 glibc floor is **2.28** for the CLI and **2.34** for the window; `release.yml` fails if
 either moves. A binary asks for the glibc it was linked against, not what
@@ -2707,9 +2827,9 @@ Do not retry without new evidence:
   mtime, ctime to the nanosecond) is its own (0.69.0, reverted): the
   kernel's ctime is a clock tick's, shared by files written or touched
   together, so same-size files took each other's analysis and different
-  pictures were reported "same pixels" with a DELETE. Moved files are
-  analysed again; that is intended. A fix needs a content hash, not a
-  better key.
+  pictures were reported "same pixels" with a DELETE. **Solved by content
+  identity in 0.82.0** (the cache keys analyses by content hash; a key is
+  compared only for its own path).
 - `TAU` less one shift of every cell alike, up to half a grey level (for
   a 16-bit master against its 8-bit export): a posterize edit, whose tones
   move nearly uniformly, came into the keep candidates, was chosen, and
@@ -2942,40 +3062,18 @@ result exactly. Not tested here: the portal file chooser, drag and drop,
   interrupt removes the half-written one): a failed write used to leave the
   last report cut off. `--cache` with `--no-cache` only beside
   `--clear-cache`.
-- **Cache**: one file per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPC21.bin`
-  (named for its format, so upgrades start a new file). Records keyed by
-  canonical path + size + mtime + ctime (the kernel's seconds and
-  nanoseconds, signed: before 0.72.0 a file dated before 1970 had no key, was
-  analysed again on every run, and kept any run holding it from taking the
-  last matching), settings per record; a file under
-  another name is analysed again (intended: see *Tried and rejected*). A run keeps
-  what it took and made, and every record it was not asked about (a path it
-  did not walk, or other settings) while the file exists or its volume is
-  away (`cache::carried`, `away`): a drive where systems mount them
-  (`volume_root`: `/media`, `/run/media`, `/mnt`, gvfs, `/Volumes`) with
-  nothing there, an `/etc/fstab` mount point not mounted, or (whether or not
-  under a mounted fstab mount point, such as `/home`) a folder gone
-  whose nearest folder above is empty, not mounted, and on another device
-  than the record's file was (`Key::dev`; an sshfs/NFS mount point left
-  behind; was a re-analysis each time the share was away). Appended as made; compacted only when
-  dead bytes reach a quarter. Runs sharing the file hold it with `flock`
-  shared; compaction, header writing and torn-tail repair need it alone
-  (`exclusive`, never waited for) and are skipped otherwise: a compaction
-  under another run sent its later appends to an unlinked file. A
-  compaction keeps what another run appended after this one read the file
-  (`Store::foreign`), and counts it live: it used to drop it. A record's
-  file is gone only on "not found" (`cache::gone`): an unreadable folder or
-  a dropped sshfs/NFS mount is not a deletion.
-  A JPEG's colour, measured later by the suggestion, is written in place into
-  its record's colour field as `-2 - c` (below the decode's -1, so a build
-  of the same format that predates it reads "not measured"); the value used
-  is `cache::kept_colour(c)`, so cold and cached runs decide alike.
-  Another format version's file named with `--cache` is left untouched; in
-  the default folder it is removed (`remove_other_formats`), and a file that
-  is no cache is never written or deleted. Damage costs only the
-  damaged record. **Cost measurements must pass `--no-cache`.** Sweeps
-  should use their own `--cache`. `--prune-cache` keeps only what the scan
-  used; refuses after a partial walk.
+- **Cache**: one per machine, `$XDG_CACHE_HOME/img-fp/analysis-IMGFPD01.db`
+  (the index; named for its schema) with `X.lock`, `X.pack.N`, `X.matched`
+  beside it; see *The analysis and the cache*. A record's file is gone only
+  on "not found" (`cache::gone`, a folder listing at a time): an unreadable
+  folder or a dropped share is not a deletion. A JPEG's colour measured
+  later by the suggestion is kept on its analysis row (`colour`), as
+  `cache::kept_colour(c)`, so cold and cached runs decide alike. Another
+  version's file named with `--cache` is left untouched; in the default
+  folder it is removed (`remove_other_formats`), and a file that is no cache
+  is never written or deleted. **Cost measurements must pass `--no-cache`.**
+  Sweeps should use their own `--cache`. `--prune-cache` keeps only what the
+  scan used; refuses after a partial walk.
 - Extensions: DDS not taken; `.hdr`, `.pam`, `.apng`, `.dib`, `.avifs`,
   `.heics`, `.jif`, `.jfi`, `.pjpeg`, `.pjp`, `.jpg_large`, `.jpg_orig`,
   `.png_large` are. ICO with an RGB PNG is read (`decode::other::ico_png`). HEIF is

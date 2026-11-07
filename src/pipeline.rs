@@ -378,11 +378,10 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
         correlation: args.min_pixel_correlation,
         skip_mirrored: args.skip_mirrored,
     };
-    let keys: Vec<_> = stats.iter().map(|s| s.key).collect();
     // Each file by the cache's name for it, not as this run spelled it.
     let fingerprint = kept_at.as_ref().zip(analysed.store.as_ref()).and_then(|(_, store)| {
         let names: Vec<&std::path::Path> = (0..n).map(|i| store.name(i)).collect();
-        matched::Fingerprint::of(&asked, &names, &keys, items, &scope.library)
+        matched::Fingerprint::of(&asked, &names, &analysed.hashes, items, &scope.library)
     });
     let kept = kept_at.as_deref().zip(fingerprint).and_then(|(p, fp)| matched::load(p, fp));
     let claims = match kept {
@@ -639,6 +638,8 @@ struct Analysed {
     /// Each file's keypoints, for the grey twins' stated pairs once the
     /// descriptors are let go.
     n_kps: Vec<u32>,
+    /// Each file's content hash, where the run knows one.
+    hashes: Vec<Option<same::Hash>>,
     n_ok: usize,
 }
 
@@ -672,7 +673,7 @@ fn analyse_all(
     // below tells it more as soon as it has counted it.
     progress.learn(|k| {
         k.files = files.len();
-        k.cache_bytes = cache_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+        k.cache_bytes = cache_path.as_deref().map_or(0, cache::bytes);
         k.cache_write = cache_path.is_some();
         k.work_size = args.work_size();
         k.candidates = args.candidates;
@@ -681,34 +682,6 @@ fn analyse_all(
             k.ask_again = Some((0, 0));
         }
     });
-
-    // Byte-identical copies, before anything is decoded.
-    progress.begin(Stage::Identical);
-    // Under a wildcard, a file is compared byte for byte only if its head may
-    // be a picture or its name says it is one: anything else is dropped from
-    // the groups below once it fails to decode, and reading two copies of a
-    // video whole to find that out was gigabytes for nothing. A list walk
-    // took only image names, so it asks nothing.
-    let guessed = wanted.is_a_guess_at_images();
-    let comparable = |i: usize| guessed || extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
-    // The cache is keyed on the paths themselves, not on their printable
-    // form: two names that are not UTF-8 can print the same and be two files.
-    // And on each file's canonical path, not the one this run spells; see
-    // `cache_names`. So is what the last run proved byte-identical.
-    let names = cache_path.as_ref().map(|_| cache_names(files, canonical));
-    let keys: Vec<_> = stats.iter().map(|s| s.key).collect();
-    let identical_at = cache_path.as_deref().map(matched::identical_beside);
-    let proven = identical_at.as_deref().zip(names.as_deref()).map_or_else(Vec::new, |(p, names)| matched::proven_identical(p, names, &keys));
-    let exact = timed!(33, exact_groups(files, stats, comparable, &proven));
-    if let (Some(p), Some(names)) = (&identical_at, &names) {
-        matched::keep_identical(p, &exact, names, &keys);
-    }
-    stage!(cx, "exact duplicates: {} groups", exact.len());
-    let mut same = Same::of_bytes(files.len(), exact);
-    // A copy is answered by its original: the most there is to describe
-    // until the cache has said what it answers.
-    let originals = (0..files.len()).filter(|&i| !same.is_copy(i)).count();
-    progress.learn(|k| k.to_describe = Some(originals));
 
     // Decode and describe.
     let sp = sift::Params {
@@ -722,25 +695,16 @@ fn analyse_all(
         features: crate::analysis::features_at(args.detail().max(args.work_size()), args.work_size()) as u32,
         thumb: THUMB_LONG as u32,
     };
-    let mut store = cache_path.as_ref().zip(names).map(|(p, names)| {
-        progress.begin(Stage::CacheRead);
-        // Only this run's paths are unpacked; the rest of the machine's
-        // cache is read for where it is, not for what it says. See
-        // `cache::open`.
-        //
-        // Each original the cache is seen to answer as it reads is one less
-        // to describe, for the bar: on a rescan the read is the first tenth
-        // of the run, and until it ends every file was a file to describe.
-        let met: Vec<std::sync::atomic::AtomicBool> = (0..n).map(|_| Default::default()).collect();
-        let answered = |i: usize| {
-            if !met[same.original(i)].swap(true, Ordering::Relaxed) {
-                progress.learn(|k| k.to_describe = k.to_describe.map(|t| t.saturating_sub(1)));
-            }
-        };
-        cache::open(p, settings, names.into_iter().zip(stats.iter().map(|s| s.key)).collect(), &answered, problems)
-    });
+    // The cache is keyed on the paths themselves, not on their printable
+    // form: two names that are not UTF-8 can print the same and be two files.
+    // And on each file's canonical path, not the one this run spells; see
+    // `cache_names`. Opened first, for the hashes it already knows.
+    let keys: Vec<_> = stats.iter().map(|s| s.key).collect();
+    let mut store = cache_path
+        .as_ref()
+        .map(|p| cache::open(p, settings, analysis::version(&sp), cache_names(files, canonical).into_iter().zip(keys.iter().copied()).collect(), problems));
     // A cache another version of img-fp wrote is that version's, and this run
-    // leaves it as it is; see `cache::MAGIC`.
+    // leaves it as it is.
     if let (Some(p), Some(v)) = (&cache_path, store.as_ref().and_then(|s| s.other_version())) {
         say!(
             cx,
@@ -751,38 +715,58 @@ fn analyse_all(
             cache::FORMAT
         );
     }
-    if let Some(s) = store.as_ref().filter(|s| s.usable() > 0) {
-        stage!(cx, "cache: {} usable records", s.usable());
+    let keeps = store.as_ref().is_some_and(|s| s.other_version().is_none());
+
+    // Byte-identical copies, before anything is decoded: each file's content
+    // hash, the cache's where its key says it knows it, else read. With a
+    // cache every file is hashed, since its analysis is kept under it.
+    progress.begin(Stage::Identical);
+    // Under a wildcard, a file is hashed only if its head may be a picture or
+    // its name says it is one; a list walk took only image names.
+    let guessed = wanted.is_a_guess_at_images();
+    let comparable = |i: usize| guessed || extensions::names_an_image(&files[i]) || decode::may_be_image(&files[i]);
+    let known = |i: usize| store.as_ref().and_then(|s| s.hash_of(i));
+    let samples = store.as_ref().map(|s| s.samples()).unwrap_or_default();
+    let lengths: std::collections::HashSet<u64> = samples.iter().map(|&(len, _)| len).collect();
+    let contents = timed!(33, same::content_hashes(files, stats, comparable, known, |len| lengths.contains(&len), |len, s| samples.contains(&(len, s)), || ()));
+    drop((samples, lengths));
+    let mut hashes: Vec<Option<same::Hash>> = contents.iter().map(|c| c.map(|c| c.hash)).collect();
+    let exact = exact_groups(&hashes);
+    stage!(cx, "exact duplicates: {} groups", exact.len());
+    let mut same = Same::of_bytes(files.len(), exact);
+    // A copy is answered by its original: the most there is to describe
+    // until the cache has said what it answers.
+    let originals = (0..files.len()).filter(|&i| !same.is_copy(i)).count();
+    progress.learn(|k| k.to_describe = Some(originals));
+
+    if let Some(s) = store.as_mut() {
+        progress.begin(Stage::CacheRead);
+        // Each original the cache is seen to answer is one less to describe,
+        // for the bar, as soon as the index says so.
+        let met: Vec<std::sync::atomic::AtomicBool> = (0..n).map(|_| Default::default()).collect();
+        let answered = |i: usize| {
+            if !met[i].swap(true, Ordering::Relaxed) {
+                progress.learn(|k| k.to_describe = k.to_describe.map(|t| t.saturating_sub(1)));
+            }
+        };
+        // Only originals: a copy is its original's bytes, so its hash and
+        // its analysis are its original's.
+        s.read(contents, &|i| !same.is_copy(i), &answered, problems);
+        if s.usable() > 0 {
+            stage!(cx, "cache: {} usable records", s.usable());
+        }
     }
     // Every walked file's record comes *out* of the store rather than being
-    // copied from it. The analysis is the largest thing the run holds, and
-    // cloning it here made it exist twice over — once in the cache's map and
-    // once in `items` — for the length of the phase that already sets the
-    // peak, and then charged a second bill to free the originals. On the
-    // found corpus that was 1.9 s of dropping a nine-thousand-record map,
-    // about as much again cloning into it, and 164 MB of peak.
-    //
-    // The exact pass has already grouped the files whose bytes hash the same,
-    // and the analysis depends on nothing but those bytes. Describing the
-    // second copy of a file is not a cheaper way to reach the same answer, it
-    // is the same work done twice: each group's original (`Same::of_bytes`)
-    // is described and the rest are copied from it. Those groups are already
-    // claimed as duplicates in the output, so sharing one analysis between
-    // them asserts nothing the run does not assert anyway.
-    //
-    // The bytes are the same, so the analysis is: the first record any of
-    // them has serves the original, and stays in the file under the name of
-    // the copy it was made for, where the next run finds it again. Any other
-    // copy's is not taken, and so not kept (`cache::Store::take`).
-    //
-    // A record made at another `--detail` is read as far as this run's goes
-    // (`Item::cached_at`); one holding fewer levels than the picture has up
-    // to it is analysed again, and the new record takes its place.
+    // copied from it: the analysis is the largest thing the run holds, and a
+    // copy of it in the cache's hands as well was 164 MB of peak on the
+    // found corpus. A record made at another `--detail` is read as far as
+    // this run's goes (`Item::cached_at`); one holding fewer levels than the
+    // picture has up to it is analysed again, and the new record takes its
+    // place.
     let mine: Vec<Option<Item>> = (0..n)
         .map(|i| {
             let s = store.as_mut().filter(|_| !same.is_copy(i))?;
-            let rec = same.identical_to(i).iter().find_map(|&k| s.take(k))?;
-            Item::cached_at(rec, args.work_size(), args.detail())
+            Item::cached_at(s.take(i)?, args.work_size(), args.detail())
         })
         .collect();
     // What each file still to be analysed is expected to cost, for the bar
@@ -842,12 +826,14 @@ fn analyse_all(
                 return Some(it);
             }
             let t0 = Instant::now();
-            let (it, decode) = analysis::analyse(&files[i], args.work_size(), args.detail(), &sp, header[i].as_ref(), &planes);
+            // A file not hashed yet is hashed from the bytes its decode reads,
+            // for the cache to keep its analysis under (`same::content_hashes`).
+            let (it, decode) = analysis::analyse(&files[i], args.work_size(), args.detail(), &sp, header[i].as_ref(), &planes, keeps && hashes[i].is_none());
             // Each record goes into the cache file as soon as it is made,
             // which is what lets an interrupt keep the analysis without
             // writing anything; see `cache::Store`.
             if let (Some(s), Read::Whole) = (&store, &it.read) {
-                s.append(i, it.dims, &it.traits, &it.feats, &it.thumb);
+                s.append(i, &it);
             }
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             bar.done(&cost[i], decode, t0.elapsed());
@@ -868,6 +854,10 @@ fn analyse_all(
     // never in a group to begin with.)
     let items: Vec<Item> = (0..n).map(|i| made[same.original(i)].clone().expect("every original is analysed")).collect();
     drop(made);
+    // The hashes the decodes took.
+    for (h, it) in hashes.iter_mut().zip(&items) {
+        *h = h.or(it.hash.map(|c| c.hash));
+    }
     // Which files share an analysis, and which of those a colour too: from
     // here to the assembly, each such set is matched as its first file.
     timed!(37, same.analysed(files, &items));
@@ -920,7 +910,7 @@ fn analyse_all(
     let n_ok = items.iter().filter(|i| i.read.ok()).count();
     let n_desc: usize = items.iter().map(|i| i.feats.len()).sum();
     stage!(cx, "described {n_ok}/{n} images, {n_desc} descriptors");
-    Analysed { items, same, store, not_asked, n_kps, n_ok }
+    Analysed { items, same, store, not_asked, n_kps, n_ok, hashes }
 }
 
 /// Settle the cache file (`cache::Store::finish`), and say what it kept.
@@ -934,17 +924,17 @@ fn finish_cache(cx: &Ctx, p: &Path, store: &mut cache::Store, prune: bool, probl
         problems.note(Note::Cache, format_args!("could not write {}: {e}", p.display()));
     }
     if kept.carried > 0 {
-        stage!(cx, "cache: {} records kept from other scans", kept.carried);
-    }
-    if kept.other_sizes > 0 {
-        stage!(cx, "cache: {} records kept from other settings (--fast or not)", kept.other_sizes);
+        stage!(cx, "cache: {} files of other scans kept, {} of them gone (kept for {} days)", kept.carried, kept.gone, cache::GRACE_DAYS);
     }
     if prune && kept.dropped > 0 {
         say!(cx, "pruned {} cached record(s) this scan did not use", kept.dropped);
+    } else if kept.dropped > 0 {
+        stage!(cx, "cache: {} records dropped", kept.dropped);
     }
     match kept.compacted {
-        cache::Compacted::Unneeded { records, unused } => stage!(cx, "cache: {records} records, {unused} of them unused, not compacted"),
+        cache::Compacted::Unneeded { bytes, unused } => stage!(cx, "cache: packs of {bytes} bytes, {unused} of them unused, not compacted"),
         cache::Compacted::Busy => stage!(cx, "cache: not compacted, another run has it open"),
+        cache::Compacted::Folded => stage!(cx, "cache: another run's pack folded in"),
         cache::Compacted::Done => {}
         cache::Compacted::Failed(e) => problems.note(Note::Cache, format_args!("could not write {}: {e}", p.display())),
     }
