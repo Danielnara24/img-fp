@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.82.0" date="2026-11-06">
+      <description>
+        <p>Images are recognised by their content, so moving, renaming or touching files no longer means analysing them again, and identical copies share one analysis. The cache is rebuilt once after the update.</p>
+      </description>
+    </release>
     <release version="0.81.0" date="2026-11-06">
       <description>
         <p>A photo is no longer matched to a small spot of an unrelated picture, and the analysis of every image is made again once, so results agree with a fresh scan.</p>
