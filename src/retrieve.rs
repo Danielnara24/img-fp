@@ -29,6 +29,32 @@ simd::dispatched! {
     pub(crate) fn quantise_from(vocab: &Vocabulary, f: &Features, from: usize) -> WordList => quantise_from_any;
 }
 
+simd::dispatched! {
+    /// `quantise`, and each keypoint's best word alone: the second is the
+    /// candidate's side of the geometric look (`Shape`), from the same descent.
+    pub(crate) fn quantise_with_best(vocab: &Vocabulary, f: &Features) -> (WordList, WordList) => quantise_with_best_any;
+}
+
+/// `quantise_with_best`, for whichever copy `dispatched!` chose.
+#[cfg_attr(dispatch, inline(always))]
+fn quantise_with_best_any(vocab: &Vocabulary, f: &Features) -> (WordList, WordList) {
+    let mut buf = Vec::with_capacity(4);
+    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(f.len() * 2);
+    let mut best: Vec<(u32, u32)> = Vec::with_capacity(f.len());
+    for i in 0..f.len() {
+        vocab.quantise(f.d(i), &mut buf);
+        for &w in buf.iter() {
+            pairs.push((w, i as u32));
+        }
+        if let Some(&w) = buf.first() {
+            best.push((w, i as u32));
+        }
+    }
+    pairs.sort_unstable();
+    best.sort_unstable();
+    (WordList::from_sorted(&pairs), WordList::from_sorted(&best))
+}
+
 /// `quantise`, for whichever copy `dispatched!` chose.
 #[cfg_attr(dispatch, inline(always))]
 fn quantise_any(vocab: &Vocabulary, f: &Features) -> WordList {
@@ -74,6 +100,9 @@ pub(crate) struct Index<'a> {
     /// Whether the vocabulary is held past the second look, for a finer
     /// step to quantise its new descriptors with (`into_parts`).
     keep_vocab: bool,
+    /// Each matched file's `Shape`, for the second look's geometric look
+    /// (`deeper`); none where nobody will ask (`--skip-mirrored`).
+    shapes: Option<Vec<Shape>>,
 }
 
 /// One worker's scratch for `Index::candidates`.
@@ -85,12 +114,13 @@ pub(crate) struct Asking {
 
 impl<'a> Index<'a> {
     /// The index of `lists`, quantised with `vocab` from the matched
-    /// `items`. `both_ways` when not every file asks (against a library).
-    pub(crate) fn new(items: &'a [Item], matched: &'a [bool], vocab: Vocabulary, lists: Vec<WordList>, both_ways: bool) -> Index<'a> {
+    /// `items`. `both_ways` when not every file asks (against a library);
+    /// `shapes` where the second look will ask deeper (`deeper`).
+    pub(crate) fn new(items: &'a [Item], matched: &'a [bool], vocab: Vocabulary, lists: Vec<WordList>, shapes: Option<Vec<Shape>>, both_ways: bool) -> Index<'a> {
         let n_live = vocab.n_live_words();
         let postings = timed!(13, InvertedFile::build(&lists, n_live));
         let mass = both_ways.then(|| lists.iter().map(|wl| postings.mass(wl)).collect());
-        Index { items, matched, vocab: Some(vocab), n_live, lists, mass, postings: Some(postings), turned: None, keep_vocab: false }
+        Index { items, matched, vocab: Some(vocab), n_live, lists, mass, postings: Some(postings), turned: None, keep_vocab: false, shapes }
     }
 
     /// The vocabulary held past the second look (`into_parts`).
@@ -201,6 +231,146 @@ impl<'a> Index<'a> {
                 Cow::Owned(std::array::from_fn(|v| timed!(39, quantise(vocab, &seen[v]))))
             }
         }
+    }
+
+    /// The geometric look: file `i`'s candidates past its first `k`, down to
+    /// `GEOMETRIC_DEPTH` of its ranking, that agree with it in geometry more
+    /// than anything in its first `k` does; best agreement first, then the
+    /// better ranked. Empty where the index holds no shapes.
+    ///
+    /// Why: a file's ranking is by shared words, and the share a true copy
+    /// gets of them falls as the folder grows (each word is finer where more
+    /// is scanned, and heavy edits keep few), so in a large folder a copy is
+    /// ranked past `-k` and never verified, however well it would verify:
+    /// of DISC21's 529 true copies in one shard (50,000 queries against
+    /// 50,000 references), 91 were ranked past the window and 40 of them
+    /// pass when the two files are scanned alone (`out/v58-reach`). Words
+    /// shared by chance scatter in rotation and scale; a copy's agree. The
+    /// agreement (`Asker::peak`) is scored for every candidate down to the
+    /// depth, and one is verified when it beats the file's own null: the
+    /// best agreement any of its first `k` reached, which held nothing that
+    /// stood (the second look asks only files with fewer than two anchors).
+    /// So the budget is the file's, not a constant.
+    pub(crate) fn deeper(&self, i: usize, k: usize, a: &mut Asking) -> Vec<u32> {
+        let Some(shapes) = &self.shapes else { return Vec::new() };
+        let ranked: Vec<u32> = self.candidates(i, &[&self.lists[i]], GEOMETRIC_DEPTH, a).iter().map(|&(j, ..)| j).collect();
+        let k = k.min(ranked.len());
+        let asker = Asker::new(&self.lists[i], &shapes[i].geo);
+        let mut above: Vec<(u32, u32)> = timed!(46, {
+            let null = ranked[..k].iter().map(|&j| asker.peak(&shapes[j as usize])).max().unwrap_or(0);
+            ranked[k..].iter().map(|&j| (asker.peak(&shapes[j as usize]), j)).filter(|&(peak, _)| peak > null && peak >= LEAST_PEAK).collect()
+        });
+        // Stable: a tie keeps the ranking's order.
+        above.sort_by(|x, y| y.0.cmp(&x.0));
+        above.into_iter().map(|(_, j)| j).collect()
+    }
+}
+
+/// How far down its ranking the geometric look reads (`Index::deeper`).
+/// Measured on two DISC21 shards (`out/v58-reach` section 6): true copies
+/// gained at bars 0.5 / 0.7, 300: 7 / 4, 500: 10 / 6, 750: 12 / 8, 1,000:
+/// 13 / 9, and none more down to 3,000; the cost is the scoring, in
+/// proportion to the depth (found corpus +6% CPU at 300, +16.5% at 1,000).
+/// Half the gain lies at ranks 150-300, and reading on only while the last
+/// block held something above the null missed it: true copies come alone.
+pub(crate) const GEOMETRIC_DEPTH: usize = 1000;
+
+/// The least agreement verified: the points a transform hypothesis needs.
+const LEAST_PEAK: u32 = 3;
+
+/// A file as the geometric look reads a candidate: each keypoint's best
+/// word, and each keypoint's rotation and scale bin (`bin`).
+#[derive(Default)]
+pub(crate) struct Shape {
+    best: WordList,
+    geo: Vec<(u8, u8)>,
+}
+
+impl Shape {
+    /// `best` is `quantise_with_best`'s second list for `f`.
+    pub(crate) fn new(f: &Features, best: WordList) -> Shape {
+        Shape { best, geo: f.kps.iter().map(|k| bin(k.angle, k.sigma)).collect() }
+    }
+}
+
+/// A keypoint's (angle in 16ths of a turn, log2 scale in quarter octaves),
+/// a byte each: a candidate's are read for every candidate the look scores,
+/// and read from the analysis's mapping they were page faults.
+fn bin(angle: f32, sigma: f32) -> (u8, u8) {
+    (((angle.rem_euclid(360.0) / 22.5) as u8).min(15), (sigma.max(1e-3).log2() * 4.0 + 64.0).clamp(0.0, 255.0) as u8)
+}
+
+/// One asker's words and keypoint bins, for scoring candidates' agreement
+/// (`peak`) without building their shared pairs.
+struct Asker {
+    /// A 64 K-bit filter of its words (8 KB, in L1 for its run of candidates).
+    has: Vec<u64>,
+    words: Vec<u32>,
+    geo: Vec<(u8, u8)>,
+    kps: Vec<u32>,
+}
+
+impl Asker {
+    #[inline(always)]
+    fn slot(w: u32) -> usize {
+        (w.wrapping_mul(0x9e37_79b1) >> 16) as usize
+    }
+
+    /// `wl` is the asker's whole word list (every descent path), `geo` its
+    /// keypoints' bins.
+    fn new(wl: &WordList, geo: &[(u8, u8)]) -> Asker {
+        let mut has = vec![0u64; 1024];
+        let (mut words, mut g, mut kps) = (Vec::with_capacity(wl.len()), Vec::with_capacity(wl.len()), Vec::with_capacity(wl.len()));
+        for e in 0..wl.len() {
+            let w = wl.word(e);
+            let h = Asker::slot(w);
+            has[h / 64] |= 1 << (h % 64);
+            words.push(w);
+            g.push(geo[wl.kp(e) as usize]);
+            kps.push(wl.kp(e));
+        }
+        Asker { has, words, geo: g, kps }
+    }
+
+    /// Weak geometric consistency: of the keypoint pairs sharing a word
+    /// (the candidate's best word), the most asker keypoints agreeing on
+    /// one (rotation, scale ratio) bin, 16 rotations by 12 octaves, each
+    /// asker keypoint counted once a bin.
+    fn peak(&self, c: &Shape) -> u32 {
+        let mut bins = [[0u16; 12]; 16];
+        let mut last = [[u32::MAX; 12]; 16];
+        let mut best = 0u16;
+        let mut at = 0usize;
+        for e in 0..c.best.len() {
+            let w = c.best.word(e);
+            let h = Asker::slot(w);
+            if self.has[h / 64] >> (h % 64) & 1 == 0 {
+                continue;
+            }
+            while at < self.words.len() && self.words[at] < w {
+                at += 1;
+            }
+            if at == self.words.len() {
+                break;
+            }
+            if self.words[at] != w {
+                continue;
+            }
+            let b = c.geo[c.best.kp(e) as usize];
+            let mut x = at;
+            while x < self.words.len() && self.words[x] == w {
+                let a = self.geo[x];
+                let turn = (b.0.wrapping_sub(a.0) & 15) as usize;
+                let scale = ((b.1 as i32 - a.1 as i32).div_euclid(4) + 6).clamp(0, 11) as usize;
+                if last[turn][scale] != self.kps[x] {
+                    last[turn][scale] = self.kps[x];
+                    bins[turn][scale] += 1;
+                    best = best.max(bins[turn][scale]);
+                }
+                x += 1;
+            }
+        }
+        best as u32
     }
 }
 

@@ -1767,6 +1767,37 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   4.4-4.8 s, the second of a pair 2.2-2.4; the two caches do not fit in
   memory together). Left: a cache of 0.81.0 is not read (analysed
   again once), and the binary is 2.8 MB larger.
+- **0.83.0, the geometric look** (`retrieve::Index::deeper`, see *How it
+  works*; `out/v58-reach`, RESULTS sections 1-7). Point (3) of the user's
+  brief: in a large folder a true copy ranks past `-k` and is never verified
+  (DISC21 shard 0: 91 of 529 true copies, ranks 150-82,000). A file the
+  second look re-asks reads its ranking to `GEOMETRIC_DEPTH` (1,000) and
+  verifies, best first, the candidates whose weak-geometric-consistency peak
+  beats the best peak among its own first `-k` and is at least 3. No budget
+  constant (the null is the file's own); the depth swept on two DISC21
+  shards (gain flat from 1,000 to 3,000; half of it at ranks 150-300).
+  Point (1), seeds made independent of the folder, was tried as fixed
+  seeding and rejected (*Tried and rejected*). Measured, the shipped build
+  against HEAD (0.82.0) on caches HEAD's build filled: DISC21 shard 0 true
+  copies at 0.5 / 0.7 374 / 312 -> **382 / 318** (µAP 65.86 -> 66.89, 56.66
+  -> 57.62; false 380 -> 393, 87 -> 88), shard 1 318 / 280 -> **323 / 283**
+  (µAP 66.49 -> 67.37, 60.28 -> 60.86; false 396 -> 403, 93 -> 95), **none
+  lost** at either bar; 95-96 k deeper candidates a shard. IMGS-ALL and
+  IMGS-ALL2: F1, precision, recall, pairs and merges identical (1,349,971
+  and 1,282,289 pairs; 405 and 363 deeper candidates verified, from 1,354
+  and 2,024 re-askers); keep rule identical on both; `pairs.py` identical
+  (loss 26); small families identical but HOLI-DEV photos alone, one more
+  sibling pair (968.7 -> 969.7, no different-scene join); HOLI-TEST
+  identical (711.0); IMGS-AGAINST identical; `--detail` 512 / 1024 on IMGS
+  identical to HEAD (0 lost 512 -> 1024). Cost: found corpus, cached, cooled
+  ABBA **+16.5% CPU** (317 / 326 -> 367 / 382; nearly every file there is
+  re-asked, and scoring 850 candidates a file is the cost, ~6 µs each,
+  memory-bound); DISC21 cached single runs +9% / +7% (2,623 -> 2,856, 2,686
+  -> 2,883 CPU-s), peak RSS 3.35 -> 3.45 GB (each file's `Shape`); IMGS-ALL
+  / IMGS-ALL2 cached single runs 940 -> 886, 770 -> 758 CPU-s (within the
+  runs' noise: few files there are re-asked). The `Shape`s are made only
+  when the second look runs (not under `--skip-mirrored`), and not for
+  `--detail`'s finer steps, which ask no second look.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
@@ -1828,8 +1859,9 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 - Precision: on IMGS every false pair is a rearrangement trap. On the
   near-miss corpora stray single files join a sibling photograph's family
   (the clean-anchor rule's lone-file allowance). **Watch merges, not pairs.**
-- Open: no downscaled JPEG decode path (worth ~4%); the second look is
-  re-asked only where the first pass anchored <2 times; nothing tested above
+- Open: no downscaled JPEG decode path (worth ~4%); the second look (and
+  the geometric look in it) is re-asked only where the first pass anchored
+  <2 times; nothing tested above
   ~30k images; on the found corpus about half of sampled reported pairs are
   different specimens of one species, leaking through the propagated tier;
   5 of the 7 families not keeping their original are grey or near-grey
@@ -2369,6 +2401,19 @@ Each was measured; changing one needs a re-measure.
   and actions), IMGS5 (F1 to four places, 2 TP fewer), `families.py` and the
   found corpus (byte for byte) as before. Passing such files over unverified
   was tried: IMGS5 bird1/2's merged burst lost 826 true pairs (recall -0.37).
+- **The geometric look** (0.83.0, `retrieve::Index::deeper`, in the second
+  look): a re-asked file (fewer than two anchors) also reads its own ranking
+  past `-k` down to `GEOMETRIC_DEPTH` (1,000), scores each candidate's weak
+  geometric consistency (`Asker::peak`: keypoint pairs sharing a word, the
+  asker's three-path words against the candidate's best word, voting in 16
+  rotations x 12 octaves of scale; `Shape` holds each file's best words and
+  a byte each of angle and scale, made in the same descent as its words) and
+  verifies those beating the file's own null (the best peak among its first
+  `-k`) with at least 3. No budget constant. Why: in a large folder a true
+  copy's share of the words falls and it ranks past `-k` (DISC21 shard 0: 91
+  of 529 true copies never verified, 40 passing alone); `-k` cannot reach
+  them (ranks 150 to 82,000, score ~0.005 against a top ~0.16). Depth swept
+  (`out/v58-reach` section 6). See *Status* 0.83.0.
 - **Shared-part rule** (0.73.0, `claims::demote_shared_parts`): a one-way
   clean link (overlap bar one side only) makes a part; a part whose containers
   lie in two clusters keeps only the most-linked cluster's links clean. A
@@ -2862,6 +2907,29 @@ Do not retry without new evidence:
   mirrored match of two specimens of a butterfly species by eye (a subject
   with two sides alike matches its kind mirrored). Kept out:
   `pipeline::cluster` reads `Variant::SAME` verdicts for corroboration.
+- **Fixed seeding** (after 0.82.0, reverted 2026-11-08, user's decision;
+  `out/v57-fixed/RESULTS.md` sections 1-7, code in `scaffolding.patch` and
+  `fixed.vocab.zst` there): a verdict's first correspondences from a
+  vocabulary trained once on 10,000 DISC21 references (65,536 leaves,
+  canonical orientation, asker 3 paths x 2 orientations, candidate 1,
+  mutual nearest within `GUIDE_D2`), the run's own vocabulary for retrieval
+  only. One pair, one verdict: originals alone vs among the found photos
+  identical evidence IMGS-ALL 15 / 15, HOLI-DEV 215 / 233 (base 10 / 14, 146
+  / 219). Why rejected (the bar: no recall or precision lost anywhere, <= 5%
+  CPU): with retrieval at one path (the CPU saving, IMGS-ALL2 +3%, found
+  corpus -23%) DISC21 shard 0 at 0.5 lost 35 true copies (374 -> 339, µAP
+  65.86 -> 60.23), every one never verified (alone, both builds judge them
+  alike): retrieval paths, not seeding; at three paths recall is level (377)
+  but false 380 -> 548 and CPU +24% (IMGS-ALL2 +16-23%). Precision on the
+  full corpora falls wherever base hides siblings (IMGS-ALL bird1/2 851 ->
+  6,849; new merges Mural1/2, and at loose bars Parish Church, game,
+  Acueducto, Henares, png3 | baseball5): base pairs them alone, so a
+  pair-intrinsic verdict cannot be level there. Better: HOLI-TEST every
+  measure (joined 711 -> 691.7), pairs.py 26 -> 27 lost (two composites
+  of siblings), IMGS-AGAINST level. Found on the way, open: the keep rule
+  deletes IMGS `document2`'s original for its `motion_blur` copy once that
+  copy is fitted right (0.995; base's wrong fit hid it), strict line 64 ->
+  83; and DISC21 recall rests on the retrieval's three descent paths.
 - Claim graph (0.54.0 survey, each rule off alone, cached IMGS-ALL at 512
   and its cliffs, IMGS3 alone): one cover test for every join, clean
   anchors included (recall -1.0, 17 perfect transforms, Segovia merges at

@@ -1362,9 +1362,9 @@ impl WordList {
         self.e[i] >> KP_BITS
     }
 
-    /// The keypoint of entry `i`. `shared` reads the entries whole, so only
-    /// the tests' reference merge asks for this.
-    #[cfg(test)]
+    /// The keypoint of entry `i`. `shared` reads the entries whole; the
+    /// geometric look (`retrieve::Asker`) reads them one by one.
+    #[inline(always)]
     pub fn kp(&self, i: usize) -> u32 {
         self.e[i] & KP_MASK
     }

@@ -4,7 +4,7 @@ use super::*;
 use analysis::{Item, Planes, Read};
 use decode::Refused;
 use claims::{Claim, Clusters, How, Propagation};
-use retrieve::{quantise, Index};
+use retrieve::{quantise, quantise_with_best, Index, Shape};
 use outcome::{Against, Asked, Group, Head, Member};
 use verify::Standing;
 use problems::Note;
@@ -1158,18 +1158,28 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Result<Index<'a>> 
     // file and every later stage read from: holding a second copy per image
     // costs as much again as the lists themselves.
     let bar = progress.begin_counted(Stage::Quantise, n_desc_match as u64, n_match, "images");
-    let lists: Vec<WordList> = (0..n)
+    // Where the second look will ask, each file's shape is made from the
+    // same descent (`retrieve::Shape`, for its geometric look).
+    let shaped = !cx.args.skip_mirrored;
+    let both: Vec<(WordList, Option<Shape>)> = (0..n)
         .into_par_iter()
         .map(|i| {
             if !matched[i] {
-                return WordList::default();
+                return (WordList::default(), shaped.then(Shape::default));
             }
             let it = &items[i];
-            let wl = timed!(11, quantise(&vocab, &it.feats));
+            let out = if shaped {
+                let (wl, best) = timed!(11, quantise_with_best(&vocab, &it.feats));
+                (wl, Some(Shape::new(&it.feats, best)))
+            } else {
+                (timed!(11, quantise(&vocab, &it.feats)), None)
+            };
             bar.add(it.feats.len() as u64);
-            wl
+            out
         })
         .collect();
+    let (lists, shapes): (Vec<WordList>, Vec<Option<Shape>>) = both.into_iter().unzip();
+    let shapes: Option<Vec<Shape>> = shapes.into_iter().collect();
     stage!(cx, "quantised");
 
     // Inverted file, of every word; see `InvertedFile::build`. Against a
@@ -1177,7 +1187,7 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Result<Index<'a>> 
     // reading its answers both ways round; see `retrieve::both_ways`.
     progress.begin(Stage::InvertedFile);
     too_many_postings(&lists)?;
-    let index = Index::new(items, matched, vocab, lists, scope.against);
+    let index = Index::new(items, matched, vocab, lists, shapes, scope.against);
     stage!(cx, "inverted file");
     Ok(index)
 }
@@ -1214,7 +1224,7 @@ fn index_adding<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>, vocab: index::Voca
     stage!(cx, "quantised {n_new} finer descriptors");
     cx.progress.begin(Stage::InvertedFile);
     too_many_postings(&lists)?;
-    let index = Index::new(items, matched, vocab, lists, scope.against);
+    let index = Index::new(items, matched, vocab, lists, None, scope.against);
     stage!(cx, "inverted file");
     Ok(index)
 }
@@ -1522,6 +1532,7 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct: 
     let bar = progress.begin_counted(Stage::Variants, total_weight, askers.len(), "images");
     index.turn(&askers);
     let index = &*index;
+    let n_deeper = std::sync::atomic::AtomicUsize::new(0);
     let turned: Vec<Edge> = askers
         .par_iter()
         .enumerate()
@@ -1536,6 +1547,14 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct: 
                     let v = v as usize;
                     out.extend(pass.verify(index.lists(), i, &seen[v], &words[v], j as usize, Variant::TURNED[v], work));
                 }
+                // The geometric look: past its first `-k`, as it is, the
+                // candidates whose geometry agrees with it more than any of
+                // those did (`Index::deeper`).
+                let deeper = index.deeper(i, args.candidates, a);
+                n_deeper.fetch_add(deeper.len(), std::sync::atomic::Ordering::Relaxed);
+                for j in deeper {
+                    out.extend(pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j as usize, Variant::SAME, work));
+                }
                 bar.add(w);
                 out
             }),
@@ -1545,7 +1564,7 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct: 
     if args.skip_mirrored {
         stage!(cx, "variants: skipped");
     } else {
-        stage!(cx, "variants: {} more pairs from {} unmatched images", anchors(&turned, policy).count(), askers.len());
+        stage!(cx, "variants: {} more pairs from {} unmatched images ({} deeper candidates)", anchors(&turned, policy).count(), askers.len(), n_deeper.into_inner());
     }
     // Nothing after this matches a descriptor against another, so the
     // vocabulary, the inverted file and the word lists go with this stage.

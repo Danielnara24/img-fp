@@ -14,7 +14,7 @@
 //! come to several times the wall clock.
 #![allow(dead_code)]
 
-pub const N: usize = 46;
+pub const N: usize = 47;
 
 #[rustfmt::skip]
 pub static NAMES: [&str; N] = [
@@ -54,6 +54,9 @@ pub static NAMES: [&str; N] = [
     // Guided matching (`verify::guided`), inside `verify:direct` and the
     // second look's verification.
     "guided",
+    // The geometric look's scoring (`retrieve::Index::deeper`), inside
+    // `variant:pass`.
+    "geometric",
 ];
 
 pub static ACC: [std::sync::atomic::AtomicU64; N] =
