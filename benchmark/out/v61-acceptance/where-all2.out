@@ -1,0 +1,30 @@
+kind       standing             true     trap    cross     skip
+direct     anchor            627,001    2,267   45,983    9,389
+direct     clean             233,767      771      485    3,046
+direct     corroborating      60,358      984   29,347    2,247
+direct     rejected           98,024   78,689  198,969   16,877
+propagated composed          194,358      377    3,187    4,107
+propagated rejected          107,738   50,846    7,527   19,771
+variant    anchor             17,026       13    1,229       14
+variant    clean              18,568       25       15       65
+variant    corroborating       2,176       46      949       14
+variant    rejected            5,124   11,159   16,408      368
+
+('direct', 'anchor') seed pairs: 1789 top: [(('IMGS5/Mural1.jpg', 'IMGS5/Mural2.jpg'), 4298), (('IMGS5/Fountain3.jpg', 'IMGS5/Fountain5.jpg'), 3760), (('IMGS5/bird1.jpg', 'IMGS5/bird2.jpg'), 3560), (('IMGS3/Henares1.jpg', 'IMGS3/Henares2.jpg'), 2487), (('IMGS3/game2.jpg', 'IMGS3/game3.jpg'), 2346), (('IMGS2/bust1.jpg', 'IMGS2/bust2.jpg'), 2315)]
+('direct', 'clean') seed pairs: 11 top: [(('IMGS5/Floriana1.jpg', 'IMGS5/Floriana2.jpg'), 181), (('IMGS5/Floriana3.jpg', 'IMGS5/Floriana4.jpg'), 142), (('IMGS5/Fountain3.jpg', 'IMGS5/Fountain5.jpg'), 64), (('IMGS5/bird1.jpg', 'IMGS5/bird2.jpg'), 49), (('IMGS5/Tree1.jpg', 'IMGS5/Tree2.jpg'), 16), (('IMGS5/Puerto3.jpg', 'IMGS5/Puerto4.jpg'), 15)]
+('direct', 'corroborating') seed pairs: 1557 top: [(('IMGS5/Macizo1.jpg', 'IMGS5/Macizo2.jpg'), 2229), (('IMGS3/Acueducto1.jpg', 'IMGS3/Acueducto2.jpg'), 1857), (('IMGS5/GanyutingStore1.jpg', 'IMGS5/GanyutingStore2.jpg'), 1790), (('IMGS3/KoronasdaruLeeds1.jpg', 'IMGS3/KoronasdaruLeeds2.jpg'), 1626), (('IMGS3/algiu1.jpg', 'IMGS3/algiu2.jpg'), 1487), (('IMGS5/Lizard1.jpg', 'IMGS5/Lizard2.jpg'), 1464)]
+('propagated', 'composed') seed pairs: 29 top: [(('IMGS5/Fountain3.jpg', 'IMGS5/Fountain5.jpg'), 1523), (('IMGS5/bird1.jpg', 'IMGS5/bird2.jpg'), 1035), (('IMGS5/Floriana1.jpg', 'IMGS5/Floriana2.jpg'), 132), (('IMGS5/Mural1.jpg', 'IMGS5/Mural2.jpg'), 76), (('IMGS5/Floriana3.jpg', 'IMGS5/Floriana4.jpg'), 69), (('IMGS3/Henares1.jpg', 'IMGS3/Henares2.jpg'), 65)]
+('variant', 'anchor') seed pairs: 60 top: [(('IMGS5/Mural1.jpg', 'IMGS5/Mural2.jpg'), 119), (('IMGS5/bird1.jpg', 'IMGS5/bird2.jpg'), 118), (('IMGS5/Fountain3.jpg', 'IMGS5/Fountain5.jpg'), 110), (('IMGS3/game2.jpg', 'IMGS3/game3.jpg'), 99), (('IMGS2/bust1.jpg', 'IMGS2/bust2.jpg'), 89), (('IMGS3/red_rocks_sign1.jpg', 'IMGS3/red_rocks_sign2.jpg'), 57)]
+('variant', 'clean') seed pairs: 6 top: [(('IMGS5/Floriana1.jpg', 'IMGS5/Floriana2.jpg'), 6), (('IMGS5/bird1.jpg', 'IMGS5/bird2.jpg'), 3), (('IMGS5/Floriana3.jpg', 'IMGS5/Floriana4.jpg'), 3), (('IMGS3/docks1.jpg', 'IMGS3/docks2.jpg'), 1), (('IMGS5/Puerto3.jpg', 'IMGS5/Puerto4.jpg'), 1), (('IMGS5/Tree1.jpg', 'IMGS5/Tree2.jpg'), 1)]
+('variant', 'corroborating') seed pairs: 133 top: [(('IMGS3/KoronasdaruLeeds1.jpg', 'IMGS3/KoronasdaruLeeds2.jpg'), 75), (('IMGS3/Acueducto1.jpg', 'IMGS3/Acueducto2.jpg'), 74), (('IMGS5/GanyutingStore1.jpg', 'IMGS5/GanyutingStore2.jpg'), 72), (('IMGS5/Macizo1.jpg', 'IMGS5/Macizo2.jpg'), 69), (('IMGS3/algiu1.jpg', 'IMGS3/algiu2.jpg'), 59), (('IMGS5/Los Gigantes1.jpg', 'IMGS5/Los Gigantes2.jpg'), 58)]
+
+report pairs by relation:
+  direct:anchor  true 626,017  trap 2,222  cross 7,799  skip 9,357
+  direct:clean   true 233,675  trap 760  cross 168  skip 3,044
+  direct:corroborating true 56,004  trap 842  cross 1,032  skip 2,116
+  direct:rejected true 64  trap 0  cross 0  skip 0
+  no verdict (same bytes/pixels) true 123,827  trap 0  cross 1,324  skip 0
+  propagated:composed true 172,190  trap 274  cross 2,912  skip 3,385
+  variant:anchor true 17,004  trap 10  cross 248  skip 14
+  variant:clean  true 18,343  trap 20  cross 5  skip 65
+  variant:corroborating true 404  trap 0  cross 5  skip 2

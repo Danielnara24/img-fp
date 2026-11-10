@@ -1,0 +1,11 @@
+== all2
+subset    files     P%     R% xpairs joined  sib unrel orig >=300 found keepX
+n0          364      -      -     17     17   17     0   17     0     0     0
+n1-d1       728  89.94  91.48     36     12   12     0   11     0     0     0
+n1-d2       728  87.73  94.54     46     17   17     0   14     0     0     0
+n1-d3       728  90.08  93.43     36     12   12     0   11     0     0     0
+n2-d1      1092  91.42  91.07     89     14   14     0   13     0     0     0
+n2-d2      1092  89.25  91.78    110     19   19     0   15     0     0     0
+n2-d3      1092  88.75  91.06    119     19   19     0   15     0     0     0
+f          9649      -      -     15     15   15     0   15     0     0     0
+mean n0: joined 17.0 orig 17.0 P - R -  n1: joined 13.7 orig 12.0 P 89.25 R 93.15  n2: joined 17.3 orig 14.3 P 89.81 R 91.30  f: joined 15.0 orig 15.0 P - R -  | total joined 63.0 (siblings 63.0)

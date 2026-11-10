@@ -1,0 +1,6 @@
+one-way  anchor  true   365,864  trap  2,259  cross  39,512  skip  8,199   cross share 9.502%
+one-way  clean   true   131,108  trap    755  cross     495  skip  2,981   cross share 0.366%
+two-way  anchor  true   278,163  trap     21  cross   7,700  skip  1,204   cross share 2.682%
+two-way  clean   true   121,227  trap     41  cross       5  skip    130   cross share 0.004%
+one-way cross anchors' variants (either end): [('rotate_large', 2022), ('crop_slight', 1883), ('crop_half', 1758), ('crop_square', 1751), ('chromatic_aberration', 1663), ('video_call_frame', 1614), ('magazine_spread', 1599), ('rotate_small', 1587), ('browser_window', 1417), ('crop_panoramic', 1411), ('crop_off_centre', 1362), ('alpha_on_white', 1308), ('caption_bar', 1306), ('alpha_on_black', 1296)]
+two-way cross anchors' variants (either end): [('magazine_spread', 2304), ('pdf_page', 408), ('alpha_on_black', 365), ('alpha_on_white', 358), ('jpeg_high', 347), ('duotone', 330), ('invert', 330), ('scale_large', 328), ('gamma', 327), ('jpeg_generations', 322), ('scale_mid', 320), ('upscale', 318), ('contrast', 314), ('cinematic_grade', 312)]
