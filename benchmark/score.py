@@ -128,7 +128,15 @@ def build(manifest, pairs, exclude_geometry=(), exclude_variants=()):
     return known, positives, skipped, prim
 
 
-def score(found, known, positives, skipped, prim):
+def sibling_set(seed):
+    """The near-miss set a seed belongs to (families.py's `group_of`): photographs
+    of one scene, a moment or a step apart (Segovia1, Segovia2)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from families import group_of
+    return group_of(seed)
+
+
+def score(found, known, positives, skipped, prim, seed_of=None):
     # A pair touching a file the manifest does not know about cannot be judged.
     # With a fully generated corpus this should be empty; it is reported rather
     # than assumed so that a stray file in the tree shows up as a number.
@@ -137,6 +145,13 @@ def score(found, known, positives, skipped, prim):
 
     hit = found & positives
     fp = found - positives
+    # False pairs between two photographs of one near-miss set (same scene, a
+    # moment or a step apart). The user's decision (2026-11-09): such joins
+    # are acceptable as long as a higher --min-pixel-correlation removes them,
+    # so they are counted apart and `precision_unrelated` leaves them out.
+    # F1 still counts them, as it always did.
+    sib = {k for k in fp if seed_of and seed_of.get(k[0]) != seed_of.get(k[1])
+           and sibling_set(seed_of[k[0]]) == sibling_set(seed_of[k[1]])} if seed_of else set()
     prop = len(found)
     precision = len(hit) / prop if prop else 0.0
     recall = len(hit) / len(positives) if positives else 0.0
@@ -150,7 +165,8 @@ def score(found, known, positives, skipped, prim):
             per[variant][0] += 1
 
     return {
-        "proposed": prop, "unknown": len(unknown),
+        "proposed": prop, "unknown": len(unknown), "sibling": len(sib),
+        "precision_unrelated": len(hit) / (prop - len(sib)) if prop - len(sib) else 0.0,
         "positives": len(positives), "hit": len(hit), "fp": len(fp),
         "fn": len(positives) - len(hit),
         "precision": precision, "recall": recall,
@@ -193,7 +209,7 @@ def main():
         name, found, runtime, config = load_tool(path)
         if found is None:
             continue
-        s = score(found, known, positives, skipped, prim)
+        s = score(found, known, positives, skipped, prim, {r["path"]: r["seed"] for r in manifest})
         s.update({"name": name, "file": os.path.basename(path),
                   "runtime": runtime, "config": config})
         results.append(s)
@@ -216,7 +232,7 @@ def main():
     print()
 
     head = (f"{'tool':<26} {'proposed':>9} {'TP':>7} {'FP':>7} {'FN':>7} "
-            f"{'precision':>10} {'recall':>8} {'F1':>7} {'wall':>7}")
+            f"{'precision':>10} {'recall':>8} {'F1':>7} {'wall':>7} {'sibFP':>7} {'P-unrel':>8}")
     print(head)
     print("-" * len(head))
     for r in sorted(results, key=lambda r: -r["f1"]):
@@ -224,7 +240,7 @@ def main():
         print(f"{r['file'][:26]:<26} {r['proposed']:>9,} {r['hit']:>7,} "
               f"{r['fp']:>7,} {r['fn']:>7,} "
               f"{100*r['precision']:>9.1f}% {100*r['recall']:>7.1f}% "
-              f"{r['f1']:>7.3f} {wall:>7}")
+              f"{r['f1']:>7.3f} {wall:>7} {r['sibling']:>7,} {100*r['precision_unrelated']:>7.2f}%")
     stray = sum(r["unknown"] for r in results)
     if stray:
         print(f"\n{stray:,} proposed pairs touch files the manifest does not "

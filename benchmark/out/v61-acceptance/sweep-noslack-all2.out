@@ -1,0 +1,80 @@
+== small families (7 subsets)
+  bar   recall  unrel FP  sib sets   sib FP
+  0.7   91.40%         0        29      419
+  0.8   84.20%         1        15      219
+  0.9   72.85%         0         8       79
+ 0.95   61.49%         0         6       24
+ 0.98   44.11%         0         2        5
+
+sibling set                                             0.7    0.8    0.9   0.95   0.98  gone from
+IMGS5/Macizo1.jpg | IMGS5/Macizo2.jpg                    37      2      0      0      0  0.9
+IMGS5/bird1.jpg | IMGS5/bird2.jpg                        34     34     30     15      0  0.98
+IMGS5/Mural1.jpg | IMGS5/Mural2.jpg                      33     25      4      0      0  0.95
+IMGS5/Fountain3.jpg | IMGS5/Fountain5.jpg                29     23     19      1      0  0.98
+IMGS2/sea_photo1.jpg | IMGS2/sea_photo2.jpg              28      0      0      0      0  0.8
+IMGS3/game2.jpg | IMGS3/game3.jpg                        27     22     12      0      0  0.95
+IMGS5/Seagull1.jpg | IMGS5/Seagull2.jpg                  27     20      0      0      0  0.9
+IMGS3/Segovia1.jpg | IMGS3/Segovia2.jpg                  24     19      6      1      0  0.98
+IMGS2/bust1.jpg | IMGS2/bust2.jpg                        22     20      0      0      0  0.9
+IMGS3/Henares1.jpg | IMGS3/Henares2.jpg                  21     11      0      0      0  0.9
+IMGS5/Cemetery3.jpg | IMGS5/Cemetery4.jpg                16     19      0      0      0  0.9
+IMGS5/Macizo3.jpg | IMGS5/Macizo4.jpg                    15      1      0      0      0  0.9
+IMGS3/Acueducto1.jpg | IMGS3/Acueducto2.jpg              12      0      0      0      0  0.8
+IMGS3/red_rocks_sign1.jpg | IMGS3/red_rocks_sign2.jp     11      0      0      0      0  0.8
+IMGS5/GanyutingStore1.jpg | IMGS5/GanyutingStore2.jp     11      0      0      0      0  0.8
+IMGS5/Floriana3.jpg | IMGS5/Floriana4.jpg                10     10      3      2      2  never
+IMGS5/Floriana1.jpg | IMGS5/Floriana2.jpg                 9      5      3      3      3  never
+IMGS5/Puerto1.jpg | IMGS5/Puerto2.jpg                     8      0      0      0      0  0.8
+IMGS5/Lizard1.jpg | IMGS5/Lizard2.jpg                     8      0      0      0      0  0.8
+IMGS5/Puerto3.jpg | IMGS5/Puerto4.jpg                     7      6      2      2      0  0.98
+IMGS5/Wignacourt Tower1.jpg | IMGS5/Wignacourt Tower      7      0      0      0      0  0.8
+IMGS2/boat_photo1.jpg | IMGS2/boat_photo2.jpg             6      0      0      0      0  0.8
+IMGS5/Parish Church1.jpg | IMGS5/Parish Church2.jpg       5      0      0      0      0  0.8
+IMGS3/algiu1.jpg | IMGS3/algiu2.jpg                       4      2      0      0      0  0.9
+IMGS5/Shenzhen1.jpg | IMGS5/Shenzhen2.jpg                 2      0      0      0      0  0.8
+IMGS3/field2.jpg | IMGS3/field3.jpg                       2      0      0      0      0  0.8
+IMGS5/Macizo5.jpg | IMGS5/Macizo6.jpg                     2      0      0      0      0  0.8
+IMGS3/Alameda1.jpg | IMGS3/Alameda2.jpg                   1      0      0      0      0  0.8
+IMGS2/subway1.jpg | IMGS2/subway2.jpg                     1      0      0      0      0  0.8
+
+== full corpus
+  bar   recall  unrel FP  sib sets   sib FP
+  0.7   87.44%        59        27   12,595
+  0.8   77.34%        11        23   10,305
+  0.9   60.77%         0        20    6,854
+ 0.95   45.50%         0        11    2,814
+ 0.98   25.23%         0         6      160
+
+sibling set                                             0.7    0.8    0.9   0.95   0.98  gone from
+IMGS5/Fountain3.jpg | IMGS5/Fountain5.jpg              6045   5045   3493   1133     26  never
+IMGS5/bird1.jpg | IMGS5/bird2.jpg                      5355   4249   2907   1436     18  never
+IMGS5/Floriana3.jpg | IMGS5/Floriana4.jpg               364    328    217    145     63  never
+IMGS5/Floriana1.jpg | IMGS5/Floriana2.jpg               165    139     86     82     51  never
+IMGS5/Mural1.jpg | IMGS5/Mural2.jpg                     116    152     43      1      1  never
+IMGS3/Segovia1.jpg | IMGS3/Segovia2.jpg                  83     60     25      0      0  0.95
+IMGS3/Henares1.jpg | IMGS3/Henares2.jpg                  79      0      2      0      0  0.95
+IMGS2/subway1.jpg | IMGS2/subway2.jpg                     0     73      0      1      0  0.98
+IMGS5/Macizo5.jpg | IMGS5/Macizo6.jpg                    73     60      7      0      0  0.95
+IMGS3/game2.jpg | IMGS3/game3.jpg                        71     59      5      1      1  never
+IMGS5/Kaper-12.jpg | IMGS5/Kaper-13.jpg                  58      0      0      0      0  0.8
+IMGS3/Antoniego1.jpg | IMGS3/Antoniego2.jpg              55      2      3      0      0  0.95
+IMGS5/Seagull1.jpg | IMGS5/Seagull2.jpg                   0     51      0      0      0  0.9
+IMGS5/Lizard1.jpg | IMGS5/Lizard2.jpg                    41      0      0      0      0  0.8
+IMGS5/Puerto1.jpg | IMGS5/Puerto2.jpg                    27      1      1      1      0  0.98
+IMGS5/Cemetery3.jpg | IMGS5/Cemetery4.jpg                 0     27      0      0      0  0.9
+IMGS2/bust1.jpg | IMGS2/bust2.jpg                         2      4     25      0      0  0.95
+IMGS3/mclaren1.jpg | IMGS3/mclaren2.jpg                   0     19      1      0      0  0.95
+IMGS5/Parish Church1.jpg | IMGS5/Parish Church2.jpg      18      3     19     12      0  0.98
+IMGS3/docks1.jpg | IMGS3/docks2.jpg                      15      3      0      0      0  0.9
+IMGS5/Tree1.jpg | IMGS5/Tree2.jpg                         4     13     11      0      0  0.95
+IMGS2/sea_photo1.jpg | IMGS2/sea_photo2.jpg               4      7      2      0      0  0.95
+IMGS5/Cemetery1.jpg | IMGS5/Cemetery2.jpg                 3      6      3      1      0  0.98
+IMGS3/Acueducto3.jpg | IMGS3/Acueducto4.jpg               6      0      0      0      0  0.8
+IMGS3/Acueducto1.jpg | IMGS3/Acueducto2.jpg               3      0      2      0      0  0.95
+IMGS3/KoronasdaruLeeds1.jpg | IMGS3/KoronasdaruLeeds      3      2      1      1      0  0.98
+IMGS4/baseball1.JPG | IMGS4/baseball2.JPG                 1      1      0      0      0  0.9
+IMGS5/Puerto3.jpg | IMGS5/Puerto4.jpg                     1      1      1      0      0  0.95
+IMGS3/algiu1.jpg | IMGS3/algiu2.jpg                       1      0      0      0      0  0.8
+IMGS2/png1.png | IMGS2/png3.png                           1      0      0      0      0  0.8
+IMGS5/GanyutingStore1.jpg | IMGS5/GanyutingStore2.jp      1      0      0      0      0  0.8
+
