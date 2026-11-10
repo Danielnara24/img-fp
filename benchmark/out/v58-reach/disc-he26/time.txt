@@ -1,0 +1,56 @@
+Settings -> Detail: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.5, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: /home/daniel/Documents/DISC21/cache57/c.db
+[   0.0s] scratch file in /home/daniel/Documents/DISC21/cache57
+Scanning: ["/home/daniel/Documents/DISC21/queries/images/queries"]
+Against: ["/home/daniel/Documents/DISC21/refs0/images/references"]
+Searching extensions: ["apng", "avif", "avifs", "bmp", "dib", "exr", "ff", "gif", "hdr", "heic", "heics", "heif", "hif", "ico", "jfi", "jfif", "jif", "jpe", "jpeg", "jpg", "jpg_large", "jpg_orig", "jxl", "pam", "pbm", "pgm", "pjp", "pjpeg", "png", "png_large", "pnm", "ppm", "qoi", "tga", "tif", "tiff", "webp"]
+[   1.8s] 100000 files
+[   1.8s] against: 50000 scanned, 50000 in the library
+[   2.6s] exact duplicates: 5 groups
+[ 123.0s] cache: 99994 usable records
+[ 123.0s] 0 files to analyse
+Found 100000 images; 99994 already cached, 6 identical copies, 0 to analyse.
+[ 148.3s] cache: packs of 5647131348 bytes, 0 of them unused, not compacted
+[ 148.3s] cpu: decode 0s, features 0s
+[ 148.5s] described 100000/100000 images, 45081168 descriptors
+Analysis complete. Matching 100000 images...
+[ 262.2s] fixed words: 231269841 entries
+[ 328.4s] hamming index: 45077659 postings, h 26
+[ 487.7s] vocabulary: 1191405 live words of 16777216 from 1280000 samples
+[ 547.5s] quantised
+[ 563.1s] inverted file
+[1240.9s] candidates: 7409221 pairs
+[1651.4s]   round 1: 6708 library files asked, 101183 more candidates
+[1687.4s]   round 2: 901 library files asked, 8199 more candidates
+[1691.1s]   round 3: 192 library files asked, 1042 more candidates
+[1691.5s]   round 4: 46 library files asked, 194 more candidates
+[1691.5s]   round 5: 9 library files asked, 8 more candidates
+[1691.5s]   round 6: 2 library files asked, 2 more candidates
+[1691.5s] -k counts rejections: 7263 windows more in 6 rounds, 7519849 candidates verified
+[1691.5s] anchors: 13308 of 17815 verified pairs
+[1694.8s] he queries 50589 postings read 136701116690 passed 48667244088
+Interrupted.
+Command exited with non-zero status 130
+	Command being timed: "/home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/img-fp-he /home/daniel/Documents/DISC21/queries/images/queries --against /home/daniel/Documents/DISC21/refs0/images/references --min-pixel-correlation 0.5 -t 8 -v --no-last --cache /home/daniel/Documents/DISC21/cache57/c.db --log-file /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/disc-he26/run.log -o /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/disc-he26/report.json"
+	User time (seconds): 10061.75
+	System time (seconds): 720.96
+	Percent of CPU this job got: 419%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 42:48.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3114780
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 4859071
+	Minor (reclaiming a frame) page faults: 4274280
+	Voluntary context switches: 5700242
+	Involuntary context switches: 2696348
+	Swaps: 0
+	File system inputs: 532219928
+	File system outputs: 15183160
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 130

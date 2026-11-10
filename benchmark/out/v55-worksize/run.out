@@ -1,0 +1,9 @@
+14:37:45 start all-512
+14:40:13 end all-512 exit 0
+14:40:13 start all2-512
+14:42:42 end all2-512 exit 0
+14:42:42 start all-1024
+14:56:05 end all-1024 exit 0
+14:56:05 start all2-1024
+15:06:09 end all2-1024 exit 0
+15:06:09 all done

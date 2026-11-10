@@ -1,0 +1,17 @@
+all n0 304 files
+all n1-d1 608 files
+all n1-d2 608 files
+all n1-d3 608 files
+all n2-d1 912 files
+all n2-d2 912 files
+all n2-d3 912 files
+all f 9589 files
+i5 n0 60 files
+i5 n1-d1 120 files
+i5 n1-d2 120 files
+i5 n1-d3 120 files
+i5 n2-d1 180 files
+i5 n2-d2 180 files
+i5 n2-d3 180 files
+i5 f 9345 files
+done g200

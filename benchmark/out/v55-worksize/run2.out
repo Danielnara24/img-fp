@@ -1,0 +1,16 @@
+15:28:20 start all2-512-tie
+15:31:17 end all2-512-tie exit 0
+15:31:17 start all2-1024-tie
+15:34:54 end all2-1024-tie exit 0
+15:34:54 start all-1024-tie
+15:39:57 end all-1024-tie exit 0
+15:39:57 start all2-1024-f1200
+15:49:44 end all2-1024-f1200 exit 0
+15:49:44 start all-1024-f1200
+16:04:13 end all-1024-f1200 exit 0
+16:04:13 all done
+16:04:13 start all2-1024-f1200
+16:08:59 end all2-1024-f1200 exit 0
+16:08:59 start all-1024-f1200
+16:21:53 end all-1024-f1200 exit 0
+16:21:53 run3 done

@@ -1,0 +1,41 @@
+[
+ {
+  "tool": "imgfp",
+  "command": [
+   "/home/daniel/Documents/Vscode_repositories/img-fp/target/headplain/release/img-fp",
+   "/home/daniel/Downloads/archive",
+   "-r",
+   "-x",
+   "*",
+   "--no-cache",
+   "-o",
+   "/home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v26-suggest/found_7_old/imgfp.json",
+   "--format",
+   "json"
+  ],
+  "ok": true,
+  "exit_code": 0,
+  "wall_seconds": 135.19,
+  "cpu_seconds": 886.48,
+  "cpu_percent": 655.7,
+  "peak_pss_mb": 990.2,
+  "peak_rss_mb": 992.2,
+  "peak_pss_swap_mb": 990.2,
+  "swap_at_peak_mb": 0.0,
+  "max_processes": 1,
+  "mem_samples": 672,
+  "temp_start_c": 77.0,
+  "temp_end_c": 77.75,
+  "mhz_start": 1634,
+  "mhz_mean": 2191,
+  "mhz_min": 1221,
+  "cooldown_seconds": 60.0,
+  "cooled_to_ceiling": true,
+  "page_cache_evicted_files": 9285,
+  "binary": {
+   "path": "/home/daniel/Documents/Vscode_repositories/img-fp/target/headplain/release/img-fp",
+   "version": "img-fp 0.33.1",
+   "sha256": "7dd042b8020f7a317dc800a78a7a74cb66f2fa773b7ac9ab0913f371f500a31f"
+  }
+ }
+]

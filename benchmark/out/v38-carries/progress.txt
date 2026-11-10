@@ -1,0 +1,10 @@
+all base exit 2
+all new exit 2
+score base exit 0
+score new exit 0
+pairs base exit 0
+pairs new exit 0
+done
+all new2 exit 2
+scores exit 0
+done2

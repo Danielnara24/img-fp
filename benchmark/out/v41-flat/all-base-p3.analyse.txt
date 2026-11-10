@@ -1,0 +1,19 @@
+== all-base-p3.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 3, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9813  precision 99.55%  recall 96.75%
+   proposed 1,111,089  TP 1,106,082  FP 5,007  FN 37,212  groups 664
+   FP: trap 4,978  cross-family 29  seed-pairs 22  merges 19
+     cross IMGS/document1.jpeg <-> IMGS3/squirrel2.jpg: 5 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 4 pairs
+     cross IMGS/14.jpg <-> IMGS4/golf-club.JPG: 1 pairs
+     cross IMGS/low-light2.jpg <-> IMGS3/cross2.jpg: 1 pairs
+     cross IMGS3/squirrel2.jpg <-> IMGS4/aerial2.jpg: 1 pairs
+     cross IMGS/noisy2.jpg <-> IMGS4/club.jpg: 1 pairs
+     cross IMGS/b&w.jpg <-> IMGS4/aerial2.jpg: 1 pairs
+     cross IMGS/low-light2.jpg <-> IMGS3/docks1.jpg: 1 pairs
+     cross IMGS/13.webp <-> IMGS3/cross1.jpg: 1 pairs
+     cross IMGS/underwater.jpg <-> IMGS2/manhole3.jpg: 1 pairs
+   half[alt] F1 0.9796  P 99.56%  R 96.40%  (152 seeds)
+   half[hash] F1 0.9804  P 99.55%  R 96.57%  (160 seeds)
+   perfect transforms: 66 of 87
+

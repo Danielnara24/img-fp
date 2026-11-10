@@ -1,0 +1,85 @@
+Settings -> Work size: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.7, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: cache.bin
+[   0.0s] scratch file in .
+Scanning: 5460 path(s) read from g320/i5-full.list
+Searching every file, whatever its extension (-x '*').
+[   0.1s] 5460 files
+[   0.1s] exact duplicates: 120 groups
+[   1.4s] cache: 47084 usable records
+[   1.4s] 0 files to analyse
+Found 5460 files; 5276 already cached, 184 identical copies, 0 to analyse.
+[   1.6s] cache: 41761 records kept from other scans
+[   1.6s] cache: 47084 records, 47 of them unused, not compacted
+[   1.6s] cpu: decode 0s, features 0s
+[   1.7s] described 5460/5460 images, 2550515 descriptors
+[   1.7s] same pixels: 180 files decode to a picture another file already holds
+Analysis complete. Matching 5460 images...
+[   3.2s] vocabulary: 225617 live words of 1048576 from 236046 samples
+[   5.7s] quantised
+[   5.9s] inverted file
+[   6.2s] candidates: 487481 pairs
+[  17.1s]   library round 1: 5052 library files asked, 360579 more candidates
+[  18.3s]   library round 2: 3234 library files asked, 17034 more candidates
+[  18.8s]   library round 3: 448 library files asked, 527 more candidates
+[  18.8s]   library round 4: 27 library files asked, 28 more candidates
+[  18.9s]   library round 5: 1 library files asked, 0 more candidates
+[  18.9s] k counts rejections: 8762 windows more in 5 rounds, 865649 candidates verified
+[  18.9s] anchors: 196084 of 220024 verified pairs
+[  20.0s] variants: 5225 more pairs from 208 unmatched images
+[  20.0s] released the index and the descriptors
+[  20.0s] shared parts: 2336 one-way links between clusters no longer clean
+[  20.1s] bridges: dropped 7 lone links between clusters
+[  20.1s] weak anchors: 93934 admitted, 22874 refused between clusters
+[  20.5s]   propagation round 1: +20589 pairs
+[  20.6s]   propagation round 2: +335 pairs
+[  20.8s]   propagation round 3: +48 pairs
+[  20.8s]   propagation round 4: +0 pairs
+[  20.8s] propagated: 20972 of 32003 composed hypotheses (93768 put to the pixels, budget 865649 a round)
+[  20.9s] corroborated: 5839 more pairs inside existing clusters
+[  21.9s] groups: 146 representatives over 5382 files, 3679 of them in more than one group
+[  21.9s] suggested: 1465 to keep, 3262 to delete, 655 to review
+146 groups, 237865 pairs over 5460 images in 21.9s -> /dev/null
+--- profile (cpu seconds; stages nest; tsc 2300 MHz) ---
+     verify:direct     90.66
+            guided     47.37
+          quantise     20.06
+       pixel_check     18.64
+    best_transform     11.01
+            shared      9.21
+             query      7.83
+  pixel_check:prop      3.94
+      variant:pass      3.74
+  variant:quantise      3.66
+        correspond      2.71
+          encloses      2.38
+             vocab      1.54
+         cand:rank      1.41
+           suggest      0.71
+         propagate      0.70
+           invfile      0.29
+      main:release      0.26
+           overlap      0.19
+   variant:mkfeats      0.14
+       main:output      0.03
+     main:candsort      0.02
+             group      0.02
+        main:exact      0.01
+         main:pool      0.00
+     decode:permit      0.00
+     #guided:calls  0
+    #guided:rounds  0
+      #guided:dist  0
+      #guided:same  0
+[  22.0s] pace: finding identical files: 5460 files in 0.02s, 23176.6 ns a unit on each of 8 threads
+[  22.0s] pace: reading the cache: 2830589028 bytes in 1.28s, 3.6 ns a unit on each of 8 threads
+[  22.0s] pace: reading headers: 5460 files in 0.00s, 1164.0 ns a unit on each of 8 threads
+[  22.0s] pace: describing: 0 pixels analysed in 0.20s, 0.0 ns a unit on each of 8 threads
+[  22.0s] pace: writing the cache: 2360460 descriptors in 0.07s, 239.3 ns a unit on each of 8 threads
+[  22.0s] pace: building the vocabulary: 236046 samples in 1.54s, 52175.9 ns a unit on each of 8 threads
+[  22.0s] pace: quantising: 2360460 descriptors in 2.51s, 8508.9 ns a unit on each of 8 threads
+[  22.0s] pace: building the inverted file: 2360460 descriptors in 0.16s, 526.1 ns a unit on each of 8 threads
+[  22.0s] pace: finding candidates: 6453425 descriptors in 0.73s, 899.4 ns a unit on each of 8 threads
+[  22.0s] pace: verifying: 865649 pairs in 12.27s, 113378.9 ns a unit on each of 8 threads
+[  22.0s] pace: propagating: 206399 images and anchors in 0.93s, 35949.3 ns a unit on each of 8 threads
+[  22.0s] pace: grouping and suggesting: 206399 images and anchors in 0.96s, 37300.7 ns a unit on each of 8 threads
+gkp 22.00 s 137.19+2.52 cpu

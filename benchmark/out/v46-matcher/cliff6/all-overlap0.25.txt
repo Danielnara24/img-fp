@@ -1,0 +1,19 @@
+== all-minframeoverlap0.25.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.25, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9457  precision 92.70%  recall 96.51%
+   proposed 1,190,351  TP 1,103,423  FP 86,928  FN 39,871  groups 326
+   FP: trap 73,324  cross-family 13,604  seed-pairs 403  merges 75
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 6,673 pairs
+     cross IMGS3/docks1.jpg <-> IMGS3/docks2.jpg: 6,123 pairs
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 173 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 88 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 78 pairs
+     cross IMGS2/bust1.jpg <-> IMGS2/bust2.jpg: 70 pairs
+     cross IMGS/low-light2.jpg <-> IMGS2/fort2.jpg: 3 pairs
+     cross IMGS2/anlage1.jpg <-> IMGS4/aerial2.jpg: 1 pairs
+     cross IMGS2/sunset3.jpeg <-> IMGS3/docks1.jpg: 1 pairs
+     cross IMGS/low-light.avif <-> IMGS4/Montgomery-ward.jpg: 1 pairs
+   half[alt] F1 0.9492  P 93.76%  R 96.10%  (152 seeds)
+   half[hash] F1 0.9504  P 93.75%  R 96.36%  (160 seeds)
+   perfect transforms: 58 of 87
+

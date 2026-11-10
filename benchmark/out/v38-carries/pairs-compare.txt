@@ -1,0 +1,4 @@
+transform                           pairs-base                pairs-new               pairs-new2
+                        oDEL  vDEL  loss   REV   oDEL  vDEL  loss   REV   oDEL  vDEL  loss   REV
+strip_metadata           244    55     0     0     95   204     0     0    113   186     0     0
+TOTAL                    483  4912    24 29391    334  5061    24 29391    352  5043    24 29391

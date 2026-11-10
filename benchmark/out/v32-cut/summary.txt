@@ -1,0 +1,47 @@
+One-file bridge test (IMGFP_CUT=1) on 0.44.0, swept 2026-10-13. Every run against v31's areaA row (0.44.0).
+img-fp-cut with IMGFP_CUT=0 reproduces cl_all_640_def_areaA pair for pair (58237e174196).
+
+merges / big changes:
+  512 all    k25      cross   321 ->   634  F1 0.9742 -> 0.9536  [] -> []
+  512 all    k50      cross   326 ->   705  F1 0.9764 -> 0.9578  [] -> [('IMGS3/Henares1.jpg|IMGS3/Henares2.jpg', 324)]
+  512 all    ov0.3    cross 15059 ->  7247  F1 0.9573 -> 0.9590  [('IMGS3/Henares1.jpg|IMGS3/Henares2.jpg', 7812), ('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6789)] -> [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6789)]
+  512 all    ov0.4    cross  7012 ->  7012  F1 0.9607 -> 0.9593  [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6564)] -> [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6564)]
+  512 all    ov0.5    cross  6529 ->   657  F1 0.9616 -> 0.9625  [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6087)] -> []
+  640 all    ap3      cross  6700 ->    22  F1 0.9848 -> 0.9876  [('IMGS2/bust1.jpg|IMGS2/bust2.jpg', 6678)] -> []
+  640 all    ap5      cross  6632 ->    20  F1 0.9840 -> 0.9864  [('IMGS2/bust1.jpg|IMGS2/bust2.jpg', 6612)] -> []
+  640 all    ap6      cross  6576 ->    17  F1 0.9833 -> 0.9857  [('IMGS2/bust1.jpg|IMGS2/bust2.jpg', 6559)] -> []
+  640 all    ap7      cross  6579 ->    13  F1 0.9829 -> 0.9856  [('IMGS2/bust1.jpg|IMGS2/bust2.jpg', 6566)] -> []
+  640 all    k25      cross    78 ->   353  F1 0.9761 -> 0.9593  [] -> []
+  640 all    ov0.3    cross 14328 ->  6945  F1 0.9596 -> 0.9625  [('IMGS2/bust1.jpg|IMGS2/bust2.jpg', 7466), ('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6586)] -> [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6586)]
+  640 all    ov0.4    cross  6854 ->  6854  F1 0.9631 -> 0.9629  [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6495)] -> [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6495)]
+  640 all    ov0.5    cross  6416 ->  6416  F1 0.9637 -> 0.9635  [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6129)] -> [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6129)]
+  640 all    ov0.6    cross  1209 ->    17  F1 0.9765 -> 0.9769  [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 1192)] -> []
+  512 imgs2  k25      cross     1 ->   257  F1 0.9739 -> 0.9592  [] -> []
+  512 imgs2  k50      cross     1 ->   256  F1 0.9760 -> 0.9635  [] -> []
+  640 imgs2  ap3      cross  6626 ->     2  F1 0.9752 -> 0.9869  [('bust1.jpg|bust2.jpg', 6626)] -> []
+  640 imgs2  ap5      cross  6600 ->     2  F1 0.9749 -> 0.9871  [('bust1.jpg|bust2.jpg', 6600)] -> []
+  640 imgs2  k25      cross     1 ->   241  F1 0.9763 -> 0.9612  [] -> []
+  640 imgs2  k50      cross     0 ->   477  F1 0.9808 -> 0.9706  [] -> []
+  512 imgs3  k25      cross    65 ->   315  F1 0.9810 -> 0.9637  [] -> []
+  512 imgs3  k50      cross     6 ->   268  F1 0.9834 -> 0.9670  [] -> []
+  640 imgs3  corr0.2  cross   358 ->   358  F1 0.9893 -> 0.9880  [('game2.jpg|game3.jpg', 352)] -> [('game2.jpg|game3.jpg', 352)]
+  640 imgs3  corr0.4  cross   354 ->   354  F1 0.9893 -> 0.9881  [('game2.jpg|game3.jpg', 348)] -> [('game2.jpg|game3.jpg', 348)]
+  640 imgs3  k25      cross   114 ->   498  F1 0.9809 -> 0.9639  [] -> []
+  640 imgs3  k50      cross    63 ->   312  F1 0.9832 -> 0.9698  [] -> []
+  640 imgs3  ov0.3    cross  7085 ->  7085  F1 0.9614 -> 0.9610  [('docks1.jpg|docks2.jpg', 6823)] -> [('docks1.jpg|docks2.jpg', 6823)]
+  640 imgs3  ov0.4    cross  6981 ->  6981  F1 0.9615 -> 0.9610  [('docks1.jpg|docks2.jpg', 6722)] -> [('docks1.jpg|docks2.jpg', 6722)]
+  640 imgs3  ov0.5    cross  6776 ->   882  F1 0.9621 -> 0.9682  [('docks1.jpg|docks2.jpg', 6521)] -> [('docks1.jpg|docks2.jpg', 627)]
+
+defaults and deltas:
+  512 imgs   F1 0.9711 -> 0.9684  rec 94.77 -> 94.27  perf 53 -> 51  cross 1 -> 1  trap 956 -> 958 halves {'alt': 0.9636, 'hash': 0.97246} -> {'alt': 0.96209, 'hash': 0.96824}
+  512 imgs2  F1 0.9808 -> 0.9802  rec 96.64 -> 96.52  perf 64 -> 64  cross 1 -> 1  trap 1143 -> 1142 halves {'alt': 0.97909, 'hash': 0.97958} -> {'alt': 0.97909, 'hash': 0.97816}
+  512 imgs3  F1 0.9861 -> 0.9849  rec 97.66 -> 97.43  perf 80 -> 68  cross 8 -> 8  trap 1581 -> 1581 halves {'alt': 0.9862, 'hash': 0.98756} -> {'alt': 0.9862, 'hash': 0.98756}
+  512 imgs4  F1 0.9854 -> 0.9854  rec 97.54 -> 97.54  perf 78 -> 78  cross 1 -> 1  trap 1123 -> 1123 halves {'alt': 0.98451, 'hash': 0.98719} -> {'alt': 0.98452, 'hash': 0.9872}
+  512 all    F1 0.9805 -> 0.9789  rec 96.59 -> 96.27  perf 46 -> 44  cross 95 -> 95  trap 4754 -> 4742 halves {'alt': 0.97876, 'hash': 0.98078} -> {'alt': 0.97758, 'hash': 0.97966}
+  512: F1 delta over 130 runs: median -0.0007 min -0.0206 max +0.0051
+  640 imgs   F1 0.9742 -> 0.9721  rec 95.39 -> 94.99  perf 57 -> 52  cross 1 -> 1  trap 1012 -> 1012 halves {'alt': 0.96828, 'hash': 0.97624} -> {'alt': 0.96402, 'hash': 0.9716}
+  640 imgs2  F1 0.9843 -> 0.9843  rec 97.33 -> 97.33  perf 74 -> 74  cross 0 -> 0  trap 1177 -> 1177 halves {'alt': 0.98465, 'hash': 0.98188} -> {'alt': 0.98465, 'hash': 0.98188}
+  640 imgs3  F1 0.9875 -> 0.9863  rec 97.95 -> 97.71  perf 79 -> 72  cross 3 -> 3  trap 1635 -> 1635 halves {'alt': 0.98839, 'hash': 0.98882} -> {'alt': 0.98839, 'hash': 0.98882}
+  640 imgs4  F1 0.9871 -> 0.9866  rec 97.89 -> 97.80  perf 82 -> 80  cross 1 -> 1  trap 1181 -> 1181 halves {'alt': 0.98615, 'hash': 0.98812} -> {'alt': 0.98615, 'hash': 0.98812}
+  640 all    F1 0.9826 -> 0.9824  rec 97.00 -> 96.97  perf 47 -> 47  cross 8 -> 8  trap 4998 -> 4997 halves {'alt': 0.98096, 'hash': 0.98246} -> {'alt': 0.98067, 'hash': 0.98246}
+  640: F1 delta over 130 runs: median -0.0004 min -0.0170 max +0.0122

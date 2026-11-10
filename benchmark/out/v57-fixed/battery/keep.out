@@ -1,0 +1,60 @@
+== all basec
+actions {'KEEP': 9147, 'DELETE': 19729, 'REVIEW': 3725}
+content lost by deletion: {} {}
+content lost, regions exact (no slack): 0 {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 64 {'unedited, no unedited holder': 64} {'unedited, no unedited holder': [('ORIGINAL', 2), ('crop_quarter', 2), ('crop_half', 2), ('jpeg_mid', 2), ('to_jxl', 2), ('messaging_app', 2), ('jpeg_magick', 2), ('rot90', 2)]}
+families whose original or exact/lossless copy survives: 358 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 19), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top', 'photo_of_screen'), 13), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top'), 11), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker', 'redaction_bars'), 11), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'pincushion'), 10), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'perspective_top'), 9)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 4 / 364 ['IMGS/b&w2.jpeg', 'IMGS/document1.jpeg', 'IMGS/low-light2.jpg', 'IMGS2/bw1.avif']
+DELETE  edit                           7520
+DELETE  original/lossless copy         1821
+DELETE  unedited version               10388
+KEEP    composite                      4235
+KEEP    edit                           2882
+KEEP    original/lossless copy         358
+KEEP    trap                           541
+== all a3r1
+actions {'KEEP': 9133, 'DELETE': 19752, 'REVIEW': 3708}
+content lost by deletion: {} {}
+content lost, regions exact (no slack): 0 {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 83 {'unedited, no unedited holder': 83} {'unedited, no unedited holder': [('ORIGINAL', 3), ('jpeg_mid', 3), ('to_jxl', 3), ('jpeg_magick', 3), ('jpeg_ffmpeg', 3), ('copy_exact', 3), ('upscale', 3), ('strip_metadata', 3)]}
+families whose original or exact/lossless copy survives: 356 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 17), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker', 'redaction_bars'), 11), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top'), 10), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top', 'photo_of_screen'), 10), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'pincushion'), 9), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'perspective_top'), 9)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 5 / 364 ['IMGS/b&w2.jpeg', 'IMGS/document1.jpeg', 'IMGS/document2.jpg', 'IMGS/low-light2.jpg', 'IMGS2/bw1.avif']
+DELETE  edit                           7524
+DELETE  original/lossless copy         1823
+DELETE  unedited version               10405
+KEEP    composite                      4236
+KEEP    edit                           2879
+KEEP    original/lossless copy         356
+KEEP    trap                           544
+== all2 basec
+actions {'REVIEW': 6008, 'DELETE': 15525, 'KEEP': 10956}
+content lost by deletion: {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, regions exact (no slack): 1 {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, holders neither composites nor mirrored/rotated copies: 39 {'unedited, no unedited holder': 38, 'composite': 1} {'unedited, no unedited holder': [('ORIGINAL', 2), ('to_tiff', 2), ('webp_lossless', 2), ('to_png', 2), ('crop_slight', 2), ('alpha_on_white', 2), ('alpha_on_black', 2), ('crop_half', 2)], 'composite': [('phone_screenshot', 1)]}
+families whose original or exact/lossless copy survives: 350 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'blur_patch', 'chromatic_aberration', 'crop_micro', 'crop_off_centre'), 4), (('barrel_distort', 'blur_fill', 'blur_patch', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'brightness', 'flip_h', 'invert'), 2), (('blur_fill', 'blur_patch', 'channel_swap', 'crop_off_centre', 'flip_h', 'invert'), 2), (('blur_fill', 'blur_patch', 'brightness', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 2), (('blur_fill', 'blur_patch', 'channel_swap', 'crop_micro', 'flip_h', 'invert'), 2)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 5 / 364 ['IMGS2/bw6.webp', 'IMGS4/Coles_Boorooma_in_December_2025.jpg', 'IMGS4/Locomotive.jpg', 'IMGS4/booktruck.jpg', 'IMGS5/GanyutingStore2.jpg']
+DELETE  composite                      1
+DELETE  edit                           4191
+DELETE  original/lossless copy         1827
+DELETE  unedited version               9506
+KEEP    composite                      4090
+KEEP    edit                           4261
+KEEP    original/lossless copy         350
+== all2 a3r1
+actions {'KEEP': 10916, 'DELETE': 15551, 'REVIEW': 6027}
+content lost by deletion: {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, regions exact (no slack): 1 {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, holders neither composites nor mirrored/rotated copies: 39 {'unedited, no unedited holder': 38, 'composite': 1} {'unedited, no unedited holder': [('ORIGINAL', 2), ('to_tiff', 2), ('to_png', 2), ('webp_lossless', 2), ('crop_slight', 2), ('alpha_on_white', 2), ('alpha_on_black', 2), ('crop_half', 2)], 'composite': [('phone_screenshot', 1)]}
+families whose original or exact/lossless copy survives: 357 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'blur_patch', 'chromatic_aberration', 'crop_micro', 'crop_off_centre'), 4), (('barrel_distort', 'blur_fill', 'blur_patch', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'channel_swap', 'crop_micro', 'crop_strip'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'chromatic_aberration', 'crop_micro', 'flip_h'), 2), (('barrel_distort', 'blur_fill', 'blur_patch', 'brightness', 'flip_h', 'invert'), 2), (('blur_fill', 'blur_patch', 'brightness', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 2)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 4 / 364 ['IMGS2/anlage2.jpg', 'IMGS2/bw6.webp', 'IMGS4/Coles_Boorooma_in_December_2025.jpg', 'IMGS5/GanyutingStore2.jpg']
+DELETE  composite                      1
+DELETE  edit                           4200
+DELETE  original/lossless copy         1820
+DELETE  unedited version               9530
+KEEP    composite                      4089
+KEEP    edit                           4217
+KEEP    original/lossless copy         357

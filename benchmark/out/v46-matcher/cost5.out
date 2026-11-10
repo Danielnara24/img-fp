@@ -1,0 +1,17 @@
+base base/all-f.list 41.76 s 284.09+3.73 cpu
+  MHz after 2037
+stack base/all-f.list 45.45 s 326.81+3.49 cpu
+  MHz after 2500
+stack base/all-f.list 49.36 s 327.63+3.84 cpu
+  MHz after 1747
+base base/all-f.list 39.52 s 280.82+3.43 cpu
+  MHz after 2096
+base g320/i5-full.list 12.28 s 75.44+2.52 cpu
+  MHz after 2100
+stack g320/i5-full.list 19.53 s 129.00+2.07 cpu
+  MHz after 2062
+stack g320/i5-full.list 19.39 s 131.19+2.17 cpu
+  MHz after 2063
+base g320/i5-full.list 12.06 s 75.64+2.01 cpu
+  MHz after 2098
+cost done

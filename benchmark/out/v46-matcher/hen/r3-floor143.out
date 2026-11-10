@@ -1,0 +1,4 @@
+== IMGS5 floor143
+  off: clean 87578, seed pairs sharing a cluster (>=5 files each): ['Floriana1.jpg(83)+Floriana2.jpg(82)', 'Floriana4.jpg(84)+Floriana3.jpg(84)', 'Fountain3.jpg(84)+Fountain5.jpg(83)', 'Macizo2.jpg(82)+Macizo1.jpg(82)', 'Tree2.jpg(84)+Tree1.jpg(84)', 'bird2.jpg(82)+bird1.jpg(81)']
+  v1 : clean 74571, seed pairs sharing a cluster (>=5 files each): ['Floriana1.jpg(83)+Floriana2.jpg(82)', 'Floriana3.jpg(82)+Floriana4.jpg(6)', 'Fountain3.jpg(84)+Fountain5.jpg(83)', 'bird2.jpg(78)+bird1.jpg(16)']
+  v2 : clean 84110, seed pairs sharing a cluster (>=5 files each): ['Floriana1.jpg(83)+Floriana2.jpg(5)', 'Fountain3.jpg(84)+Fountain5.jpg(6)', 'bird1.jpg(71)+bird2.jpg(5)', 'bird2.jpg(77)+bird1.jpg(10)']

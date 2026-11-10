@@ -1,0 +1,36 @@
+[
+ {
+  "tool": "w",
+  "command": [
+   "/tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20",
+   "/home/daniel/Documents/IMGS",
+   "-r",
+   "-x",
+   "*",
+   "--no-cache",
+   "--work-size",
+   "448",
+   "-o",
+   "/tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w448_6/o.json",
+   "--format",
+   "json"
+  ],
+  "ok": false,
+  "exit_code": 2,
+  "wall_seconds": 95.78,
+  "cpu_seconds": 569.44,
+  "cpu_percent": 594.5,
+  "peak_pss_mb": 656.9,
+  "peak_rss_mb": 659.8,
+  "max_processes": 1,
+  "mem_samples": 517,
+  "temp_start_c": 70.875,
+  "temp_end_c": 74.5,
+  "mhz_start": 1470,
+  "mhz_mean": 1715,
+  "mhz_min": 1133,
+  "cooldown_seconds": 60.0,
+  "page_cache_evicted_files": 5641,
+  "error": "- /home/daniel/Documents/IMGS/derived/WhatsApp Images/Foto 38622.png: unexpected end of file\n      3  image(s) have no features and can only match a byte-identical copy\n         - /home/daniel/Documents/IMGS/derived/Desktop/Foto 55132.png\n         - /home/daniel/Documents/IMGS/derived/Documents/scans/image (47787).jpg\n         - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg"
+ }
+]

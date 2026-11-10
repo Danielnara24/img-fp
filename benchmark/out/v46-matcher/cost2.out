@@ -1,0 +1,16 @@
+old150 62.19 s 326.50+5.54 cpu
+  MHz after 2034
+new150 53.80 s 323.67+4.77 cpu
+  MHz after 2652
+new150 57.71 s 321.27+4.95 cpu
+  MHz after 1747
+old150 55.21 s 328.67+4.75 cpu
+  MHz after 1621
+off 46.74 s 301.68+4.08 cpu
+  MHz after 2590
+new320 57.47 s 351.28+4.92 cpu
+  MHz after 1874
+new320 61.49 s 351.59+5.37 cpu
+  MHz after 2223
+off 50.24 s 299.10+4.57 cpu
+  MHz after 2187

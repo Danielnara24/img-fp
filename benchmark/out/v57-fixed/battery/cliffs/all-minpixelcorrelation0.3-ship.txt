@@ -1,0 +1,19 @@
+== all-minpixelcorrelation0.3-ship.json ==
+   config: {"candidates": 150, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.3, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9791  precision 97.54%  recall 98.27%
+   proposed 1,379,266  TP 1,345,371  FP 33,895  FN 23,638  groups 789
+   FP: trap 10,294  cross-family 23,601  seed-pairs 74  merges 65
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 7,618 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 7,614 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 3,659 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 503 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 350 pairs
+     cross IMGS3/red_rocks_sign1.jpg <-> IMGS3/red_rocks_sign2.jpg: 349 pairs
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 331 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 268 pairs
+     cross IMGS5/Cemetery3.jpg <-> IMGS5/Cemetery4.jpg: 259 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 234 pairs
+   half[alt] F1 0.9806  P 98.07%  R 98.04%  (182 seeds)
+   half[hash] F1 0.9873  P 99.07%  R 98.39%  (184 seeds)
+   perfect transforms: 65 of 87
+

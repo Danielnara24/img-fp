@@ -1,0 +1,72 @@
+idle 79.3 C, ceiling 82.3 C
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w384_0/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 52.9s
+               - /home/daniel/Documents/IMGS/derived/Pictures/edited/image (60137).jpg
+RESULT ws 384 slot 0: wall 52.94 s, cpu 329.29 s, PSS 700.6 MB, 2672 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 256 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w256_1/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 70.5s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 256 slot 1: wall 70.55 s, cpu 447.07 s, PSS 733.4 MB, 2632 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w512_2/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 105.8s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 512 slot 2: wall 105.81 s, cpu 635.65 s, PSS 735.2 MB, 1762 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 128 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w128_3/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 96.1s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 128 slot 3: wall 96.11 s, cpu 571.58 s, PSS 689.7 MB, 1786 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 640 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w640_4/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 131.7s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 640 slot 4: wall 131.68 s, cpu 785.97 s, PSS 736.5 MB, 1622 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 320 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w320_5/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 65.8s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 320 slot 5: wall 65.81 s, cpu 387.46 s, PSS 614.8 MB, 1870 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 448 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w448_6/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 95.8s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 448 slot 6: wall 95.78 s, cpu 569.44 s, PSS 656.9 MB, 1715 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 192 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w192_7/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 79.4s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 192 slot 7: wall 79.37 s, cpu 470.19 s, PSS 765.6 MB, 1872 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w384_8/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 79.5s
+               - /home/daniel/Documents/IMGS/derived/Pictures/edited/image (60137).jpg
+RESULT ws 384 slot 8: wall 79.55 s, cpu 466.07 s, PSS 663.6 MB, 1803 MHz, ok False
+
+=== w
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/img-fp-v20 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 256 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/10dd09fd-7285-4a4a-a49b-189bea73141f/scratchpad/full/cost/w256_9/o.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    FAILED (exit 2) in 110.6s
+               - /home/daniel/Documents/IMGS/derived/Downloads/scan_55171.jpg
+RESULT ws 256 slot 9: wall 110.65 s, cpu 664.86 s, PSS 767.9 MB, 1680 MHz, ok False
+COST DONE

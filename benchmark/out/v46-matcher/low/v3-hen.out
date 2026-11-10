@@ -1,0 +1,6 @@
+v2: demoted 10,649  same-family 10,649  cross-family 0
+  v2: clean 422482, seed pairs sharing a cluster (>=5 files each): []
+v3: demoted 5,961  same-family 5,961  cross-family 0
+  v3: clean 427191, seed pairs sharing a cluster (>=5 files each): []
+off:
+  off: clean 433139, seed pairs sharing a cluster (>=5 files each): []

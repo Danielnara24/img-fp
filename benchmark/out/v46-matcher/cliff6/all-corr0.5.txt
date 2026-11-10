@@ -1,0 +1,19 @@
+== all-minpixelcorrelation0.5.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.5, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9874  precision 99.55%  recall 97.95%
+   proposed 1,124,979  TP 1,119,865  FP 5,114  FN 23,429  groups 799
+   FP: trap 4,291  cross-family 823  seed-pairs 38  merges 30
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 232 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 203 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 180 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 85 pairs
+     cross IMGS3/docks1.jpg <-> IMGS3/docks2.jpg: 83 pairs
+     cross IMGS3/field1.jpg <-> IMGS3/field3.jpg: 4 pairs
+     cross IMGS/earth.jpeg <-> IMGS2/png3.png: 4 pairs
+     cross IMGS3/KoronasdaruLeeds1.jpg <-> IMGS3/KoronasdaruLeeds2.jpg: 2 pairs
+     cross IMGS2/sea_photo4.jpg <-> IMGS3/docks2.jpg: 1 pairs
+     cross IMGS/earth.jpeg <-> IMGS/small-image2.jpg: 1 pairs
+   half[alt] F1 0.9868  P 99.64%  R 97.75%  (152 seeds)
+   half[hash] F1 0.9880  P 99.58%  R 98.04%  (160 seeds)
+   perfect transforms: 62 of 87
+

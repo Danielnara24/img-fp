@@ -1,0 +1,19 @@
+== all-minpixelcorrelation0.4.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.4, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9877  precision 99.38%  recall 98.17%
+   proposed 1,129,337  TP 1,122,324  FP 7,013  FN 20,970  groups 751
+   FP: trap 5,803  cross-family 1,210  seed-pairs 44  merges 34
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 252 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 247 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 227 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 85 pairs
+     cross IMGS3/docks1.jpg <-> IMGS3/docks2.jpg: 82 pairs
+     cross IMGS3/field1.jpg <-> IMGS3/field3.jpg: 78 pairs
+     cross IMGS3/docks1.jpg <-> IMGS4/baseball5.JPG: 76 pairs
+     cross IMGS2/png3.png <-> IMGS4/baseball5.JPG: 67 pairs
+     cross IMGS3/I-70WBDenPecosStExit.JPG <-> IMGS3/docks1.jpg: 36 pairs
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 14 pairs
+   half[alt] F1 0.9871  P 99.46%  R 97.97%  (152 seeds)
+   half[hash] F1 0.9886  P 99.41%  R 98.31%  (160 seeds)
+   perfect transforms: 64 of 87
+

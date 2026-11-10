@@ -1,0 +1,8 @@
+all n1 exit 2
+score n1 exit 0
+all n2 exit 2
+score n2 exit 0
+prov done
+t3 exit 2
+v1 done
+v2 done

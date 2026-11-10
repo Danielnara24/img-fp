@@ -1,0 +1,91 @@
+/home/daniel/Documents/IMGS-ALL/IMGS/forest.jpeg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/49854.jpeg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/image (49867).jpeg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/IMG_49880.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/received_49893.tif
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/photo-49906.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/DSC49919.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/Foto 49932.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/PXL_20240315_049958.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/scan_49971.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/49984.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/image (49997).webp
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/IMG_50010.webp
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/received_50023.avif
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/photo-50036.heic
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/DSC50049.jxl
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/Foto 50062.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/PXL_20240513_050088.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/scan_50101.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/50114.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/image (50127).jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/IMG_50140.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/received_50153.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/photo-50166.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/DSC50179.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/Foto 50192.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/Screenshot from 2024-02-28 03-25-25.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/PXL_20240711_050218.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/scan_50231.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/50244.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/image (50257).jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/IMG_50270.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/received_50283.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/photo-50296.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/DSC50309.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/Foto 50322.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/Screenshot from 2024-04-26 09-15-15.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/PXL_20240909_050348.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/scan_50361.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/50374.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/image (50387).png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/IMG_50400.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/received_50413.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/photo-50426.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/DSC50439.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/Foto 50452.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/Screenshot from 2024-06-24 15-05-05.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/PXL_20241107_050478.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/scan_50491.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/50504.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/image (50517).jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/IMG_50530.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/received_50543.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/photo-50556.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/DSC50569.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/Foto 50582.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/Screenshot from 2024-08-22 21-55-55.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/PXL_20240105_050608.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/scan_50621.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/50634.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/image (50647).png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/IMG_50660.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/received_50673.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/photo-50686.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/DSC50699.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/Foto 50712.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/Screenshot from 2024-10-20 03-45-45.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/PXL_20240303_050738.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/scan_50751.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/50764.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/image (50777).jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/IMG_50790.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/received_50803.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/photo-50816.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/DSC50829.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/Foto 50842.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2024/PXL_20240501_050868.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/scan_50881.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/50894.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/image (50907).png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/IMG_50920.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/received_50933.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/photo-50946.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Downloads/DSC50959.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/2023/Foto 50972.png
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/Camera Roll/PXL_20240727_050998.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Pictures/edited/scan_51011.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/WhatsApp Images/51024.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Desktop/image (51037).jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Backup/old-phone/IMG_51050.jpg
+/home/daniel/Documents/IMGS-ALL/IMGS/derived/Documents/scans/received_51063.webp

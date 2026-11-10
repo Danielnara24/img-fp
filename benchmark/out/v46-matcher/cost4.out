@@ -1,0 +1,13 @@
+X=0 g320/i5-full.list 23.23 s 149.28+2.36 cpu
+[  19.3s] k counts rejections: 9096 windows more in 7 rounds, 878297 candidates verified
+IMGFP_K_REJECT=1 g320/i5-full.list 22.55 s 146.11+2.30 cpu
+[  20.7s] k counts rejections: 9096 windows more in 7 rounds, 878297 candidates verified
+IMGFP_K_REJECT=1 g320/i5-full.list 24.18 s 150.07+2.42 cpu
+X=0 g320/i5-full.list 20.44 s 132.31+2.19 cpu
+X=0 base/all-f.list 61.17 s 354.43+4.93 cpu
+[  25.7s] k counts rejections: 2211 windows more in 2 rounds, 1072878 candidates verified
+IMGFP_K_REJECT=1 base/all-f.list 58.03 s 365.20+4.57 cpu
+[  24.2s] k counts rejections: 2211 windows more in 2 rounds, 1072878 candidates verified
+IMGFP_K_REJECT=1 base/all-f.list 58.49 s 374.46+4.16 cpu
+X=0 base/all-f.list 56.97 s 366.78+4.57 cpu
+cost done

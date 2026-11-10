@@ -1,0 +1,158 @@
+== all
+                                    f143                            c-none                          c-bridge                           c-cover                           c-cycle                           c-clean
+n0       6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R
+n1       6.7 j  6.7 o  92.38 P  96.69 R   6.7 j  6.7 o  92.38 P  96.69 R   6.7 j  6.7 o  92.38 P  96.69 R   9.7 j  9.0 o  89.27 P  96.69 R   6.7 j  6.7 o  92.38 P  96.69 R   6.7 j  6.7 o  92.18 P  96.69 R
+n2       8.3 j  7.0 o  93.26 P  95.26 R   8.3 j  7.0 o  93.26 P  95.26 R   8.3 j  7.0 o  93.26 P  95.26 R  10.3 j  8.0 o  92.48 P  95.26 R   8.3 j  7.0 o  93.26 P  95.26 R   9.3 j  7.7 o  92.71 P  95.18 R
+f        5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R
+full    64.0 j  0.0 o  99.71 P  95.96 R  64.0 j  0.0 o  99.71 P  95.98 R  65.0 j  1.0 o  99.17 P  95.98 R  93.0 j  0.0 o  99.69 P  96.00 R  64.0 j  1.0 o  99.17 P  95.99 R2066.0 j  9.0 o  94.27 P  90.82 R
+total     26.0 joined                        26.0 joined                        26.0 joined                        31.0 joined                        26.0 joined                        27.0 joined                    
+== i5
+                                    f143                            c-none                          c-bridge                           c-cover                           c-cycle                           c-clean
+n0       9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+n1      10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R  14.0 j 11.3 o  57.12 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R  11.0 j  9.0 o  62.57 P  98.27 R
+n2      13.0 j 11.0 o  64.70 P  96.48 R  13.0 j 11.0 o  64.70 P  96.48 R  13.0 j 11.0 o  64.70 P  96.48 R  16.0 j 13.0 o  60.79 P  96.48 R  13.3 j 11.3 o  64.04 P  96.48 R  15.7 j 13.0 o  60.79 P  96.48 R
+f        9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+full    14.0 j  3.0 o  88.44 P  96.50 R  14.0 j  3.0 o  88.29 P  96.53 R  14.0 j  4.0 o  84.13 P  96.63 R  14.0 j  3.0 o  88.28 P  96.57 R  14.0 j  5.0 o  83.79 P  96.73 R 167.0 j 13.0 o  71.33 P  91.26 R
+total     41.0 joined                        41.0 joined                        41.0 joined                        48.0 joined                        41.3 joined                        44.7 joined                    
+== f143
+   F1 0.9780  precision 99.71%  recall 95.96%
+   FP: trap 2,698  cross-family 502  seed-pairs 64  merges 42
+   half[alt] F1 0.9764  P 99.77%  R 95.60%  (152 seeds)
+   half[hash] F1 0.9771  P 99.73%  R 95.77%  (160 seeds)
+   perfect transforms: 58 of 87
+   F1 0.9230  precision 88.44%  recall 96.50%
+   FP: trap 471  cross-family 28,000  seed-pairs 14  merges 14
+     cross bird1.jpg <-> bird2.jpg: 6,883 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,684 pairs
+     cross Macizo1.jpg <-> Macizo2.jpg: 5,813 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,855 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,769 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,418 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 252 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 112 pairs
+   half[alt] F1 0.9520  P 94.00%  R 96.43%  (30 seeds)
+   half[hash] F1 0.9722  P 97.46%  R 96.98%  (33 seeds)
+content lost by deletion: {} {}
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop
+== c-none
+   F1 0.9781  precision 99.71%  recall 95.98%
+   FP: trap 2,699  cross-family 501  seed-pairs 64  merges 42
+   half[alt] F1 0.9764  P 99.77%  R 95.61%  (152 seeds)
+   half[hash] F1 0.9771  P 99.73%  R 95.78%  (160 seeds)
+   perfect transforms: 58 of 87
+   F1 0.9223  precision 88.29%  recall 96.53%
+   FP: trap 471  cross-family 28,425  seed-pairs 14  merges 14
+     cross bird1.jpg <-> bird2.jpg: 6,886 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,711 pairs
+     cross Macizo1.jpg <-> Macizo2.jpg: 6,088 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,900 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,800 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,458 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 255 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 113 pairs
+   half[alt] F1 0.9520  P 93.98%  R 96.45%  (30 seeds)
+   half[hash] F1 0.9722  P 97.44%  R 97.00%  (33 seeds)
+content lost by deletion: {} {}
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop
+== c-bridge
+   F1 0.9754  precision 99.17%  recall 95.98%
+   FP: trap 2,699  cross-family 6,540  seed-pairs 65  merges 43
+     cross IMGS2/bust1.jpg <-> IMGS2/bust2.jpg: 6,039 pairs
+   half[alt] F1 0.9764  P 99.77%  R 95.60%  (152 seeds)
+   half[hash] F1 0.9771  P 99.73%  R 95.78%  (160 seeds)
+   perfect transforms: 58 of 87
+   F1 0.8995  precision 84.13%  recall 96.63%
+   FP: trap 483  cross-family 40,654  seed-pairs 14  merges 14
+     cross Mural1.jpg <-> Mural2.jpg: 7,351 pairs
+     cross bird1.jpg <-> bird2.jpg: 6,886 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,711 pairs
+     cross Macizo1.jpg <-> Macizo2.jpg: 6,088 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,900 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,800 pairs
+     cross Puerto3.jpg <-> Puerto4.jpg: 2,691 pairs
+     cross Macizo5.jpg <-> Macizo6.jpg: 2,474 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,458 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 113 pairs
+   half[alt] F1 0.9530  P 93.99%  R 96.65%  (30 seeds)
+   half[hash] F1 0.9722  P 97.44%  R 97.00%  (33 seeds)
+content lost by deletion: {} {}
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop
+== c-cover
+   F1 0.9781  precision 99.69%  recall 96.00%
+   FP: trap 2,834  cross-family 530  seed-pairs 93  merges 50
+   half[alt] F1 0.9765  P 99.75%  R 95.63%  (152 seeds)
+   half[hash] F1 0.9772  P 99.71%  R 95.80%  (160 seeds)
+   perfect transforms: 58 of 87
+   F1 0.9224  precision 88.28%  recall 96.57%
+   FP: trap 500  cross-family 28,428  seed-pairs 14  merges 14
+     cross bird1.jpg <-> bird2.jpg: 6,886 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,712 pairs
+     cross Macizo1.jpg <-> Macizo2.jpg: 6,089 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,901 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,800 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,458 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 255 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 113 pairs
+   half[alt] F1 0.9523  P 93.97%  R 96.52%  (30 seeds)
+   half[hash] F1 0.9721  P 97.42%  R 97.00%  (33 seeds)
+content lost by deletion: {} {}
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop
+== c-cycle
+   F1 0.9755  precision 99.17%  recall 95.99%
+   FP: trap 2,702  cross-family 6,499  seed-pairs 64  merges 42
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 6,085 pairs
+   half[alt] F1 0.9764  P 99.77%  R 95.61%  (152 seeds)
+   half[hash] F1 0.9723  P 98.70%  R 95.79%  (160 seeds)
+   perfect transforms: 58 of 87
+   F1 0.8979  precision 83.79%  recall 96.73%
+   FP: trap 478  cross-family 41,773  seed-pairs 14  merges 14
+     cross Mural1.jpg <-> Mural2.jpg: 7,351 pairs
+     cross bird1.jpg <-> bird2.jpg: 6,886 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,711 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 6,365 pairs
+     cross Macizo1.jpg <-> Macizo2.jpg: 6,088 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,900 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,800 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,458 pairs
+   half[alt] F1 0.9530  P 93.99%  R 96.64%  (30 seeds)
+   half[hash] F1 0.9721  P 97.44%  R 96.99%  (33 seeds)
+content lost by deletion: {} {}
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop
+== c-clean
+   F1 0.9251  precision 94.27%  recall 90.82%
+   FP: trap 2,581  cross-family 60,492  seed-pairs 2066  merges 229
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 6,224 pairs
+     cross IMGS2/bust1.jpg <-> IMGS2/bust2.jpg: 6,100 pairs
+     cross IMGS3/Henares1.jpg <-> IMGS3/Henares2.jpg: 5,347 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 5,187 pairs
+     cross IMGS2/boat_photo1.jpg <-> IMGS2/boat_photo2.jpg: 4,901 pairs
+     cross IMGS2/sea_photo1.jpg <-> IMGS2/sea_photo2.jpg: 4,891 pairs
+     cross IMGS3/red_rocks_sign1.jpg <-> IMGS3/red_rocks_sign2.jpg: 4,831 pairs
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 4,808 pairs
+     cross IMGS3/KoronasdaruLeeds1.jpg <-> IMGS3/KoronasdaruLeeds2.jpg: 4,001 pairs
+     cross IMGS3/algiu1.jpg <-> IMGS3/algiu2.jpg: 3,555 pairs
+   half[alt] F1 0.9451  P 99.28%  R 90.17%  (152 seeds)
+   half[hash] F1 0.9321  P 95.95%  R 90.61%  (160 seeds)
+   perfect transforms: 52 of 87
+   F1 0.8008  precision 71.33%  recall 91.26%
+   FP: trap 476  cross-family 82,304  seed-pairs 167  merges 51
+     cross Mural1.jpg <-> Mural2.jpg: 6,703 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 6,350 pairs
+     cross bird1.jpg <-> bird2.jpg: 6,341 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 5,788 pairs
+     cross Macizo1.jpg <-> Macizo2.jpg: 5,550 pairs
+     cross GanyutingStore1.jpg <-> GanyutingStore2.jpg: 5,029 pairs
+     cross Lizard1.jpg <-> Lizard2.jpg: 4,692 pairs
+     cross Puerto1.jpg <-> Puerto2.jpg: 4,534 pairs
+     cross Seagull1.jpg <-> Seagull2.jpg: 4,347 pairs
+     cross Los Gigantes1.jpg <-> Los Gigantes2.jpg: 4,297 pairs
+   half[alt] F1 0.9268  P 93.94%  R 91.44%  (30 seeds)
+   half[hash] F1 0.8868  P 85.71%  R 91.86%  (33 seeds)
+content lost by deletion: {} {}
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop

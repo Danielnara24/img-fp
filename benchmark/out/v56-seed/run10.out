@@ -1,0 +1,21 @@
+14:45:13 start ship-all
+14:48:11 end ship-all exit 2 836.37 34.39 2:57.58
+14:48:11 start ship-all2
+14:50:25 end ship-all2 exit 0 733.71 20.83 2:13.91
+14:50:25 start pairs head
+15:00:08 end pairs head
+15:00:08 start pairs ship
+15:08:47 end pairs ship
+15:08:47 start htest head
+15:11:51 end htest head
+15:11:51 start htest ship
+15:13:45 end htest ship
+15:14:45 start cost-head-151445
+15:16:40 end cost-head-151445 exit 0 640.92 21.95 1:55.17
+15:17:40 start cost-ship-151740
+15:20:02 end cost-ship-151740 exit 0 631.12 25.37 2:21.84
+15:21:02 start cost-ship-152102
+15:22:55 end cost-ship-152102 exit 0 640.32 19.65 1:53.10
+15:23:55 start cost-head-152355
+15:26:09 end cost-head-152355 exit 0 611.13 22.59 2:13.29
+15:26:09 done

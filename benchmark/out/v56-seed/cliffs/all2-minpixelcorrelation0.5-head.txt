@@ -1,0 +1,19 @@
+== stdin ==
+   config: {"candidates": 150, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.5, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9590  precision 97.87%  recall 94.01%
+   proposed 1,329,953  TP 1,301,613  FP 28,340  FN 82,888  groups 830
+   FP: trap 6,219  cross-family 22,121  seed-pairs 55  merges 51
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 6,711 pairs
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 6,372 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 6,339 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 322 pairs
+     cross IMGS3/red_rocks_sign1.jpg <-> IMGS3/red_rocks_sign2.jpg: 318 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 307 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 229 pairs
+     cross IMGS3/Henares1.jpg <-> IMGS3/Henares2.jpg: 225 pairs
+     cross IMGS5/Lizard1.jpg <-> IMGS5/Lizard2.jpg: 158 pairs
+     cross IMGS5/Parish Church1.jpg <-> IMGS5/Parish Church2.jpg: 151 pairs
+   half[alt] F1 0.9596  P 98.57%  R 93.49%  (182 seeds)
+   half[hash] F1 0.9661  P 99.42%  R 93.96%  (184 seeds)
+   perfect transforms: 12 of 88
+

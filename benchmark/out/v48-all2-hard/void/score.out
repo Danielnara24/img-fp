@@ -1,0 +1,102 @@
+corpus: 33,483 files from 364 seeds, catalogue ONE 91 transforms
+truth:  1,384,444 positive pairs, 559,114,943 negative, 39,516 excluded
+
+tool                        proposed      TP      FP      FN  precision   recall      F1    wall
+------------------------------------------------------------------------------------------------
+imgfp.json                 1,262,516 1,241,817  20,699 142,627      98.4%    89.7%   0.938    379s
+
+51,718 proposed pairs touch files the manifest does not know about and were dropped.
+
+transform             cat    imgfp.json
+---------------------------------------
+-- catalogue ONE -----------------------
+alpha_on_black        ONE    362/364   
+alpha_on_white        ONE    364/364   
+aspect_distort        ONE    343/364   
+barrel_distort        ONE    327/364   
+blur                  ONE    307/364   
+blur_fill             ONE    354/364   
+blur_patch            ONE    363/364   
+brightness            ONE    363/364   
+browser_window        ONE    362/364   
+caption_bar           ONE    364/364   
+channel_swap          ONE    327/364   
+chromatic_aberration  ONE    362/364   
+cinematic_grade       ONE    361/364   
+collage_cell          ONE    361/364   
+contact_sheet         ONE    355/364   
+contrast              ONE    364/364   
+copy_exact            ONE    364/364   
+crop_half             ONE    363/364   
+crop_micro            ONE    282/364   
+crop_off_centre       ONE    352/364   
+crop_panoramic        ONE    359/364   
+crop_quarter          ONE    357/364   
+crop_slight           ONE    364/364   
+crop_square           ONE    362/364   
+crop_strip            ONE    360/364   
+duotone               ONE    360/364   
+embed_small           ONE    359/364   
+embed_tiny            ONE    341/364   
+flip_h                ONE    356/364   
+gamma                 ONE    362/364   
+greyscale             ONE    362/364   
+halftone              ONE    353/364   
+hue_rotate            ONE    362/364   
+invert                ONE    360/364   
+jpeg_ffmpeg           ONE    362/364   
+jpeg_generations      ONE    364/364   
+jpeg_high             ONE    363/364   
+jpeg_low              ONE    322/364   
+jpeg_magick           ONE    361/364   
+jpeg_mid              ONE    363/364   
+magazine_spread       ONE    362/364   
+messaging_app         ONE    359/364   
+mirror_crop           ONE    355/364   
+motion_blur           ONE    354/364   
+noise                 ONE    334/364   
+pdf_page              ONE    359/364   
+perspective           ONE    289/364   
+perspective_two       ONE    352/364   
+phone_screenshot      ONE    361/364   
+photo_of_screen       ONE    347/364   
+picture_in_picture    ONE    357/364   
+pinch                 ONE    245/364   
+pincushion            ONE    362/364   
+posterize             ONE    357/364   
+print_scan            ONE    358/364   
+qr_sticker            ONE    364/364   
+redaction_bars        ONE    358/364   
+rot180                ONE    364/364   
+rot90                 ONE    364/364   
+rotate_large          ONE    356/364   
+rotate_small          ONE    361/364   
+saturation            ONE    359/364   
+scale_large           ONE    363/364   
+scale_mid             ONE    364/364   
+scale_nearest         ONE    358/364   
+scale_small           ONE    361/364   
+sharpen               ONE    360/364   
+shear                 ONE    357/364   
+slide_deck            ONE    361/364   
+strip_metadata        ONE    359/359   
+swirl                 ONE    266/364   
+temperature           ONE    363/364   
+thumbnail             ONE    352/364   
+tiled_watermark       ONE    252/364   
+to_avif               ONE    338/364   
+to_heif               ONE    320/364   
+to_jxl                ONE    359/364   
+to_png                ONE    364/364   
+to_tiff               ONE    364/364   
+transpose_diag        ONE    356/364   
+upscale               ONE    363/364   
+video_call_frame      ONE    357/364   
+vignette              ONE    354/364   
+wall_poster           ONE    350/364   
+watermark_corner      ONE    359/364   
+wave                  ONE    273/364   
+webp_lossless         ONE    364/364   
+webp_lossy            ONE    359/364   
+
+per-transform matrix -> out/v48-all2-hard/per_transform.csv

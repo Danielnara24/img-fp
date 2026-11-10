@@ -1,0 +1,18 @@
+actions {'KEEP': 10643, 'DELETE': 16578, 'REVIEW': 5198}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 22 {'unedited, no unedited holder': 22} {'unedited, no unedited holder': [('ORIGINAL', 1), ('rotate_large', 1), ('aspect_distort', 1), ('to_tiff', 1), ('webp_lossless', 1), ('to_png', 1), ('rotate_small', 1), ('crop_slight', 1)]}
+families whose original or exact/lossless copy survives: 354 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'blur_patch', 'chromatic_aberration', 'crop_micro', 'crop_off_centre'), 5), (('blur_fill', 'channel_swap', 'crop_micro', 'flip_h', 'invert', 'photo_of_screen'), 2), (('barrel_distort', 'blur_fill', 'channel_swap', 'crop_micro', 'duotone', 'flip_h'), 2), (('blur_fill', 'channel_swap', 'chromatic_aberration', 'crop_off_centre', 'flip_h', 'invert'), 2), (('blur_fill', 'crop_micro', 'crop_off_centre', 'crop_panoramic', 'flip_h', 'invert'), 2), (('barrel_distort', 'blur_fill', 'crop_panoramic', 'gamma', 'invert', 'mirror_crop'), 2)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 3 / 364 ['IMGS2/backyard2.jpg', 'IMGS2/bw6.webp', 'IMGS4/Coles_Boorooma_in_December_2025.jpg']
+DELETE  edit                           4940
+DELETE  original/lossless copy         1825
+DELETE  unedited version               9813
+KEEP    composite                      4081
+KEEP    edit                           4003
+KEEP    original/lossless copy         354
+KEEP    trap                           534
+KEEP    unedited version               1671
+REVIEW  composite                      253
+REVIEW  edit                           4061
+REVIEW  trap                           199
+REVIEW  unedited version               685

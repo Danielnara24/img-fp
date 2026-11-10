@@ -1,0 +1,274 @@
+diff --git a/src/index.rs b/src/index.rs
+index 5c4b0f6..68cd6a8 100644
+--- a/src/index.rs
++++ b/src/index.rs
+@@ -1364,7 +1364,6 @@ impl WordList {
+ 
+     /// The keypoint of entry `i`. `shared` reads the entries whole, so only
+     /// the tests' reference merge asks for this.
+-    #[cfg(test)]
+     pub fn kp(&self, i: usize) -> u32 {
+         self.e[i] & KP_MASK
+     }
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index ad603f0..beb9095 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -440,6 +440,9 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+     let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some(), bounds: None, known: None, fresh: None };
+     let mut index = index_all(cx, scope, &pass)?;
+     let (mut direct, verified) = retrieve_and_verify(cx, scope, &pass, &index);
++    if let Ok(p) = std::env::var("IMGFP_GEO2_NAMES") {
++        let _ = std::fs::write(p, files.iter().map(|f| f.to_string_lossy().into_owned() + "\n").collect::<String>());
++    }
+     let turned = second_look(cx, scope, &pass, &mut index, &direct);
+     drop(index);
+     direct.extend(turned);
+@@ -1158,18 +1161,26 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Result<Index<'a>>
+     // file and every later stage read from: holding a second copy per image
+     // costs as much again as the lists themselves.
+     let bar = progress.begin_counted(Stage::Quantise, n_desc_match as u64, n_match, "images");
+-    let lists: Vec<WordList> = (0..n)
++    let both: Vec<(WordList, WordList)> = (0..n)
+         .into_par_iter()
+         .map(|i| {
+             if !matched[i] {
+-                return WordList::default();
++                return (WordList::default(), WordList::default());
+             }
+             let it = &items[i];
+-            let wl = timed!(11, quantise(&vocab, &it.feats));
++            let wl = if geo2_window().is_some() {
++                timed!(11, crate::retrieve::quantise_two(&vocab, &it.feats))
++            } else {
++                (timed!(11, quantise(&vocab, &it.feats)), WordList::default())
++            };
+             bar.add(it.feats.len() as u64);
+             wl
+         })
+         .collect();
++    let (lists, best): (Vec<WordList>, Vec<WordList>) = both.into_iter().unzip();
++    if geo2_window().is_some() {
++        let _ = BEST_ALL.set(best);
++    }
+     stage!(cx, "quantised");
+ 
+     // Inverted file, of every word; see `InvertedFile::build`. Against a
+@@ -1536,6 +1547,32 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct:
+                     let v = v as usize;
+                     out.extend(pass.verify(index.lists(), i, &seen[v], &words[v], j as usize, Variant::TURNED[v], work));
+                 }
++                // SCAFFOLDING (v58): the geometric look, as it is.
++                if let Some((m, wmax)) = geo2_window() {
++                    let ranked: Vec<u32> = timed!(46, index.candidates(i, &[&index.lists()[i]], m, a).iter().map(|&(j, ..)| j).collect());
++                    let g = geom_of(items);
++                    let k = args.candidates.min(ranked.len());
++                    let asker = Asker::new(&index.lists()[i], &g[i]);
++                    let best = BEST_ALL.get().unwrap();
++                    let mut sc: Vec<(u32, u32, u32)> = timed!(47, ranked[k..].iter().enumerate().map(|(r, &j)| (asker.peak(&best[j as usize], &g[j as usize]), r as u32, j)).filter(|e| e.0 >= 3).collect());
++                    sc.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
++                    GEO2_EXTRA.fetch_add(sc.len().min(wmax) as u64, std::sync::atomic::Ordering::Relaxed);
++                    for (pos, &(peak, _, j)) in sc.iter().take(wmax).enumerate() {
++                        let e = timed!(48, pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j as usize, Variant::SAME, work));
++                        if let Some(e) = &e {
++                            if policy.standing(&e.v) != Standing::Rejected {
++                                if let Some(f) = GEO2_LOG.get_or_init(|| std::env::var("IMGFP_GEO2_LOG").ok().map(|p| std::sync::Mutex::new(std::fs::File::create(p).unwrap()))) {
++                                    use std::io::Write;
++                                    let _ = writeln!(f.lock().unwrap(), "{} {} {} {} {} {:.3}", i, j, pos, peak, e.v.n_in, e.v.blk);
++                                }
++                                let b = [10, 20, 50, 100, usize::MAX].iter().position(|&x| pos < x).unwrap();
++                                GEO2_POS[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                                GEO2_PEAK[(peak as usize).min(15)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                            }
++                        }
++                        out.extend(e);
++                    }
++                }
+                 bar.add(w);
+                 out
+             }),
+@@ -1545,7 +1582,8 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct:
+     if args.skip_mirrored {
+         stage!(cx, "variants: skipped");
+     } else {
+-        stage!(cx, "variants: {} more pairs from {} unmatched images", anchors(&turned, policy).count(), askers.len());
++        stage!(cx, "variants: {} more pairs from {} unmatched images ({} geometric candidates)", anchors(&turned, policy).count(), askers.len(), GEO2_EXTRA.load(std::sync::atomic::Ordering::Relaxed));
++        stage!(cx, "geometric standing by position <10/<20/<50/<100/rest {:?}, by peak {:?}", GEO2_POS.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>(), GEO2_PEAK.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>());
+     }
+     // Nothing after this matches a descriptor against another, so the
+     // vocabulary, the inverted file and the word lists go with this stage.
+@@ -2418,3 +2456,117 @@ mod tests {
+         }
+     }
+ }
++
++// SCAFFOLDING (v58): the geometric look.
++static BEST_ALL: std::sync::OnceLock<Vec<WordList>> = std::sync::OnceLock::new();
++static GEO2_LOG: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
++static GEO2_EXTRA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static GEO2_POS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
++static GEO2_PEAK: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
++fn geo2_window() -> Option<(usize, usize)> {
++    static G: std::sync::OnceLock<Option<(usize, usize)>> = std::sync::OnceLock::new();
++    *G.get_or_init(|| {
++        let v = std::env::var("IMGFP_GEO2").ok()?;
++        let (m, w) = v.split_once(':')?;
++        Some((m.parse().ok()?, w.parse().ok()?))
++    })
++}
++
++/// Each file's keypoints as (angle in 16ths of a turn, log2 scale in
++/// quarter octaves), built once for the geometric look.
++static GEOM: std::sync::OnceLock<Vec<Vec<(u8, u8)>>> = std::sync::OnceLock::new();
++fn geom_of(items: &[Item]) -> &'static Vec<Vec<(u8, u8)>> {
++    GEOM.get_or_init(|| {
++        items
++            .par_iter()
++            .map(|it| it.feats.kps.iter().map(|k| (((k.angle.rem_euclid(360.0) / 22.5) as u8).min(15), ((k.sigma.max(1e-3).log2() * 4.0 + 64.0).clamp(0.0, 255.0)) as u8)).collect())
++            .collect()
++    })
++}
++
++/// Weak geometric consistency of two files' shared words: the most
++/// shared-word keypoint pairs agreeing on one (rotation, scale) bin, each of
++/// A's keypoints counted once a bin.
++fn wgc(ga: &[(u8, u8)], wa: &WordList, gb: &[(u8, u8)], wb: &WordList) -> u32 {
++    thread_local!(static PAIRS: std::cell::RefCell<Vec<(u32, u32)>> = const { std::cell::RefCell::new(Vec::new()) });
++    PAIRS.with_borrow_mut(|pairs| {
++        index::shared(wa, wb, pairs, 60_000);
++        if pairs.len() < 3 {
++            return pairs.len() as u32;
++        }
++        let mut bins = [[0u32; 12]; 16];
++        let mut last = [[u32::MAX; 12]; 16];
++        let mut best = 0;
++        for &(ka, kb) in pairs.iter() {
++            let (a, b) = (ga[ka as usize], gb[kb as usize]);
++            let ab = (b.0.wrapping_sub(a.0) & 15) as usize;
++            let ds = (b.1 as i32 - a.1 as i32).div_euclid(4) + 6;
++            let sb = ds.clamp(0, 11) as usize;
++            if last[ab][sb] != ka {
++                last[ab][sb] = ka;
++                bins[ab][sb] += 1;
++                best = best.max(bins[ab][sb]);
++            }
++        }
++        best
++    })
++}
++
++/// One asker's words and keypoint geometry, for scoring candidates' weak
++/// geometric consistency (`peak`) without building their shared pairs.
++struct Asker {
++    has: Vec<u64>,
++    words: Vec<u32>,
++    geo: Vec<(u8, u8)>,
++    kps: Vec<u32>,
++}
++
++impl Asker {
++    fn new(wl: &WordList, g: &[(u8, u8)]) -> Asker {
++        let top = (0..wl.len()).map(|e| wl.word(e)).max().unwrap_or(0) as usize;
++        let mut has = vec![0u64; top / 64 + 1];
++        let (mut words, mut geo, mut kps) = (Vec::with_capacity(wl.len()), Vec::with_capacity(wl.len()), Vec::with_capacity(wl.len()));
++        for e in 0..wl.len() {
++            let w = wl.word(e);
++            has[w as usize / 64] |= 1 << (w % 64);
++            words.push(w);
++            geo.push(g[wl.kp(e) as usize]);
++            kps.push(wl.kp(e));
++        }
++        Asker { has, words, geo, kps }
++    }
++
++    /// The most of the asker's keypoints agreeing on one (rotation, scale)
++    /// bin with a candidate keypoint sharing their word.
++    fn peak(&self, wl: &WordList, g: &[(u8, u8)]) -> u32 {
++        let mut bins = [[0u16; 12]; 16];
++        let mut last = [[u32::MAX; 12]; 16];
++        let mut best = 0u16;
++        let mut at = 0usize;
++        let n = self.has.len() * 64;
++        for e in 0..wl.len() {
++            let w = wl.word(e);
++            if w as usize >= n || self.has[w as usize / 64] >> (w % 64) & 1 == 0 {
++                continue;
++            }
++            while self.words[at] < w {
++                at += 1;
++            }
++            let b = g[wl.kp(e) as usize];
++            let mut x = at;
++            while x < self.words.len() && self.words[x] == w {
++                let a = self.geo[x];
++                let ab = (b.0.wrapping_sub(a.0) & 15) as usize;
++                let sb = ((b.1 as i32 - a.1 as i32).div_euclid(4) + 6).clamp(0, 11) as usize;
++                let ka = self.kps[x];
++                if last[ab][sb] != ka {
++                    last[ab][sb] = ka;
++                    bins[ab][sb] += 1;
++                    best = best.max(bins[ab][sb]);
++                }
++                x += 1;
++            }
++        }
++        best as u32
++    }
++}
+diff --git a/src/prof.rs b/src/prof.rs
+index 59295ee..86d7606 100644
+--- a/src/prof.rs
++++ b/src/prof.rs
+@@ -14,7 +14,7 @@
+ //! come to several times the wall clock.
+ #![allow(dead_code)]
+ 
+-pub const N: usize = 46;
++pub const N: usize = 49;
+ 
+ #[rustfmt::skip]
+ pub static NAMES: [&str; N] = [
+@@ -54,6 +54,8 @@ pub static NAMES: [&str; N] = [
+     // Guided matching (`verify::guided`), inside `verify:direct` and the
+     // second look's verification.
+     "guided",
++    // SCAFFOLDING v58
++    "geo:query", "geo:peak", "geo:verify",
+ ];
+ 
+ pub static ACC: [std::sync::atomic::AtomicU64; N] =
+diff --git a/src/retrieve.rs b/src/retrieve.rs
+index 78ea2e8..a1c6a13 100644
+--- a/src/retrieve.rs
++++ b/src/retrieve.rs
+@@ -29,6 +29,30 @@ simd::dispatched! {
+     pub(crate) fn quantise_from(vocab: &Vocabulary, f: &Features, from: usize) -> WordList => quantise_from_any;
+ }
+ 
++simd::dispatched! {
++    /// SCAFFOLDING v58: `quantise` and each keypoint's best word alone.
++    pub(crate) fn quantise_two(vocab: &Vocabulary, f: &Features) -> (WordList, WordList) => quantise_two_any;
++}
++
++#[cfg_attr(dispatch, inline(always))]
++fn quantise_two_any(vocab: &Vocabulary, f: &Features) -> (WordList, WordList) {
++    let mut buf = Vec::with_capacity(4);
++    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(f.len() * 2);
++    let mut best: Vec<(u32, u32)> = Vec::with_capacity(f.len());
++    for i in 0..f.len() {
++        vocab.quantise(f.d(i), &mut buf);
++        for &w in buf.iter() {
++            pairs.push((w, i as u32));
++        }
++        if let Some(&w) = buf.first() {
++            best.push((w, i as u32));
++        }
++    }
++    pairs.sort_unstable();
++    best.sort_unstable();
++    (WordList::from_sorted(&pairs), WordList::from_sorted(&best))
++}
++
+ /// `quantise`, for whichever copy `dispatched!` chose.
+ #[cfg_attr(dispatch, inline(always))]
+ fn quantise_any(vocab: &Vocabulary, f: &Features) -> WordList {

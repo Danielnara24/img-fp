@@ -1,0 +1,106 @@
+== all-ssim-points8.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 8, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9737  precision 99.77%  recall 95.08%
+   proposed 1,089,524  TP 1,087,051  FP 2,473  FN 56,243  groups 750
+   FP: trap 2,455  cross-family 18  seed-pairs 15  merges 14
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 3 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 2 pairs
+     cross IMGS/panoramic.avif <-> IMGS2/temple1.jpg: 1 pairs
+     cross IMGS3/squirrel2.jpg <-> IMGS4/aerial2.jpg: 1 pairs
+     cross IMGS2/sea_photo3.jpg <-> IMGS3/squirrel2.jpg: 1 pairs
+     cross IMGS/13.webp <-> IMGS3/cross1.jpg: 1 pairs
+     cross IMGS3/docks1.jpg <-> IMGS4/UnionCity.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS2/temple2.jpg: 1 pairs
+     cross IMGS3/docks2.jpg <-> IMGS4/aerial3.jpg: 1 pairs
+     cross IMGS2/ducks1.jpg <-> IMGS4/harvester.jpg: 1 pairs
+   half[alt] F1 0.9715  P 99.78%  R 94.65%  (152 seeds)
+   half[hash] F1 0.9731  P 99.77%  R 94.97%  (160 seeds)
+   perfect transforms: 51 of 87
+     tiled_watermark          188/304
+     crop_micro               232/304
+     wave_vertical            251/304
+     embed_tiny               264/304
+     contact_sheet            276/304
+     perspective_top          288/304
+     barrel_distort           289/304
+     keystone_side            290/304
+     crop_strip_top           291/304
+     halftone                 295/304
+     vignette                 296/304
+     redaction_bars           297/304
+     embed_small              300/304
+     pdf_page                 300/304
+     photo_of_screen          300/304
+     picture_in_picture       300/304
+     scale_small              300/304
+     wall_poster              300/304
+     magazine_spread          301/304
+     phone_screenshot         301/304
+     browser_window           302/304
+     mirror_crop              302/304
+     scale_nearest            302/304
+     slide_deck               302/304
+     blur_patch               303/304
+     brightness               303/304
+     caption_bar              303/304
+     collage_cell             303/304
+     crop_half                303/304
+     crop_off_centre          303/304
+     crop_quarter             303/304
+     flip_h                   303/304
+     hue_rotate               303/304
+     posterize                303/304
+     thumbnail                303/304
+     transpose_diag           303/304
+     alpha_on_black           304/304
+     alpha_on_white           304/304
+     aspect_distort           304/304
+     blur                     304/304
+     blur_fill                304/304
+     channel_swap             304/304
+     chromatic_aberration     304/304
+     cinematic_grade          304/304
+     contrast                 304/304
+     copy_exact               304/304
+     crop_panoramic           304/304
+     crop_slight              304/304
+     crop_square              304/304
+     duotone                  304/304
+     gamma                    304/304
+     greyscale                304/304
+     invert                   304/304
+     jpeg_ffmpeg              304/304
+     jpeg_generations         304/304
+     jpeg_high                304/304
+     jpeg_low                 304/304
+     jpeg_magick              304/304
+     jpeg_mid                 304/304
+     messaging_app            304/304
+     motion_blur              304/304
+     noise                    304/304
+     pincushion               304/304
+     print_scan               304/304
+     qr_sticker               304/304
+     rot180                   304/304
+     rot90                    304/304
+     rotate_large             304/304
+     rotate_small             304/304
+     saturation               304/304
+     scale_large              304/304
+     scale_mid                304/304
+     sharpen                  304/304
+     shear                    304/304
+     strip_metadata           299/299
+     swirl                    304/304
+     temperature              304/304
+     to_avif                  304/304
+     to_heif                  304/304
+     to_jxl                   304/304
+     to_png                   304/304
+     to_tiff                  304/304
+     upscale                  304/304
+     video_call_frame         304/304
+     watermark_corner         304/304
+     webp_lossless            304/304
+     webp_lossy               304/304
+

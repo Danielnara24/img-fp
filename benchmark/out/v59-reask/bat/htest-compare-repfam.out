@@ -1,0 +1,8 @@
+== htest
+                          fam-htest-ship                  fam-htest-repfam
+n0     175.0 j 175.0 o      - P      - R 175.0 j 175.0 o      - P      - R
+n1     183.3 j 157.3 o  52.82 P  98.67 R 183.3 j 157.3 o  52.82 P  98.67 R
+n2     189.7 j 147.7 o  60.84 P  96.87 R 191.0 j 149.3 o  60.65 P  96.91 R
+f      163.0 j 163.0 o      - P      - R 163.0 j 163.0 o      - P      - R
+total    711.0 joined                       712.3 joined                    
+sibs     711.0 joined                       712.3 joined                    

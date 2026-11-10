@@ -1,0 +1,163 @@
+== IMGS_384.json ==
+   F1 0.9466  precision 99.63%  recall 90.17%
+   FP: trap 775  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9364  P 99.66%  R 88.31%  (31 seeds)
+   half[hash] F1 0.9518  P 99.60%  R 91.13%  (28 seeds)
+   perfect transforms: 39 of 87
+== IMGS_512.json ==
+   F1 0.9671  precision 99.57%  recall 94.01%
+   FP: trap 937  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9584  P 99.63%  R 92.34%  (31 seeds)
+   half[hash] F1 0.9697  P 99.57%  R 94.50%  (28 seeds)
+   perfect transforms: 47 of 87
+== IMGS_640.json ==
+   F1 0.9706  precision 99.56%  recall 94.69%
+   FP: trap 970  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9637  P 99.59%  R 93.36%  (31 seeds)
+   half[hash] F1 0.9736  P 99.51%  R 95.30%  (28 seeds)
+   perfect transforms: 48 of 87
+== hub_IMGS_512.json ==
+   F1 0.9671  precision 99.57%  recall 94.01%
+   FP: trap 937  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9584  P 99.63%  R 92.34%  (31 seeds)
+   half[hash] F1 0.9697  P 99.57%  R 94.50%  (28 seeds)
+   perfect transforms: 47 of 87
+== hub_IMGS_640.json ==
+   F1 0.9706  precision 99.56%  recall 94.69%
+   FP: trap 970  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9637  P 99.59%  R 93.36%  (31 seeds)
+   half[hash] F1 0.9736  P 99.51%  R 95.30%  (28 seeds)
+   perfect transforms: 48 of 87
+== IMGS2_384.json ==
+   F1 0.9696  precision 99.65%  recall 94.42%
+   FP: trap 898  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9699  P 99.64%  R 94.48%  (36 seeds)
+   half[hash] F1 0.9652  P 99.69%  R 93.55%  (31 seeds)
+   perfect transforms: 66 of 87
+== IMGS2_512.json ==
+   F1 0.9803  precision 99.56%  recall 96.55%
+   FP: trap 1,139  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9802  P 99.55%  R 96.55%  (36 seeds)
+   half[hash] F1 0.9774  P 99.58%  R 95.96%  (31 seeds)
+   perfect transforms: 68 of 87
+== IMGS2_640.json ==
+   F1 0.9835  precision 99.54%  recall 97.18%
+   FP: trap 1,209  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9843  P 99.52%  R 97.36%  (36 seeds)
+   half[hash] F1 0.9806  P 99.58%  R 96.59%  (31 seeds)
+   perfect transforms: 69 of 87
+== hub_IMGS2_384.json ==
+   F1 0.9696  precision 99.65%  recall 94.42%
+   FP: trap 898  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9699  P 99.64%  R 94.48%  (36 seeds)
+   half[hash] F1 0.9652  P 99.69%  R 93.55%  (31 seeds)
+   perfect transforms: 66 of 87
+== hub_IMGS2_512.json ==
+   F1 0.9803  precision 99.56%  recall 96.55%
+   FP: trap 1,139  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9802  P 99.55%  R 96.55%  (36 seeds)
+   half[hash] F1 0.9774  P 99.58%  R 95.96%  (31 seeds)
+   perfect transforms: 68 of 87
+== hub_IMGS2_640.json ==
+   F1 0.9835  precision 99.54%  recall 97.18%
+   FP: trap 1,209  cross-family 0  seed-pairs 0  merges 0
+   half[alt] F1 0.9843  P 99.52%  R 97.36%  (36 seeds)
+   half[hash] F1 0.9806  P 99.58%  R 96.59%  (31 seeds)
+   perfect transforms: 69 of 87
+== IMGS3_384.json ==
+   F1 0.9700  precision 99.59%  recall 94.55%
+   FP: trap 1,242  cross-family 255  seed-pairs 7  merges 6
+     cross game2.jpg <-> game3.jpg: 249 pairs
+   half[alt] F1 0.9711  P 99.63%  R 94.71%  (51 seeds)
+   half[hash] F1 0.9742  P 99.50%  R 95.43%  (52 seeds)
+   perfect transforms: 65 of 87
+== IMGS3_512.json ==
+   F1 0.9842  precision 99.53%  recall 97.33%
+   FP: trap 1,564  cross-family 164  seed-pairs 6  merges 6
+   half[alt] F1 0.9846  P 99.57%  R 97.38%  (51 seeds)
+   half[hash] F1 0.9869  P 99.54%  R 97.85%  (52 seeds)
+   perfect transforms: 77 of 87
+== IMGS3_640.json ==
+   F1 0.9863  precision 99.54%  recall 97.74%
+   FP: trap 1,711  cross-family 2  seed-pairs 2  merges 2
+   half[alt] F1 0.9867  P 99.52%  R 97.83%  (51 seeds)
+   half[hash] F1 0.9878  P 99.52%  R 98.05%  (52 seeds)
+   perfect transforms: 74 of 87
+== hub_IMGS3_512_ap7.json ==
+   F1 0.9872  precision 99.50%  recall 97.95%
+   FP: trap 1,687  cross-family 167  seed-pairs 9  merges 9
+   half[alt] F1 0.9879  P 99.54%  R 98.04%  (51 seeds)
+   half[hash] F1 0.9887  P 99.52%  R 98.22%  (52 seeds)
+   perfect transforms: 79 of 87
+== hub_IMGS3_512_ap9.json ==
+   F1 0.9855  precision 99.53%  recall 97.59%
+   FP: trap 1,593  cross-family 165  seed-pairs 7  merges 7
+   half[alt] F1 0.9863  P 99.56%  R 97.72%  (51 seeds)
+   half[hash] F1 0.9874  P 99.53%  R 97.95%  (52 seeds)
+   perfect transforms: 76 of 87
+== hub_IMGS3_512.json ==
+   F1 0.9842  precision 99.53%  recall 97.33%
+   FP: trap 1,564  cross-family 164  seed-pairs 6  merges 6
+   half[alt] F1 0.9846  P 99.57%  R 97.38%  (51 seeds)
+   half[hash] F1 0.9869  P 99.54%  R 97.85%  (52 seeds)
+   perfect transforms: 77 of 87
+== hub_IMGS3_640_c055.json ==
+   F1 0.9878  precision 99.53%  recall 98.05%
+   FP: trap 1,754  cross-family 2  seed-pairs 2  merges 2
+   half[alt] F1 0.9884  P 99.52%  R 98.18%  (51 seeds)
+   half[hash] F1 0.9892  P 99.51%  R 98.34%  (52 seeds)
+   perfect transforms: 73 of 87
+== hub_IMGS3_640_c070.json ==
+   F1 0.9763  precision 99.58%  recall 95.75%
+   FP: trap 1,546  cross-family 2  seed-pairs 2  merges 2
+   half[alt] F1 0.9771  P 99.56%  R 95.92%  (51 seeds)
+   half[hash] F1 0.9775  P 99.56%  R 96.01%  (52 seeds)
+   perfect transforms: 72 of 87
+== IMGS4_384.json ==
+   F1 0.9703  precision 99.65%  recall 94.55%
+   FP: trap 865  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9692  P 99.65%  R 94.34%  (35 seeds)
+   half[hash] F1 0.9723  P 99.67%  R 94.90%  (37 seeds)
+   perfect transforms: 73 of 87
+== IMGS4_512.json ==
+   F1 0.9825  precision 99.58%  recall 96.96%
+   FP: trap 1,064  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9817  P 99.57%  R 96.80%  (35 seeds)
+   half[hash] F1 0.9836  P 99.61%  R 97.15%  (37 seeds)
+   perfect transforms: 77 of 87
+== IMGS4_640.json ==
+   F1 0.9865  precision 99.54%  recall 97.78%
+   FP: trap 1,182  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9853  P 99.54%  R 97.54%  (35 seeds)
+   half[hash] F1 0.9888  P 99.55%  R 98.23%  (37 seeds)
+   perfect transforms: 78 of 87
+== hub_IMGS4_384.json ==
+   F1 0.9703  precision 99.65%  recall 94.55%
+   FP: trap 865  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9692  P 99.65%  R 94.34%  (35 seeds)
+   half[hash] F1 0.9723  P 99.67%  R 94.90%  (37 seeds)
+   perfect transforms: 73 of 87
+== hub_IMGS4_512.json ==
+   F1 0.9825  precision 99.58%  recall 96.96%
+   FP: trap 1,064  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9817  P 99.57%  R 96.80%  (35 seeds)
+   half[hash] F1 0.9836  P 99.61%  R 97.15%  (37 seeds)
+   perfect transforms: 77 of 87
+== hub_IMGS4_640.json ==
+   F1 0.9865  precision 99.54%  recall 97.78%
+   FP: trap 1,182  cross-family 1  seed-pairs 1  merges 1
+   half[alt] F1 0.9853  P 99.54%  R 97.54%  (35 seeds)
+   half[hash] F1 0.9888  P 99.55%  R 98.23%  (37 seeds)
+   perfect transforms: 78 of 87
+== base_IMGS3_512_ap9.json ==
+   F1 0.9770  precision 97.79%  recall 97.61%
+   FP: trap 1,591  cross-family 6,794  seed-pairs 7  merges 7
+   half[alt] F1 0.9866  P 99.57%  R 97.76%  (51 seeds)
+   half[hash] F1 0.9874  P 99.53%  R 97.95%  (52 seeds)
+   perfect transforms: 76 of 87
+== base_IMGS3_640_c055.json ==
+   F1 0.9787  precision 97.69%  recall 98.05%
+   FP: trap 1,748  cross-family 7,058  seed-pairs 3  merges 3
+   half[alt] F1 0.9885  P 99.52%  R 98.19%  (51 seeds)
+   half[hash] F1 0.9892  P 99.51%  R 98.34%  (52 seeds)
+   perfect transforms: 73 of 87

@@ -1,0 +1,128 @@
+
+== ap
+val   512b:imgs       512b:imgs2      512b:imgs3      512b:imgs4      512b:all        512A:imgs       512A:imgs2      512A:imgs3      512A:imgs4      512A:all        640b:imgs       640b:imgs2      640b:imgs3      640b:imgs4      640b:all        640A:imgs       640A:imgs2      640A:imgs3      640A:imgs4      640A:all       
+3     0.9804 16       0.9864 1        0.9883 119      0.9890 2        0.9862 96       0.9810 16       0.9864 1        0.9883 119      0.9890 2        0.9865 96       0.9817 7        0.9750†6551     0.9887 90       0.9892 2        0.9870 21       0.9817 7        0.9750†6551     0.9894 90       0.9892 2        0.9870 21      
+5     0.9797 3        0.9856 1        0.9883 90       0.9882 2        0.9852 18       0.9803 3        0.9856 1        0.9883 90       0.9889 2        0.9858 18       0.9809 5        0.9751†6459     0.9882 87       0.9894 3        0.9867 15       0.9809 5        0.9751†6459     0.9889 87       0.9894 3        0.9867 15      
+6     0.9780 4        0.9850 1        0.9877 90       0.9874 2        0.9845 14       0.9785 4        0.9850 1        0.9877 90       0.9874 2        0.9850 14       0.9806 2        0.9753†6450     0.9884 87       0.9884 3        0.9859 12       0.9806 2        0.9753†6450     0.9891 87       0.9884 3        0.9859 12      
+7     0.9755 4        0.9844 1        0.9872 88       0.9869 1        0.9833 11       0.9761 4        0.9844 1        0.9872 88       0.9869 1        0.9838 11       0.9799 1        0.9863 0        0.9878 87       0.9881 2        0.9848 12       0.9799 1        0.9863 0        0.9884 87       0.9881 2        0.9850 12      
+8     0.9741 4        0.9834 1        0.9864 87       0.9860 1        0.9821 10       0.9747 4        0.9834 1        0.9868 87       0.9860 1        0.9826 10       0.9773 1        0.9852 0        0.9872 87       0.9880 2        0.9841 10       0.9773 1        0.9852 0        0.9879 87       0.9880 2        0.9843 10      
+9     0.9714 0        0.9823 0        0.9858 87       0.9841 0        0.9800 5        0.9719 0        0.9823 0        0.9858 87       0.9844 0        0.9807 5        0.9746 1        0.9848 0        0.9867 87       0.9878 2        0.9831 6        0.9747 1        0.9848 0        0.9874 87       0.9878 2        0.9832 6       
+10    0.9687 0        0.9811 0        0.9843 87       0.9827 0        0.9781 3        0.9693 0        0.9811 0        0.9843 87       0.9830 0        0.9789 3        0.9722 1        0.9842 0        0.9863 87       0.9873 2        0.9819 6        0.9722 1        0.9842 0        0.9870 87       0.9873 2        0.9822 6       
+12    0.9618 0        0.9781 0        0.9819 336      0.9780 0        0.9747 4        0.9623 0        0.9781 0        0.9828 84       0.9784 0        0.9753 4        0.9653 1        0.9825 0        0.9852 85       0.9855 1        0.9805 5        0.9653 1        0.9825 0        0.9858 85       0.9862 1        0.9807 5       
+
+== ov
+val   512b:imgs       512b:imgs2      512b:imgs3      512b:imgs4      512b:all        512A:imgs       512A:imgs2      512A:imgs3      512A:imgs4      512A:all        640b:imgs       640b:imgs2      640b:imgs3      640b:imgs4      640b:all        640A:imgs       640A:imgs2      640A:imgs3      640A:imgs4      640A:all       
+0.3   0.9516 1        0.9634 0        0.9579†7104     0.9654 0        0.9582†6996     0.9522 1        0.9637 0        0.9579†7104     0.9660 0        0.9590†6996     0.9558 3        0.9670 0        0.9608†7084     0.9703 26       0.9621†6854     0.9558 3        0.9670 0        0.9612†7084     0.9703 26       0.9624†6854    
+0.4   0.9516 1        0.9641 0        0.9587†6844     0.9656 0        0.9584†6757     0.9522 1        0.9644 0        0.9587†6844     0.9662 0        0.9592†6757     0.9559 3        0.9675 0        0.9616†6744     0.9705 2        0.9625†6628     0.9559 3        0.9675 0        0.9620†6744     0.9705 2        0.9628†6628    
+0.5   0.9522 1        0.9646 0        0.9675 409      0.9663 0        0.9592†6357     0.9528 1        0.9649 0        0.9675 409      0.9669 0        0.9599†6357     0.9565 3        0.9680 0        0.9701 263      0.9710 2        0.9656 269      0.9565 3        0.9680 0        0.9704 263      0.9710 2        0.9659 269     
+0.6   0.9621 1        0.9759 0        0.9787 172      0.9774 0        0.9727 93       0.9628 1        0.9759 0        0.9787 172      0.9778 0        0.9733 93       0.9664 3        0.9784 0        0.9804 91       0.9815 2        0.9761 90       0.9664 3        0.9785 0        0.9810 91       0.9815 2        0.9764 90      
+0.7   0.9663 1        0.9799 0        0.9836 90       0.9809 0        0.9771 8        0.9670 1        0.9799 0        0.9836 90       0.9812 0        0.9777 8        0.9703 1        0.9829 0        0.9856 88       0.9851 2        0.9805 8        0.9703 1        0.9829 0        0.9861 88       0.9851 2        0.9807 8       
+0.8   0.9694 0        0.9820 0        0.9844 88       0.9832 0        0.9784 4        0.9700 0        0.9820 0        0.9844 88       0.9835 0        0.9792 4        0.9726 1        0.9848 0        0.9865 88       0.9874 2        0.9823 6        0.9726 1        0.9848 0        0.9870 88       0.9874 2        0.9825 6       
+0.85  0.9687 0        0.9811 0        0.9843 87       0.9827 0        0.9781 3        0.9693 0        0.9811 0        0.9843 87       0.9830 0        0.9789 3        0.9722 1        0.9842 0        0.9863 87       0.9873 2        0.9819 6        0.9722 1        0.9842 0        0.9870 87       0.9873 2        0.9822 6       
+
+== corr
+val   512b:imgs       512b:imgs2      512b:imgs3      512b:imgs4      512b:all        512A:imgs       512A:imgs2      512A:imgs3      512A:imgs4      512A:all        640b:imgs       640b:imgs2      640b:imgs3      640b:imgs4      640b:all        640A:imgs       640A:imgs2      640A:imgs3      640A:imgs4      640A:all       
+0.2   0.9728 259      0.9854 172      0.9874 173      0.9862 0        0.9815 732      0.9732 259      0.9854 172      0.9874 173      0.9865 0        0.9823 733      0.9756 192      0.9888 61       0.9890 86       0.9900 2        0.9847 953      0.9756 192      0.9888 61       0.9897 86       0.9900 2        0.9849 953     
+0.4   0.9731 0        0.9860 0        0.9874 173      0.9862 0        0.9819 68       0.9735 0        0.9860 0        0.9874 173      0.9866 0        0.9827 68       0.9752 121      0.9888 0        0.9890 86       0.9899 1        0.9852 108      0.9752 121      0.9888 0        0.9896 86       0.9899 1        0.9854 108     
+0.5   0.9719 0        0.9846 0        0.9871 86       0.9854 0        0.9810 5        0.9723 0        0.9846 0        0.9871 86       0.9858 0        0.9818 5        0.9745 37       0.9880 0        0.9884 86       0.9896 2        0.9846 2        0.9745 37       0.9880 0        0.9891 86       0.9896 2        0.9848 2       
+0.55  0.9708 0        0.9835 0        0.9859 88       0.9844 0        0.9801 4        0.9713 0        0.9835 0        0.9859 88       0.9847 0        0.9809 4        0.9736 7        0.9867 0        0.9875 86       0.9889 2        0.9834 5        0.9736 7        0.9867 0        0.9882 86       0.9889 2        0.9836 5       
+0.6   0.9687 0        0.9811 0        0.9843 87       0.9827 0        0.9781 3        0.9693 0        0.9811 0        0.9843 87       0.9830 0        0.9789 3        0.9722 1        0.9842 0        0.9863 87       0.9873 2        0.9819 6        0.9722 1        0.9842 0        0.9870 87       0.9873 2        0.9822 6       
+0.65  0.9661 0        0.9762 0        0.9811 85       0.9797 0        0.9743 4        0.9661 0        0.9762 0        0.9811 85       0.9801 0        0.9751 4        0.9687 1        0.9792 0        0.9830 84       0.9838 2        0.9783 5        0.9687 1        0.9792 0        0.9837 84       0.9838 2        0.9785 5       
+0.7   0.9606 0        0.9695 0        0.9741 83       0.9735 0        0.9681 3        0.9611 0        0.9695 0        0.9741 83       0.9738 0        0.9689 3        0.9633 1        0.9719 0        0.9761 82       0.9777 2        0.9718 4        0.9633 1        0.9719 0        0.9768 82       0.9777 2        0.9721 4       
+0.8   0.9386 0        0.9456 0        0.9488 270      0.9505 0        0.9445 15       0.9392 0        0.9459 0        0.9494 69       0.9508 0        0.9454 15       0.9430 1        0.9493 0        0.9512 71       0.9548 0        0.9485 3        0.9430 1        0.9493 0        0.9519 71       0.9548 0        0.9487 3       
+
+== k
+val   512b:imgs       512b:imgs2      512b:imgs3      512b:imgs4      512b:all        512A:imgs       512A:imgs2      512A:imgs3      512A:imgs4      512A:all        640b:imgs       640b:imgs2      640b:imgs3      640b:imgs4      640b:all        640A:imgs       640A:imgs2      640A:imgs3      640A:imgs4      640A:all       
+10    0.7434 0        0.7532 5        0.7632 303      0.7378 0        0.7655 70       0.7493 0        0.7554 5        0.7601 95       0.7487 0        0.7724 70       0.7583 1        0.7660 16       0.7466 142      0.7363 0        0.7556 131      0.7613 1        0.7602 4        0.7424 142      0.7369 0        0.7556 131     
+25    0.9615 0        0.9719 1        0.9780 322      0.9776 0        0.9723 66       0.9632 0        0.9724 1        0.9786 322      0.9782 0        0.9732 66       0.9662 1        0.9723 0        0.9793 325      0.9822 1        0.9762 108      0.9672 1        0.9728 0        0.9802 325      0.9822 1        0.9769 108     
+50    0.9654 0        0.9762 1        0.9800 110      0.9804 0        0.9744 4        0.9665 0        0.9767 1        0.9803 110      0.9808 0        0.9753 4        0.9693 1        0.9771 0        0.9814 314      0.9838 2        0.9783 73       0.9702 1        0.9771 0        0.9819 314      0.9838 2        0.9790 73      
+100   0.9687 0        0.9811 0        0.9843 88       0.9827 0        0.9781 3        0.9693 0        0.9811 0        0.9843 88       0.9830 0        0.9789 3        0.9722 1        0.9842 0        0.9861 85       0.9873 2        0.9819 5        0.9722 1        0.9842 0        0.9868 85       0.9873 2        0.9822 5       
+150   0.9687 0        0.9811 0        0.9843 87       0.9827 0        0.9781 3        0.9693 0        0.9811 0        0.9843 87       0.9830 0        0.9789 3        0.9722 1        0.9842 0        0.9863 87       0.9873 2        0.9819 6        0.9722 1        0.9842 0        0.9870 87       0.9873 2        0.9822 6       
+300   0.9687 0        0.9811 0        0.9844 87       0.9827 0        0.9781 5        0.9693 0        0.9811 0        0.9844 87       0.9830 0        0.9790 5        0.9723 1        0.9842 0        0.9863 87       0.9873 2        0.9820 6        0.9723 1        0.9843 0        0.9870 87       0.9873 2        0.9822 6       
+
+== merges (>=300 between two seeds)
+all 512 A ov0.3 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6728)]
+all 512 A ov0.4 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6495)]
+all 512 A ov0.5 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6098)]
+all 512 base ov0.3 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6728)]
+all 512 base ov0.4 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6495)]
+all 512 base ov0.5 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6098)]
+all 640 A ov0.3 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6557)]
+all 640 A ov0.4 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6338)]
+all 640 base ov0.3 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6557)]
+all 640 base ov0.4 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6338)]
+imgs2 640 A ap3 [('bust1.jpg|bust2.jpg', 6551)]
+imgs2 640 A ap5 [('bust1.jpg|bust2.jpg', 6459)]
+imgs2 640 A ap6 [('bust1.jpg|bust2.jpg', 6450)]
+imgs2 640 base ap3 [('bust1.jpg|bust2.jpg', 6551)]
+imgs2 640 base ap5 [('bust1.jpg|bust2.jpg', 6459)]
+imgs2 640 base ap6 [('bust1.jpg|bust2.jpg', 6450)]
+imgs3 512 A ov0.3 [('docks1.jpg|docks2.jpg', 6840)]
+imgs3 512 A ov0.4 [('docks1.jpg|docks2.jpg', 6581)]
+imgs3 512 base ov0.3 [('docks1.jpg|docks2.jpg', 6840)]
+imgs3 512 base ov0.4 [('docks1.jpg|docks2.jpg', 6581)]
+imgs3 640 A ov0.3 [('docks1.jpg|docks2.jpg', 6818)]
+imgs3 640 A ov0.4 [('docks1.jpg|docks2.jpg', 6480)]
+imgs3 640 base ov0.3 [('docks1.jpg|docks2.jpg', 6818)]
+imgs3 640 base ov0.4 [('docks1.jpg|docks2.jpg', 6480)]
+
+== stray files (seedpair 50-299)
+imgs3 512 A def [('Segovia1.jpg|Segovia2.jpg', 83)]
+imgs3 512 base def [('Segovia1.jpg|Segovia2.jpg', 83)]
+imgs3 640 A def [('Segovia1.jpg|Segovia2.jpg', 85)]
+imgs3 640 base def [('Segovia1.jpg|Segovia2.jpg', 85)]
+
+== area rule + A (areaA, img-fp-ship = 0.44.0 working tree), merges (seed pair >= 300)
+all 512 areaA ov0.3 [Henares1|Henares2 7812, docks1|docks2 6789]
+all 512 areaA ov0.4 [docks 6564]
+all 512 areaA ov0.5 [docks 6087]
+imgs3 512 areaA: no merge anywhere (base merged docks at ov <= 0.4)
+all 640 areaA ap3/5/6/7 [bust1|bust2 6559-6678]   (base: IMGS-ALL never through ap)
+imgs2 640 areaA ap3/5 [bust 6600-6626]            (base: ap <= 6)
+all 640 areaA ov0.3 [bust 7466, docks 6586]
+all 640 areaA ov0.4/0.5 [docks 6495, 6129]         (base: ov <= 0.4)
+all 640 areaA ov0.6 [docks 1192]
+imgs3 640 areaA ov0.3/0.4/0.5 [docks 6521-6823]    (base: ov <= 0.4)
+imgs3 640 areaA corr0.2/0.4 [game2|game3 352, 348] (base: none; game 1 pair)
+
+== margins, shipped value to the nearest merge
+          512 base        512 areaA        640 base             640 areaA
+ap 10     none to 3       none to 3        4 steps (IMGS2 6)    3 steps (IMGS-ALL 7)
+ov 0.85   0.35 (ALL 0.5)  0.35 (ALL 0.5)   0.45 (0.4)           0.25 (ALL 0.6, docks 1192)
+corr 0.6  none            none             none                 0.2 below (IMGS3 0.4, game 348)
+k 150     none            none             none                 none
+near line, no seed pair >= 300: all 512 areaA k25/k50 321/326 total cross (base: imgs3 k25 322)
+identity: cl_all_512_def_areaA d84a4587f1d0, cl_all_640_def_areaA 58237e174196 (= ship build checks)
+
+== traced: docks at overlap 0.6, IMGS-ALL 640, area rule + A (dumps in the session scratchpad)
+1,192 pairs = a 12-file docks1 cluster (slide_deck, pdf_page, wall_poster, magazine_spread,
+embed_small, browser_window, crop_off_centre, keystone_side, mirror_crop, crop_quarter, ...)
+joined to docks2's family. Every joining anchor comes from ONE file, docks1 mirror_crop
+received_70693.jpg (525x479), into docks2 flip_h (Foto 71902.jpg) and transpose_diag (71954.jpg),
+both 640x480: n_in 11 / 10, overlap 0.625, centred, blk_min 0.927 / 0.921 (clean); + one weak
+variant anchor to docks2 invert (blk_min 0.80).
+0.43.1+A has the same three pairs at overlap 0.5625, not centred: below the 0.6 bar.
+None of the four files is wider than 4:3, so the area rule does not change their analysis
+(features and thumbnail identical); the anchors moved because the vocabulary did (other files'
+descriptors change the sample). Same near-miss pair as the 0.5 cliff, one ripple closer.
+Two clean edges from one file into a cyclic cluster are not a bridge, so drop_weak_bridges
+keeps them: the join rests on a single file (a cut vertex), not a single edge.
+
+== traced: bust at aligned points 7, IMGS-ALL 640, area rule + A
+6,566 pairs, the two families whole. The only clean cross anchors (2) both come from ONE file,
+bust2 crop_strip_top 18914.jpg (500x321, 1.56:1, thumbnail factor 1.08), into bust1 rot180
+DSC18199.jpg (n_in 7, blk_min 0.919) and print_scan 18524.jpg (n_in 9, 0.883); both bust1
+files are portraits just past 4:3 (work 473x650 / 469x655 against 0.43.1's 466x640 / 459x640).
+0.43.1+A: the same pairs at blk_min 0.709 / 0.348, weak. So the area rule itself moved them:
+larger thumbnails on both sides, and the worst block rose past 0.85. At bar 8 only the n_in 9
+edge is clean, a bridge, dropped; at 7 two edges from one file are not a bridge: the docks shape.
+
+== traced: game at correlation 0.4, IMGS3 640, area rule + A
+348 pairs = a 4-file fragment of game3 (flip_h, transpose_diag, mirror_crop, invert; all 4:3
+or squarer, untouched by the area rule) joined to game2 by weak anchors (no clean one), the
+fragment allowance. In 0.43.1+A the invert (photo-81886.png) has ONE direct anchor (to game2's
+invert, n_in 91, blk_min 0.25), so the second look re-asks it: 151 variant rows, 45 clean variant
+anchors home into game3, and the fragment goes home. In the area rule build it also anchors
+game1's invert (n_in 10, blk 0.45: passes at correlation 0.4, not at 0.6, a vocabulary ripple),
+so it has TWO anchors, is not re-asked, and never finds its family. Different mechanism:
+wrong weak anchors counting toward the second look's "anchored twice".

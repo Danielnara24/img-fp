@@ -1,0 +1,16 @@
+      variant:pass    328.91
+  variant:quantise    199.00
+            guided     67.78
+          quantise     64.36
+     verify:direct     55.43
+            shared     44.56
+             query     28.54
+    best_transform     16.39
+       pixel_check     11.95
+        correspond     10.75
+         cand:rank      6.45
+             vocab      5.37
+   variant:mkfeats      4.36
+          encloses      1.65
+           invfile      1.46
+      main:release      1.45

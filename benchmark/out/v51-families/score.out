@@ -1,0 +1,22 @@
+== all
+subset    files     P%     R% xpairs joined orig >=300 found keepX
+n0          364      -      -     17     17   17     0     0     0
+n1-d1       728  86.11  96.60     55     16   15     0     0     0
+n1-d2       728  86.84  96.89     52     15   14     0     0     1
+n1-d3       728  84.87  95.11     59     17   16     0     0     0
+n2-d1      1092  89.35  94.11    116     17   13     0     0     1
+n2-d2      1092  91.28  96.19     94     14   12     0     0     1
+n2-d3      1092  87.17  96.10    145     20   16     0     0     2
+f          9649      -      -     16     16   16     0     0     0
+mean n0: joined 17.0 orig 17.0 P - R -  n1: joined 16.0 orig 15.0 P 85.94 R 96.20  n2: joined 17.0 orig 13.7 P 89.27 R 95.46  f: joined 16.0 orig 16.0 P - R -  | total joined 66.0
+== all2
+subset    files     P%     R% xpairs joined orig >=300 found keepX
+n0          364      -      -     17     17   17     0     0     0
+n1-d1       728  89.36  90.62     38     13   11     0     0     0
+n1-d2       728  87.70  94.25     46     17   14     0     0     1
+n1-d3       728  90.03  92.86     36     12   11     0     0     1
+n2-d1      1092  91.91  90.60     83     13   12     0     0     0
+n2-d2      1092  89.48  91.59    107     19   15     0     0     1
+n2-d3      1092  89.54  90.58    109     18   14     0     0     2
+f          9649      -      -     16     16   16     0     0     0
+mean n0: joined 17.0 orig 17.0 P - R -  n1: joined 14.0 orig 12.0 P 89.03 R 92.58  n2: joined 16.7 orig 13.7 P 90.31 R 90.92  f: joined 16.0 orig 16.0 P - R -  | total joined 63.7

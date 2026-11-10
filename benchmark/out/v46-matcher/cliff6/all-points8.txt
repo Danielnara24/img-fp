@@ -1,0 +1,19 @@
+== all-minalignedpoints8.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 8, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9781  precision 99.73%  recall 95.96%
+   proposed 1,100,128  TP 1,097,103  FP 3,025  FN 46,191  groups 771
+   FP: trap 2,545  cross-family 480  seed-pairs 53  merges 35
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 139 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 87 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 73 pairs
+     cross IMGS3/docks1.jpg <-> IMGS3/docks2.jpg: 69 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 64 pairs
+     cross IMGS2/anlage1.jpg <-> IMGS4/bunker.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS2/temple2.jpg: 1 pairs
+     cross IMGS4/aerial2.jpg <-> IMGS4/bunker.jpg: 1 pairs
+     cross IMGS2/manhole3.jpg <-> IMGS4/aerial2.jpg: 1 pairs
+     cross IMGS3/cross2.jpg <-> IMGS4/golf-club.JPG: 1 pairs
+   half[alt] F1 0.9764  P 99.77%  R 95.60%  (152 seeds)
+   half[hash] F1 0.9772  P 99.73%  R 95.79%  (160 seeds)
+   perfect transforms: 60 of 87
+

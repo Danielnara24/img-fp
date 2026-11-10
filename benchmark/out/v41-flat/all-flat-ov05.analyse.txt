@@ -1,0 +1,19 @@
+== all-flat-ov05.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.5, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9521  precision 95.76%  recall 94.66%
+   proposed 1,130,063  TP 1,082,192  FP 47,871  FN 61,102  groups 587
+   FP: trap 47,693  cross-family 178  seed-pairs 14  merges 13
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 165 pairs
+     cross IMGS/panoramic.avif <-> IMGS2/temple1.jpg: 1 pairs
+     cross IMGS3/docks1.jpg <-> IMGS4/UnionCity.jpg: 1 pairs
+     cross IMGS/noisy2.jpg <-> IMGS4/club.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS2/temple2.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS3/cross2.jpg: 1 pairs
+     cross IMGS3/docks2.jpg <-> IMGS4/aerial.jpg: 1 pairs
+     cross IMGS3/ateneul1.jpg <-> IMGS3/mountain1.jpg: 1 pairs
+     cross IMGS2/temple2.jpg <-> IMGS4/WeehawkenLibrary.jpg: 1 pairs
+     cross IMGS2/ducks1.jpg <-> IMGS4/harvester.jpg: 1 pairs
+   half[alt] F1 0.9493  P 95.77%  R 94.11%  (152 seeds)
+   half[hash] F1 0.9515  P 95.74%  R 94.56%  (160 seeds)
+   perfect transforms: 45 of 87
+

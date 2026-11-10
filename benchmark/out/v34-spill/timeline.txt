@@ -1,0 +1,132 @@
+peak anon+swap 776 MB at 408.2s (file 316)
+   0.0s anon     8 file     4 swap    0  scratch file in /home/daniel/.cache/img-fp
+   0.4s anon    14 file     4 swap    0  27673 files
+   1.3s anon    28 file     8 swap    0  exact duplicates: 617 groups
+   2.6s anon   121 file    10 swap    0  26886 files to analyse
+   6.1s anon   162 file    11 swap    0    described 250
+   9.3s anon   162 file    12 swap    0    described 500
+  12.7s anon   158 file    12 swap    0    described 750
+  15.9s anon   158 file    11 swap    0    described 1000
+  19.0s anon   207 file    11 swap    0    described 1250
+  22.4s anon   295 file    11 swap    0    described 1500
+  25.8s anon   222 file    11 swap    0    described 1750
+  28.9s anon   222 file    11 swap    0    described 2000
+  32.1s anon   222 file    11 swap    0    described 2250
+  34.8s anon   230 file    11 swap    0    described 2500
+  37.9s anon   208 file    11 swap    0    described 2750
+  40.3s anon   208 file    11 swap    0    described 3000
+  43.7s anon   217 file    11 swap    0    described 3250
+  46.3s anon   217 file    11 swap    0    described 3500
+  49.6s anon   219 file    11 swap    0    described 3750
+  53.5s anon   220 file    11 swap    0    described 4000
+  55.8s anon   223 file    11 swap    0    described 4250
+  59.4s anon   265 file    11 swap    0    described 4500
+  62.1s anon   270 file    11 swap    0    described 4750
+  66.8s anon   243 file    11 swap    0    described 5000
+  69.9s anon   243 file    11 swap    0    described 5250
+  72.7s anon   243 file    11 swap    0    described 5500
+  75.6s anon   250 file    11 swap    0    described 5750
+  78.1s anon   243 file    11 swap    0    described 6000
+  81.2s anon   263 file    11 swap    0    described 6250
+  83.6s anon   263 file    11 swap    0    described 6500
+  86.4s anon   263 file    11 swap    0    described 6750
+  89.0s anon   263 file    11 swap    0    described 7000
+  92.0s anon   267 file    11 swap    0    described 7250
+  94.7s anon   267 file    11 swap    0    described 7500
+  97.5s anon   416 file    11 swap    0    described 7750
+ 100.9s anon   267 file    11 swap    0    described 8000
+ 103.7s anon   268 file    11 swap    0    described 8250
+ 107.0s anon   268 file    11 swap    0    described 8500
+ 109.5s anon   268 file    11 swap    0    described 8750
+ 113.1s anon   387 file    11 swap    0    described 9000
+ 116.7s anon   247 file    11 swap    0    described 9250
+ 119.5s anon   251 file    11 swap    0    described 9500
+ 122.6s anon   250 file    11 swap    0    described 9750
+ 124.9s anon   250 file    11 swap    0    described 10000
+ 127.9s anon   280 file    11 swap    0    described 10250
+ 130.3s anon   273 file    11 swap    0    described 10500
+ 133.5s anon   273 file    11 swap    0    described 10750
+ 136.1s anon   273 file    11 swap    0    described 11000
+ 139.3s anon   273 file    11 swap    0    described 11250
+ 142.2s anon   273 file    11 swap    0    described 11500
+ 145.2s anon   273 file    11 swap    0    described 11750
+ 148.2s anon   273 file    11 swap    0    described 12000
+ 151.1s anon   273 file    11 swap    0    described 12250
+ 154.6s anon   273 file    11 swap    0    described 12500
+ 157.4s anon   273 file    11 swap    0    described 12750
+ 160.7s anon   273 file    11 swap    0    described 13000
+ 163.2s anon   273 file    11 swap    0    described 13250
+ 166.3s anon   273 file    11 swap    0    described 13500
+ 168.9s anon   273 file    11 swap    0    described 13750
+ 171.6s anon   290 file    11 swap    0    described 14000
+ 174.3s anon   290 file    11 swap    0    described 14250
+ 177.5s anon   290 file    11 swap    0    described 14500
+ 180.7s anon   302 file    11 swap    0    described 14750
+ 183.5s anon   290 file    11 swap    0    described 15000
+ 186.9s anon   299 file    11 swap    0    described 15250
+ 189.6s anon   299 file    11 swap    0    described 15500
+ 192.9s anon   300 file    11 swap    0    described 15750
+ 195.7s anon   300 file    11 swap    0    described 16000
+ 198.8s anon   333 file    11 swap    0    described 16250
+ 202.4s anon   517 file    11 swap    0    described 16500
+ 205.1s anon   333 file    11 swap    0    described 16750
+ 208.5s anon   333 file    11 swap    0    described 17000
+ 210.9s anon   333 file    11 swap    0    described 17250
+ 214.1s anon   333 file    11 swap    0    described 17500
+ 216.7s anon   333 file    11 swap    0    described 17750
+ 219.5s anon   333 file    11 swap    0    described 18000
+ 222.5s anon   333 file    11 swap    0    described 18250
+ 225.1s anon   333 file    11 swap    0    described 18500
+ 228.2s anon   333 file    11 swap    0    described 18750
+ 230.5s anon   333 file    11 swap    0    described 19000
+ 233.5s anon   333 file    11 swap    0    described 19250
+ 236.0s anon   403 file    11 swap    0    described 19500
+ 240.5s anon   333 file    11 swap    0    described 19750
+ 243.5s anon   333 file    11 swap    0    described 20000
+ 246.6s anon   333 file    11 swap    0    described 20250
+ 250.2s anon   333 file    11 swap    0    described 20500
+ 252.9s anon   333 file    11 swap    0    described 20750
+ 256.0s anon   333 file    11 swap    0    described 21000
+ 259.0s anon   333 file    11 swap    0    described 21250
+ 262.2s anon   333 file    11 swap    0    described 21500
+ 265.5s anon   333 file    11 swap    0    described 21750
+ 268.1s anon   333 file    11 swap    0    described 22000
+ 271.4s anon   333 file    11 swap    0    described 22250
+ 273.9s anon   333 file    11 swap    0    described 22500
+ 277.0s anon   333 file    11 swap    0    described 22750
+ 279.4s anon   333 file    11 swap    0    described 23000
+ 282.8s anon   333 file    11 swap    0    described 23250
+ 285.5s anon   333 file    11 swap    0    described 23500
+ 288.7s anon   333 file    11 swap    0    described 23750
+ 292.1s anon   333 file    11 swap    0    described 24000
+ 294.7s anon   333 file    11 swap    0    described 24250
+ 298.0s anon   333 file    11 swap    0    described 24500
+ 300.3s anon   333 file    11 swap    0    described 24750
+ 303.5s anon   333 file    11 swap    0    described 25000
+ 306.1s anon   333 file    11 swap    0    described 25250
+ 309.4s anon   333 file    11 swap    0    described 25500
+ 312.4s anon   333 file    11 swap    0    described 25750
+ 315.0s anon   333 file    11 swap    0    described 26000
+ 318.2s anon   333 file    11 swap    0    described 26250
+ 320.9s anon   333 file    11 swap    0    described 26500
+ 324.8s anon   333 file    11 swap    0    described 26750
+ 328.1s anon    37 file  1443 swap    0  cpu: decode 906s, features 1635s
+ 328.2s anon    37 file  1476 swap    0  described 27658/27673 images, 12160127 descriptors
+ 328.2s anon    37 file  1476 swap    0  same pixels: 1114 files decode to a picture another file already holds
+ 340.3s anon   208 file  1758 swap    0  vocabulary: 1034435 live words of 4826809 from 1122519 samples
+ 356.6s anon   290 file  1729 swap    0  quantised
+ 358.4s anon   350 file  1639 swap    0  inverted file
+ 361.0s anon   393 file  1672 swap    0  candidates: 2603326 pairs
+ 389.4s anon   393 file  1848 swap    2  anchors: 810190 of 849258 verified pairs
+ 394.8s anon   269 file   316 swap    2  variants: 24299 more pairs from 1191 unmatched images
+ 395.2s anon   331 file   316 swap    2  released the index and the descriptors
+ 395.7s anon   440 file   316 swap    2  bridges: dropped 33 lone links between clusters
+ 395.9s anon   447 file   316 swap    2  weak anchors: 373293 admitted, 16545 refused between clusters
+ 398.6s anon   507 file   316 swap    2    propagation round 1: +144290 pairs
+ 399.3s anon   507 file   316 swap    2    propagation round 2: +792 pairs
+ 399.9s anon   507 file   316 swap    2    propagation round 3: +13 pairs
+ 400.3s anon   507 file   316 swap    2    propagation round 4: +0 pairs
+ 400.3s anon   507 file   316 swap    2  propagated: 145095 of 156820 composed hypotheses (343058 put to the pi
+ 400.6s anon   370 file   316 swap    2  corroborated: 6269 more pairs inside existing clusters
+ 408.5s anon   695 file   316 swap    2  groups: 687 representatives over 27283 files, 23360 of them in more th
+ 408.5s anon   695 file   316 swap    2  suggested: 7497 to keep, 17293 to delete, 2493 to review

@@ -1,0 +1,261 @@
+   Compiling img-fp v0.73.0 (/home/daniel/Documents/Vscode_repositories/img-fp)
+    Finished `release` profile [optimized] target(s) in 10m 33s
+     Running unittests src/lib.rs (target/release/deps/img_fp-6942b42774196301)
+
+running 225 tests
+test against::tests::a_chain_that_loops_names_no_kept_file ... ok
+test against::tests::a_repeat_rests_on_its_holder_and_on_the_file_kept ... ok
+test against::tests::each_scanned_file_gets_one_verdict ... ok
+test cache::tests::a_packed_record_comes_back_bit_for_bit ... ok
+test cache::tests::a_named_path_is_a_file_unless_it_is_a_directory ... ok
+test cache::tests::a_file_that_cannot_be_reached_is_not_gone ... ok
+test cache::tests::a_cache_another_run_holds_is_not_replaced_under_it ... ok
+test cache::tests::a_colour_measured_later_is_kept_in_the_record ... ok
+test cache::tests::a_damaged_record_costs_itself_and_not_the_cache ... ok
+test cache::tests::a_compaction_keeps_what_another_run_appended_meanwhile ... ok
+test cache::tests::a_short_record_is_rejected_rather_than_trusted ... ok
+test cache::tests::a_record_on_an_unplugged_drive_is_kept ... ok
+test cache::tests::an_impossible_length_is_a_torn_tail_not_an_abort ... ok
+test cache::tests::a_file_is_compacted_once_a_quarter_of_it_is_unused ... ok
+test cache::tests::a_wide_thumbnail_is_not_damage ... ok
+test cache::tests::a_torn_final_record_costs_that_record_and_nothing_else ... ok
+test cache::tests::another_names_record_is_not_taken_whatever_its_key ... ok
+test cache::tests::appended_records_are_read_back_and_the_last_one_wins ... ok
+test cache::tests::names_that_are_not_utf8_keep_their_own_records ... ok
+test cache::tests::gone_is_asked_a_folder_at_a_time ... ok
+test cache::tests::a_record_on_a_share_mounted_anywhere_is_kept_while_it_is_away ... ok
+test cache::tests::a_run_keeps_what_it_took_and_made ... ok
+test cache::tests::the_default_file_is_named_for_its_format ... ok
+test claims::tests::a_pair_found_twice_is_still_one_bridge ... ok
+test claims::tests::weak_anchors_join_clusters_only_when_every_file_vouches ... ok
+test cache::tests::compaction_keeps_what_it_is_given_and_another_versions_file_is_left_alone ... ok
+test claims::tests::weak_anchors_join_two_clusters_with_clean_cycles_only_through_one_file ... ok
+test decode::jpeg::tests::a_jpegs_head_says_its_depth_profile_and_pictures ... ok
+test cache::tests::a_read_only_cache_counts_what_it_holds ... ok
+test cache::tests::damaged_framing_keeps_the_records_before_it ... ok
+test decode::jpeg::tests::a_motion_photos_video_is_held_after_the_picture ... ok
+test decode::jpeg::tests::an_mpf_large_thumbnail_is_not_another_picture ... ok
+test decode::other::pnm_tests::a_pnms_largest_value_is_read_past_comments ... ok
+test cache::tests::what_a_run_was_not_asked_about_is_carried_while_it_is_there ... ok
+test decode::tests::a_file_that_is_no_picture_is_refused_from_its_head ... ok
+test cache::tests::records_this_run_does_not_walk_are_framed_not_unpacked ... ok
+test decode::tests::a_file_with_no_extension_is_taken_only_by_a_wildcard ... ok
+test cache::tests::records_made_at_other_settings_are_kept_not_read ... ok
+test decode::tests::a_heif_is_known_by_its_compatible_brands ... ok
+test decode::tests::a_jpegs_metadata_is_not_its_coding ... ok
+test decode::tests::a_jxl_past_the_allocation_limit_is_refused_not_fatal ... ok
+test decode::tests::a_grey_copy_differs_from_its_original_by_its_colour ... ok
+test claims::tests::a_cluster_over_the_budget_is_starred_not_skipped ... ok
+test decode::tests::a_header_claiming_too_many_pixels_is_refused_not_allocated ... ok
+test decode::tests::a_sixteen_bit_sample_is_made_eight_as_image_makes_it ... ok
+test decode::tests::a_mac_metadata_file_is_not_a_broken_picture ... ok
+test decode::tests::a_tga_is_decoded_by_its_name ... ok
+test decode::tests::area_resize_preserves_mean ... ok
+test decode::tests::fingerprints ... ignored
+test decode::tests::exif_is_found_where_each_format_keeps_it ... ok
+test decode::tests::lossless_is_read_from_the_picture_not_the_container ... ok
+test decode::tests::orienting_the_plane_is_orienting_the_picture ... ok
+test decode::tests::reduce_timings ... ignored
+test decode::tests::several_pictures_and_raw_files_are_told_by_their_bytes ... ok
+test decode::tests::a_turned_picture_is_probed_the_way_it_is_shown ... ok
+test decode::tests::sniff_basics ... ok
+test decode::tests::an_icon_holding_an_rgb_png_is_read ... ok
+test decode::tests::every_default_extension_names_a_file_that_decodes ... ok
+test decode::tests::text_that_starts_like_a_short_signature_is_no_picture ... ok
+test decode::tests::specialised_reduction_matches_the_general_one ... ok
+test extensions::tests::an_exception_alone_is_every_file_but_that_one ... ok
+test extensions::tests::an_exception_takes_one_back_out_of_a_list ... ok
+test extensions::tests::an_exception_that_takes_nothing_away_is_said ... ok
+test extensions::tests::only_an_image_extension_names_an_image ... ok
+test extensions::tests::spellings_of_one_extension_agree ... ok
+test extensions::tests::the_default_list_takes_images_and_nothing_bare ... ok
+test decode::tests::a_cut_off_jpeg_decodes_and_says_it_is_damaged ... ok
+test extensions::tests::the_wildcard_reaches_a_file_with_no_extension ... ok
+test extensions::tests::walks_that_match_nothing_are_refused ... ok
+test group::tests::a_chain_groups_around_its_middle ... ok
+test extensions::tests::the_wildcard_widens_whatever_it_is_written_beside ... ok
+test group::tests::a_dense_component_costs_nothing ... ok
+test group::tests::a_file_matched_by_two_others_represents_them ... ok
+test group::tests::a_repeated_edge_does_not_duplicate_a_member ... ok
+test group::tests::a_second_representative_covers_what_the_first_missed ... ok
+test group::tests::a_tie_goes_to_the_better_file ... ok
+test group::tests::every_matched_file_lands_in_a_group ... ok
+test group::tests::every_member_matched_the_representative ... ok
+test group::tests::output_does_not_depend_on_edge_order ... ok
+test group::tests::a_complete_component_is_one_group ... ok
+test group::tests::unmatched_files_are_in_no_group ... ok
+test decode::tests::a_cut_off_png_decodes_and_says_it_is_damaged ... ok
+test index::bench::quantise_branching ... ignored
+test index::bench::quantise_depth ... ignored
+test index::bench::quantise_threads ... ignored
+test index::bench::quantise_timings ... ignored
+test index::bench::query_timings ... ignored
+test index::bench::shared_overlap ... ignored
+test index::bench::shared_pool ... ignored
+test index::bench::shared_timings ... ignored
+test index::tests::query_distances_are_dist2 ... ok
+test decode::tests::a_preview_fits_its_place ... ok
+test last::tests::a_file_changed_during_the_scan_is_changed_since_it ... ok
+test index::tests::packed_postings_score_exactly_as_pairs_did ... ok
+test last::tests::a_file_changed_since_the_scan_is_not_deleted_nor_relied_on ... ok
+test last::tests::a_scan_is_kept_beside_the_cache_it_used ... ok
+test last::tests::a_scan_kept_by_an_earlier_version_asks_for_a_scan ... ok
+test index::tests::the_block_filter_intersects_exactly_as_a_merge_does ... ok
+test matched::tests::kept_claims_come_back_whole_for_their_fingerprint_alone ... ok
+test matched::tests::identical_files_are_kept_for_as_long_as_neither_changes ... ok
+test outcome::tests::a_lapsed_kept_copy_takes_back_what_rests_on_it ... ok
+test outcome::tests::a_place_is_in_fractions_of_each_picture_and_reverses ... ok
+test outcome::tests::a_saved_scan_is_read_back_whole ... ok
+test outcome::tests::the_group_rules_judge_by_representatives_still_there ... ok
+test outcome::tests::the_group_rules_read_the_groups ... ok
+test outputs::tests::a_log_to_a_descriptor_appends_and_a_file_is_truncated ... ok
+test outputs::tests::a_report_replaces_the_last_only_when_written_whole ... ok
+test outputs::tests::a_report_to_a_pipe_a_descriptor_or_a_device_is_written_in_place ... ok
+test last::tests::a_kept_scan_writes_the_reports_the_scan_wrote ... ok
+test decode::tests::streamed_fit_is_fit_to ... ok
+test outputs::tests::no_output_writes_over_the_kept_scan ... ok
+test outputs::tests::one_file_by_two_names_is_one_destination ... ok
+test outputs::tests::the_output_probe_writes_through_a_link_and_leaves_it_alone ... ok
+test outputs::tests::no_output_is_named_as_a_picture ... ok
+test pipeline::tests::a_plain_scan_is_the_scope_with_no_library ... ok
+test outputs::tests::stdout_carries_one_output ... ok
+test problems::tests::a_clean_run_has_nothing_to_report ... ok
+test problems::tests::a_skip_is_not_a_problem_and_does_not_move_the_exit_code ... ok
+test outputs::tests::two_outputs_on_one_file_are_refused ... ok
+test problems::tests::every_category_has_its_tally ... ok
+test problems::tests::every_problem_category_counts_towards_the_exit_code ... ok
+test problems::tests::samples_are_capped_but_the_count_is_not ... ok
+test outputs::tests::the_report_goes_where_one_rule_says ... ok
+test progress::tests::a_stage_past_its_estimate_is_never_done ... ok
+test progress::tests::every_stage_has_its_words_and_a_price ... ok
+test progress::tests::rate_holds_three_figures_and_climbs_the_ladder ... ok
+test progress::tests::the_analysis_is_priced_by_what_its_own_files_took ... ok
+test progress::tests::a_file_is_costed_at_the_size_the_analysis_works_at ... ok
+
+Problems (50 total):
+     50  image(s) could not be read
+         - /x/0.jpg: not an image
+         - /x/1.jpg: not an image
+         - /x/2.jpg: not an image
+         - /x/3.jpg: not an image
+         - /x/4.jpg: not an image
+         - /x/5.jpg: not an image
+         - /x/6.jpg: not an image
+         - /x/7.jpg: not an image
+         - /x/8.jpg: not an image
+         - /x/9.jpg: not an image
+         - ... and 40 more (all of them are in the log file)
+test progress::tests::the_bar_moves_with_the_time_left_and_never_back ... ok
+test progress::tests::the_second_look_is_every_file_verification_has_not_settled ... ok
+test problems::tests::the_log_file_holds_every_line_the_console_elides ... ok
+test report::tests::a_csv_row_quotes_only_what_needs_it ... ok
+test report::tests::a_corroborated_pair_says_so_against_a_library ... ok
+test report::tests::a_report_without_pairs_is_still_one_document ... ok
+test report::tests::a_text_row_is_the_members_pair_with_its_representative ... ok
+test report::tests::a_corroborated_pair_says_so_in_every_format ... ok
+test report::tests::a_name_that_is_not_utf8_reaches_every_format_intact ... ok
+test retrieve::tests::one_ranked_list_is_its_own_merge ... ok
+test report::tests::the_json_is_one_document ... ok
+test same::tests::a_hash_collision_is_not_an_identical_pair ... ok
+test decode::tests::tiff_chunks_decode_exactly_as_the_whole_picture_does ... ok
+test same::tests::a_hash_read_in_pieces_is_the_hash_of_the_whole ... ok
+test same::tests::a_pair_is_stated_for_every_copy_of_either_file ... ok
+test same::tests::files_analysed_alike_are_one_file ... ok
+test retrieve::tests::rank_best_keys_order_as_the_comparator_does ... ok
+test same::tests::a_wildcard_walk_compares_only_what_may_be_a_picture ... ok
+test same::tests::the_files_that_are_one_file_are_stated_once_each ... ok
+test sift::bench::blur_threads ... ignored
+test sift::bench::extract_threads ... ignored
+test sift::bench::kernel_timings ... ignored
+test sift::bench::octave_threads ... ignored
+test same::tests::files_proven_identical_are_not_read_again ... ok
+test stated::tests::a_pair_met_both_ways_round_is_stated_once ... ok
+test stated::tests::a_pair_reads_alike_from_either_end ... ok
+test suggest::tests::a_deletion_is_taken_back_when_what_it_rests_on_lapses ... ok
+test suggest::tests::a_deletion_names_the_file_that_stays ... ok
+test suggest::tests::a_file_of_several_pictures_is_deleted_only_for_its_bytes ... ok
+test suggest::tests::a_larger_frame_deletes_what_it_holds_unless_the_rest_is_canvas ... ok
+test suggest::tests::a_lossless_file_is_deleted_only_for_its_own_pixels ... ok
+test suggest::tests::a_mirror_image_settles_nothing_and_is_left_for_a_look ... ok
+test same::tests::identical_files_are_found_whatever_the_sample_says ... ok
+test suggest::tests::a_pinned_file_is_kept_and_named_by_what_it_deletes ... ok
+test suggest::tests::a_weak_pair_settles_nothing_unless_it_agrees_almost_everywhere ... ok
+test suggest::tests::blur_timings ... ignored
+test suggest::tests::by_group_keeps_representatives_and_cuts_on_correlation ... ok
+test suggest::tests::of_the_same_pixels_the_file_that_carries_more_is_kept ... ok
+test suggest::tests::of_two_identical_files_one_is_kept_and_the_other_deleted ... ok
+test suggest::tests::a_softer_copy_does_not_delete_a_sharper_one_of_its_size ... ok
+test table::tests::a_path_that_is_not_utf8_carries_its_bytes_beside_it ... ok
+test suggest::tests::two_pictures_of_one_frame_alone_are_both_left_for_a_look ... ok
+test table::tests::a_quote_in_a_csv_field_is_doubled ... ok
+test table::tests::every_layout_reads_one_list_of_columns ... ok
+test tests::a_named_cache_beside_no_cache_is_only_for_clearing ... ok
+test tests::affine_round_trip ... ok
+test tests::last_takes_only_what_rewrites_a_report ... ok
+test tests::the_cpu_check_reads_cpuid_as_std_does ... ok
+test pipeline::tests::a_verdict_is_the_same_edge_from_either_end ... ok
+test tests::mirror_permutation_matches_reextraction ... ok
+test tests::the_vocabulary_sample_follows_the_corpus ... ok
+test tests::this_machine_has_what_this_build_needs ... ok
+test tests::thresholds_outside_their_range_are_refused ... ok
+test tests::the_window_is_refused_what_its_worker_would_be ... ok
+test tests::vocabulary_occupancy_holds_at_every_corpus_size ... ok
+test verify::bench::match_timings ... ignored
+test verify::bench::pixel_timings ... ignored
+test tests::why_says_the_cause_once ... ok
+test verify::tests::a_frame_onto_a_frame_is_the_whole_picture_resized ... ok
+test verify::tests::a_reversed_verdict_describes_the_same_pair_from_the_other_side ... ok
+test verify::tests::a_whole_frame_match_needs_fewer_points_and_every_block ... ok
+test walk::tests::a_carriage_return_is_trimmed_rather_than_kept_in_the_path ... ok
+test verify::tests::the_pyramid_is_built_as_its_reference ... ok
+test walk::tests::a_dangling_link_is_a_problem_when_followed_and_stops_a_prune ... ok
+test walk::tests::a_file_both_sides_reach_is_the_nearer_roots ... ok
+test walk::tests::a_link_and_its_target_are_one_file_not_a_duplicate_pair ... ok
+test walk::tests::a_list_is_split_on_newlines_and_blanks_are_ignored ... ok
+test walk::tests::a_list_that_cannot_be_opened_is_fatal ... ok
+test walk::tests::a_listed_file_is_walked_as_if_it_were_named ... ok
+test walk::tests::a_missing_root_is_a_problem ... ok
+test walk::tests::a_hidden_folder_waits_for_hidden ... ok
+test walk::tests::a_named_link_does_not_stand_in_for_the_file_a_walk_finds ... ok
+test walk::tests::a_null_separated_list_keeps_every_byte_of_the_filename ... ok
+test walk::tests::a_path_that_is_not_utf8_is_still_a_path ... ok
+test walk::tests::a_symlink_is_not_followed_unless_asked ... ok
+test walk::tests::a_symlink_loop_is_a_skip_and_everything_else_is_still_found ... ok
+test walk::tests::an_exclude_holds_for_relative_roots_and_relative_excludes ... ok
+test walk::tests::an_exclude_matches_whole_components ... ok
+test walk::tests::an_exclude_naming_one_file_reaches_it_through_a_link_too ... ok
+test walk::tests::an_exclude_outranks_a_root_named_outright ... ok
+test walk::tests::a_trash_or_thumbnail_cache_is_passed_over ... ok
+test walk::tests::an_exclude_protects_a_file_reached_through_a_link_to_it ... ok
+test walk::tests::an_exclude_protects_a_file_reached_through_a_linked_folder ... ok
+test walk::tests::an_exclude_that_does_not_resolve_is_a_problem ... ok
+test walk::tests::an_exclude_prunes_a_folder_and_can_name_one_file ... ok
+test walk::tests::excluding_the_link_path_works_as_well_as_excluding_the_real_one ... ok
+test walk::tests::an_import_folder_inside_the_library_is_the_scans ... ok
+test walk::tests::inside_a_flatpak_the_desktops_folders_are_the_hosts ... ok
+test walk::tests::hard_links_and_overlapping_roots_are_listed_once ... ok
+test walk::tests::subfolders_and_links_to_them_wait_for_recursive ... ok
+test walk::tests::the_canonical_paths_a_walk_states_are_the_filesystems ... ok
+test index::tests::a_two_level_vocabulary_separates_what_is_separable ... ok
+test decode::tests::png_rows_decode_exactly_as_the_whole_picture_does ... ok
+test tests::the_plain_and_the_v3_copies_agree ... ok
+test decode::tests::the_working_size_is_the_planes ... ok
+test spill::tests::arrays_come_back_from_the_file_as_they_went_in ... ok
+test report::tests::the_pairs_are_written_on_every_thread_byte_for_byte ... ok
+
+test result: ok. 208 passed; 0 failed; 17 ignored; 0 measured; 0 filtered out; finished in 1.96s
+
+     Running unittests src/main.rs (target/release/deps/img_fp-ee412df067cfc5b2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests img_fp
+
+running 1 test
+test src/simd.rs - simd::dispatched (line 107) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 7.31s; merged doctests compilation took 7.29s

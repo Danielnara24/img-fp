@@ -1,0 +1,12 @@
+17:44:42 start all-2048
+17:45:33 cancelled by user
+--- restart 18:09:05
+18:09:05 start all-2048
+18:35:02 end all-2048 exit 2
+18:35:02 start all2-2048
+18:53:20 end all2-2048 exit 0
+18:53:20 start disc shard 0
+20:10:02 end disc shard 0 exit 0: 1:16:41
+20:10:02 start disc shard 1
+21:10:41 end disc shard 1 exit 0: 1:00:38
+21:10:41 run4 done

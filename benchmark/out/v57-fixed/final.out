@@ -1,0 +1,130 @@
+all-new
+   F1 0.9730  precision 98.40%  recall 96.22%
+   proposed 1,338,735  TP 1,317,290  FP 21,445  FN 51,719  groups 904
+   FP: trap 3,202  cross-family 18,243  seed-pairs 61  merges 49
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 6,849 pairs
+keep all-basec
+actions {'KEEP': 9147, 'DELETE': 19729, 'REVIEW': 3725}
+content lost by deletion: {} {}
+content lost, regions exact (no slack): 0 {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 64 {'unedited, no unedited holder': 64} {'unedited, no unedited holder': [('ORIGINAL', 2), ('crop_quarter', 2), ('crop_half', 2), ('jpeg_mid', 2), ('to_jxl', 2), ('messaging_app', 2), ('jpeg_magick', 2), ('rot90', 2)]}
+families whose original or exact/lossless copy survives: 358 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 19), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top', 'photo_of_screen'), 13), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top'), 11), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker', 'redaction_bars'), 11), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'pincushion'), 10), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'perspective_top'), 9)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 4 / 364 ['IMGS/b&w2.jpeg', 'IMGS/document1.jpeg', 'IMGS/low-light2.jpg', 'IMGS2/bw1.avif']
+DELETE  edit                           7520
+DELETE  original/lossless copy         1821
+DELETE  unedited version               10388
+KEEP    composite                      4235
+KEEP    edit                           2882
+KEEP    original/lossless copy         358
+KEEP    trap                           541
+KEEP    unedited version               1131
+REVIEW  composite                      115
+REVIEW  edit                           2592
+REVIEW  trap                           205
+REVIEW  unedited version               813
+keep all-new
+actions {'KEEP': 9133, 'DELETE': 19748, 'REVIEW': 3703}
+content lost by deletion: {} {}
+content lost, regions exact (no slack): 0 {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 83 {'unedited, no unedited holder': 83} {'unedited, no unedited holder': [('ORIGINAL', 3), ('jpeg_mid', 3), ('to_jxl', 3), ('jpeg_magick', 3), ('jpeg_ffmpeg', 3), ('copy_exact', 3), ('upscale', 3), ('strip_metadata', 3)]}
+families whose original or exact/lossless copy survives: 356 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 20), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'perspective_top'), 11), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top'), 10), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'pincushion', 'qr_sticker'), 10), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top', 'photo_of_screen'), 9), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker', 'redaction_bars'), 9)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 5 / 364 ['IMGS/b&w2.jpeg', 'IMGS/document1.jpeg', 'IMGS/document2.jpg', 'IMGS/low-light2.jpg', 'IMGS2/bw1.avif']
+DELETE  edit                           7519
+DELETE  original/lossless copy         1823
+DELETE  unedited version               10406
+KEEP    composite                      4235
+KEEP    edit                           2880
+KEEP    original/lossless copy         356
+KEEP    trap                           545
+KEEP    unedited version               1117
+REVIEW  composite                      116
+REVIEW  edit                           2581
+REVIEW  trap                           197
+REVIEW  unedited version               809
+keep all2-basec
+actions {'REVIEW': 6008, 'DELETE': 15525, 'KEEP': 10956}
+content lost by deletion: {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, regions exact (no slack): 1 {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, holders neither composites nor mirrored/rotated copies: 39 {'unedited, no unedited holder': 38, 'composite': 1} {'unedited, no unedited holder': [('ORIGINAL', 2), ('to_tiff', 2), ('webp_lossless', 2), ('to_png', 2), ('crop_slight', 2), ('alpha_on_white', 2), ('alpha_on_black', 2), ('crop_half', 2)], 'composite': [('phone_screenshot', 1)]}
+families whose original or exact/lossless copy survives: 350 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'blur_patch', 'chromatic_aberration', 'crop_micro', 'crop_off_centre'), 4), (('barrel_distort', 'blur_fill', 'blur_patch', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'brightness', 'flip_h', 'invert'), 2), (('blur_fill', 'blur_patch', 'channel_swap', 'crop_off_centre', 'flip_h', 'invert'), 2), (('blur_fill', 'blur_patch', 'brightness', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 2), (('blur_fill', 'blur_patch', 'channel_swap', 'crop_micro', 'flip_h', 'invert'), 2)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 5 / 364 ['IMGS2/bw6.webp', 'IMGS4/Coles_Boorooma_in_December_2025.jpg', 'IMGS4/Locomotive.jpg', 'IMGS4/booktruck.jpg', 'IMGS5/GanyutingStore2.jpg']
+DELETE  composite                      1
+DELETE  edit                           4191
+DELETE  original/lossless copy         1827
+DELETE  unedited version               9506
+KEEP    composite                      4090
+KEEP    edit                           4261
+KEEP    original/lossless copy         350
+KEEP    trap                           521
+KEEP    unedited version               1734
+REVIEW  composite                      243
+REVIEW  edit                           4573
+REVIEW  original/lossless copy         2
+REVIEW  trap                           232
+REVIEW  unedited version               958
+keep all2b-B1
+actions {'REVIEW': 6069, 'DELETE': 15482, 'KEEP': 10900}
+content lost by deletion: {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, regions exact (no slack): 1 {'composite': 1} {'composite': [('phone_screenshot', 1)]}
+content lost, holders neither composites nor mirrored/rotated copies: 23 {'unedited, no unedited holder': 22, 'composite': 1} {'unedited, no unedited holder': [('ORIGINAL', 1), ('rotate_large', 1), ('aspect_distort', 1), ('to_tiff', 1), ('webp_lossless', 1), ('to_png', 1), ('rotate_small', 1), ('crop_slight', 1)], 'composite': [('phone_screenshot', 1)]}
+families whose original or exact/lossless copy survives: 356 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'blur_patch', 'crop_micro', 'flip_h', 'invert'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'chromatic_aberration', 'crop_micro', 'crop_off_centre'), 3), (('barrel_distort', 'blur_fill', 'blur_patch', 'crop_micro', 'invert', 'jpeg_low'), 3), (('blur_fill', 'blur_patch', 'brightness', 'crop_micro', 'crop_off_centre', 'crop_panoramic'), 2), (('blur_fill', 'blur_patch', 'channel_swap', 'crop_micro', 'flip_h', 'invert'), 2)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 3 / 364 ['IMGS2/bw6.webp', 'IMGS4/Coles_Boorooma_in_December_2025.jpg', 'IMGS5/Mural2.jpg']
+DELETE  composite                      1
+DELETE  edit                           4172
+DELETE  original/lossless copy         1818
+DELETE  unedited version               9491
+KEEP    composite                      4094
+KEEP    edit                           4213
+KEEP    original/lossless copy         355
+KEEP    trap                           518
+KEEP    unedited version               1720
+REVIEW  composite                      242
+REVIEW  edit                           4605
+REVIEW  original/lossless copy         6
+REVIEW  trap                           229
+REVIEW  unedited version               987
+== all
+                                fam-base                           fam-cr1                           fam-new
+n0      17.0 j 17.0 o      - P      - R  14.0 j 14.0 o      - P      - R  15.0 j 15.0 o      - P      - R
+n1      16.7 j 15.7 o  85.31 P  96.87 R  15.3 j 14.3 o  86.33 P  96.96 R  16.3 j 15.3 o  85.71 P  97.15 R
+n2      16.7 j 13.7 o  89.22 P  95.63 R  17.0 j 13.7 o  89.27 P  95.62 R  16.0 j 13.3 o  89.75 P  95.50 R
+f       15.0 j 15.0 o      - P      - R  14.0 j 14.0 o      - P      - R  15.0 j 15.0 o      - P      - R
+total     65.3 joined                        60.3 joined                        62.3 joined                    
+sibs      65.3 joined                        60.3 joined                        62.3 joined                    
+== i5
+                                fam-base                           fam-cr1                           fam-new
+n0       9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+n1      10.0 j  8.0 o  64.42 P  98.27 R   9.7 j  8.0 o  65.05 P  97.71 R  10.0 j  8.3 o  64.47 P  97.71 R
+n2      12.7 j 10.7 o  64.78 P  96.48 R  11.3 j  9.0 o  67.58 P  97.07 R  11.7 j  9.7 o  66.58 P  96.87 R
+f        9.0 j  9.0 o      - P      - R   8.0 j  8.0 o      - P      - R   8.0 j  8.0 o      - P      - R
+total     40.7 joined                        38.0 joined                        38.7 joined                    
+sibs      40.7 joined                        38.0 joined                        38.7 joined                    
+== all2
+                                fam-base                           fam-cr1                           fam-new
+n0      17.0 j 17.0 o      - P      - R  14.0 j 14.0 o      - P      - R  15.0 j 15.0 o      - P      - R
+n1      13.7 j 12.0 o  89.25 P  93.15 R  12.7 j 12.0 o  89.75 P  93.05 R  13.3 j 12.3 o  89.83 P  92.96 R
+n2      17.3 j 14.3 o  89.84 P  91.30 R  15.7 j 12.7 o  91.08 P  90.79 R  15.0 j 12.3 o  91.54 P  90.60 R
+f       15.0 j 15.0 o      - P      - R  14.0 j 14.0 o      - P      - R  15.0 j 15.0 o      - P      - R
+total     63.0 joined                        56.3 joined                        58.3 joined                    
+sibs      63.0 joined                        56.3 joined                        58.3 joined                    
+== hdev
+                                fam-base                           fam-cr1                           fam-new
+n0     248.0 j 248.0 o      - P      - R 245.0 j 245.0 o      - P      - R 239.0 j 239.0 o      - P      - R
+n1     240.3 j 216.7 o  50.74 P  97.46 R 232.3 j 210.7 o  51.72 P  97.46 R 237.7 j 212.0 o  51.36 P  97.46 R
+n2     249.3 j 207.0 o  58.41 P  95.66 R 232.7 j 192.7 o  60.01 P  95.56 R 241.0 j 200.0 o  59.30 P  95.53 R
+f      231.0 j 231.0 o      - P      - R 242.0 j 242.0 o      - P      - R 236.0 j 236.0 o      - P      - R
+total    968.7 joined                       952.0 joined                       953.7 joined                    
+sibs     968.7 joined                       952.0 joined                       953.7 joined                    
+fam-base  hdev  alone  248  among found  231  both  219  same evidence  146  only alone  29  only found  12
+fam-base  all   alone   17  among found   15  both   14  same evidence   10  only alone   3  only found   1
+fam-base  all2  alone   17  among found   15  both   14  same evidence   10  only alone   3  only found   1
+fam-base  i5    alone    9  among found    9  both    9  same evidence    5  only alone   0  only found   0
+fam-new   hdev  alone  239  among found  236  both  233  same evidence  215  only alone   6  only found   3
+fam-new   all   alone   15  among found   15  both   15  same evidence   15  only alone   0  only found   0
+fam-new   all2  alone   15  among found   15  both   15  same evidence   15  only alone   0  only found   0
+fam-new   i5    alone    9  among found    8  both    8  same evidence    7  only alone   1  only found   0
+containment IMGS 512 -> 1024: true pairs 220795 222199 lost 0 added 1404

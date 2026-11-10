@@ -1,0 +1,17 @@
+mir 32.25 user 4.79 wall 1299 more pairs from 466 unmatched images (0 deeper candidates)
+IDENTICAL mir.json mir-repfam.json
+found 368.35 user 59.02 wall 399 more pairs from 8967 unmatched images (6089 deeper candidates)
+IDENTICAL found.json found-repfam.json
+all 1067.69 user 213.38 wall 36454 more pairs from 1516 unmatched images (405 deeper candidates)
+IDENTICAL all.json all-repfam.json
+all2 971.64 user 187.72 wall 36944 more pairs from 2253 unmatched images (363 deeper candidates)
+IDENTICAL all2.json all2-repfam.json
+detail-512 159.45 user 29.48 wall 5578 more pairs from 313 unmatched images (96 deeper candidates)
+IDENTICAL detail-512.json repfam-512.json
+detail-1024 600.23 user 108.72 wall 5578 more pairs from 313 unmatched images (96 deeper candidates)
+IDENTICAL detail-1024.json repfam-1024.json
+against 955.69 user 158.05 wall 26811 more pairs from 2546 unmatched images (321 deeper candidates)
+IDENTICAL against.json ship.json
+disc0 3673.13 user 887.63 wall 3729 more pairs from 50460 unmatched images (95470 deeper candidates)
+IDENTICAL disc0.json report.json
+done

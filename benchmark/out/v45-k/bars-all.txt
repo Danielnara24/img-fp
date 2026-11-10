@@ -1,0 +1,113 @@
+run                     files      F1     P%     R%  trap  cross seedp orig >=300  top
+all-n0-d0@default         304  0.0000   0.00 100.00     0      6     6    6     0  bust1|bust2:1*, game2|game3:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*
+all-n1-d1@default         608  0.9302  90.61  95.56     0     29     8    8     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*, bust1|bust2:4*
+all-n10-d1@default       3344  0.9570  97.67  93.82    15    333     4    3     0  sea_photo1|sea_photo2:111*, Segovia1|Segovia2:111*, game2|game3:110*, mclaren1|mclaren2:1
+all-n2-d1@default         912  0.9324  93.19  93.30     1     59     8    7     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d2@default         912  0.9558  96.78  94.41     0     27     5    5     0  sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d3@default         912  0.9327  91.12  95.52     0     79    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n30-d1@default       9424  0.9649  99.76  93.44   262     30     4    0     0  bust1|bust2:26, subway1|subway2:2, docks1|UnionCity:1, noisy2|club:1
+all-n0-d0@c0.5            304  0.0000   0.00 100.00     0     18    18   18     0  boat_photo1|boat_photo2:1*, bust1|bust2:1*, game2|game3:1*, KoronasdaruLeeds1|KoronasdaruLeeds2:1*, red_rocks_sign1|red_rocks_sign2:1*
+all-n0-d0@c0.6            304  0.0000   0.00 100.00     0     13    13   13     0  boat_photo1|boat_photo2:1*, bust1|bust2:1*, game2|game3:1*, KoronasdaruLeeds1|KoronasdaruLeeds2:1*, red_rocks_sign1|red_rocks_sign2:1*
+all-n0-d0@c0.8            304  0.0000   0.00 100.00     0      4     4    4     0  game2|game3:1*, Henares1|Henares2:1*, bust1|bust2:1*, Segovia1|Segovia2:1*
+all-n0-d0@c0.9            304  0.0000   0.00 100.00     0      2     2    2     0  game2|game3:1*, Segovia1|Segovia2:1*
+all-n0-d0@c0.65           304  0.0000   0.00 100.00     0      9     9    9     0  boat_photo1|boat_photo2:1*, bust1|bust2:1*, game2|game3:1*, KoronasdaruLeeds1|KoronasdaruLeeds2:1*, red_rocks_sign1|red_rocks_sign2:1*
+all-n0-d0@c0.75           304  0.0000   0.00 100.00     0      5     5    5     0  bust1|bust2:1*, game2|game3:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*, Henares1|Henares2:1*
+all-n1-d1@c0.5            608  0.8899  82.51  96.59     0     60    16   15     0  field1|field2:4*, red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, algiu1|algiu2:4*, ibira1|ibira2:4*
+all-n1-d1@c0.6            608  0.9024  84.94  96.25     0     50    13   13     0  field1|field2:4*, red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, algiu1|algiu2:4*, KoronasdaruLeeds1|KoronasdaruLeeds2:4*
+all-n1-d1@c0.8            608  0.9424  96.43  92.15     0     10     3    3     0  bust1|bust2:4*, game2|game3:4*, Segovia1|Segovia2:2*
+all-n1-d1@c0.9            608  0.9167  97.68  86.35     0      6     2    2     0  game2|game3:4*, Segovia1|Segovia2:2*
+all-n1-d1@c0.65           608  0.9198  88.36  95.90     0     37    10   10     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, algiu1|algiu2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*
+all-n1-d1@c0.75           608  0.9400  94.48  93.52     0     16     5    5     0  Henares1|Henares2:4*, bust1|bust2:4*, game2|game3:4*, Segovia1|Segovia2:2*, sea_photo1|sea_photo2:2*
+all-n10-d1@c0.5          3344  0.9598  95.58  96.39    43    651     6    6     0  Segovia1|Segovia2:121*, sea_photo1|sea_photo2:120*, game2|game3:118*, algiu1|algiu2:109*, Henares1|Henares2:100*
+all-n10-d1@c0.6          3344  0.9546  95.32  95.59    26    704     7    7     0  sea_photo1|sea_photo2:120*, Segovia1|Segovia2:120*, game2|game3:116*, red_rocks_sign1|red_rocks_sign2:102*, Henares1|Henares2:94*
+all-n10-d1@c0.8          3344  0.9348  98.64  88.83     6    184     2    2     0  game2|game3:95*, Segovia1|Segovia2:89*
+all-n10-d1@c0.9          3344  0.9004  99.96  81.92     5      0     0    0     0  
+all-n10-d1@c0.65         3344  0.9564  96.52  94.79    19    513     6    5     0  sea_photo1|sea_photo2:120*, Segovia1|Segovia2:116*, game2|game3:114*, Henares1|Henares2:90*, Acueducto1|Acueducto2:72*
+all-n10-d1@c0.75         3344  0.9490  98.53  91.52    11    201     2    2     0  game2|game3:103*, Segovia1|Segovia2:98*
+all-n2-d1@c0.5            912  0.9313  89.52  97.05     1     99    13   11     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, ibira1|ibira2:9*, game2|game3:9*, boat_photo1|boat_photo2:9*
+all-n2-d1@c0.6            912  0.9355  90.89  96.36     1     84    11   10     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, algiu1|algiu2:9*, Acueducto1|Acueducto2:9*
+all-n2-d1@c0.8            912  0.9370  97.19  90.45     0     23     4    3     0  game2|game3:9*, Segovia1|Segovia2:9*, bust1|bust2:3*, subway1|subway2:2
+all-n2-d1@c0.9            912  0.9062  97.64  84.55     0     18     2    2     0  game2|game3:9*, Segovia1|Segovia2:9*
+all-n2-d1@c0.65           912  0.9384  92.49  95.23     1     67     9    8     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d1@c0.75           912  0.9406  96.53  91.70     0     29     5    4     0  game2|game3:9*, Segovia1|Segovia2:9*, sea_photo1|sea_photo2:6*, bust1|bust2:3*, subway1|subway2:2
+all-n2-d2@c0.5            912  0.9356  90.17  97.21     0     91    12   12     0  sea_photo1|sea_photo2:9*, KoronasdaruLeeds1|KoronasdaruLeeds2:9*, ibira1|ibira2:9*, algiu1|algiu2:9*, red_rocks_sign1|red_rocks_sign2:9*
+all-n2-d2@c0.6            912  0.9525  93.69  96.86     0     56     8    8     0  algiu1|algiu2:9*, red_rocks_sign1|red_rocks_sign2:9*, boat_photo1|boat_photo2:9*, sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*
+all-n2-d2@c0.8            912  0.9479  97.65  92.08     0     19     4    4     0  Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d2@c0.9            912  0.9198  98.67  86.15     0     10     2    2     0  Segovia1|Segovia2:6*, game2|game3:4*
+all-n2-d2@c0.65           912  0.9554  95.15  95.93     0     42     7    7     0  sea_photo1|sea_photo2:8*, red_rocks_sign1|red_rocks_sign2:7*, Segovia1|Segovia2:6*, boat_photo1|boat_photo2:6*, Henares1|Henares2:6*
+all-n2-d2@c0.75           912  0.9535  97.68  93.13     0     19     4    4     0  Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d3@c0.5            912  0.9203  87.32  97.29     0    120    17   13     0  sea_photo1|sea_photo2:9*, KoronasdaruLeeds1|KoronasdaruLeeds2:9*, game2|game3:9*, Segovia1|Segovia2:9*, algiu1|algiu2:9*
+all-n2-d3@c0.6            912  0.9349  89.98  97.29     0     92    12   10     0  sea_photo1|sea_photo2:9*, KoronasdaruLeeds1|KoronasdaruLeeds2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*
+all-n2-d3@c0.8            912  0.9354  96.97  90.34     0     24     3    3     0  game2|game3:9*, Segovia1|Segovia2:9*, bust1|bust2:6*
+all-n2-d3@c0.9            912  0.9098  97.96  84.92     0     15     2    2     0  game2|game3:9*, Segovia1|Segovia2:6*
+all-n2-d3@c0.65           912  0.9395  91.14  96.94     0     80    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n2-d3@c0.75           912  0.9446  94.57  94.35     0     46     7    5     0  game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, sea_photo1|sea_photo2:8*, bust1|bust2:8*
+all-n30-d1@c0.5          9424  0.9735  98.92  95.83   529    837     9    1     1  Acueducto1|Acueducto2:704*, subway1|subway2:29, Henares1|Henares2:27, algiu1|algiu2:26, bust1|bust2:26
+all-n30-d1@c0.6          9424  0.9727  99.59  95.05   415     90     9    0     0  Henares1|Henares2:26, algiu1|algiu2:26, bust1|bust2:26, mclaren1|mclaren2:6, subway1|subway2:2
+all-n30-d1@c0.8          9424  0.9446  99.85  89.62   145     26     3    0     0  bust1|bust2:23, subway1|subway2:2, docks1|UnionCity:1
+all-n30-d1@c0.9          9424  0.9036  99.90  82.48    83     21     1    0     0  bust1|bust2:21
+all-n30-d1@c0.65         9424  0.9699  99.68  94.43   334     58     8    0     0  bust1|bust2:25, Henares1|Henares2:23, mclaren1|mclaren2:4, subway1|subway2:2, sunset4|Henares1:1
+all-n30-d1@c0.75         9424  0.9569  99.80  91.89   206     28     3    0     0  bust1|bust2:25, subway1|subway2:2, docks1|UnionCity:1
+all-n0-d0@o0.4            304  0.0000   0.00 100.00     0     10    10   10     0  Acueducto3|Acueducto4:1*, bust1|bust2:1*, docks1|docks2:1*, game2|game3:1*, subway1|subway2:1*
+all-n0-d0@o0.5            304  0.0000   0.00 100.00     0     10    10   10     0  Acueducto3|Acueducto4:1*, bust1|bust2:1*, docks1|docks2:1*, game2|game3:1*, subway1|subway2:1*
+all-n0-d0@o0.6            304  0.0000   0.00 100.00     0      8     8    8     0  Acueducto3|Acueducto4:1*, bust1|bust2:1*, game2|game3:1*, subway1|subway2:1*, red_rocks_sign1|red_rocks_sign2:1*
+all-n0-d0@o0.75           304  0.0000   0.00 100.00     0      7     7    7     0  bust1|bust2:1*, game2|game3:1*, subway1|subway2:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*
+all-n1-d1@o0.4            608  0.8960  84.34  95.56     7     45    12   12     0  red_rocks_sign1|red_rocks_sign2:4*, Acueducto3|Acueducto4:4*, Henares1|Henares2:4*, Antoniego1|Antoniego2:4*, game2|game3:4*
+all-n1-d1@o0.5            608  0.8960  84.34  95.56     7     45    12   12     0  red_rocks_sign1|red_rocks_sign2:4*, Acueducto3|Acueducto4:4*, Henares1|Henares2:4*, Antoniego1|Antoniego2:4*, game2|game3:4*
+all-n1-d1@o0.6            608  0.9091  86.69  95.56     4     39    11   10     0  red_rocks_sign1|red_rocks_sign2:4*, Acueducto3|Acueducto4:4*, Henares1|Henares2:4*, game2|game3:4*, subway1|subway2:4*
+all-n1-d1@o0.75           608  0.9180  88.33  95.56     2     35    10    9     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, subway1|subway2:4*, Acueducto1|Acueducto2:4*
+all-n10-d1@o0.4          3344  0.9342  92.63  94.23   623    544     5    5     0  sea_photo1|sea_photo2:112*, game2|game3:112*, Segovia1|Segovia2:111*, subway1|subway2:110*, bust1|bust2:99*
+all-n10-d1@o0.5          3344  0.9345  92.78  94.12   597    542     5    5     0  sea_photo1|sea_photo2:112*, game2|game3:112*, Segovia1|Segovia2:111*, subway1|subway2:108*, bust1|bust2:99*
+all-n10-d1@o0.6          3344  0.9440  94.65  94.15   206    622     6    6     0  sea_photo1|sea_photo2:112*, game2|game3:112*, Segovia1|Segovia2:111*, bust1|bust2:99*, subway1|subway2:98*
+all-n10-d1@o0.75         3344  0.9529  96.67  93.96    69    435     5    4     0  sea_photo1|sea_photo2:112*, Segovia1|Segovia2:111*, game2|game3:111*, bust1|bust2:99*, mclaren1|mclaren2:2
+all-n2-d1@o0.4            912  0.9070  87.94  93.64    21     92    12   12     0  Antoniego1|Antoniego2:9*, red_rocks_sign1|red_rocks_sign2:9*, docks1|docks2:9*, sea_photo1|sea_photo2:9*, Henares1|Henares2:9*
+all-n2-d1@o0.5            912  0.9070  87.94  93.64    21     92    12   12     0  Antoniego1|Antoniego2:9*, red_rocks_sign1|red_rocks_sign2:9*, docks1|docks2:9*, sea_photo1|sea_photo2:9*, Henares1|Henares2:9*
+all-n2-d1@o0.6            912  0.9237  91.24  93.52    13     66     9    9     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d1@o0.75           912  0.9310  92.68  93.52     2     63     8    8     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d2@o0.4            912  0.9229  89.94  94.76    36     55     8    8     0  subway1|subway2:9*, sea_photo1|sea_photo2:8*, Acueducto3|Acueducto4:8*, docks1|docks2:6*, bust1|bust2:6*
+all-n2-d2@o0.5            912  0.9240  90.14  94.76    36     53     8    8     0  subway1|subway2:9*, sea_photo1|sea_photo2:8*, Acueducto3|Acueducto4:8*, docks1|docks2:6*, Segovia1|Segovia2:6*
+all-n2-d2@o0.6            912  0.9393  93.23  94.64    16     43     7    7     0  subway1|subway2:9*, sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:6*
+all-n2-d2@o0.75           912  0.9492  95.20  94.64     4     37     6    6     0  subway1|subway2:9*, sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, bust1|bust2:4*
+all-n2-d3@o0.4            912  0.9002  85.03  95.64    37    106    14   13     0  docks1|docks2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*
+all-n2-d3@o0.5            912  0.9002  85.03  95.64    37    106    14   13     0  docks1|docks2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*
+all-n2-d3@o0.6            912  0.9139  87.50  95.64    13    103    15   12     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n2-d3@o0.75           912  0.9275  90.02  95.64     6     84    11   10     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n30-d1@o0.4          9424  0.9477  95.49  94.06  5665    109    10    0     0  Antoniego1|Antoniego2:54, bust1|bust2:26, Acueducto3|Acueducto4:20, Acueducto1|Acueducto2:2, subway1|subway2:2
+all-n30-d1@o0.5          9424  0.9484  95.65  94.04  5482     80     8    0     0  Antoniego1|Antoniego2:53, Acueducto3|Acueducto4:18, bust1|bust2:3, subway1|subway2:2, temple1|temple2:1
+all-n30-d1@o0.6          9424  0.9590  97.92  93.96  2569     30     5    0     0  Antoniego1|Antoniego2:25, subway1|subway2:2, bust1|bust2:1, docks1|UnionCity:1, noisy2|club:1
+all-n30-d1@o0.75         9424  0.9639  99.19  93.74   944     53     5    0     0  bust1|bust2:26, Antoniego1|Antoniego2:23, subway1|subway2:2, docks1|UnionCity:1, noisy2|club:1
+all-n0-d0@p3              304  0.0000   0.00 100.00     0      6     6    6     0  bust1|bust2:1*, game2|game3:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*
+all-n0-d0@p4              304  0.0000   0.00 100.00     0      6     6    6     0  bust1|bust2:1*, game2|game3:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*
+all-n0-d0@p5              304  0.0000   0.00 100.00     0      6     6    6     0  bust1|bust2:1*, game2|game3:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*
+all-n0-d0@p6              304  0.0000   0.00 100.00     0      6     6    6     0  bust1|bust2:1*, game2|game3:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*
+all-n0-d0@p8              304  0.0000   0.00 100.00     0      6     6    6     0  bust1|bust2:1*, game2|game3:1*, red_rocks_sign1|red_rocks_sign2:1*, sea_photo1|sea_photo2:1*, Segovia1|Segovia2:1*
+all-n1-d1@p3              608  0.9373  90.73  96.93     0     29     8    8     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*, bust1|bust2:4*
+all-n1-d1@p4              608  0.9373  90.73  96.93     0     29     8    8     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*, bust1|bust2:4*
+all-n1-d1@p5              608  0.9355  90.71  96.59     0     29     8    8     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*, bust1|bust2:4*
+all-n1-d1@p6              608  0.9338  90.68  96.25     0     29     8    8     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*, bust1|bust2:4*
+all-n1-d1@p8              608  0.9302  90.61  95.56     0     29     8    8     0  red_rocks_sign1|red_rocks_sign2:4*, Henares1|Henares2:4*, game2|game3:4*, Acueducto1|Acueducto2:4*, bust1|bust2:4*
+all-n10-d1@p3            3344  0.9664  97.71  95.60    15    334     5    3     0  Segovia1|Segovia2:113*, game2|game3:110*, sea_photo1|sea_photo2:109*, mclaren1|mclaren2:1, manhole5|aerial3:1
+all-n10-d1@p4            3344  0.9656  97.71  95.44    15    333     4    3     0  Segovia1|Segovia2:113*, game2|game3:110*, sea_photo1|sea_photo2:109*, mclaren1|mclaren2:1
+all-n10-d1@p5            3344  0.9645  97.70  95.24    15    333     4    3     0  Segovia1|Segovia2:113*, game2|game3:110*, sea_photo1|sea_photo2:109*, mclaren1|mclaren2:1
+all-n10-d1@p6            3344  0.9626  97.70  94.87    15    333     4    3     0  Segovia1|Segovia2:113*, game2|game3:110*, sea_photo1|sea_photo2:109*, mclaren1|mclaren2:1
+all-n10-d1@p8            3344  0.9600  97.68  94.38    15    333     4    3     0  Segovia1|Segovia2:113*, game2|game3:110*, sea_photo1|sea_photo2:109*, mclaren1|mclaren2:1
+all-n2-d1@p3              912  0.9357  92.94  94.20     1     62     8    7     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d1@p4              912  0.9357  92.94  94.20     1     62     8    7     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d1@p5              912  0.9357  92.94  94.20     1     62     8    7     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d1@p6              912  0.9357  92.94  94.20     1     62     8    7     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d1@p8              912  0.9336  93.20  93.52     1     59     8    7     0  red_rocks_sign1|red_rocks_sign2:9*, sea_photo1|sea_photo2:9*, game2|game3:9*, Acueducto1|Acueducto2:9*, Segovia1|Segovia2:9*
+all-n2-d2@p3              912  0.9631  96.82  95.81     0     27     5    5     0  sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d2@p4              912  0.9619  96.82  95.58     0     27     5    5     0  sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d2@p5              912  0.9619  96.82  95.58     0     27     5    5     0  sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d2@p6              912  0.9619  96.82  95.58     0     27     5    5     0  sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d2@p8              912  0.9595  96.80  95.11     0     27     5    5     0  sea_photo1|sea_photo2:8*, Segovia1|Segovia2:6*, Henares1|Henares2:6*, game2|game3:4*, bust1|bust2:3*
+all-n2-d3@p3              912  0.9382  91.21  96.58     0     79    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n2-d3@p4              912  0.9382  91.21  96.58     0     79    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n2-d3@p5              912  0.9358  91.17  96.11     0     79    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n2-d3@p6              912  0.9346  91.15  95.88     0     79    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n2-d3@p8              912  0.9327  91.12  95.52     0     79    11    9     0  sea_photo1|sea_photo2:9*, game2|game3:9*, Segovia1|Segovia2:9*, Henares1|Henares2:9*, Acueducto1|Acueducto2:9*
+all-n30-d1@p3            9424  0.9740  99.73  95.18   292     44    11    0     0  bust1|bust2:26, algiu1|algiu2:8, subway1|subway2:2, aerial2|c-bike:1, Koorka_0117|aerial2:1
+all-n30-d1@p4            9424  0.9734  99.73  95.07   288     44    11    0     0  bust1|bust2:26, algiu1|algiu2:8, subway1|subway2:2, aerial2|c-bike:1, Koorka_0117|aerial2:1
+all-n30-d1@p5            9424  0.9729  99.74  94.95   287     35     9    0     0  bust1|bust2:26, subway1|subway2:2, aerial2|c-bike:1, Koorka_0117|aerial2:1, low-light|club:1
+all-n30-d1@p6            9424  0.9720  99.74  94.78   284     35     8    0     0  bust1|bust2:26, subway1|subway2:3, aerial2|c-bike:1, Koorka_0117|aerial2:1, low-light|club:1
+all-n30-d1@p8            9424  0.9688  99.75  94.16   269     32     6    0     0  bust1|bust2:26, subway1|subway2:2, Koorka_0117|aerial2:1, low-light|club:1, docks1|UnionCity:1

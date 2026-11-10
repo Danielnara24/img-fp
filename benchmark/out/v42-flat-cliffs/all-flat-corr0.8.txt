@@ -1,0 +1,98 @@
+== all-flat-corr0.8.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.8, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9436  precision 99.86%  recall 89.43%
+   proposed 1,023,873  TP 1,022,454  FP 1,419  FN 120,840  groups 784
+   FP: trap 1,378  cross-family 41  seed-pairs 2  merges 2
+     cross IMGS2/bust1.jpg <-> IMGS2/bust2.jpg: 39 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 2 pairs
+   half[alt] F1 0.9408  P 99.88%  R 88.92%  (152 seeds)
+   half[hash] F1 0.9418  P 99.87%  R 89.11%  (160 seeds)
+   perfect transforms: 41 of 87
+     tiled_watermark           90/304
+     wave_vertical            162/304
+     crop_micro               171/304
+     redaction_bars           190/304
+     barrel_distort           202/304
+     keystone_side            211/304
+     perspective_top          225/304
+     embed_tiny               232/304
+     contact_sheet            247/304
+     photo_of_screen          277/304
+     crop_strip_top           287/304
+     vignette                 290/304
+     halftone                 292/304
+     crop_quarter             293/304
+     picture_in_picture       293/304
+     slide_deck               294/304
+     pdf_page                 295/304
+     magazine_spread          296/304
+     wall_poster              296/304
+     embed_small              297/304
+     scale_small              298/304
+     crop_half                300/304
+     crop_off_centre          300/304
+     pincushion               300/304
+     scale_nearest            300/304
+     browser_window           301/304
+     collage_cell             301/304
+     phone_screenshot         301/304
+     posterize                301/304
+     qr_sticker               301/304
+     blur_fill                302/304
+     blur_patch               302/304
+     brightness               302/304
+     crop_panoramic           302/304
+     gamma                    302/304
+     thumbnail                302/304
+     video_call_frame         302/304
+     caption_bar              303/304
+     crop_slight              303/304
+     crop_square              303/304
+     flip_h                   303/304
+     hue_rotate               303/304
+     mirror_crop              303/304
+     rot180                   303/304
+     swirl                    303/304
+     transpose_diag           303/304
+     alpha_on_black           304/304
+     alpha_on_white           304/304
+     aspect_distort           304/304
+     blur                     304/304
+     channel_swap             304/304
+     chromatic_aberration     304/304
+     cinematic_grade          304/304
+     contrast                 304/304
+     copy_exact               304/304
+     duotone                  304/304
+     greyscale                304/304
+     invert                   304/304
+     jpeg_ffmpeg              304/304
+     jpeg_generations         304/304
+     jpeg_high                304/304
+     jpeg_low                 304/304
+     jpeg_magick              304/304
+     jpeg_mid                 304/304
+     messaging_app            304/304
+     motion_blur              304/304
+     noise                    304/304
+     print_scan               304/304
+     rot90                    304/304
+     rotate_large             304/304
+     rotate_small             304/304
+     saturation               304/304
+     scale_large              304/304
+     scale_mid                304/304
+     sharpen                  304/304
+     shear                    304/304
+     strip_metadata           299/299
+     temperature              304/304
+     to_avif                  304/304
+     to_heif                  304/304
+     to_jxl                   304/304
+     to_png                   304/304
+     to_tiff                  304/304
+     upscale                  304/304
+     watermark_corner         304/304
+     webp_lossless            304/304
+     webp_lossy               304/304
+

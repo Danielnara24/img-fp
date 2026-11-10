@@ -4,9 +4,21 @@
 # Vendored third-party tools, venvs and their caches
 /vendor/
 
-# The benchmark is local for now: corpus paths, tool outputs and the
-# competitors' binaries are all machine-specific.
-/benchmark/
+# The benchmark's code, docs and generators are kept; of its runs
+# (benchmark/out, ~42 GB: binaries, caches, reports, file lists) only the
+# write-ups, scripts and small tables that CLAUDE.md cites as evidence.
+/benchmark/out/**
+!/benchmark/out/**/
+!/benchmark/out/**/*.md
+!/benchmark/out/**/*.py
+!/benchmark/out/**/*.sh
+!/benchmark/out/**/*.patch
+!/benchmark/out/**/*.tsv
+!/benchmark/out/**/*.txt
+!/benchmark/out/**/*.out
+!/benchmark/out/**/metrics.json
+/benchmark/out/**/lists/
+/benchmark/out/v58-reach/geo2names.txt
 
 __pycache__/
 *.pyc

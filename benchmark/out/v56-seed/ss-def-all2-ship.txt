@@ -1,0 +1,21 @@
+== size-all2.json ==
+   config: {"candidates": 150, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9342  precision 98.59%  recall 88.78%
+   proposed 1,246,736  TP 1,229,104  FP 17,632  FN 155,397  groups 886
+   FP: trap 3,975  cross-family 13,657  seed-pairs 64  merges 57
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 6,244 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 5,612 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 297 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 272 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 270 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 190 pairs
+     cross IMGS5/Parish Church1.jpg <-> IMGS5/Parish Church2.jpg: 123 pairs
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 80 pairs
+     cross IMGS5/Macizo5.jpg <-> IMGS5/Macizo6.jpg: 73 pairs
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 72 pairs
+   half[alt] F1 0.9318  P 98.67%  R 88.27%  (182 seeds)
+   half[hash] F1 0.9369  P 99.63%  R 88.42%  (184 seeds)
+   perfect transforms: 8 of 88
+     pinch                    241/364
+     tiled_watermark          247/364
+     swirl                    256/364

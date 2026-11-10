@@ -1,0 +1,12 @@
+czkawka_default.json
+czkawka_tuned.json
+difpy.json
+dupeguru.json
+fclones.json
+findimagedupes.json
+imagededup_cnn.json
+imagededup_phash.json
+imgdupes_phash.json
+imgfp.json
+pdq.json
+sscd.json

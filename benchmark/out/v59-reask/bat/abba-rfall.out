@@ -1,0 +1,5 @@
+idle 70 C
+A1 start 61C end 90C user/sys/wall 949.80 36.57 188.25
+B2 start 70C end 87C user/sys/wall 819.41 22.22 157.54
+B3 start 64C end 84C user/sys/wall 827.70 21.55 153.82
+A4 start 68C end 84C user/sys/wall 818.12 20.34 138.64

@@ -1,0 +1,10 @@
+== all-minpixelcorrelation0.9.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.9, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9137  precision 99.91%  recall 84.17%
+   proposed 963,264  TP 962,367  FP 897  FN 180,927  groups 845
+   FP: trap 844  cross-family 53  seed-pairs 1  merges 1
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 53 pairs
+   half[alt] F1 0.9116  P 99.92%  R 83.82%  (152 seeds)
+   half[hash] F1 0.9121  P 99.91%  R 83.90%  (160 seeds)
+   perfect transforms: 49 of 87
+

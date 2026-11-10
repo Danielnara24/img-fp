@@ -1,0 +1,6 @@
+v2: demoted 3,386  same-family 2,689  cross-family 697
+  v2: clean 83450, seed pairs sharing a cluster (>=5 files each): ['Floriana1.jpg(83)+Floriana2.jpg(6)', 'Floriana3.jpg(81)+Floriana4.jpg(11)', 'Fountain3.jpg(83)+Fountain5.jpg(6)', 'bird2.jpg(81)+bird1.jpg(81)']
+v3: demoted 2,337  same-family 1,780  cross-family 557
+  v3: clean 84507, seed pairs sharing a cluster (>=5 files each): ['Floriana2.jpg(83)+Floriana1.jpg(83)', 'Floriana3.jpg(81)+Floriana4.jpg(5)', 'Fountain3.jpg(84)+Fountain5.jpg(83)', 'bird2.jpg(81)+bird1.jpg(81)']
+off:
+  off: clean 86841, seed pairs sharing a cluster (>=5 files each): ['Floriana2.jpg(83)+Floriana1.jpg(83)', 'Floriana4.jpg(84)+Floriana3.jpg(84)', 'Fountain3.jpg(84)+Fountain5.jpg(83)', 'Tree2.jpg(84)+Tree1.jpg(84)', 'bird2.jpg(81)+bird1.jpg(81)']

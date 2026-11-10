@@ -1,0 +1,18 @@
+actions {'KEEP': 8840, 'DELETE': 19914, 'REVIEW': 3817}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 55 {'unedited, no unedited holder': 55} {'unedited, no unedited holder': [('ORIGINAL', 2), ('jpeg_mid', 2), ('to_jxl', 2), ('messaging_app', 2), ('jpeg_magick', 2), ('rot90', 2), ('rot180', 2), ('jpeg_ffmpeg', 2)]}
+families whose original or exact/lossless copy survives: 358 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 16), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker'), 8), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'halftone', 'invert'), 8), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker', 'redaction_bars'), 7), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side', 'qr_sticker'), 7), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'pincushion', 'qr_sticker'), 6)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 3 / 364 ['IMGS/b&w2.jpeg', 'IMGS/document1.jpeg', 'IMGS2/bw1.avif']
+DELETE  edit                           7558
+DELETE  original/lossless copy         1821
+DELETE  unedited version               10535
+KEEP    composite                      4174
+KEEP    edit                           2663
+KEEP    original/lossless copy         358
+KEEP    trap                           550
+KEEP    unedited version               1095
+REVIEW  composite                      165
+REVIEW  edit                           2764
+REVIEW  trap                           186
+REVIEW  unedited version               702

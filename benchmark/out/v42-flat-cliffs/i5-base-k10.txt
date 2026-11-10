@@ -1,0 +1,106 @@
+== i5-base-k10.json ==
+   config: {"candidates": 10, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.7621  precision 96.01%  recall 63.18%
+   proposed 148,534  TP 142,606  FP 5,928  FN 83,109  groups 154
+   FP: trap 197  cross-family 5,731  seed-pairs 10  merges 10
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,748 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,545 pairs
+     cross bird1.jpg <-> bird2.jpg: 207 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 116 pairs
+     cross Macizo3.jpg <-> Macizo4.jpg: 69 pairs
+     cross Macizo5.jpg <-> Macizo6.jpg: 28 pairs
+     cross Cemetery3.jpg <-> Cemetery4.jpg: 10 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 6 pairs
+     cross Puerto3.jpg <-> Puerto4.jpg: 1 pairs
+     cross Los Gigantes1.jpg <-> Los Gigantes2.jpg: 1 pairs
+   half[alt] F1 0.8014  P 99.68%  R 67.01%  (30 seeds)
+   half[hash] F1 0.8218  P 96.78%  R 71.41%  (33 seeds)
+   perfect transforms: 14 of 87
+     flip_h                    19/60
+     mirror_crop               19/60
+     transpose_diag            19/60
+     tiled_watermark           22/60
+     wave_vertical             23/60
+     keystone_side             26/60
+     barrel_distort            27/60
+     crop_micro                28/60
+     perspective_top           30/60
+     photo_of_screen           34/60
+     contact_sheet             36/60
+     crop_strip_top            36/60
+     magazine_spread           36/60
+     slide_deck                36/60
+     blur_fill                 37/60
+     browser_window            37/60
+     collage_cell              37/60
+     crop_half                 37/60
+     crop_off_centre           37/60
+     crop_panoramic            37/60
+     crop_quarter              37/60
+     crop_slight               37/60
+     crop_square               37/60
+     embed_small               37/60
+     embed_tiny                37/60
+     halftone                  37/60
+     hue_rotate                37/60
+     jpeg_generations          37/60
+     jpeg_low                  37/60
+     pdf_page                  37/60
+     phone_screenshot          37/60
+     picture_in_picture        37/60
+     pincushion                37/60
+     posterize                 37/60
+     rotate_large              37/60
+     scale_nearest             37/60
+     scale_small               37/60
+     shear                     37/60
+     swirl                     37/60
+     thumbnail                 37/60
+     to_jxl                    37/60
+     video_call_frame          37/60
+     wall_poster               37/60
+     webp_lossy                37/60
+     blur                      38/60
+     motion_blur               38/60
+     rotate_small              38/60
+     scale_mid                 38/60
+     to_avif                   38/60
+     chromatic_aberration      39/60
+     jpeg_mid                  39/60
+     noise                     39/60
+     sharpen                   39/60
+     aspect_distort            40/60
+     channel_swap              40/60
+     print_scan                40/60
+     gamma                     41/60
+     jpeg_ffmpeg               42/60
+     to_heif                   43/60
+     vignette                  43/60
+     scale_large               44/60
+     cinematic_grade           47/60
+     jpeg_magick               47/60
+     messaging_app             47/60
+     contrast                  50/60
+     caption_bar               51/60
+     brightness                52/60
+     rot90                     57/60
+     saturation                57/60
+     upscale                   57/60
+     rot180                    58/60
+     blur_patch                59/60
+     temperature               59/60
+     alpha_on_black            60/60
+     alpha_on_white            60/60
+     copy_exact                60/60
+     duotone                   60/60
+     greyscale                 60/60
+     invert                    60/60
+     jpeg_high                 60/60
+     qr_sticker                60/60
+     redaction_bars            60/60
+     strip_metadata            60/60
+     to_png                    60/60
+     to_tiff                   60/60
+     watermark_corner          60/60
+     webp_lossless             60/60
+

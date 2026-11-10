@@ -1,0 +1,18 @@
+actions {'KEEP': 7282, 'DELETE': 16697, 'REVIEW': 3158}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 197 {'unedited, no unedited holder': 197} {'unedited, no unedited holder': [('ORIGINAL', 7), ('jpeg_mid', 7), ('to_jxl', 7), ('jpeg_magick', 7), ('rot90', 7), ('rot180', 7), ('jpeg_ffmpeg', 7), ('copy_exact', 7)]}
+families whose original or exact/lossless copy survives: 58 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 7), (('blur_fill', 'crop_micro', 'flip_h', 'invert', 'jpeg_mid', 'keystone_side'), 6), (('ORIGINAL', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'keystone_side'), 4), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective_top'), 4), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'qr_sticker'), 4), (('ORIGINAL', 'barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert'), 4)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 24 / 304 ['IMGS/10.avif', 'IMGS/14.jpg', 'IMGS/b&w2.jpeg', 'IMGS/city2.jpg', 'IMGS/document1.jpeg', 'IMGS/logo.jpg', 'IMGS2/bw1.avif', 'IMGS2/fallen_tree1.jpg', 'IMGS2/park1.jpg', 'IMGS2/parking_lot1.jpeg', 'IMGS3/Bielskich2.jpg', 'IMGS3/Werbkowice2.jpg', 'IMGS3/casa1.jpg', 'IMGS3/casa2.jpg', 'IMGS3/cross2.jpg', 'IMGS3/docks2.jpg', 'IMGS3/facultatea2.jpg', 'IMGS3/kmart1.jpg', 'IMGS3/morminte2.jpg', 'IMGS3/tserkov1.jpg', 'IMGS4/booktruck.jpg', 'IMGS4/hotel-room.jpg', 'IMGS4/house1.png', 'IMGS4/house4.png']
+DELETE  edit                           6337
+DELETE  original/lossless copy         1761
+DELETE  unedited version               8599
+KEEP    composite                      3500
+KEEP    edit                           2107
+KEEP    original/lossless copy         58
+KEEP    trap                           531
+KEEP    unedited version               1086
+REVIEW  composite                      63
+REVIEW  edit                           2367
+REVIEW  trap                           180
+REVIEW  unedited version               548

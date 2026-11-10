@@ -1,0 +1,36 @@
+02:41:10 start
+02:41:43 pairs rep
+02:51:22 fam rep
+02:58:51 htest rep
+03:01:00 against rep
+03:03:11 detail rep 512
+03:03:33 detail rep 1024
+03:04:59 pairs repfam
+03:14:35 fam repfam
+03:21:52 htest repfam
+03:23:55 against repfam
+03:26:00 detail repfam 512
+03:26:20 detail repfam 1024
+03:27:45 disc repfam 0
+12:49:06 start
+12:50:57 disc repfam 0
+disc-repfam0 3155.84 14:34.06
+13:05:31 disc repfam 1
+disc-repfam1 3188.92 17:04.51
+13:22:35 abba repfam found
+13:31:04 abba repfam all
+14:04:36 cliff --min-aligned-points 6
+14:22:26 cliff --min-aligned-points 3
+14:40:43 cliff --min-frame-overlap 0.6
+14:58:50 cliff --min-frame-overlap 0.5
+15:16:57 cliff --min-frame-overlap 0.4
+15:34:54 cliff --min-frame-overlap 0.3
+15:52:44 cliff --min-frame-overlap 0.25
+16:10:13 cliff --min-pixel-correlation 0.6
+16:27:34 cliff --min-pixel-correlation 0.5
+16:44:30 cliff --min-pixel-correlation 0.4
+17:01:54 cliff --min-pixel-correlation 0.3
+17:19:14 cliff --min-pixel-correlation 0.2
+17:35:49 cliff -k 50
+17:50:39 cliff -k 10
+17:50:39 done

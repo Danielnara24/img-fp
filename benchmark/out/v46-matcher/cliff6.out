@@ -1,0 +1,12 @@
+on3 --min-aligned-points 6
+on3 --min-aligned-points 4
+on3 --min-frame-overlap 0.65
+on3 --min-frame-overlap 0.25
+on3 --min-pixel-correlation 0.9
+on3 --min-pixel-correlation 0.5
+on3 --min-pixel-correlation 0.3
+on3 -k 100
+on3 -k 10
+cliff6 done
+bash: line 1: ./cliff6_score.sh: Permission denied
+scored

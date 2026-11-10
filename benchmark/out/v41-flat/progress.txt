@@ -1,0 +1,10 @@
+all-base done
+all-flat done
+i5-base done
+i5-flat done
+all-base-ov05 done
+all-flat-ov05 done
+all-base-p3 done
+all-flat-p3 done
+done
+pairs-done

@@ -1,0 +1,19 @@
+== all2-repclean2.json ==
+   config: {"candidates": 150, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9420  precision 98.61%  recall 90.17%
+   proposed 1,265,983  TP 1,248,374  FP 17,609  FN 136,127  groups 891
+   FP: trap 4,122  cross-family 13,487  seed-pairs 95  merges 69
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 6,183 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 5,760 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 374 pairs
+     cross IMGS3/Henares1.jpg <-> IMGS3/Henares2.jpg: 203 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 190 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 187 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 91 pairs
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 78 pairs
+     cross IMGS5/Macizo5.jpg <-> IMGS5/Macizo6.jpg: 73 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 59 pairs
+   half[alt] F1 0.9404  P 98.69%  R 89.81%  (182 seeds)
+   half[hash] F1 0.9446  P 99.61%  R 89.81%  (184 seeds)
+   perfect transforms: 13 of 88
+

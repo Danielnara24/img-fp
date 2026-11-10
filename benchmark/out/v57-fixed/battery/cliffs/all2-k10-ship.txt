@@ -1,0 +1,19 @@
+== all2-k10-ship.json ==
+   config: {"candidates": 10, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9096  precision 99.44%  recall 83.82%
+   proposed 1,166,975  TP 1,160,431  FP 6,544  FN 224,070  groups 1111
+   FP: trap 3,662  cross-family 2,882  seed-pairs 29  merges 27
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 1,124 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 535 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 284 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 260 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 197 pairs
+     cross IMGS5/Macizo5.jpg <-> IMGS5/Macizo6.jpg: 152 pairs
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 93 pairs
+     cross IMGS4/baseball1.JPG <-> IMGS4/baseball2.JPG: 69 pairs
+     cross IMGS5/Kaper-12.jpg <-> IMGS5/Kaper-13.jpg: 54 pairs
+     cross IMGS3/cross1.jpg <-> IMGS3/cross2.jpg: 26 pairs
+   half[alt] F1 0.9093  P 99.67%  R 83.60%  (182 seeds)
+   half[hash] F1 0.9085  P 99.63%  R 83.48%  (184 seeds)
+   perfect transforms: 9 of 88
+

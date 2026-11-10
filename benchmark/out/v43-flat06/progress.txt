@@ -1,0 +1,39 @@
+all done
+i5 done
+prov done
+found done
+pairs done
+cliff i5 points8
+cliff i5 points6
+cliff i5 points5
+cliff i5 points4
+cliff i5 points3
+cliff i5 overlap0.75
+cliff i5 overlap0.65
+cliff i5 overlap0.6
+cliff i5 overlap0.5
+cliff i5 overlap0.4
+cliff i5 overlap0.3
+cliff i5 overlap0.25
+cliff i5 k100
+cliff i5 k50
+cliff i5 k25
+cliff i5 k10
+cliff all points8
+cliff all points6
+cliff all points5
+cliff all points4
+cliff all points3
+cliff all overlap0.75
+cliff all overlap0.65
+cliff all overlap0.6
+cliff all overlap0.5
+cliff all overlap0.4
+cliff all overlap0.3
+cliff all overlap0.25
+cliff all k100
+cliff all k50
+cliff all k25
+cliff all k10
+done
+065 done

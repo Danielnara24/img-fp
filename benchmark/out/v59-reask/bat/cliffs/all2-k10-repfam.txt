@@ -1,0 +1,19 @@
+== all2-k10-repfam.json ==
+   config: {"candidates": 10, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9298  precision 99.34%  recall 87.40%
+   proposed 1,218,124  TP 1,210,024  FP 8,100  FN 174,477  groups 927
+   FP: trap 3,706  cross-family 4,394  seed-pairs 47  merges 42
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 1,578 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 340 pairs
+     cross IMGS3/Henares1.jpg <-> IMGS3/Henares2.jpg: 297 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 276 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 263 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 235 pairs
+     cross IMGS2/sea_photo1.jpg <-> IMGS2/sea_photo2.jpg: 205 pairs
+     cross IMGS5/Seagull1.jpg <-> IMGS5/Seagull2.jpg: 203 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 200 pairs
+     cross IMGS5/Macizo3.jpg <-> IMGS5/Macizo4.jpg: 178 pairs
+   half[alt] F1 0.9293  P 99.67%  R 87.05%  (182 seeds)
+   half[hash] F1 0.9295  P 99.59%  R 87.14%  (184 seeds)
+   perfect transforms: 10 of 88
+

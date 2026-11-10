@@ -1,0 +1,91 @@
+Settings -> Detail: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.5, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: /home/daniel/Documents/DISC21/cache57/c.db
+[   0.0s] scratch file in /home/daniel/Documents/DISC21/cache57
+Scanning: ["/home/daniel/Documents/DISC21/queries/images/queries"]
+Against: ["/home/daniel/Documents/DISC21/refs0/images/references"]
+Searching extensions: ["apng", "avif", "avifs", "bmp", "dib", "exr", "ff", "gif", "hdr", "heic", "heics", "heif", "hif", "ico", "jfi", "jfif", "jif", "jpe", "jpeg", "jpg", "jpg_large", "jpg_orig", "jxl", "pam", "pbm", "pgm", "pjp", "pjpeg", "png", "png_large", "pnm", "ppm", "qoi", "tga", "tif", "tiff", "webp"]
+[   1.4s] 100000 files
+[   1.4s] against: 50000 scanned, 50000 in the library
+[   2.1s] exact duplicates: 5 groups
+[ 121.1s] cache: 99994 usable records
+[ 121.2s] 0 files to analyse
+Found 100000 images; 99994 already cached, 6 identical copies, 0 to analyse.
+[ 165.5s] cache: packs of 5647131348 bytes, 0 of them unused, not compacted
+[ 165.5s] cpu: decode 0s, features 0s
+[ 166.2s] described 100000/100000 images, 45081168 descriptors
+Analysis complete. Matching 100000 images...
+[ 259.9s] fixed words: 231269841 entries
+[ 341.0s] vocabulary: 1191405 live words of 16777216 from 1280000 samples
+[ 439.7s] quantised
+[ 450.3s] inverted file
+[ 494.4s] candidates: 7071448 pairs
+[1026.5s]   round 1: 7933 library files asked, 113192 more candidates
+[1035.4s]   round 2: 1004 library files asked, 11753 more candidates
+[1035.8s]   round 3: 232 library files asked, 3350 more candidates
+[1035.9s]   round 4: 70 library files asked, 1140 more candidates
+[1036.0s]   round 5: 18 library files asked, 162 more candidates
+[1036.0s]   round 6: 4 library files asked, 149 more candidates
+[1036.0s]   round 7: 1 library files asked, 5 more candidates
+[1036.1s] -k counts rejections: 8536 windows more in 7 rounds, 7201199 candidates verified
+[1036.1s] anchors: 15944 of 148255 verified pairs
+[1473.0s] variants: 4311 more pairs from 50526 unmatched images
+[1480.2s] released the index and the descriptors
+[1481.5s] bridges: dropped 0 lone links between clusters
+[1481.5s] weak anchors: 13903 admitted, 2501 refused between clusters
+[1481.7s]   propagation round 1: +1386 pairs
+[1481.8s]   propagation round 2: +21 pairs
+[1481.8s]   propagation round 3: +24 pairs
+[1481.8s]   propagation round 4: +0 pairs
+[1481.8s] propagated: 1431 of 5316 composed hypotheses (9488 put to the pixels, budget 7201199 a round)
+[1481.8s] corroborated: 706 more pairs inside existing clusters
+dumped verdicts -> disc/ship-r3/dump.csv
+35 repeat, 53 better, 116 to review, 49796 new, of 50000 images scanned against 50000 library images in 1493.2s -> disc/ship-r3/report.json
+[1493.5s] pace: finding identical files: 100000 files in 0.15s, 12129.3 ns a unit on each of 8 threads
+[1493.5s] pace: reading the cache: 5683004116 bytes in 119.11s, 167.7 ns a unit on each of 8 threads
+[1493.5s] pace: reading headers: 100000 files in 0.00s, 372.2 ns a unit on each of 8 threads
+[1493.5s] pace: describing: 0 pixels analysed in 43.46s, 0.0 ns a unit on each of 8 threads
+[1493.5s] pace: writing the cache: 0 descriptors in 95.67s, 0.0 ns a unit on each of 8 threads
+[1493.5s] pace: building the vocabulary: 1280000 samples in 80.70s, 504401.1 ns a unit on each of 8 threads
+[1493.5s] pace: quantising: 45077659 descriptors in 98.72s, 17519.5 ns a unit on each of 8 threads
+[1493.5s] pace: building the inverted file: 45077659 descriptors in 12.49s, 2217.1 ns a unit on each of 8 threads
+[1493.5s] pace: finding candidates: 25726819 descriptors in 47.02s, 14621.7 ns a unit on each of 8 threads
+[1493.5s] pace: verifying: 7201199 pairs in 539.68s, 599547.7 ns a unit on each of 8 threads
+[1493.5s] pace: propagating: 116525 images and anchors in 12.07s, 828599.5 ns a unit on each of 8 threads
+[1493.5s] pace: grouping and suggesting: 116525 images and anchors in 0.89s, 61425.7 ns a unit on each of 8 threads
+
+Skipped:
+     27  image(s) with no detail to match, such as a blank picture: only an identical copy can match one
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q01298.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q11809.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q12571.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q15563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q16563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q17557.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q21194.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q27539.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30445.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30606.jpg
+         - ... and 17 more (all of them are in the log file)
+	Command being timed: "./img-fp-ship /home/daniel/Documents/DISC21/queries/images/queries --against /home/daniel/Documents/DISC21/refs0/images/references --min-pixel-correlation 0.5 -t 8 -v --no-last --cache /home/daniel/Documents/DISC21/cache57/c.db --log-file disc/ship-r3/run.log -o disc/ship-r3/report.json --dump disc/ship-r3/dump.csv"
+	User time (seconds): 3250.45
+	System time (seconds): 649.83
+	Percent of CPU this job got: 261%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 24:53.79
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3454224
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 6077172
+	Minor (reclaiming a frame) page faults: 4431836
+	Voluntary context switches: 7142085
+	Involuntary context switches: 735293
+	Swaps: 0
+	File system inputs: 637655800
+	File system outputs: 15375592
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

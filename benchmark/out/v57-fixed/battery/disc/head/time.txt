@@ -1,0 +1,487 @@
+Settings -> Detail: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.5, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: /home/daniel/Documents/DISC21/cache57/c.db
+[   0.0s] scratch file in /home/daniel/Documents/DISC21/cache57
+Scanning: ["/home/daniel/Documents/DISC21/queries/images/queries"]
+Against: ["/home/daniel/Documents/DISC21/refs0/images/references"]
+Searching extensions: ["apng", "avif", "avifs", "bmp", "dib", "exr", "ff", "gif", "hdr", "heic", "heics", "heif", "hif", "ico", "jfi", "jfif", "jif", "jpe", "jpeg", "jpg", "jpg_large", "jpg_orig", "jxl", "pam", "pbm", "pgm", "pjp", "pjpeg", "png", "png_large", "pnm", "ppm", "qoi", "tga", "tif", "tiff", "webp"]
+[   4.4s] 100000 files
+[   4.4s] against: 50000 scanned, 50000 in the library
+[  23.0s] exact duplicates: 5 groups
+[  27.5s] 99994 files to analyse
+Found 100000 images; 0 already cached, 6 identical copies, 99994 to analyse.
+[  30.3s]   described 250
+[  32.1s]   described 500
+[  33.7s]   described 750
+[  35.3s]   described 1000
+[  38.4s]   described 1250
+[  40.0s]   described 1500
+[  41.9s]   described 1750
+[  43.6s]   described 2000
+[  46.3s]   described 2250
+[  48.1s]   described 2500
+[  50.1s]   described 2750
+[  52.6s]   described 3000
+[  55.9s]   described 3250
+[  58.5s]   described 3500
+[  61.4s]   described 3750
+[  65.0s]   described 4000
+[  67.5s]   described 4250
+[  69.1s]   described 4500
+[  70.6s]   described 4750
+[  72.2s]   described 5000
+[  73.8s]   described 5250
+[  75.6s]   described 5500
+[  77.2s]   described 5750
+[  78.9s]   described 6000
+[  80.6s]   described 6250
+[  82.4s]   described 6500
+[  84.5s]   described 6750
+[  86.8s]   described 7000
+[  89.2s]   described 7250
+[  91.4s]   described 7500
+[  93.6s]   described 7750
+[  95.5s]   described 8000
+[  97.6s]   described 8250
+[ 100.0s]   described 8500
+[ 102.3s]   described 8750
+[ 105.5s]   described 9000
+[ 109.3s]   described 9250
+[ 111.1s]   described 9500
+[ 112.7s]   described 9750
+[ 114.2s]   described 10000
+[ 115.8s]   described 10250
+[ 117.4s]   described 10500
+[ 119.0s]   described 10750
+[ 120.6s]   described 11000
+[ 122.4s]   described 11250
+[ 124.2s]   described 11500
+[ 126.2s]   described 11750
+[ 128.5s]   described 12000
+[ 130.6s]   described 12250
+[ 133.3s]   described 12500
+[ 135.5s]   described 12750
+[ 137.7s]   described 13000
+[ 140.4s]   described 13250
+[ 143.2s]   described 13500
+[ 146.4s]   described 13750
+[ 149.7s]   described 14000
+[ 152.9s]   described 14250
+[ 155.9s]   described 14500
+[ 157.6s]   described 14750
+[ 159.3s]   described 15000
+[ 160.9s]   described 15250
+[ 162.5s]   described 15500
+[ 164.1s]   described 15750
+[ 165.8s]   described 16000
+[ 167.6s]   described 16250
+[ 169.9s]   described 16500
+[ 173.4s]   described 16750
+[ 176.9s]   described 17000
+[ 179.8s]   described 17250
+[ 182.3s]   described 17500
+[ 184.3s]   described 17750
+[ 185.9s]   described 18000
+[ 187.5s]   described 18250
+[ 189.1s]   described 18500
+[ 190.7s]   described 18750
+[ 192.4s]   described 19000
+[ 194.0s]   described 19250
+[ 195.7s]   described 19500
+[ 198.8s]   described 19750
+[ 201.5s]   described 20000
+[ 204.5s]   described 20250
+[ 207.2s]   described 20500
+[ 209.3s]   described 20750
+[ 211.1s]   described 21000
+[ 212.9s]   described 21250
+[ 214.6s]   described 21500
+[ 216.4s]   described 21750
+[ 218.3s]   described 22000
+[ 220.1s]   described 22250
+[ 222.0s]   described 22500
+[ 225.2s]   described 22750
+[ 228.4s]   described 23000
+[ 231.2s]   described 23250
+[ 235.1s]   described 23500
+[ 238.7s]   described 23750
+[ 242.2s]   described 24000
+[ 244.2s]   described 24250
+[ 246.4s]   described 24500
+[ 248.5s]   described 24750
+[ 250.7s]   described 25000
+[ 252.8s]   described 25250
+[ 255.0s]   described 25500
+[ 257.2s]   described 25750
+[ 260.4s]   described 26000
+[ 263.4s]   described 26250
+[ 267.0s]   described 26500
+[ 270.4s]   described 26750
+[ 274.9s]   described 27000
+[ 277.5s]   described 27250
+[ 279.7s]   described 27500
+[ 282.1s]   described 27750
+[ 284.3s]   described 28000
+[ 286.8s]   described 28250
+[ 289.2s]   described 28500
+[ 292.1s]   described 28750
+[ 296.8s]   described 29000
+[ 299.6s]   described 29250
+[ 302.7s]   described 29500
+[ 306.1s]   described 29750
+[ 309.1s]   described 30000
+[ 311.9s]   described 30250
+[ 314.1s]   described 30500
+[ 316.3s]   described 30750
+[ 318.5s]   described 31000
+[ 320.7s]   described 31250
+[ 323.0s]   described 31500
+[ 325.2s]   described 31750
+[ 328.4s]   described 32000
+[ 331.9s]   described 32250
+[ 335.5s]   described 32500
+[ 338.8s]   described 32750
+[ 341.9s]   described 33000
+[ 344.7s]   described 33250
+[ 346.9s]   described 33500
+[ 349.1s]   described 33750
+[ 351.3s]   described 34000
+[ 353.5s]   described 34250
+[ 355.6s]   described 34500
+[ 357.8s]   described 34750
+[ 359.9s]   described 35000
+[ 362.9s]   described 35250
+[ 365.4s]   described 35500
+[ 368.0s]   described 35750
+[ 370.4s]   described 36000
+[ 372.6s]   described 36250
+[ 374.7s]   described 36500
+[ 377.0s]   described 36750
+[ 379.1s]   described 37000
+[ 381.2s]   described 37250
+[ 383.4s]   described 37500
+[ 385.8s]   described 37750
+[ 388.8s]   described 38000
+[ 392.5s]   described 38250
+[ 395.7s]   described 38500
+[ 399.3s]   described 38750
+[ 401.5s]   described 39000
+[ 403.7s]   described 39250
+[ 405.9s]   described 39500
+[ 408.2s]   described 39750
+[ 410.2s]   described 40000
+[ 412.5s]   described 40250
+[ 414.6s]   described 40500
+[ 417.1s]   described 40750
+[ 419.5s]   described 41000
+[ 421.6s]   described 41250
+[ 423.8s]   described 41500
+[ 425.9s]   described 41750
+[ 428.1s]   described 42000
+[ 430.2s]   described 42250
+[ 432.4s]   described 42500
+[ 434.5s]   described 42750
+[ 437.0s]   described 43000
+[ 439.3s]   described 43250
+[ 441.4s]   described 43500
+[ 443.6s]   described 43750
+[ 445.8s]   described 44000
+[ 448.1s]   described 44250
+[ 450.2s]   described 44500
+[ 452.5s]   described 44750
+[ 455.1s]   described 45000
+[ 458.5s]   described 45250
+[ 461.3s]   described 45500
+[ 464.9s]   described 45750
+[ 467.4s]   described 46000
+[ 469.5s]   described 46250
+[ 471.7s]   described 46500
+[ 473.9s]   described 46750
+[ 475.9s]   described 47000
+[ 478.2s]   described 47250
+[ 480.3s]   described 47500
+[ 483.3s]   described 47750
+[ 485.8s]   described 48000
+[ 488.9s]   described 48250
+[ 492.2s]   described 48500
+[ 494.3s]   described 48750
+[ 496.5s]   described 49000
+[ 498.7s]   described 49250
+[ 501.0s]   described 49500
+[ 503.3s]   described 49750
+[ 505.5s]   described 50000
+[ 508.3s]   described 50250
+[ 511.9s]   described 50500
+[ 516.4s]   described 50750
+[ 520.7s]   described 51000
+[ 524.9s]   described 51250
+[ 528.1s]   described 51500
+[ 530.6s]   described 51750
+[ 532.8s]   described 52000
+[ 534.9s]   described 52250
+[ 537.1s]   described 52500
+[ 539.3s]   described 52750
+[ 541.5s]   described 53000
+[ 543.7s]   described 53250
+[ 546.3s]   described 53500
+[ 549.0s]   described 53750
+[ 551.8s]   described 54000
+[ 555.1s]   described 54250
+[ 557.4s]   described 54500
+[ 559.6s]   described 54750
+[ 561.9s]   described 55000
+[ 564.2s]   described 55250
+[ 566.4s]   described 55500
+[ 568.7s]   described 55750
+[ 571.6s]   described 56000
+[ 575.7s]   described 56250
+[ 579.5s]   described 56500
+[ 583.2s]   described 56750
+[ 586.4s]   described 57000
+[ 588.9s]   described 57250
+[ 591.1s]   described 57500
+[ 593.4s]   described 57750
+[ 595.6s]   described 58000
+[ 597.8s]   described 58250
+[ 600.2s]   described 58500
+[ 602.8s]   described 58750
+[ 607.2s]   described 59000
+[ 612.0s]   described 59250
+[ 615.7s]   described 59500
+[ 619.3s]   described 59750
+[ 622.7s]   described 60000
+[ 625.2s]   described 60250
+[ 627.4s]   described 60500
+[ 629.7s]   described 60750
+[ 631.9s]   described 61000
+[ 634.1s]   described 61250
+[ 636.3s]   described 61500
+[ 638.6s]   described 61750
+[ 642.2s]   described 62000
+[ 645.5s]   described 62250
+[ 649.2s]   described 62500
+[ 653.0s]   described 62750
+[ 657.7s]   described 63000
+[ 660.3s]   described 63250
+[ 662.5s]   described 63500
+[ 664.7s]   described 63750
+[ 667.1s]   described 64000
+[ 669.2s]   described 64250
+[ 671.4s]   described 64500
+[ 673.6s]   described 64750
+[ 676.7s]   described 65000
+[ 680.7s]   described 65250
+[ 684.6s]   described 65500
+[ 688.6s]   described 65750
+[ 692.0s]   described 66000
+[ 694.1s]   described 66250
+[ 696.3s]   described 66500
+[ 698.5s]   described 66750
+[ 700.7s]   described 67000
+[ 702.9s]   described 67250
+[ 705.5s]   described 67500
+[ 708.2s]   described 67750
+[ 711.5s]   described 68000
+[ 714.5s]   described 68250
+[ 717.8s]   described 68500
+[ 721.3s]   described 68750
+[ 725.0s]   described 69000
+[ 727.3s]   described 69250
+[ 729.5s]   described 69500
+[ 731.7s]   described 69750
+[ 734.0s]   described 70000
+[ 736.2s]   described 70250
+[ 738.5s]   described 70500
+[ 741.0s]   described 70750
+[ 744.7s]   described 71000
+[ 748.4s]   described 71250
+[ 751.8s]   described 71500
+[ 756.8s]   described 71750
+[ 760.2s]   described 72000
+[ 764.7s]   described 72250
+[ 767.9s]   described 72500
+[ 770.6s]   described 72750
+[ 772.9s]   described 73000
+[ 775.0s]   described 73250
+[ 777.3s]   described 73500
+[ 779.5s]   described 73750
+[ 781.7s]   described 74000
+[ 784.0s]   described 74250
+[ 787.2s]   described 74500
+[ 790.5s]   described 74750
+[ 794.0s]   described 75000
+[ 797.2s]   described 75250
+[ 801.2s]   described 75500
+[ 803.7s]   described 75750
+[ 806.0s]   described 76000
+[ 808.3s]   described 76250
+[ 810.5s]   described 76500
+[ 812.8s]   described 76750
+[ 815.1s]   described 77000
+[ 817.4s]   described 77250
+[ 820.4s]   described 77500
+[ 823.9s]   described 77750
+[ 827.8s]   described 78000
+[ 831.5s]   described 78250
+[ 835.2s]   described 78500
+[ 837.7s]   described 78750
+[ 840.4s]   described 79000
+[ 842.7s]   described 79250
+[ 845.0s]   described 79500
+[ 850.2s]   described 79750
+[ 854.5s]   described 80000
+[ 858.7s]   described 80250
+[ 861.6s]   described 80500
+[ 863.9s]   described 80750
+[ 866.1s]   described 81000
+[ 868.4s]   described 81250
+[ 870.9s]   described 81500
+[ 874.9s]   described 81750
+[ 879.0s]   described 82000
+[ 882.9s]   described 82250
+[ 886.1s]   described 82500
+[ 888.7s]   described 82750
+[ 891.0s]   described 83000
+[ 893.6s]   described 83250
+[ 896.4s]   described 83500
+[ 899.0s]   described 83750
+[ 901.5s]   described 84000
+[ 905.5s]   described 84250
+[ 910.2s]   described 84500
+[ 913.9s]   described 84750
+[ 917.7s]   described 85000
+[ 920.8s]   described 85250
+[ 923.1s]   described 85500
+[ 925.3s]   described 85750
+[ 927.6s]   described 86000
+[ 929.9s]   described 86250
+[ 932.1s]   described 86500
+[ 934.3s]   described 86750
+[ 936.6s]   described 87000
+[ 939.7s]   described 87250
+[ 942.2s]   described 87500
+[ 944.4s]   described 87750
+[ 946.8s]   described 88000
+[ 949.0s]   described 88250
+[ 951.2s]   described 88500
+[ 953.5s]   described 88750
+[ 955.7s]   described 89000
+[ 958.0s]   described 89250
+[ 962.6s]   described 89500
+[ 967.0s]   described 89750
+[ 970.9s]   described 90000
+[ 976.0s]   described 90250
+[ 982.2s]   described 90500
+[ 985.8s]   described 90750
+[ 988.5s]   described 91000
+[ 990.6s]   described 91250
+[ 992.9s]   described 91500
+[ 995.1s]   described 91750
+[ 997.4s]   described 92000
+[ 999.6s]   described 92250
+[1002.3s]   described 92500
+[1005.6s]   described 92750
+[1009.2s]   described 93000
+[1012.6s]   described 93250
+[1016.2s]   described 93500
+[1019.9s]   described 93750
+[1022.2s]   described 94000
+[1024.4s]   described 94250
+[1026.7s]   described 94500
+[1029.0s]   described 94750
+[1031.2s]   described 95000
+[1033.5s]   described 95250
+[1036.5s]   described 95500
+[1040.1s]   described 95750
+[1043.7s]   described 96000
+[1047.4s]   described 96250
+[1051.0s]   described 96500
+[1053.8s]   described 96750
+[1056.1s]   described 97000
+[1058.3s]   described 97250
+[1063.7s]   described 97500
+[1067.3s]   described 97750
+[1070.6s]   described 98000
+[1073.2s]   described 98250
+[1075.6s]   described 98500
+[1077.8s]   described 98750
+[1080.1s]   described 99000
+[1082.3s]   described 99250
+[1084.7s]   described 99500
+[1087.3s]   described 99750
+[1148.6s] cache: packs of 5647131348 bytes, 0 of them unused, not compacted
+[1148.6s] cpu: decode 2955s, features 4838s
+[1149.4s] described 100000/100000 images, 45081168 descriptors
+Analysis complete. Matching 100000 images...
+[1241.2s] vocabulary: 1191405 live words of 16777216 from 1280000 samples
+[1353.4s] quantised
+[1365.3s] inverted file
+[1403.6s] candidates: 7071448 pairs
+[1805.4s]   round 1: 7517 library files asked, 101976 more candidates
+[1808.0s]   round 2: 913 library files asked, 8616 more candidates
+[1808.2s]   round 3: 185 library files asked, 2386 more candidates
+[1808.3s]   round 4: 49 library files asked, 680 more candidates
+[1808.3s]   round 5: 9 library files asked, 250 more candidates
+[1808.3s]   round 6: 2 library files asked, 5 more candidates
+[1808.3s] -k counts rejections: 8071 windows more in 6 rounds, 7185361 candidates verified
+[1808.3s] anchors: 15706 of 154306 verified pairs
+[2201.1s] variants: 3591 more pairs from 50460 unmatched images
+[2206.3s] released the index and the descriptors
+[2206.3s] bridges: dropped 0 lone links between clusters
+[2206.3s] weak anchors: 13614 admitted, 2497 refused between clusters
+[2206.5s]   propagation round 1: +1496 pairs
+[2206.5s]   propagation round 2: +45 pairs
+[2206.5s]   propagation round 3: +0 pairs
+[2206.5s] propagated: 1541 of 5675 composed hypotheses (9872 put to the pixels, budget 7185361 a round)
+[2206.6s] corroborated: 740 more pairs inside existing clusters
+dumped verdicts -> /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v57-fixed/battery/disc/head/dump.csv
+35 repeat, 51 better, 114 to review, 49800 new, of 50000 images scanned against 50000 library images in 2209.7s -> /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v57-fixed/battery/disc/head/report.json
+[2209.9s] pace: finding identical files: 100000 files in 17.70s, 1415766.8 ns a unit on each of 8 threads
+[2209.9s] pace: reading the cache: 0 bytes in 0.02s, 0.0 ns a unit on each of 8 threads
+[2209.9s] pace: reading headers: 100000 files in 4.53s, 362697.6 ns a unit on each of 8 threads
+[2209.9s] pace: describing: 19752766004 pixels analysed in 1120.35s, 453.7 ns a unit on each of 8 threads
+[2209.9s] pace: writing the cache: 45077659 descriptors in 1.49s, 264.9 ns a unit on each of 8 threads
+[2209.9s] pace: building the vocabulary: 1280000 samples in 91.84s, 574004.5 ns a unit on each of 8 threads
+[2209.9s] pace: quantising: 45077659 descriptors in 112.19s, 19910.6 ns a unit on each of 8 threads
+[2209.9s] pace: building the inverted file: 45077659 descriptors in 12.62s, 2239.3 ns a unit on each of 8 threads
+[2209.9s] pace: finding candidates: 25515286 descriptors in 41.82s, 13110.9 ns a unit on each of 8 threads
+[2209.9s] pace: verifying: 7185361 pairs in 401.05s, 446514.3 ns a unit on each of 8 threads
+[2209.9s] pace: propagating: 116228 images and anchors in 2.43s, 167533.0 ns a unit on each of 8 threads
+[2209.9s] pace: grouping and suggesting: 116228 images and anchors in 0.95s, 65347.3 ns a unit on each of 8 threads
+[2209.9s] pace: describing, past the decode: 19752766004 pixels analysed in 731.18s, 296.1 ns a unit on each of 8 threads
+
+Skipped:
+     27  image(s) with no detail to match, such as a blank picture: only an identical copy can match one
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q01298.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q11809.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q12571.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q15563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q16563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q17557.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q21194.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q27539.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30445.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30606.jpg
+         - ... and 17 more (all of them are in the log file)
+	Command being timed: "/home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v57-fixed/battery/img-fp-head /home/daniel/Documents/DISC21/queries/images/queries --against /home/daniel/Documents/DISC21/refs0/images/references --min-pixel-correlation 0.5 -t 8 -v --no-last --cache /home/daniel/Documents/DISC21/cache57/c.db --log-file /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v57-fixed/battery/disc/head/run.log -o /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v57-fixed/battery/disc/head/report.json --dump /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v57-fixed/battery/disc/head/dump.csv"
+	User time (seconds): 8106.06
+	System time (seconds): 582.12
+	Percent of CPU this job got: 393%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 36:50.01
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3348752
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 4402898
+	Minor (reclaiming a frame) page faults: 4490913
+	Voluntary context switches: 5838440
+	Involuntary context switches: 766713
+	Swaps: 0
+	File system inputs: 548325736
+	File system outputs: 32262048
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

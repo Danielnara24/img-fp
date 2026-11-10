@@ -1,0 +1,65 @@
+all n0 304 files
+all n1-d1 608 files
+all n1-d2 608 files
+all n1-d3 608 files
+all n2-d1 912 files
+all n2-d2 912 files
+all n2-d3 912 files
+all f 9589 files
+all full 27659 files
+i5 n0 60 files
+i5 n1-d1 120 files
+i5 n1-d2 120 files
+i5 n1-d3 120 files
+i5 n2-d1 180 files
+i5 n2-d2 180 files
+i5 n2-d3 180 files
+i5 f 9345 files
+i5 full 5460 files
+all n0 304 files
+all n1-d1 608 files
+all n1-d2 608 files
+all n1-d3 608 files
+all n2-d1 912 files
+all n2-d2 912 files
+all n2-d3 912 files
+all f 9589 files
+all full 27659 files
+i5 n0 60 files
+i5 n1-d1 120 files
+i5 n1-d2 120 files
+i5 n1-d3 120 files
+i5 n2-d1 180 files
+i5 n2-d2 180 files
+i5 n2-d3 180 files
+i5 f 9345 files
+i5 full 5460 files
+off --min-aligned-points 8
+off --min-aligned-points 5
+off --min-aligned-points 3
+off --min-frame-overlap 0.75
+off --min-frame-overlap 0.6
+off --min-frame-overlap 0.5
+off --min-frame-overlap 0.4
+off --min-frame-overlap 0.3
+off --min-pixel-correlation 0.8
+off --min-pixel-correlation 0.6
+off --min-pixel-correlation 0.4
+off --min-pixel-correlation 0.2
+off -k 50
+off -k 25
+on --min-aligned-points 8
+on --min-aligned-points 5
+on --min-aligned-points 3
+on --min-frame-overlap 0.75
+on --min-frame-overlap 0.6
+on --min-frame-overlap 0.5
+on --min-frame-overlap 0.4
+on --min-frame-overlap 0.3
+on --min-pixel-correlation 0.8
+on --min-pixel-correlation 0.6
+on --min-pixel-correlation 0.4
+on --min-pixel-correlation 0.2
+on -k 50
+on -k 25
+part done

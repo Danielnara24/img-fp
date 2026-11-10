@@ -1,0 +1,55 @@
+== IMGS-ALL  (0.72.0 | stack)
+        step              F1       precision          recall    cross-family  merges >= 300 (largest below if none)
+     default 0.9710|0.9774  99.78| 99.73  94.56| 95.83      10|479      0|0  0.72.0: none (largest 2)  ||  stack: none (largest 139)
+     points8 0.9737|0.9781  99.77| 99.73  95.08| 95.96      18|480      0|0  0.72.0: none (largest 3)  ||  stack: none (largest 139)
+     points6 0.9761|0.9785  99.76| 99.72  95.55| 96.05      27|483      0|0  0.72.0: none (largest 3)  ||  stack: none (largest 139)
+     points5 0.9770|0.9787  99.76| 99.72  95.73| 96.08      30|483      0|0  0.72.0: none (largest 3)  ||  stack: none (largest 139)
+     points4 0.9780|0.9788  99.75| 99.72  95.92| 96.10      30|482      0|0  0.72.0: none (largest 3)  ||  stack: none (largest 139)
+     points3 0.9784|0.9788  99.75| 99.72  96.00| 96.10      32|482      0|0  0.72.0: none (largest 3)  ||  stack: none (largest 139)
+ overlap0.75 0.9697|0.9763  99.20| 99.16  94.84| 96.15      14|425      0|0  0.72.0: none (largest 2)  ||  stack: none (largest 92)
+ overlap0.65 0.9675|0.9739  98.59| 98.55  94.97| 96.26      15|554      0|0  0.72.0: none (largest 2)  ||  stack: none (largest 157)
+  overlap0.6 0.9655|0.9719  98.04| 97.99  95.10| 96.39      15|567      0|0  0.72.0: none (largest 1)  ||  stack: none (largest 161)
+  overlap0.5 0.9546|0.9583  95.74| 95.22  95.19| 96.46     178|6,687    0|1  0.72.0: none (largest 165)  ||  stack: docks1/2 5,972
+  overlap0.4 0.9542|0.9578  95.63| 95.09  95.22| 96.47     181|6,851    0|1  0.72.0: none (largest 168)  ||  stack: docks1/2 6,115
+  overlap0.3 0.9540|0.9575  95.57| 95.03  95.23| 96.48     183|6,881    0|1  0.72.0: none (largest 169)  ||  stack: docks1/2 6,109
+ overlap0.25 0.9451|0.9457  93.73| 92.70  95.30| 96.51     181|13,604   0|2  0.72.0: none (largest 170)  ||  stack: Acueducto3/4 6,673, docks1/2 6,123
+     corr0.9 0.9051|0.9137  99.92| 99.91  82.73| 84.17       0|53       0|0  0.72.0: none (largest 0)  ||  stack: none (largest 53)
+     corr0.8 0.9489|0.9563  99.86| 99.81  90.40| 91.79      43|296      0|0  0.72.0: none (largest 39)  ||  stack: none (largest 136)
+     corr0.6 0.9792|0.9853  99.68| 99.63  96.23| 97.45      12|541      0|0  0.72.0: none (largest 1)  ||  stack: none (largest 154)
+     corr0.5 0.9822|0.9874  99.62| 99.55  96.85| 97.95       8|823      0|0  0.72.0: none (largest 1)  ||  stack: none (largest 232)
+     corr0.4 0.9837|0.9877  99.59| 99.38  97.18| 98.17       5|1,210    0|0  0.72.0: none (largest 1)  ||  stack: none (largest 252)
+     corr0.3 0.9843|0.9864  99.53| 99.11  97.36| 98.16      92|2,163    0|1  0.72.0: none (largest 63)  ||  stack: red_rocks_sign1/2 346
+     corr0.2 0.9842|0.9842  99.47| 98.88  97.39| 97.97     461|4,087    0|2  0.72.0: none (largest 78)  ||  stack: red_rocks_sign1/2 346, Henares1/2 340
+        k100 0.9710|0.9772  99.78| 99.73  94.55| 95.79      10|478      0|0  0.72.0: none (largest 2)  ||  stack: none (largest 139)
+         k50 0.9664|0.9769  99.80| 99.73  93.67| 95.74      29|448      0|0  0.72.0: none (largest 20)  ||  stack: none (largest 138)
+         k25 0.9621|0.9767  99.84| 99.74  92.83| 95.69      49|404      0|0  0.72.0: none (largest 20)  ||  stack: none (largest 142)
+         k10 0.7490|0.9667  99.91| 99.72  59.90| 93.79     110|624      0|0  0.72.0: none (largest 66)  ||  stack: none (largest 230)
+
+== IMGS5  (0.72.0 | stack)
+        step              F1       precision          recall    cross-family  merges >= 300 (largest below if none)
+     default 0.9325|0.9425  90.84| 92.40  95.79| 96.17  21,375|17,418   5|5  0.72.0: bird1/2 6,827, Fountain3/5 6,569, Floriana1/2 2,696, Floriana3/4 2,654, Tree1/2 2,149  ||  stack: bird1/2 6,827, Fountain3/5 6,642, Floriana1/2 2,872, Floriana3/4 473, Mural1/2 327
+     points8 0.9343|0.9428  90.80| 92.40  96.21| 96.23  21,546|17,420   5|5  0.72.0: bird1/2 6,855, Fountain3/5 6,600, Floriana1/2 2,708, Floriana3/4 2,670, Tree1/2 2,233  ||  stack: bird1/2 6,830, Fountain3/5 6,642, Floriana1/2 2,872, Floriana3/4 473, Mural1/2 329
+     points6 0.9351|0.9429  90.73| 92.40  96.46| 96.25  21,775|17,420   5|5  0.72.0: bird1/2 6,867, Fountain3/5 6,609, Floriana1/2 2,812, Floriana3/4 2,752, Tree1/2 2,252  ||  stack: bird1/2 6,830, Fountain3/5 6,642, Floriana1/2 2,872, Floriana3/4 472, Mural1/2 329
+     points5 0.9355|0.9429  90.73| 92.40  96.54| 96.26  21,797|17,420   5|5  0.72.0: bird1/2 6,866, Fountain3/5 6,613, Floriana1/2 2,821, Floriana3/4 2,758, Tree1/2 2,254  ||  stack: bird1/2 6,830, Fountain3/5 6,642, Floriana1/2 2,872, Floriana3/4 472, Mural1/2 329
+     points4 0.9221|0.9429  88.15| 92.40  96.66| 96.26  28,853|17,420   6|5  0.72.0: Mural1/2 7,298, bird1/2 6,864, Fountain3/5 6,617, Floriana1/2 2,824, Floriana3/4 2,749, Tree1/2 2,254  ||  stack: bird1/2 6,830, Fountain3/5 6,642, Floriana1/2 2,872, Floriana3/4 472, Mural1/2 329
+     points3 0.9221|0.9429  88.14| 92.40  96.68| 96.26  28,887|17,420   6|5  0.72.0: Mural1/2 7,299, bird1/2 6,889, Fountain3/5 6,616, Floriana1/2 2,829, Floriana3/4 2,749, Tree1/2 2,257  ||  stack: bird1/2 6,830, Fountain3/5 6,642, Floriana1/2 2,872, Floriana3/4 472, Mural1/2 329
+ overlap0.75 0.8818|0.9054  81.46| 85.22  96.11| 96.57  47,804|36,266   7|7  0.72.0: Floriana3/4 7,379, Floriana1/2 7,136, Puerto3/4 6,859, bird1/2 6,853, Tree1/2 6,631, Fountain3/5 6,621, Macizo5/6 5,634  ||  stack: Floriana3/4 7,400, Floriana1/2 7,374, bird1/2 6,857, Puerto3/4 6,850, Fountain3/5 6,699, Mural1/2 326, Parish Church1/2 300
+ overlap0.65 0.8794|0.9029  80.94| 84.70  96.27| 96.67  48,540|36,904   7|7  0.72.0: Floriana3/4 7,494, Floriana1/2 7,276, Puerto3/4 6,891, Tree1/2 6,877, bird1/2 6,870, Fountain3/5 6,635, Macizo5/6 5,856  ||  stack: Floriana3/4 7,573, Floriana1/2 7,490, Puerto3/4 7,000, bird1/2 6,877, Fountain3/5 6,689, Parish Church1/2 461, Mural1/2 333
+  overlap0.6 0.8770|0.9006  80.47| 84.20  96.37| 96.80  48,848|37,085   7|7  0.72.0: Floriana3/4 7,514, Floriana1/2 7,352, Tree1/2 7,019, Puerto3/4 6,910, bird1/2 6,890, Fountain3/5 6,642, Macizo5/6 5,880  ||  stack: Floriana3/4 7,605, Floriana1/2 7,573, Puerto3/4 7,004, bird1/2 6,900, Fountain3/5 6,721, Parish Church1/2 462, Mural1/2 328
+  overlap0.5 0.8665|0.8790  78.61| 80.36  96.51| 97.00  49,531|43,760   7|7  0.72.0: Floriana3/4 7,596, Floriana1/2 7,376, bird1/2 7,187, Tree1/2 7,123, Puerto3/4 7,065, Fountain3/5 6,656, Macizo5/6 5,886  ||  stack: Floriana3/4 7,667, Floriana1/2 7,607, bird1/2 7,253, Puerto3/4 7,164, Fountain3/5 6,729, Macizo5/6 6,335, Parish Church1/2 388
+  overlap0.4 0.8654|0.8773  78.41| 80.10  96.56| 96.97  50,039|44,230   7|7  0.72.0: Floriana3/4 7,721, Floriana1/2 7,388, bird1/2 7,209, Tree1/2 7,158, Puerto3/4 7,129, Fountain3/5 6,715, Macizo5/6 6,074  ||  stack: Floriana3/4 7,815, Floriana1/2 7,593, bird1/2 7,241, Puerto3/4 7,192, Fountain3/5 6,789, Macizo5/6 6,534, Parish Church1/2 390
+  overlap0.3 0.8648|0.8645  78.30| 77.95  96.57| 97.03  50,605|51,889   7|8  0.72.0: Floriana3/4 7,804, Floriana1/2 7,431, Puerto3/4 7,338, Tree1/2 7,302, bird1/2 7,212, Fountain3/5 6,718, Macizo5/6 6,147  ||  stack: Floriana3/4 7,891, Floriana1/2 7,682, Tree1/2 7,526, bird1/2 7,284, Puerto3/4 7,284, Fountain3/5 6,787, Macizo5/6 6,549, Parish Church1/2 398
+ overlap0.25 0.8442|0.8561  74.93| 76.58  96.67| 97.05  58,531|52,445   8|8  0.72.0: Floriana3/4 7,867, Mural1/2 7,820, Floriana1/2 7,627, bird1/2 7,357, Tree1/2 7,322, Puerto3/4 7,269, Fountain3/5 6,698, Macizo5/6 6,159  ||  stack: Floriana3/4 7,960, Floriana1/2 7,787, Tree1/2 7,543, bird1/2 7,428, Puerto3/4 7,390, Fountain3/5 6,820, Macizo5/6 6,623, Parish Church1/2 403
+     corr0.9 0.8803|0.8969  92.77| 95.75  83.75| 84.34  14,598|8,295    5|4  0.72.0: bird1/2 5,391, Fountain3/5 5,368, Floriana3/4 1,583, Floriana1/2 1,431, Tree1/2 720  ||  stack: Fountain3/5 5,410, Floriana1/2 1,727, bird1/2 514, Floriana3/4 456
+     corr0.8 0.9134|0.9224  91.60| 92.75  91.09| 91.74  18,570|15,885   5|4  0.72.0: Fountain3/5 6,175, bird1/2 6,097, Floriana3/4 2,329, Floriana1/2 2,246, Tree1/2 1,459  ||  stack: Fountain3/5 6,304, bird1/2 6,178, Floriana1/2 2,575, Floriana3/4 451
+     corr0.6 0.9370|0.9485  90.32| 92.08  97.33| 97.80  22,874|18,356   5|5  0.72.0: bird1/2 7,281, Fountain3/5 6,849, Floriana3/4 2,899, Floriana1/2 2,794, Tree1/2 2,522  ||  stack: bird1/2 7,374, Fountain3/5 6,862, Floriana1/2 2,937, Floriana3/4 484, Mural1/2 346
+     corr0.5 0.9384|0.9477  90.12| 91.75  97.87| 98.00  23,421|18,992   5|5  0.72.0: bird1/2 7,374, Fountain3/5 7,108, Floriana3/4 2,940, Floriana1/2 2,833, Tree1/2 2,620  ||  stack: bird1/2 7,453, Fountain3/5 7,242, Floriana1/2 3,082, Floriana3/4 489, Mural1/2 351
+     corr0.4 0.9379|0.9465  89.88| 91.41  98.05| 98.12  24,018|19,506   5|5  0.72.0: bird1/2 7,501, Fountain3/5 7,409, Floriana3/4 2,935, Floriana1/2 2,849, Tree1/2 2,661  ||  stack: bird1/2 7,617, Fountain3/5 7,479, Floriana1/2 3,054, Floriana3/4 512, Mural1/2 353
+     corr0.3 0.9379|0.9467  89.78| 91.28  98.19| 98.33  24,222|19,764   5|5  0.72.0: bird1/2 7,576, Fountain3/5 7,546, Floriana3/4 2,948, Floriana1/2 2,808, Tree1/2 2,677  ||  stack: bird1/2 7,651, Fountain3/5 7,598, Floriana1/2 3,114, Floriana3/4 513, Mural1/2 354
+     corr0.2 0.9378|0.9450  89.71| 91.12  98.23| 98.14  24,329|19,990   5|5  0.72.0: Fountain3/5 7,622, bird1/2 7,580, Floriana3/4 2,955, Floriana1/2 2,812, Tree1/2 2,692  ||  stack: bird1/2 7,677, Fountain3/5 7,632, Floriana1/2 3,128, Floriana3/4 514, Mural1/2 354
+        k100 0.9328|0.9426  90.92| 92.44  95.77| 96.16  21,154|17,309   5|5  0.72.0: bird1/2 6,759, Fountain3/5 6,567, Floriana3/4 2,701, Floriana1/2 2,687, Tree1/2 1,967  ||  stack: bird1/2 6,781, Fountain3/5 6,633, Floriana1/2 2,820, Floriana3/4 473, Mural1/2 327
+         k50 0.9334|0.9532  91.95| 94.86  94.77| 95.79  18,343|11,281   4|5  0.72.0: bird1/2 6,568, Fountain3/5 6,263, Floriana1/2 2,602, Floriana3/4 2,593  ||  stack: Fountain3/5 6,608, Floriana1/2 2,808, bird1/2 799, Floriana3/4 470, Mural1/2 320
+         k25 0.9285|0.9530  91.94| 94.86  93.78| 95.74  18,266|11,266   4|5  0.72.0: bird1/2 6,508, Fountain3/5 6,306, Floriana1/2 2,562, Floriana3/4 2,532  ||  stack: Fountain3/5 6,598, Floriana1/2 2,773, bird1/2 838, Floriana3/4 464, Mural1/2 320
+         k10 0.7414|0.9469  96.03| 94.81  60.38| 94.57   5,536|11,288   2|5  0.72.0: Floriana3/4 2,628, Floriana1/2 2,465  ||  stack: Fountain3/5 6,578, Floriana1/2 2,725, bird1/2 770, Floriana3/4 443, Mural1/2 310
+
+check, 0.72.0 i5 overlap 0.6 from the list vs v44: (0.877, 80.47, 96.37, 48848) (0.877, 80.47, 96.37, 48848)

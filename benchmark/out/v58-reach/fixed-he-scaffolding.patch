@@ -1,0 +1,2515 @@
+diff --git a/src/fixed.rs b/src/fixed.rs
+new file mode 100644
+index 0000000..6500914
+--- /dev/null
++++ b/src/fixed.rs
+@@ -0,0 +1,413 @@
++//! Where a verdict's first correspondences come from: words of a vocabulary
++//! trained once, on photographs no scan holds, so that which keypoints of two
++//! pictures are compared depends on the two pictures alone.
++//!
++//! **Why.** A verdict is seeded by correspondences, and they used to be the
++//! keypoint pairs sharing a word of the run's own vocabulary, which is
++//! trained on whatever is scanned. A vocabulary trained on ninety copies of
++//! a photograph is finest around that photograph's descriptors, so a near
++//! sibling's correspondences fell into other words; the same pair of files
++//! was judged one way in a folder of sixty and another in a folder of five
++//! thousand (`benchmark/out/v45-k`). Guided matching (`verify::guided`) made
++//! the verdict independent of the vocabulary once a transform was seeded;
++//! this makes the seeding so. The run's vocabulary now only proposes which
++//! files to compare (`retrieve`).
++//!
++//! **What.** The tree (`fixed.vocab.zst`, 65,536 leaves of 16 x 16 x 16 x
++//! 16) was trained by `tests::train_fixed_vocabulary` on 10,000 DISC21
++//! reference photographs (R000000-R009999), never part of a benchmark
++//! corpus. A descriptor is quantised in a canonical orientation: of its four
++//! mirror / invert orientations (`Variant`, a group in which composing two is
++//! the xor of their numbers) the one reading highest along a fixed direction
++//! (`key`), so a file's mirrored and inverted words are its own relabelled
++//! (`turned`), and the second look needs no descent at all. Its word is the
++//! leaf and the orientation (`leaf << 2 | g`).
++//!
++//! Each file has two lists (`Words`): `own`, its best orientation's best leaf
++//! a keypoint, and `asks`, the best two leaves under each of its best two
++//! orientations. A pair is matched from the asker's `asks` against the
++//! candidate's `own` (`correspond`): soft on one side, as a query is against
++//! a database, so a correspondence near a leaf's or an orientation's border
++//! is still met, at about half the pairs symmetric softness costs. Each of
++//! the asker's keypoints keeps its nearest such candidate keypoint, within
++//! `verify::GUIDE_D2` and only when that keypoint's nearest is it in turn
++//! (mutual): a correspondence that two coincidences agree on is rarer than
++//! one either gives. Measured in `benchmark/out/v57-fixed`.
++
++use crate::index::{Vocabulary, WordList};
++use crate::sift::{Features, Variant, DESC_LEN};
++use std::sync::OnceLock;
++
++/// The vocabulary, as `tests::train_fixed_vocabulary` wrote it, compressed.
++const VOCABULARY: &[u8] = include_bytes!("fixed.vocab.zst");
++
++/// Leaves the asker's descent keeps in each orientation it asks in.
++fn asker_paths() -> usize { std::env::var("IMGFP_AP").ok().and_then(|v| v.parse().ok()).unwrap_or(3) }
++fn own_paths() -> usize { std::env::var("IMGFP_OP").ok().and_then(|v| v.parse().ok()).unwrap_or(1) }
++
++/// Orientations the asker asks in.
++const ASKER_ORIENTATIONS: usize = 2;
++
++/// The fixed vocabulary.
++pub(crate) fn vocabulary() -> &'static Vocabulary {
++    static V: OnceLock<Vocabulary> = OnceLock::new();
++    V.get_or_init(|| {
++        let raw = zstd::decode_all(VOCABULARY).expect("the fixed vocabulary decompresses");
++        let mut v = Vocabulary::from_bytes(&raw).expect("the fixed vocabulary reads");
++        v.set_paths(asker_paths());
++        v
++    })
++}
++
++/// Words the fixed vocabulary can return: a leaf in each orientation.
++pub(crate) fn n_words() -> usize {
++    vocabulary().n_live_words() * 4
++}
++
++/// The four orientations' permutations, by `mirror | invert << 1`: where
++/// each bin of a descriptor seen so comes from, read off `Features::seen_as`
++/// of a descriptor whose bins are their own numbers. Mirror and invert
++/// commute and are each their own inverse, so composing two is the xor of
++/// their numbers.
++fn perms() -> &'static [[u8; DESC_LEN]; 4] {
++    static P: OnceLock<[[u8; DESC_LEN]; 4]> = OnceLock::new();
++    P.get_or_init(|| {
++        let numbered = Features { w: 1, h: 1, kps: vec![crate::sift::Keypoint::default()].into(), desc: (0..DESC_LEN as u8).collect::<Vec<u8>>().into(), ends: Vec::new() };
++        std::array::from_fn(|g| numbered.seen_as(Variant { mirror: g & 1 != 0, invert: g & 2 != 0 }).d(0).try_into().unwrap())
++    })
++}
++
++/// A fixed direction of signs, from a constant seed: the orientation a
++/// descriptor is quantised in is the one its bins read highest along.
++fn key() -> &'static [i32; DESC_LEN] {
++    static K: OnceLock<[i32; DESC_LEN]> = OnceLock::new();
++    K.get_or_init(|| {
++        let mut s = 0x9e37_79b9_7f4a_7c15u64;
++        std::array::from_fn(|_| {
++            s ^= s << 13;
++            s ^= s >> 7;
++            s ^= s << 17;
++            if s >> 63 == 1 { 1 } else { -1 }
++        })
++    })
++}
++
++/// `d`'s orientations by how high they read along `key`, best first; a tie
++/// goes to the orientation whose bytes are the lesser, which is a property
++/// of the descriptor and not of its labels, so `d` seen turned orders the
++/// same descriptors the same way (`turned`).
++#[inline(always)]
++fn orientations(d: &[u8]) -> [usize; 4] {
++    let (k, p) = (key(), perms());
++    let mut sc = [(0i32, 0usize); 4];
++    for (g, s) in sc.iter_mut().enumerate() {
++        let mut t = 0i32;
++        for i in 0..DESC_LEN {
++            t += k[i] * d[p[g][i] as usize] as i32;
++        }
++        *s = (t, g);
++    }
++    sc.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| oriented(d, a.1).cmp(&oriented(d, b.1))));
++    sc.map(|x| x.1)
++}
++
++/// `d` in orientation `g`.
++#[inline(always)]
++pub(crate) fn oriented(d: &[u8], g: usize) -> [u8; DESC_LEN] {
++    let p = &perms()[g];
++    std::array::from_fn(|i| d[p[i] as usize])
++}
++
++/// A file's fixed words: what it asks with (`asks`) and what it is asked by
++/// (`own`).
++#[derive(Default)]
++pub(crate) struct Words {
++    pub(crate) asks: WordList,
++    pub(crate) own: WordList,
++}
++
++crate::simd::dispatched! {
++    /// `f`'s fixed words: one descent per orientation asked in.
++    pub(crate) fn words(f: &Features) -> Words => words_any;
++}
++
++#[cfg_attr(dispatch, inline(always))]
++fn words_any(f: &Features) -> Words {
++    let vocab = vocabulary();
++    let mut buf = Vec::with_capacity(asker_paths());
++    let op = own_paths();
++    let mut asks: Vec<(u32, u32)> = Vec::with_capacity(f.len() * asker_paths() * ASKER_ORIENTATIONS);
++    let mut own: Vec<(u32, u32)> = Vec::with_capacity(f.len());
++    for i in 0..f.len() {
++        let d = f.d(i);
++        for (k, &g) in orientations(d)[..ASKER_ORIENTATIONS].iter().enumerate() {
++            vocab.quantise(&oriented(d, g), &mut buf);
++            for (n, &w) in buf.iter().enumerate() {
++                asks.push((w << 2 | g as u32, i as u32));
++                if k == 0 && n < op {
++                    own.push((w << 2 | g as u32, i as u32));
++                }
++            }
++        }
++    }
++    asks.sort_unstable();
++    asks.dedup();
++    own.sort_unstable();
++    own.dedup();
++    Words { asks: WordList::from_sorted(&asks), own: WordList::from_sorted(&own) }
++}
++
++/// SCAFFOLDING v58: `words` with no `asks` (made when asked, `asks_of`).
++pub(crate) fn own_only(f: &Features) -> Words {
++    let mut w = words(f);
++    w.asks = WordList::default();
++    w
++}
++
++/// The words `w` (made by `words` from some features) of those features seen
++/// as `v`: each word's orientation composed with `v`'s, no descent. Seen as
++/// `v`, a descriptor's orientations read along `key` as its own did, each
++/// composed with `v`, so its canonical form is the same descriptor.
++pub(crate) fn turned(w: &WordList, v: Variant) -> WordList {
++    let x = v.mirror as u32 | (v.invert as u32) << 1;
++    let mut pairs: Vec<(u32, u32)> = (0..w.len()).map(|i| (w.word(i) ^ x, w.kp(i))).collect();
++    pairs.sort_unstable();
++    WordList::from_sorted(&pairs)
++}
++
++/// One asker's words, built once for the run of candidates it is verified
++/// against: its entries in word order, and which words it has as a bit a
++/// word (`has`, small enough to stay in L1 while most of an unrelated
++/// candidate's words are turned away). A candidate's words come in the same
++/// order, so its hits are found by walking the asker's entries forward, never
++/// by a lookup into a table as large as the vocabulary: on a corpus of copies,
++/// where nearly every word hits, a 1 MB table read at random cost twice the
++/// rest of the pass. The bits are set only for the asker's words and cleared
++/// after, never swept whole.
++#[derive(Default)]
++pub(crate) struct Table {
++    key: Option<(usize, u8, usize)>,
++    has: Vec<u64>,
++    words: Vec<u32>,
++    kps: Vec<u32>,
++    best: Vec<(u32, u32)>,
++    best_b: Vec<(u32, u32)>,
++}
++
++impl Table {
++    /// Ready for `asks`, the words of file `i` seen as `v` (`key` tells
++    /// whether it already is).
++    fn ask(&mut self, key: (usize, u8, usize), asks: &WordList) {
++        if self.key == Some(key) {
++            return;
++        }
++        let n = n_words().div_ceil(64);
++        if self.has.len() != n {
++            self.has = vec![0; n];
++        }
++        for &w in &self.words {
++            self.has[w as usize / 64] = 0;
++        }
++        self.words.clear();
++        self.kps.clear();
++        for e in 0..asks.len() {
++            let w = asks.word(e);
++            self.has[w as usize / 64] |= 1 << (w % 64);
++            self.words.push(w);
++            self.kps.push(asks.kp(e));
++        }
++        self.key = Some(key);
++    }
++}
++
++/// The correspondences between file `i` seen as `v` (features `fa`, words
++/// `asks`) and a candidate (`fb`, its `own` words), into `out`: each of A's
++/// keypoints with the nearest of B's that share a word with it (the lower on
++/// a tie), when within `bound` (a squared distance) and when that B keypoint's
++/// nearest among those sharing a word with it is this A keypoint (the lower
++/// on a tie). In A's keypoint order.
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn correspond(table: &mut Table, i: usize, v: Variant, fa: &Features, asks: &WordList, fb: &Features, own: &WordList, bound: u32, out: &mut Vec<(u32, u32)>) {
++    let vb = v.mirror as u8 | (v.invert as u8) << 1;
++    table.ask((i, vb, asks as *const WordList as usize), asks);
++    correspond_in(table, fa, fb, own, bound, out);
++}
++
++crate::simd::dispatched! {
++    fn correspond_in(t: &mut Table, fa: &Features, fb: &Features, own: &WordList, bound: u32, out: &mut Vec<(u32, u32)>) => correspond_in_any;
++}
++
++#[cfg_attr(dispatch, inline(always))]
++fn correspond_in_any(t: &mut Table, fa: &Features, fb: &Features, own: &WordList, bound: u32, out: &mut Vec<(u32, u32)>) {
++    t.best.clear();
++    t.best.resize(fa.len(), (u32::MAX, u32::MAX));
++    t.best_b.clear();
++    t.best_b.resize(fb.len(), (u32::MAX, u32::MAX));
++    // Where the asker's entries of the word last met begin: both lists are
++    // in word order, so it only moves forward.
++    let mut at = 0usize;
++    for e in 0..own.len() {
++        let w = own.word(e);
++        if t.has[w as usize / 64] >> (w % 64) & 1 == 0 {
++            continue;
++        }
++        while t.words[at] < w {
++            at += 1;
++        }
++        let kb = own.kp(e);
++        let db: &[u8; DESC_LEN] = fb.d(kb as usize).try_into().unwrap();
++        let mut x = at;
++        while x < t.words.len() && t.words[x] == w {
++            let ka = t.kps[x];
++            let d = crate::index::dist2(db, fa.d(ka as usize));
++            let a = &mut t.best[ka as usize];
++            if (d, kb) < *a {
++                *a = (d, kb);
++            }
++            let b = &mut t.best_b[kb as usize];
++            if (d, ka) < *b {
++                *b = (d, ka);
++            }
++            x += 1;
++        }
++    }
++    out.clear();
++    for (ka, &(d, kb)) in t.best.iter().enumerate() {
++        if d <= bound && t.best_b[kb as usize].1 == ka as u32 {
++            out.push((ka as u32, kb));
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::sift::Keypoint;
++
++    /// The orientations compose as their numbers' xor, which `turned` relies
++    /// on: mirror and invert commute, and each undoes itself.
++    #[test]
++    fn orientations_compose_as_xor() {
++        let p = perms();
++        for g in 0..4 {
++            for h in 0..4 {
++                let composed: [u8; DESC_LEN] = std::array::from_fn(|i| p[h][p[g][i] as usize]);
++                assert_eq!(composed, p[g ^ h], "{g} then {h}");
++            }
++        }
++    }
++
++    /// Features of `n` random descriptors at random places.
++    fn random_features(n: usize, seed: u64) -> Features {
++        let mut s = seed;
++        let mut rnd = move || {
++            s ^= s << 13;
++            s ^= s >> 7;
++            s ^= s << 17;
++            s
++        };
++        let desc: Vec<u8> = (0..n * DESC_LEN).map(|_| (rnd() % 64) as u8).collect();
++        let kps: Vec<Keypoint> = (0..n).map(|_| Keypoint { x: (rnd() % 500) as f32, y: (rnd() % 400) as f32, sigma: 2.0, angle: (rnd() % 360) as f32, ..Default::default() }).collect();
++        Features { w: 500, h: 400, kps: kps.into(), desc: desc.into(), ends: Vec::new() }
++    }
++
++    /// The vocabulary is the one trained: it reads, and is the size it was.
++    #[test]
++    fn the_fixed_vocabulary_reads() {
++        let v = vocabulary();
++        assert_eq!((v.branching, v.depth), (16, 4));
++        assert!(v.n_live_words() > 60_000, "{} words", v.n_live_words());
++    }
++
++    /// A file's words seen mirrored, inverted or both are its own words with
++    /// the orientation relabelled: what the second look asks with, made
++    /// without a descent, is what a descent would have made.
++    #[test]
++    fn turned_words_are_the_words_of_the_turned_features() {
++        let f = random_features(300, 0x1234_5678_9abc_def1);
++        let w = words(&f);
++        for v in Variant::TURNED {
++            let seen = f.seen_as(v);
++            let direct = words(&seen);
++            let relabelled = turned(&w.asks, v);
++            let same = |a: &WordList, b: &WordList| a.len() == b.len() && (0..a.len()).all(|e| (a.word(e), a.kp(e)) == (b.word(e), b.kp(e)));
++            assert!(same(&direct.asks, &relabelled), "{v:?}");
++        }
++    }
++
++    /// `correspond` is the brute-force answer over the keypoint pairs sharing
++    /// a word: nearest each way, mutual, within the bound.
++    #[test]
++    fn correspond_is_mutual_nearest_among_shared_words() {
++        let fa = random_features(250, 0xdead_beef_0bad_f00d);
++        let mut fb = random_features(250, 0x0123_4567_89ab_cdef);
++        // Some of B is a noisy copy of A, so there is something to find.
++        let mut desc = fb.desc.to_vec();
++        for k in 0..120 {
++            for x in 0..DESC_LEN {
++                desc[k * DESC_LEN + x] = fa.d(k * 2)[x].saturating_add((x % 3) as u8);
++            }
++        }
++        fb.desc = desc.into();
++        let (wa, wb) = (words(&fa), words(&fb));
++        let bound = 320 * 320;
++        let mut got = Vec::new();
++        correspond(&mut Table::default(), 0, Variant::SAME, &fa, &wa.asks, &fb, &wb.own, bound, &mut got);
++        let mut shares = std::collections::HashSet::new();
++        for a in 0..wa.asks.len() {
++            for b in 0..wb.own.len() {
++                if wa.asks.word(a) == wb.own.word(b) {
++                    shares.insert((wa.asks.kp(a), wb.own.kp(b)));
++                }
++            }
++        }
++        let d = |a: u32, b: u32| crate::index::dist2(fb.d(b as usize).try_into().unwrap(), fa.d(a as usize));
++        let best_a = |a: u32| shares.iter().filter(|p| p.0 == a).map(|p| (d(p.0, p.1), p.1)).min();
++        let best_b = |b: u32| shares.iter().filter(|p| p.1 == b).map(|p| (d(p.0, p.1), p.0)).min();
++        let want: Vec<(u32, u32)> = (0..fa.len() as u32)
++            .filter_map(|a| best_a(a).filter(|&(dd, b)| dd <= bound && best_b(b).map(|x| x.1) == Some(a)).map(|(_, b)| (a, b)))
++            .collect();
++        assert!(want.len() >= 60, "the copy is found: {}", want.len());
++        assert_eq!(got, want);
++    }
++
++    /// Trains the fixed vocabulary from scratch (`IMGFP_TRAIN_FROM`, the
++    /// folder of DISC21 reference photographs R000000-R009999) and checks it
++    /// is byte for byte the shipped one; `IMGFP_TRAIN_TO` writes it instead.
++    /// `cargo test --release -- --ignored --nocapture train_fixed_vocabulary`
++    #[test]
++    #[ignore]
++    fn train_fixed_vocabulary() {
++        use crate::analysis::{analyse, Planes};
++        use rayon::prelude::*;
++        let from = std::env::var("IMGFP_TRAIN_FROM").expect("IMGFP_TRAIN_FROM: the DISC21 references");
++        let mut files: Vec<_> = std::fs::read_dir(&from).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "jpg")).collect();
++        files.sort();
++        let p = crate::sift::Params { max_features: crate::analysis::FEATURES, ..Default::default() };
++        let planes = Planes::default();
++        let feats: Vec<Features> = files
++            .par_iter()
++            .filter_map(|f| {
++                let (it, _) = analyse(f, 512, 512, &p, None, &planes, false);
++                it.read.ok().then(|| it.feats.as_ref().clone())
++            })
++            .collect();
++        // Every descriptor a picture has, up to its share, in its canonical
++        // orientation: the tree is grown in the space it is asked in.
++        let per = feats.iter().map(|f| f.len()).sum::<usize>() / feats.len().max(1);
++        let canon: Vec<[u8; DESC_LEN]> = feats
++            .iter()
++            .flat_map(|f| (0..f.len().min(per.max(crate::analysis::FEATURES))).map(move |i| f.d(i)))
++            .map(|d| oriented(d, orientations(d)[0]))
++            .collect();
++        let pool: Vec<&[u8; DESC_LEN]> = canon.iter().collect();
++        let vp = crate::index::VocabParams { branching: 16, depth: 4, sample: 1_500_000, iters: 12, max_paths: 3, path_ratio: 1.3, seed: 0x5eed_0f12_ed00_0001 };
++        let v = Vocabulary::build(pool, &vp);
++        let bytes = v.to_bytes();
++        if let Ok(to) = std::env::var("IMGFP_TRAIN_TO") {
++            std::fs::write(to, &bytes).unwrap();
++        } else {
++            assert!(zstd::decode_all(VOCABULARY).unwrap() == bytes, "the shipped vocabulary is what this trains");
++        }
++    }
++}
+diff --git a/src/he.rs b/src/he.rs
+new file mode 100644
+index 0000000..75b17b5
+--- /dev/null
++++ b/src/he.rs
+@@ -0,0 +1,265 @@
++//! SCAFFOLDING (v58-reach): retrieval by Hamming embedding over the fixed
++//! vocabulary. A file's own fixed words are the postings, each with a 64-bit
++//! signature of its descriptor (the signs of a fixed random projection of the
++//! descriptor in its word's orientation, less the projection of the word's
++//! centre). A query keypoint meets a posting when they share a word and their
++//! signatures differ in at most `h()` bits; each query keypoint counts once
++//! per image, at the word's idf squared, and a score is the share of the
++//! query's mass met (containment, as `index::InvertedFile::query`).
++use crate::fixed;
++use crate::index::WordList;
++use crate::sift::{Features, DESC_LEN};
++use rayon::prelude::*;
++use std::sync::OnceLock;
++
++pub(crate) fn h() -> u32 {
++    static H: OnceLock<u32> = OnceLock::new();
++    *H.get_or_init(|| std::env::var("IMGFP_HE_H").ok().and_then(|v| v.parse().ok()).unwrap_or(24))
++}
++
++pub(crate) fn on() -> bool {
++    std::env::var("IMGFP_HE").is_ok_and(|v| v == "1")
++}
++
++/// Random signs flipping each dimension before the transform.
++fn flips() -> &'static [i32; DESC_LEN] {
++    static F: OnceLock<[i32; DESC_LEN]> = OnceLock::new();
++    F.get_or_init(|| {
++        let mut s = 0x2545_f491_4f6c_dd1du64;
++        std::array::from_fn(|_| {
++            s ^= s << 13;
++            s ^= s >> 7;
++            s ^= s << 17;
++            if s >> 63 == 1 { 1 } else { -1 }
++        })
++    })
++}
++
++/// 64 coefficients of the Walsh-Hadamard transform of `d` with its
++/// dimensions' signs flipped at random: a structured random projection.
++#[inline(always)]
++fn project(d: &[u8]) -> [i32; 64] {
++    let f = flips();
++    let mut x = [0i32; DESC_LEN];
++    for i in 0..DESC_LEN {
++        x[i] = d[i] as i32 * f[i];
++    }
++    let mut h = 1;
++    while h < DESC_LEN {
++        let mut i = 0;
++        while i < DESC_LEN {
++            for j in i..i + h {
++                let (a, b) = (x[j], x[j + h]);
++                x[j] = a + b;
++                x[j + h] = a - b;
++            }
++            i += 2 * h;
++        }
++        h *= 2;
++    }
++    // Coefficient 0 is the sum, nearly constant: skip it.
++    std::array::from_fn(|b| x[b + 1])
++}
++
++/// Each leaf's centre projected.
++fn centres() -> &'static Vec<[i32; 64]> {
++    static C: OnceLock<Vec<[i32; 64]>> = OnceLock::new();
++    C.get_or_init(|| {
++        let v = fixed::vocabulary();
++        (0..v.n_live_words() as u32).into_par_iter().map(|w| project(v.leaf(w))).collect()
++    })
++}
++
++#[inline(always)]
++fn sign(p: &[i32; 64], leaf: u32) -> u64 {
++    let c = &centres()[leaf as usize];
++    let mut s = 0u64;
++    for b in 0..64 {
++        s |= ((p[b] > c[b]) as u64) << b;
++    }
++    s
++}
++
++/// Each entry of `wl` (fixed words `leaf << 2 | g`) with its signature.
++pub(crate) fn signed(f: &Features, wl: &WordList) -> Vec<(u32, u64, u32)> {
++    // Each keypoint projected once per orientation it is quantised in.
++    let mut slot: Vec<[u32; 4]> = vec![[u32::MAX; 4]; f.len()];
++    let mut proj: Vec<[i32; 64]> = Vec::new();
++    let mut out = Vec::with_capacity(wl.len());
++    for e in 0..wl.len() {
++        let (w, kp) = (wl.word(e), wl.kp(e));
++        let g = (w & 3) as usize;
++        let at = &mut slot[kp as usize][g];
++        if *at == u32::MAX {
++            *at = proj.len() as u32;
++            proj.push(project(&fixed::oriented(f.d(kp as usize), g)));
++        }
++        out.push((w, sign(&proj[*at as usize], w >> 2), kp));
++    }
++    out
++}
++
++pub(crate) struct HeIndex {
++    off: Vec<u32>,
++    img: Vec<u32>,
++    sig: Vec<u64>,
++    idf2: Vec<f32>,
++    pub(crate) mass: Vec<f32>,
++}
++
++impl HeIndex {
++    pub(crate) fn build(items: &[crate::analysis::Item], matched: &[bool], words: &[fixed::Words]) -> HeIndex {
++        let nw = fixed::n_words();
++        let own: Vec<Vec<(u32, u64, u32)>> = (0..items.len()).into_par_iter().map(|i| if matched[i] { signed(&items[i].feats, &words[i].own) } else { Vec::new() }).collect();
++        let mut count = vec![0u32; nw + 1];
++        for o in &own {
++            for &(w, ..) in o {
++                count[w as usize + 1] += 1;
++            }
++        }
++        let mut df = vec![0u32; nw];
++        let mut last = vec![u32::MAX; nw];
++        for (i, o) in own.iter().enumerate() {
++            for &(w, ..) in o {
++                if last[w as usize] != i as u32 {
++                    last[w as usize] = i as u32;
++                    df[w as usize] += 1;
++                }
++            }
++        }
++        for w in 0..nw {
++            count[w + 1] += count[w];
++        }
++        let off = count.clone();
++        let total = off[nw] as usize;
++        let mut img = vec![0u32; total];
++        let mut sig = vec![0u64; total];
++        let mut at = count;
++        for (i, o) in own.iter().enumerate() {
++            for &(w, s, _) in o {
++                let k = at[w as usize] as usize;
++                img[k] = i as u32;
++                sig[k] = s;
++                at[w as usize] += 1;
++            }
++        }
++        if std::env::var("IMGFP_HE_STAT").is_ok() {
++            stat(items, &own, &off, &img);
++        }
++        let n = matched.iter().filter(|&&m| m).count().max(1) as f32;
++        let idf2: Vec<f32> = df.iter().map(|&d| if d == 0 { 0.0 } else { let x = (n / d as f32).ln(); x * x }).collect();
++        let mass = own.iter().map(|o| o.iter().map(|&(w, ..)| idf2[w as usize]).sum()).collect();
++        HeIndex { off, img, sig, idf2, mass }
++    }
++
++    pub(crate) fn postings(&self) -> usize {
++        self.img.len()
++    }
++
++    /// Images met by `q` (entries: word, signature, keypoint), scored as
++    /// containment of the query's own mass `qmass`, into `out`.
++    pub(crate) fn query(&self, q: &[(u32, u64, u32)], qmass: f32, exclude: u32, acc: &mut [f32], tag: &mut [u32], touched: &mut Vec<u32>, pass: &mut Vec<u32>, out: &mut Vec<(u32, f32)>) {
++        out.clear();
++        touched.clear();
++        let hh = h();
++        let mut reads = 0u64;
++        let mut hits = 0u64;
++        // Tags run over keypoints; a fresh query starts past any tag used.
++        for &(w, s, kp) in q {
++            let w = w as usize;
++            let (p0, p1) = (self.off[w] as usize, self.off[w + 1] as usize);
++            let idf2 = self.idf2[w];
++            let t = kp + 1;
++            reads += (p1 - p0) as u64;
++            crate::timed!(48, scan(&self.sig[p0..p1], s, hh, pass));
++            hits += pass.len() as u64;
++            for &k in pass.iter() {
++                let o = self.img[p0 + k as usize] as usize;
++                if o as u32 == exclude || tag[o] == t {
++                    continue;
++                }
++                if tag[o] == 0 {
++                    touched.push(o as u32);
++                }
++                tag[o] = t;
++                acc[o] += idf2;
++            }
++        }
++        READS.fetch_add(reads, std::sync::atomic::Ordering::Relaxed);
++        HITS.fetch_add(hits, std::sync::atomic::Ordering::Relaxed);
++        QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        let inv = 1.0 / qmass.max(1e-6);
++        for &o in touched.iter() {
++            out.push((o, acc[o as usize] * inv));
++            acc[o as usize] = 0.0;
++            tag[o as usize] = 0;
++        }
++    }
++}
++
++pub(crate) static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub(crate) static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub(crate) static QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub(crate) fn counts() -> String {
++    use std::sync::atomic::Ordering::Relaxed;
++    format!("he queries {} postings read {} passed {}", QUERIES.load(Relaxed), READS.load(Relaxed), HITS.load(Relaxed))
++}
++
++crate::simd::dispatched! {
++    /// The offsets in `sig` within `hh` bits of `s`, into `out`.
++    fn scan(sig: &[u64], s: u64, hh: u32, out: &mut Vec<u32>) => scan_any;
++}
++
++#[cfg_attr(dispatch, inline(always))]
++fn scan_any(sig: &[u64], s: u64, hh: u32, out: &mut Vec<u32>) {
++    out.clear();
++    out.reserve(sig.len() + 1);
++    let p = out.as_mut_ptr();
++    let mut n = 0usize;
++    for (k, &x) in sig.iter().enumerate() {
++        // SAFETY: n <= k < sig.len() < capacity.
++        unsafe { *p.add(n) = k as u32 };
++        n += ((x ^ s).count_ones() <= hh) as usize;
++    }
++    // SAFETY: the first n were written.
++    unsafe { out.set_len(n) };
++}
++
++/// SCAFFOLDING: Hamming distances of same-word keypoint pairs of different
++/// files, by whether their descriptors lie within `GUIDE_D2`.
++fn stat(items: &[crate::analysis::Item], own: &[Vec<(u32, u64, u32)>], off: &[u32], img: &[u32]) {
++    // Postings' keypoints and signatures, by word, rebuilt here.
++    let nw = off.len() - 1;
++    let mut by: Vec<Vec<(u32, u32, u64)>> = vec![Vec::new(); nw];
++    for (i, o) in own.iter().enumerate() {
++        for &(w, s, kp) in o {
++            by[w as usize].push((i as u32, kp, s));
++        }
++    }
++    let _ = img;
++    let (mut near, mut far) = ([0u64; 65], [0u64; 65]);
++    let mut d2s = [0u64; 65];
++    let mut x = 0x1234_5678u64;
++    for w in (0..nw).step_by(7) {
++        let p = &by[w];
++        if p.len() < 2 { continue; }
++        for _ in 0..p.len().min(2000) {
++            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
++            let a = (x % p.len() as u64) as usize;
++            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
++            let b = (x % p.len() as u64) as usize;
++            if p[a].0 == p[b].0 { continue; }
++            let ga = (w & 3) as usize;
++            let da = fixed::oriented(items[p[a].0 as usize].feats.d(p[a].1 as usize), ga);
++            let db = fixed::oriented(items[p[b].0 as usize].feats.d(p[b].1 as usize), ga);
++            let d2: u32 = (0..DESC_LEN).map(|i| { let t = da[i] as i32 - db[i] as i32; (t * t) as u32 }).sum();
++            let h = (p[a].2 ^ p[b].2).count_ones() as usize;
++            if d2 <= 143 * 143 { near[h] += 1 } else if d2 > crate::verify::GUIDE_D2 { far[h] += 1 }
++            d2s[((d2 as f64).sqrt() / 20.0).min(64.0) as usize] += 1;
++        }
++    }
++    let cum = |v: &[u64; 65]| { let t: u64 = v.iter().sum(); let mut c = 0; (0..65).map(|h| { c += v[h]; format!("{h}:{:.4}", c as f64 / t.max(1) as f64) }).collect::<Vec<_>>().join(" ") };
++    eprintln!("HE_STAT near (n {}) {}", near.iter().sum::<u64>(), cum(&near));
++    eprintln!("HE_STAT far (n {}) {}", far.iter().sum::<u64>(), cum(&far));
++    eprintln!("HE_STAT dist/20 {:?}", d2s);
++}
+diff --git a/src/index.rs b/src/index.rs
+index 5c4b0f6..e1d41e9 100644
+--- a/src/index.rs
++++ b/src/index.rs
+@@ -16,9 +16,12 @@
+ //!
+ //! The vocabulary is a hierarchical k-means tree (Nister & Stewenius): a
+ //! descriptor is quantised by descending it, which costs `branching * depth`
+-//! comparisons instead of one per word. Descent keeps several paths when the
+-//! choice is close, because a descriptor sitting near a boundary must not be
+-//! invisible to its own twin on the other side.
++//! comparisons instead of one per word. The run's own vocabulary only
++//! proposes which files to compare, and descends one path (`VocabParams::
++//! max_paths`); the fixed vocabulary that seeds a verdict's correspondences
++//! (`fixed`) is the same kind of tree and keeps two, because there a
++//! descriptor sitting near a boundary must not be invisible to its own twin
++//! on the other side.
+ 
+ use crate::sift::DESC_LEN;
+ use rayon::prelude::*;
+@@ -39,6 +42,16 @@ pub struct VocabParams {
+     pub sample: usize,
+     pub iters: usize,
+     /// Extra descent paths kept when a child is nearly as close as the best.
++    ///
++    /// One for the run's vocabulary: it proposes candidates, which are ranked
++    /// over hundreds of words a file, and a word missed at a boundary moves a
++    /// score a little. It was three while its words also seeded the verdicts'
++    /// correspondences, where a missed word was a missed correspondence; those
++    /// come from the fixed vocabulary now (`fixed`). Measured with the fixed
++    /// seeding (`benchmark/out/v57-fixed`): IMGS-ALL recall 96.18 / 96.17% at
++    /// two / one paths (three: the base's 96.17), IMGS-ALL2 89.88 / 89.73%
++    /// (three 89.91%); one path takes the run's quantising, its second look's
++    /// and its queries to about a third.
+     pub max_paths: usize,
+     pub path_ratio: f32,
+     pub seed: u64,
+@@ -157,7 +170,7 @@ impl Default for VocabParams {
+             depth: 4,
+             sample: 160_000,
+             iters: 8,
+-            max_paths: 3,
++            max_paths: std::env::var("IMGFP_RP").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+             path_ratio: 1.3,
+             seed: 0x5eed_1234_abcd_ef01,
+         }
+@@ -368,8 +381,14 @@ impl Vocabulary {
+     /// The two numberings sort the same way, which is what makes the swap
+     /// invisible: centres are laid down parent by parent and, within a parent,
+     /// child by child, so a leaf's slot rises with its node number. Every
+-    /// consumer of a word list — the merge in `shared`, the runs the inverted
++    /// consumer of a word list — the runs the inverted
+     /// file is built from — reads only that order.
++    /// The centre of live word `w` (a leaf).
++    pub fn leaf(&self, w: u32) -> &[u8] {
++        let l = self.levels.last().unwrap();
++        &l[w as usize * DESC_LEN..(w as usize + 1) * DESC_LEN]
++    }
++
+     pub fn n_live_words(&self) -> usize {
+         self.levels.last().map_or(0, |l| l.len() / DESC_LEN)
+     }
+@@ -563,6 +582,83 @@ impl Vocabulary {
+         .with_floor()
+     }
+ 
++    /// Descent paths kept: the fixed vocabulary's asker keeps fewer than it
++    /// was trained with (`fixed::ASKER_PATHS`).
++    pub fn set_paths(&mut self, m: usize) {
++        assert!(m >= 1 && m * self.branching <= FRONTIER);
++        self.max_paths = m;
++    }
++
++    /// The tree as bytes (`fixed`'s vocabulary is kept so): its shape, every
++    /// level's centres, the descent's tables and the words' aliases. Norms
++    /// are taken again on reading.
++    #[cfg(test)]
++    pub fn to_bytes(&self) -> Vec<u8> {
++        let mut o = Vec::new();
++        let u = |o: &mut Vec<u8>, v: u64| o.extend_from_slice(&v.to_le_bytes());
++        o.extend_from_slice(b"IMGFPV01");
++        for v in [self.branching as u64, self.depth as u64, self.max_paths as u64, self.path_ratio.to_bits() as u64, self.root.first as u64, self.root.n as u64] {
++            u(&mut o, v);
++        }
++        for l in &self.levels {
++            u(&mut o, l.len() as u64);
++            o.extend_from_slice(l);
++        }
++        for d in &self.down {
++            u(&mut o, d.len() as u64);
++            for k in d {
++                o.extend_from_slice(&k.first.to_le_bytes());
++                o.extend_from_slice(&k.n.to_le_bytes());
++            }
++        }
++        u(&mut o, self.alias.len() as u64);
++        for a in &self.alias {
++            o.extend_from_slice(&a.to_le_bytes());
++        }
++        o
++    }
++
++    /// `to_bytes` read back; `None` for anything else.
++    pub fn from_bytes(b: &[u8]) -> Option<Vocabulary> {
++        struct Cur<'a>(&'a [u8], usize);
++        impl<'a> Cur<'a> {
++            fn take(&mut self, n: usize) -> Option<&'a [u8]> {
++                let s = self.0.get(self.1..self.1.checked_add(n)?)?;
++                self.1 += n;
++                Some(s)
++            }
++            fn u(&mut self) -> Option<usize> {
++                usize::try_from(u64::from_le_bytes(self.take(8)?.try_into().ok()?)).ok()
++            }
++        }
++        let mut c = Cur(b, 0);
++        if c.take(8)? != b"IMGFPV01" {
++            return None;
++        }
++        let (branching, depth, max_paths) = (c.u()?, c.u()?, c.u()?);
++        let path_ratio = f32::from_bits(c.u()? as u32);
++        let root = Kids { first: c.u()? as u32, n: c.u()? as u32 };
++        if !(1..=MAX_BRANCH).contains(&branching) || max_paths * branching > FRONTIER || depth == 0 {
++            return None;
++        }
++        let mut levels = Vec::with_capacity(depth);
++        for _ in 0..depth {
++            let n = c.u()?;
++            levels.push(c.take(n)?.to_vec());
++        }
++        let mut down = Vec::with_capacity(depth - 1);
++        for _ in 0..depth - 1 {
++            let n = c.u()?;
++            let raw = c.take(n.checked_mul(8)?)?;
++            down.push(raw.chunks_exact(8).map(|c| Kids { first: u32::from_le_bytes(c[..4].try_into().unwrap()), n: u32::from_le_bytes(c[4..].try_into().unwrap()) }).collect());
++        }
++        let n = c.u()?;
++        let alias = c.take(n.checked_mul(4)?)?.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
++        let norm = |c: &[u8]| -> u32 { c.iter().map(|&v| v as u32 * v as u32).sum() };
++        let norms = levels.iter().map(|l| l.chunks_exact(DESC_LEN).map(norm).collect()).collect();
++        Some(Vocabulary { branching, depth, levels, norms, root, down, max_paths, path_ratio, alias })
++    }
++
+     /// Leaves of one parent whose centres lie within `WORD_FLOOR` of each
+     /// other made one word (single linkage), so that no word is finer than
+     /// two observations of one point.
+@@ -683,7 +779,7 @@ impl Vocabulary {
+             // `max_paths` rather than the old `min(max_paths, n_next)`: the
+             // two differ only when the level offers fewer children than that,
+             // and then the scan never fills up, so the bound is never read.
+-            let keep = self.max_paths;
++            let keep = if l + 1 == self.depth && self.max_paths == 1 { last_paths() } else { self.max_paths };
+             let mut held = 0usize;
+             for pi in 0..n_cur {
+                 let kids = kids[pi];
+@@ -776,6 +872,11 @@ impl Vocabulary {
+     }
+ }
+ 
++fn last_paths() -> usize {
++    static L: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    *L.get_or_init(|| std::env::var("IMGFP_RLAST").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
++}
++
+ /// A descriptor prepared for the descent: widened once, and its squared
+ /// length taken once.
+ ///
+@@ -1362,9 +1463,8 @@ impl WordList {
+         self.e[i] >> KP_BITS
+     }
+ 
+-    /// The keypoint of entry `i`. `shared` reads the entries whole, so only
+-    /// the tests' reference merge asks for this.
+-    #[cfg(test)]
++    /// The keypoint of entry `i`.
++    #[inline(always)]
+     pub fn kp(&self, i: usize) -> u32 {
+         self.e[i] & KP_MASK
+     }
+@@ -1828,402 +1928,70 @@ crate::simd::dispatched! {
+     fn query_entry(inv: &InvertedFile, wl: &WordList, exclude: u32, acc: &mut [f32], out: &mut Vec<(u32, f32)>) => InvertedFile::query_any;
+ }
+ 
+-/// Whether any word of `a` is also a word of `b`, for two runs of `BLOCK`
+-/// sorted words.
+-///
+-/// All sixty-four comparisons at once: one vector holds `b`'s block, each of
+-/// `a`'s eight words is broadcast against it, and the masks are collected. The
+-/// intersection is *sparse* — two images share some tens of words out of
+-/// thirteen hundred each — so this answers "no" almost every time, and the
+-/// answer costs about one instruction per word compared against four unusable
+-/// branches.
+-///
+-/// Compiled on every x86-64 build and called only when `simd::v3()` says the
+-/// CPU has AVX2; see `shared`.
+-#[cfg(target_arch = "x86_64")]
+-#[target_feature(enable = "avx2")]
+-#[inline]
+-unsafe fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
+-    debug_assert!(a.len() >= BLOCK && b.len() >= BLOCK);
+-    unsafe {
+-        use std::arch::x86_64::*;
+-        let mask = _mm256_set1_epi32(KP_MASK as i32);
+-        let bv = _mm256_or_si256(_mm256_loadu_si256(b.as_ptr() as *const __m256i), mask);
+-        let mut acc = _mm256_setzero_si256();
+-        for k in 0..BLOCK {
+-            let av = _mm256_set1_epi32((*a.get_unchecked(k) | KP_MASK) as i32);
+-            acc = _mm256_or_si256(acc, _mm256_cmpeq_epi32(av, bv));
+-        }
+-        _mm256_movemask_epi8(acc) != 0
+-    }
+-}
+-
+-/// On another architecture there is no filter to run — `shared`'s block width
+-/// is zero and its block phase is dead code — and this exists so that the
+-/// phase still type-checks. Answering "yes, look at these" would also be
+-/// *correct* there, just pointless: sixty-four scalar comparisons cost more
+-/// than the eight merge steps they could skip.
+-#[cfg(not(target_arch = "x86_64"))]
+-#[inline]
+-unsafe fn blocks_meet(_a: &[u32], _b: &[u32]) -> bool {
+-    true
++/// A flat run of descriptors as the candidates `Vocabulary::build` samples.
++#[cfg(test)]
++fn as_samples(desc: &[u8]) -> Vec<&[u8; DESC_LEN]> {
++    desc.chunks_exact(DESC_LEN).map(|d| d.try_into().unwrap()).collect()
+ }
+ 
+-/// Words compared at a time by the block filter, and the width of the vector
+-/// that does it.
+-const BLOCK: usize = 8;
++#[cfg(test)]
++mod tests {
++    use super::*;
+ 
+-crate::simd::dispatched! {
+-    /// Candidate descriptor pairs for two images: keypoints that share a word.
+-    ///
+-    /// The intersection is *sparse*: two images' word lists hold about thirteen
+-    /// hundred entries each over a vocabulary of a million-odd words, and share
+-    /// some tens. It is also the matcher's most-called function — five million
+-    /// times in one run of a nine-thousand-image corpus, and four times that on
+-    /// one where most files have no duplicate and the mirrored pass re-asks.
+-    ///
+-    /// So the words are merged in two phases. A **block filter** asks whether the
+-    /// next eight words of each side have anything in common at all, and when they
+-    /// do not — which is nearly always — it advances the side whose block ends
+-    /// first by all eight. A **scalar merge** takes over for the block pair that
+-    /// does meet, and it is where the pairs are emitted. The words come out in the
+-    /// same order a plain merge would give them, so `cap` still cuts the same
+-    /// place.
+-    ///
+-    /// The two forms this replaces are worth recording, because both were
+-    /// measured. A plain three-way merge steps once per entry of both lists, and
+-    /// every step is a comparison the predictor cannot learn: 43 microseconds a
+-    /// pair. Galloping — skipping to the next candidate rather than walking to it
+-    /// — reduced the *steps* to one per entry of one list and left the branches
+-    /// exactly as unpredictable, which is why it was worth only 4%. Neither was
+-    /// bound by its comparisons; both were bound by being wrong about them.
+-    /// Measured on `shared_timings`, at 1,300 entries over 1.7 M words: 13.9
+-    /// microseconds galloping against 2.5 with the filter.
+-    pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) => shared_any;
+-}
++    struct Lcg(u64);
++    impl Lcg {
++        fn byte(&mut self) -> u8 {
++            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            (self.0 >> 33) as u8
++        }
++    }
+ 
+-/// `shared`, for whichever copy `dispatched!` chose.
+-#[cfg_attr(dispatch, inline(always))]
+-fn shared_any(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
+-    out.clear();
+-    // The block filter's width, or zero, which turns it off, where the CPU
+-    // has no AVX2 to run it with.
+-    let block = if crate::simd::v3() { BLOCK } else { 0 };
+-    // The largest keypoint index emitted, as a running `or`. It decides
+-    // whether the pairs can be sorted by counting rather than by comparing —
+-    // see `sort_pairs` — and it costs one integer operation per pair.
+-    let mut hi = 0u32;
+-    // Entries are compared by their word alone, and `| KP_MASK` is how: it
+-    // sets every keypoint bit, so two entries compare equal exactly when
+-    // their words do and order exactly as their words do. One `or` per
+-    // entry read, here and in the block filter.
+-    let (aw, bw) = (&a.e[..], &b.e[..]);
+-    let (na, nb) = (aw.len(), bw.len());
+-    let (mut i, mut j) = (0usize, 0usize);
+-    while i < na && j < nb {
+-        // Block phase. Nothing is emitted here: it only finds the first block
+-        // pair that could hold a shared word.
+-        let (mut ia, mut jb) = (i + block, j + block);
+-        // SAFETY: `block` is non-zero only when `simd::v3()` has said the CPU
+-        // has AVX2.
+-        while block > 0 && ia <= na && jb <= nb && !unsafe { blocks_meet(&aw[i..ia], &bw[j..jb]) } {
+-            // The block that ends first cannot match anything the other side
+-            // has left, so it goes whole. Equal ends retire both.
+-            let (am, bm) = (aw[ia - 1] | KP_MASK, bw[jb - 1] | KP_MASK);
+-            if am <= bm {
+-                i = ia;
+-                ia += block;
+-            }
+-            if bm <= am {
+-                j = jb;
+-                jb += block;
++    #[test]
++    fn a_two_level_vocabulary_separates_what_is_separable() {
++        const GROUPS: usize = 16;
++        const SUBS: usize = 16;
++        const EACH: usize = 10;
++        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
++        let mut desc: Vec<u8> = Vec::with_capacity(GROUPS * SUBS * EACH * DESC_LEN);
++        for _ in 0..GROUPS {
++            let centre: Vec<i32> = (0..DESC_LEN).map(|_| (rng.byte() / 2) as i32).collect();
++            for sub in 0..SUBS {
++                let mut mode = centre.clone();
++                for d in 0..8 {
++                    mode[(sub * 8 + d) % DESC_LEN] += 40;
++                }
++                for _ in 0..EACH {
++                    for &m in mode.iter() {
++                        desc.push((m + (rng.byte() % 3) as i32 - 1).clamp(0, 255) as u8);
++                    }
++                }
+             }
+         }
+-        if i >= na || j >= nb {
+-            break;
++        let p = VocabParams { depth: 2, ..Default::default() };
++        let v = Vocabulary::build(as_samples(&desc), &p);
++
++        let mut words: Vec<Vec<u32>> = Vec::new();
++        let mut out = Vec::new();
++        for (i, d) in desc.chunks_exact(DESC_LEN).enumerate() {
++            v.quantise(d, &mut out);
++            assert!(!out.is_empty(), "descriptor {i} quantised to nothing");
++            assert!(out.iter().all(|&w| (w as usize) < v.n_words()));
++            words.push(out.clone());
+         }
+-        // Scalar phase, over the block pair the filter stopped at — or over
+-        // the tails, where there is no whole block left to filter. It runs
+-        // until one of the two windows is used up, which is as far as the
+-        // filter's own reasoning reaches.
+-        let (aend, bend) = if block == 0 { (na, nb) } else { (ia.min(na), jb.min(nb)) };
+-        while i < aend && j < bend {
+-            let (av, bv) = (aw[i] | KP_MASK, bw[j] | KP_MASK);
+-            // Two conditional increments rather than a three-way branch: a
+-            // shared word is rare enough that the test below predicts, and the
+-            // ordering of two words that differ does not.
+-            i += (av < bv) as usize;
+-            j += (bv < av) as usize;
+-            if av != bv {
+-                continue;
+-            }
+-            let (i0, j0) = (i, j);
+-            while i < na && aw[i] | KP_MASK == av {
+-                i += 1;
+-            }
+-            while j < nb && bw[j] | KP_MASK == av {
+-                j += 1;
+-            }
+-            // Every keypoint pair a shared word offers, however many there
+-            // are. A word on many keypoints of both sides used to be dropped
+-            // as repeated texture once it offered more than 64 pairs — a
+-            // number from nowhere, and one that did nothing: swept from 8 to
+-            // no cut at all on four corpora at three working sizes, pooled F1
+-            // is the same to 0.0001 from 32 up, nothing merges, and the clock
+-            // does not move (CLAUDE.md, *Parameters*). What it dropped were
+-            // real correspondences that only ever added inliers to matches
+-            // already accepted. The one case it guarded, a word on hundreds
+-            // of keypoints of both images, is what `cap` below is for.
+-            for &ea in &aw[i0..i] {
+-                for &eb in &bw[j0..j] {
+-                    let e = (ea & KP_MASK, eb & KP_MASK);
+-                    hi |= e.0 | e.1;
+-                    out.push(e);
++        for (i, wi) in words.iter().enumerate() {
++            for (j, wj) in words.iter().enumerate().skip(i + 1) {
++                if i / (SUBS * EACH) != j / (SUBS * EACH) {
++                    assert!(
++                        wi.iter().all(|w| !wj.contains(w)),
++                        "descriptors {i} and {j} are from different groups and share a word"
++                    );
+                 }
+             }
+-            // A bound on the work one pair of images can ask for, not a
+-            // filter: with nothing cut before it, it was reached 8 and 12
+-            // times on IMGS at 512 and 640, and never on IMGS2-4.
+-            if out.len() > cap {
+-                sort_pairs(out, hi);
+-                out.dedup();
+-                return;
+-            }
+         }
+-    }
+-    sort_pairs(out, hi);
+-    out.dedup();
+-}
+-
+-/// Bits taken per radix pass, and the buckets that implies. Two passes of ten
+-/// cover a keypoint index of a thousand, which is more than `max_features`
+-/// lets an image hold.
+-const RADIX_BITS: usize = 10;
+-const RADIX_BUCKETS: usize = 1 << RADIX_BITS;
+-
+-/// Below this many pairs the comparison sort wins, because a radix pass has to
+-/// clear and prefix-sum a thousand buckets whatever the list holds. Measured
+-/// on lists of the shape this function really sees: 56 pairs cost 0.9
+-/// microseconds comparing and 2.2 counting, 400 cost 7.5 and 4.0, 1,200 cost
+-/// 23.6 and 10.2, 3,200 cost 66.5 and 23.8. The crossing is near 150.
+-const RADIX_MIN: usize = 192;
+-
+-/// Scratch for the counting sort: the buffer it ping-pongs through and the
+-/// buckets it counts into, kept per thread rather than allocated five million
+-/// times.
+-struct SortScratch {
+-    tmp: Vec<(u32, u32)>,
+-    cnt: Vec<u32>,
+-}
+-
+-thread_local! {
+-    static SORT_SCRATCH: std::cell::RefCell<SortScratch> =
+-        const { std::cell::RefCell::new(SortScratch { tmp: Vec::new(), cnt: Vec::new() }) };
+-}
+-
+-/// Sort the emitted pairs.
+-///
+-/// **This is what `shared` costs**, and it took a bench to see it. The merge
+-/// that finds the shared words is a couple of microseconds and does not care
+-/// how much the two images have in common; the list it emits does. The
+-/// candidates a query returns are by construction the images sharing the most
+-/// words with it, so the calls that matter are the ones emitting hundreds or
+-/// thousands of pairs, and at that size the whole call is this sort:
+-/// `shared_overlap` reads 2.1 microseconds at no shared words and 33.9 at
+-/// eight hundred, and a comparison sort of the 3,190 pairs those eight hundred
+-/// emit is 66 microseconds of the 68 a two-thread machine would charge for it.
+-///
+-/// A keypoint index is smaller than `max_features`, so a pair is twenty bits
+-/// and two counting passes put it in order — the same order, since a
+-/// least-significant-digit radix sort is stable and sorts on the whole key.
+-/// `hi` is the `or` of every index emitted, so the fast path is taken only
+-/// when the key really fits; anything wider falls back to comparing, as does
+-/// anything short enough that clearing the buckets would cost more than the
+-/// comparisons.
+-fn sort_pairs(out: &mut Vec<(u32, u32)>, hi: u32) {
+-    if out.len() < RADIX_MIN || hi >= RADIX_BUCKETS as u32 {
+-        out.sort_unstable();
+-        return;
+-    }
+-    SORT_SCRATCH.with(|s| {
+-        let s = &mut *s.borrow_mut();
+-        let n = out.len();
+-        // Grown, never refilled: the scratch is written before it is read on
+-        // every pass, so zeroing it would be a pass over the pairs of its own.
+-        if s.tmp.len() < n {
+-            s.tmp.resize(n, (0, 0));
+-        }
+-        if s.cnt.len() != RADIX_BUCKETS {
+-            s.cnt.resize(RADIX_BUCKETS, 0);
+-        }
+-        let cnt = &mut s.cnt[..RADIX_BUCKETS];
+-        let tmp = &mut s.tmp[..n];
+-        // Pass one on the second index, pass two on the first: both are below
+-        // `RADIX_BUCKETS`, so each is its own digit and no shifting is needed.
+-        for pass in 0..2 {
+-            cnt.fill(0);
+-            let (src, dst): (&[(u32, u32)], &mut [(u32, u32)]) =
+-                if pass == 0 { (&out[..n], tmp) } else { (tmp, &mut out[..n]) };
+-            for e in src.iter() {
+-                let k = if pass == 0 { e.1 } else { e.0 } as usize;
+-                cnt[k] += 1;
+-            }
+-            let mut run = 0u32;
+-            for c in cnt.iter_mut() {
+-                let take = *c;
+-                *c = run;
+-                run += take;
+-            }
+-            for &e in src.iter() {
+-                let k = if pass == 0 { e.1 } else { e.0 } as usize;
+-                dst[cnt[k] as usize] = e;
+-                cnt[k] += 1;
+-            }
+-        }
+-    });
+-}
+-
+-/// A flat run of descriptors as the candidates `Vocabulary::build` samples.
+-#[cfg(test)]
+-fn as_samples(desc: &[u8]) -> Vec<&[u8; DESC_LEN]> {
+-    desc.chunks_exact(DESC_LEN).map(|d| d.try_into().unwrap()).collect()
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    /// The plain three-way merge the block filter replaced, kept as the
+-    /// reference the filter is checked against: same pairs, same order, same
+-    /// `cap` cut.
+-    fn shared_reference(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
+-        out.clear();
+-        let (mut i, mut j) = (0usize, 0usize);
+-        while i < a.len() && j < b.len() {
+-            match a.word(i).cmp(&b.word(j)) {
+-                std::cmp::Ordering::Less => i += 1,
+-                std::cmp::Ordering::Greater => j += 1,
+-                std::cmp::Ordering::Equal => {
+-                    let w = a.word(i);
+-                    let i0 = i;
+-                    while i < a.len() && a.word(i) == w {
+-                        i += 1;
+-                    }
+-                    let j0 = j;
+-                    while j < b.len() && b.word(j) == w {
+-                        j += 1;
+-                    }
+-                    for x in i0..i {
+-                        for y in j0..j {
+-                            out.push((a.kp(x), b.kp(y)));
+-                        }
+-                    }
+-                    if out.len() > cap {
+-                        break;
+-                    }
+-                }
+-            }
+-        }
+-        out.sort_unstable();
+-        out.dedup();
+-    }
+-
+-    /// Random lists at every shape that matters — sparse and dense
+-    /// intersections, runs on one side and both, lists shorter than a block,
+-    /// and a cap small enough to cut.
+-    #[test]
+-    fn the_block_filter_intersects_exactly_as_a_merge_does() {
+-        let mut rng = Lcg(0x243f_6a88_85a3_08d3);
+-        let mut made = |len: usize, span: u32, reps: u32| -> WordList {
+-            let mut pairs: Vec<(u32, u32)> = (0..len)
+-                .map(|k| {
+-                    let w = (rng.byte() as u32) << 8 | rng.byte() as u32;
+-                    (w % span.max(1) / reps.max(1) * reps.max(1), k as u32)
+-                })
+-                .collect();
+-            pairs.sort_unstable();
+-            WordList::from_sorted(&pairs)
+-        };
+-        let mut got = Vec::new();
+-        let mut want = Vec::new();
+-        // The last pair reaches past a thousand keypoints, which is the width
+-        // `sort_pairs` counts in: above it the pairs go back to being compared,
+-        // and that path has to give the same answer as the counting one.
+-        for &(la, lb) in [(0usize, 7usize), (1, 1), (3, 40), (9, 9), (17, 8), (64, 64), (300, 290), (1000, 30), (1500, 1200)].iter() {
+-            for &(span, reps) in [(65535u32, 1u32), (400, 1), (64, 1), (65535, 7), (200, 3)].iter() {
+-                let a = made(la, span, reps);
+-                let b = made(lb, span, reps);
+-                for cap in [60_000usize, 32, 3] {
+-                    shared(&a, &b, &mut got, cap);
+-                    shared_reference(&a, &b, &mut want, cap);
+-                    assert_eq!(got, want, "la {la} lb {lb} span {span} reps {reps} cap {cap}");
+-                }
+-            }
+-        }
+-    }
+-
+-    struct Lcg(u64);
+-    impl Lcg {
+-        fn byte(&mut self) -> u8 {
+-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+-            (self.0 >> 33) as u8
+-        }
+-    }
+-
+-    /// The descent measures a node's children all at once, out of a block
+-    /// stored dimension-major, which is an indexing trick over an obvious
+-    /// loop. The check is not that the indices look right — it is that the
+-    /// tree still does its job. Descriptors are built in sixteen groups that
+-    /// sit ~1,100 apart in L2, each group holding sixteen tight modes ~160
+-    /// apart; a vocabulary that measures distances correctly never gives two
+-    /// groups the same word, and does subdivide inside a group. Confuse a
+-    /// centre's dimensions with its siblings' and every distance is noise.
+-    #[test]
+-    fn a_two_level_vocabulary_separates_what_is_separable() {
+-        const GROUPS: usize = 16;
+-        const SUBS: usize = 16;
+-        const EACH: usize = 10;
+-        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+-        let mut desc: Vec<u8> = Vec::with_capacity(GROUPS * SUBS * EACH * DESC_LEN);
+-        for _ in 0..GROUPS {
+-            let centre: Vec<i32> = (0..DESC_LEN).map(|_| (rng.byte() / 2) as i32).collect();
+-            for sub in 0..SUBS {
+-                let mut mode = centre.clone();
+-                for d in 0..8 {
+-                    mode[(sub * 8 + d) % DESC_LEN] += 40;
+-                }
+-                for _ in 0..EACH {
+-                    for &m in mode.iter() {
+-                        desc.push((m + (rng.byte() % 3) as i32 - 1).clamp(0, 255) as u8);
+-                    }
+-                }
+-            }
+-        }
+-        let p = VocabParams { depth: 2, ..Default::default() };
+-        let v = Vocabulary::build(as_samples(&desc), &p);
+-
+-        let mut words: Vec<Vec<u32>> = Vec::new();
+-        let mut out = Vec::new();
+-        for (i, d) in desc.chunks_exact(DESC_LEN).enumerate() {
+-            v.quantise(d, &mut out);
+-            assert!(!out.is_empty(), "descriptor {i} quantised to nothing");
+-            assert!(out.iter().all(|&w| (w as usize) < v.n_words()));
+-            words.push(out.clone());
+-        }
+-        for (i, wi) in words.iter().enumerate() {
+-            for (j, wj) in words.iter().enumerate().skip(i + 1) {
+-                if i / (SUBS * EACH) != j / (SUBS * EACH) {
+-                    assert!(
+-                        wi.iter().all(|w| !wj.contains(w)),
+-                        "descriptors {i} and {j} are from different groups and share a word"
+-                    );
+-                }
+-            }
+-        }
+-        let mut firsts: Vec<u32> = words.iter().map(|w| w[0]).collect();
+-        firsts.sort_unstable();
+-        firsts.dedup();
+-        assert!(firsts.len() > GROUPS, "the second level separated nothing");
++        let mut firsts: Vec<u32> = words.iter().map(|w| w[0]).collect();
++        firsts.sort_unstable();
++        firsts.dedup();
++        assert!(firsts.len() > GROUPS, "the second level separated nothing");
+     }
+ 
+     /// The query as it was written before its postings were packed and its
+@@ -2378,48 +2146,6 @@ mod bench {
+         println!("quantise: {best:8.1} ns/descriptor  ({} words)", v.n_words());
+     }
+ 
+-    /// `cargo test --release -- --ignored --nocapture shared_timings`
+-    ///
+-    /// The word-list intersection, on one core, at the shape a real corpus
+-    /// produces: `L` entries per list over `V` words, both sorted.
+-    #[test]
+-    #[ignore]
+-    fn shared_timings() {
+-        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+-        let mut w32 = || {
+-            let a = rng.byte() as u32;
+-            let b = rng.byte() as u32;
+-            let c = rng.byte() as u32;
+-            (a << 16) | (b << 8) | c
+-        };
+-        for (l, v) in [(1300usize, 1_771_561u32), (1070, 1_048_576), (1300, 262_144)] {
+-            // A pool of lists, so that each call reads a different one and the
+-            // measurement is not a single pair sitting in L1.
+-            let lists: Vec<WordList> = (0..64)
+-                .map(|_| {
+-                    let mut pairs: Vec<(u32, u32)> =
+-                        (0..l).map(|k| (w32() % v, (k / 3) as u32)).collect();
+-                    pairs.sort_unstable();
+-                    WordList::from_sorted(&pairs)
+-                })
+-                .collect();
+-            let mut out = Vec::new();
+-            let mut best = f64::MAX;
+-            for _ in 0..7 {
+-                let t = std::time::Instant::now();
+-                let mut n = 0usize;
+-                for a in lists.iter() {
+-                    for b in lists.iter() {
+-                        shared(a, b, &mut out, 60_000);
+-                        std::hint::black_box(&out);
+-                        n += 1;
+-                    }
+-                }
+-                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+-            }
+-            println!("shared: {best:9.0} ns/call  (len {l}, {v} words)");
+-        }
+-    }
+ 
+     /// `cargo test --release -- --ignored --nocapture query_timings`
+     ///
+@@ -2474,132 +2200,7 @@ mod bench {
+         }
+     }
+ 
+-    /// `cargo test --release -- --ignored --nocapture shared_overlap`
+-    ///
+-    /// The same intersection at the overlap a real pair has. Two images that
+-    /// share nothing still share some words — the reach histogram of a
+-    /// nine-thousand-image corpus puts the typical candidate at thirty to a
+-    /// hundred shared entries — and the cost of a call is not all in the merge:
+-    /// every shared word emits `c_a * c_b` pairs and the list is sorted and
+-    /// deduplicated before it is returned. This says how the two halves divide.
+-    #[test]
+-    #[ignore]
+-    fn shared_overlap() {
+-        let mut rng = Lcg(0x51ed_270b_6efc_2f4d);
+-        let l = 1300usize;
+-        let v = 1_771_561u32;
+-        for shared_words in [0usize, 10, 40, 100, 300, 800] {
+-            let lists: Vec<(WordList, WordList)> = (0..32)
+-                .map(|_| {
+-                    let mut wa: Vec<u32> = Vec::new();
+-                    let mut wb: Vec<u32> = Vec::new();
+-                    let w32 = |rng: &mut Lcg| {
+-                        let (a, b, c) = (rng.byte() as u32, rng.byte() as u32, rng.byte() as u32);
+-                        ((a << 16) | (b << 8) | c) % v
+-                    };
+-                    // Shared words first, then each side's own, then a run
+-                    // length of one to three for each, as a descriptor's
+-                    // multi-assignment gives.
+-                    let mut common = Vec::new();
+-                    for _ in 0..shared_words {
+-                        common.push(w32(&mut rng));
+-                    }
+-                    for w in common.iter() {
+-                        for _ in 0..1 + (rng.byte() % 3) {
+-                            wa.push(*w);
+-                        }
+-                        for _ in 0..1 + (rng.byte() % 3) {
+-                            wb.push(*w);
+-                        }
+-                    }
+-                    while wa.len() < l {
+-                        wa.push(w32(&mut rng));
+-                    }
+-                    while wb.len() < l {
+-                        wb.push(w32(&mut rng));
+-                    }
+-                    let mk = |mut w: Vec<u32>| {
+-                        w.sort_unstable();
+-                        let pairs: Vec<(u32, u32)> = w.iter().enumerate().map(|(k, &w)| (w, k as u32)).collect();
+-                        WordList::from_sorted(&pairs)
+-                    };
+-                    (mk(wa), mk(wb))
+-                })
+-                .collect();
+-            let mut out = Vec::new();
+-            let mut best = f64::MAX;
+-            let mut emitted = 0usize;
+-            for _ in 0..7 {
+-                let t = std::time::Instant::now();
+-                let mut n = 0usize;
+-                emitted = 0;
+-                for (a, b) in lists.iter() {
+-                    shared(a, b, &mut out, 60_000);
+-                    emitted += out.len();
+-                    std::hint::black_box(&out);
+-                    n += 1;
+-                }
+-                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+-            }
+-            println!(
+-                "shared_overlap: {best:9.0} ns/call  ({shared_words} shared words, {} pairs out)",
+-                emitted / 32
+-            );
+-        }
+-    }
+ 
+-    /// `cargo test --release -- --ignored --nocapture shared_pool`
+-    ///
+-    /// The same intersection against a pool too large to cache, which is the
+-    /// shape the matcher really asks for: a query list against nine thousand
+-    /// other images' lists, each some ten kilobytes and none of them recently
+-    /// read. `shared_timings` keeps its pool in L2 and so measures the
+-    /// arithmetic; this one measures the arithmetic plus whatever the memory
+-    /// costs, and the gap between the two is the answer to "would a faster
+-    /// loop help".
+-    #[test]
+-    #[ignore]
+-    fn shared_pool() {
+-        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+-        let mut w32 = || {
+-            let a = rng.byte() as u32;
+-            let b = rng.byte() as u32;
+-            let c = rng.byte() as u32;
+-            (a << 16) | (b << 8) | c
+-        };
+-        let l = 1300usize;
+-        let v = 1_771_561u32;
+-        for n_lists in [64usize, 1024, 8192] {
+-            let lists: Vec<WordList> = (0..n_lists)
+-                .map(|_| {
+-                    let mut pairs: Vec<(u32, u32)> =
+-                        (0..l).map(|k| (w32() % v, (k / 3) as u32)).collect();
+-                    pairs.sort_unstable();
+-                    WordList::from_sorted(&pairs)
+-                })
+-                .collect();
+-            let mb = n_lists as f64 * l as f64 * 8.0 / 1e6;
+-            let mut out = Vec::new();
+-            let mut best = f64::MAX;
+-            for _ in 0..5 {
+-                let t = std::time::Instant::now();
+-                let mut n = 0usize;
+-                // One query list against a long stride of others, which is
+-                // what a candidate list looks like: the query stays warm, the
+-                // other side never does.
+-                for q in 0..n_lists {
+-                    for step in 1..17 {
+-                        let o = (q * 7 + step * 613) % n_lists;
+-                        shared(&lists[q], &lists[o], &mut out, 60_000);
+-                        std::hint::black_box(&out);
+-                        n += 1;
+-                    }
+-                }
+-                best = best.min(t.elapsed().as_secs_f64() * 1e9 / n as f64);
+-            }
+-            println!("shared_pool: {best:9.0} ns/call  ({n_lists} lists, {mb:.0} MB)");
+-        }
+-    }
+ 
+     /// `cargo test --release -- --ignored --nocapture quantise_depth`
+     ///
+@@ -2712,3 +2313,260 @@ mod bench {
+         }
+     }
+ }
++
++// SCAFFOLDING v58: restored from HEAD for the geometric window.
++/// Whether any word of `a` is also a word of `b`, for two runs of `BLOCK`
++/// sorted words.
++///
++/// All sixty-four comparisons at once: one vector holds `b`'s block, each of
++/// `a`'s eight words is broadcast against it, and the masks are collected. The
++/// intersection is *sparse* — two images share some tens of words out of
++/// thirteen hundred each — so this answers "no" almost every time, and the
++/// answer costs about one instruction per word compared against four unusable
++/// branches.
++///
++/// Compiled on every x86-64 build and called only when `simd::v3()` says the
++/// CPU has AVX2; see `shared`.
++#[cfg(target_arch = "x86_64")]
++#[target_feature(enable = "avx2")]
++#[inline]
++unsafe fn blocks_meet(a: &[u32], b: &[u32]) -> bool {
++    debug_assert!(a.len() >= BLOCK && b.len() >= BLOCK);
++    unsafe {
++        use std::arch::x86_64::*;
++        let mask = _mm256_set1_epi32(KP_MASK as i32);
++        let bv = _mm256_or_si256(_mm256_loadu_si256(b.as_ptr() as *const __m256i), mask);
++        let mut acc = _mm256_setzero_si256();
++        for k in 0..BLOCK {
++            let av = _mm256_set1_epi32((*a.get_unchecked(k) | KP_MASK) as i32);
++            acc = _mm256_or_si256(acc, _mm256_cmpeq_epi32(av, bv));
++        }
++        _mm256_movemask_epi8(acc) != 0
++    }
++}
++
++/// On another architecture there is no filter to run — `shared`'s block width
++/// is zero and its block phase is dead code — and this exists so that the
++/// phase still type-checks. Answering "yes, look at these" would also be
++/// *correct* there, just pointless: sixty-four scalar comparisons cost more
++/// than the eight merge steps they could skip.
++#[cfg(not(target_arch = "x86_64"))]
++#[inline]
++unsafe fn blocks_meet(_a: &[u32], _b: &[u32]) -> bool {
++    true
++}
++
++/// Words compared at a time by the block filter, and the width of the vector
++/// that does it.
++const BLOCK: usize = 8;
++
++crate::simd::dispatched! {
++    /// Candidate descriptor pairs for two images: keypoints that share a word.
++    ///
++    /// The intersection is *sparse*: two images' word lists hold about thirteen
++    /// hundred entries each over a vocabulary of a million-odd words, and share
++    /// some tens. It is also the matcher's most-called function — five million
++    /// times in one run of a nine-thousand-image corpus, and four times that on
++    /// one where most files have no duplicate and the mirrored pass re-asks.
++    ///
++    /// So the words are merged in two phases. A **block filter** asks whether the
++    /// next eight words of each side have anything in common at all, and when they
++    /// do not — which is nearly always — it advances the side whose block ends
++    /// first by all eight. A **scalar merge** takes over for the block pair that
++    /// does meet, and it is where the pairs are emitted. The words come out in the
++    /// same order a plain merge would give them, so `cap` still cuts the same
++    /// place.
++    ///
++    /// The two forms this replaces are worth recording, because both were
++    /// measured. A plain three-way merge steps once per entry of both lists, and
++    /// every step is a comparison the predictor cannot learn: 43 microseconds a
++    /// pair. Galloping — skipping to the next candidate rather than walking to it
++    /// — reduced the *steps* to one per entry of one list and left the branches
++    /// exactly as unpredictable, which is why it was worth only 4%. Neither was
++    /// bound by its comparisons; both were bound by being wrong about them.
++    /// Measured on `shared_timings`, at 1,300 entries over 1.7 M words: 13.9
++    /// microseconds galloping against 2.5 with the filter.
++    pub fn shared(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) => shared_any;
++}
++
++/// `shared`, for whichever copy `dispatched!` chose.
++#[cfg_attr(dispatch, inline(always))]
++fn shared_any(a: &WordList, b: &WordList, out: &mut Vec<(u32, u32)>, cap: usize) {
++    out.clear();
++    // The block filter's width, or zero, which turns it off, where the CPU
++    // has no AVX2 to run it with.
++    let block = if crate::simd::v3() { BLOCK } else { 0 };
++    // The largest keypoint index emitted, as a running `or`. It decides
++    // whether the pairs can be sorted by counting rather than by comparing —
++    // see `sort_pairs` — and it costs one integer operation per pair.
++    let mut hi = 0u32;
++    // Entries are compared by their word alone, and `| KP_MASK` is how: it
++    // sets every keypoint bit, so two entries compare equal exactly when
++    // their words do and order exactly as their words do. One `or` per
++    // entry read, here and in the block filter.
++    let (aw, bw) = (&a.e[..], &b.e[..]);
++    let (na, nb) = (aw.len(), bw.len());
++    let (mut i, mut j) = (0usize, 0usize);
++    while i < na && j < nb {
++        // Block phase. Nothing is emitted here: it only finds the first block
++        // pair that could hold a shared word.
++        let (mut ia, mut jb) = (i + block, j + block);
++        // SAFETY: `block` is non-zero only when `simd::v3()` has said the CPU
++        // has AVX2.
++        while block > 0 && ia <= na && jb <= nb && !unsafe { blocks_meet(&aw[i..ia], &bw[j..jb]) } {
++            // The block that ends first cannot match anything the other side
++            // has left, so it goes whole. Equal ends retire both.
++            let (am, bm) = (aw[ia - 1] | KP_MASK, bw[jb - 1] | KP_MASK);
++            if am <= bm {
++                i = ia;
++                ia += block;
++            }
++            if bm <= am {
++                j = jb;
++                jb += block;
++            }
++        }
++        if i >= na || j >= nb {
++            break;
++        }
++        // Scalar phase, over the block pair the filter stopped at — or over
++        // the tails, where there is no whole block left to filter. It runs
++        // until one of the two windows is used up, which is as far as the
++        // filter's own reasoning reaches.
++        let (aend, bend) = if block == 0 { (na, nb) } else { (ia.min(na), jb.min(nb)) };
++        while i < aend && j < bend {
++            let (av, bv) = (aw[i] | KP_MASK, bw[j] | KP_MASK);
++            // Two conditional increments rather than a three-way branch: a
++            // shared word is rare enough that the test below predicts, and the
++            // ordering of two words that differ does not.
++            i += (av < bv) as usize;
++            j += (bv < av) as usize;
++            if av != bv {
++                continue;
++            }
++            let (i0, j0) = (i, j);
++            while i < na && aw[i] | KP_MASK == av {
++                i += 1;
++            }
++            while j < nb && bw[j] | KP_MASK == av {
++                j += 1;
++            }
++            // Every keypoint pair a shared word offers, however many there
++            // are. A word on many keypoints of both sides used to be dropped
++            // as repeated texture once it offered more than 64 pairs — a
++            // number from nowhere, and one that did nothing: swept from 8 to
++            // no cut at all on four corpora at three working sizes, pooled F1
++            // is the same to 0.0001 from 32 up, nothing merges, and the clock
++            // does not move (CLAUDE.md, *Parameters*). What it dropped were
++            // real correspondences that only ever added inliers to matches
++            // already accepted. The one case it guarded, a word on hundreds
++            // of keypoints of both images, is what `cap` below is for.
++            for &ea in &aw[i0..i] {
++                for &eb in &bw[j0..j] {
++                    let e = (ea & KP_MASK, eb & KP_MASK);
++                    hi |= e.0 | e.1;
++                    out.push(e);
++                }
++            }
++            // A bound on the work one pair of images can ask for, not a
++            // filter: with nothing cut before it, it was reached 8 and 12
++            // times on IMGS at 512 and 640, and never on IMGS2-4.
++            if out.len() > cap {
++                sort_pairs(out, hi);
++                out.dedup();
++                return;
++            }
++        }
++    }
++    sort_pairs(out, hi);
++    out.dedup();
++}
++
++/// Bits taken per radix pass, and the buckets that implies. Two passes of ten
++/// cover a keypoint index of a thousand, which is more than `max_features`
++/// lets an image hold.
++const RADIX_BITS: usize = 10;
++const RADIX_BUCKETS: usize = 1 << RADIX_BITS;
++
++/// Below this many pairs the comparison sort wins, because a radix pass has to
++/// clear and prefix-sum a thousand buckets whatever the list holds. Measured
++/// on lists of the shape this function really sees: 56 pairs cost 0.9
++/// microseconds comparing and 2.2 counting, 400 cost 7.5 and 4.0, 1,200 cost
++/// 23.6 and 10.2, 3,200 cost 66.5 and 23.8. The crossing is near 150.
++const RADIX_MIN: usize = 192;
++
++/// Scratch for the counting sort: the buffer it ping-pongs through and the
++/// buckets it counts into, kept per thread rather than allocated five million
++/// times.
++struct SortScratch {
++    tmp: Vec<(u32, u32)>,
++    cnt: Vec<u32>,
++}
++
++thread_local! {
++    static SORT_SCRATCH: std::cell::RefCell<SortScratch> =
++        const { std::cell::RefCell::new(SortScratch { tmp: Vec::new(), cnt: Vec::new() }) };
++}
++
++/// Sort the emitted pairs.
++///
++/// **This is what `shared` costs**, and it took a bench to see it. The merge
++/// that finds the shared words is a couple of microseconds and does not care
++/// how much the two images have in common; the list it emits does. The
++/// candidates a query returns are by construction the images sharing the most
++/// words with it, so the calls that matter are the ones emitting hundreds or
++/// thousands of pairs, and at that size the whole call is this sort:
++/// `shared_overlap` reads 2.1 microseconds at no shared words and 33.9 at
++/// eight hundred, and a comparison sort of the 3,190 pairs those eight hundred
++/// emit is 66 microseconds of the 68 a two-thread machine would charge for it.
++///
++/// A keypoint index is smaller than `max_features`, so a pair is twenty bits
++/// and two counting passes put it in order — the same order, since a
++/// least-significant-digit radix sort is stable and sorts on the whole key.
++/// `hi` is the `or` of every index emitted, so the fast path is taken only
++/// when the key really fits; anything wider falls back to comparing, as does
++/// anything short enough that clearing the buckets would cost more than the
++/// comparisons.
++fn sort_pairs(out: &mut Vec<(u32, u32)>, hi: u32) {
++    if out.len() < RADIX_MIN || hi >= RADIX_BUCKETS as u32 {
++        out.sort_unstable();
++        return;
++    }
++    SORT_SCRATCH.with(|s| {
++        let s = &mut *s.borrow_mut();
++        let n = out.len();
++        // Grown, never refilled: the scratch is written before it is read on
++        // every pass, so zeroing it would be a pass over the pairs of its own.
++        if s.tmp.len() < n {
++            s.tmp.resize(n, (0, 0));
++        }
++        if s.cnt.len() != RADIX_BUCKETS {
++            s.cnt.resize(RADIX_BUCKETS, 0);
++        }
++        let cnt = &mut s.cnt[..RADIX_BUCKETS];
++        let tmp = &mut s.tmp[..n];
++        // Pass one on the second index, pass two on the first: both are below
++        // `RADIX_BUCKETS`, so each is its own digit and no shifting is needed.
++        for pass in 0..2 {
++            cnt.fill(0);
++            let (src, dst): (&[(u32, u32)], &mut [(u32, u32)]) =
++                if pass == 0 { (&out[..n], tmp) } else { (tmp, &mut out[..n]) };
++            for e in src.iter() {
++                let k = if pass == 0 { e.1 } else { e.0 } as usize;
++                cnt[k] += 1;
++            }
++            let mut run = 0u32;
++            for c in cnt.iter_mut() {
++                let take = *c;
++                *c = run;
++                run += take;
++            }
++            for &e in src.iter() {
++                let k = if pass == 0 { e.1 } else { e.0 } as usize;
++                dst[cnt[k] as usize] = e;
++                cnt[k] += 1;
++            }
++        }
++    });
++}
++
+diff --git a/src/lib.rs b/src/lib.rs
+index 283338e..a4cc05a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -37,7 +37,9 @@ mod cache;
+ mod claims;
+ mod decode;
+ mod extensions;
++mod fixed;
+ mod group;
++mod he;
+ mod heif;
+ mod index;
+ pub mod last;
+@@ -1322,7 +1324,7 @@ mod tests {
+     /// In a build that cannot assume AVX2, the two copies of every dispatched
+     /// stage — the one compiled for x86-64-v3 and the one any x86-64 runs —
+     /// give the same answer to the bit: the features, the vocabulary's words,
+-    /// the query's scores, the word-list intersection and the verdict. Only
++    /// the query's scores, the fixed words' correspondences and the verdict. Only
+     /// such a build has two copies, the release among them; one built for
+     /// x86-64-v3 has one.
+     #[cfg(all(dispatch, not(target_feature = "avx2")))]
+@@ -1369,10 +1371,11 @@ mod tests {
+             let inv = index::InvertedFile::build(&lists, vocab.n_live_words());
+             let (mut acc, mut scored) = (vec![0f32; 2], Vec::new());
+             inv.query(&lists[1], 1, &mut acc, &mut scored);
++            let (wa, wb) = (fixed::words(&fa), fixed::words(&fb));
+             let mut cands = Vec::new();
+-            index::shared(&lists[0], &lists[1], &mut cands, 60_000);
++            fixed::correspond(&mut fixed::Table::default(), 0, Variant::SAME, &fa, &wa.asks, &fb, &wb.own, verify::GUIDE_D2, &mut cands);
+             let pair = verify::Pair { fa: &fa, fb: &fb, ta: &ta, tb: &tb };
+-            let v = verify::verify(&pair, &cands, Variant::SAME, (3, 0.2), &mut Vec::new(), &mut verify::Scratch::default());
++            let v = verify::verify(&pair, Variant::SAME, (3, 0.2), &mut cands.clone(), &mut verify::Scratch::default());
+             let t = verify::verify_transform(&pair, &v.m, Variant::SAME, 0.2);
+             let kps = |f: &Features| f.kps.iter().map(|k| [k.x, k.y, k.sigma, k.angle].map(f32::to_bits)).collect::<Vec<_>>();
+             let verdict = |v: &Verdict| (v.n_match, v.n_in, v.m.map(f32::to_bits), [v.ov_a, v.ov_b, v.blk, v.ncc, v.blk_min].map(f32::to_bits), v.blk_n);
+@@ -1393,7 +1396,7 @@ mod tests {
+         assert!(v3.0.0.len() > 50 && v3.2.1.1 >= 10, "the pictures match: {} keypoints, {} aligned points", v3.0.0.len(), v3.2.1.1);
+         assert_eq!(v3.0, plain.0, "the features");
+         assert_eq!(v3.1, plain.1, "the words and the query");
+-        assert_eq!(v3.2, plain.2, "the intersection and the verdicts");
++        assert_eq!(v3.2, plain.2, "the correspondences and the verdicts");
+     }
+ 
+     /// A binary built for the machine it runs on passes its own check.
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index ad603f0..601dbfd 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -437,9 +437,19 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+     if steps.len() > 1 {
+         return match_by_detail(cx, scope, files, items, matched, steps, outputs, &policy, gate, dump);
+     }
+-    let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some(), bounds: None, known: None, fresh: None };
++    let fixed = fixed_words(cx, items, matched);
++    let he = he::on().then(|| {
++        let h = he::HeIndex::build(items, matched, &fixed);
++        stage!(cx, "hamming index: {} postings, h {}", h.postings(), he::h());
++        h
++    });
++    let pass = Pass { items, matched, policy: &policy, gate, dumping: dump.is_some(), bounds: None, known: None, fresh: None, fixed: &fixed, he: he.as_ref() };
+     let mut index = index_all(cx, scope, &pass)?;
+     let (mut direct, verified) = retrieve_and_verify(cx, scope, &pass, &index);
++    if pass.he.is_some() {
++        stage!(cx, "{}", he::counts());
++    }
++    trace_pairs(files, &pass, &index);
+     let turned = second_look(cx, scope, &pass, &mut index, &direct);
+     drop(index);
+     direct.extend(turned);
+@@ -539,7 +549,8 @@ fn match_by_detail(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item
+         };
+         let dumping = top && dump.is_some();
+         let fresh: Option<Vec<bool>> = below.as_ref().map(|b| b.iter().zip(&n_of).map(|(x, y)| y > x).collect());
+-        let pass = Pass { items: &items_r, matched, policy, gate: if dumping { gate } else { policy.gate() }, dumping, bounds: (step > 0).then_some(&r[..]), known: (step > 0).then_some(&known), fresh: fresh.as_deref() };
++        let fixed = fixed_words(cx, &items_r, matched);
++        let pass = Pass { items: &items_r, matched, policy, gate: if dumping { gate } else { policy.gate() }, dumping, bounds: (step > 0).then_some(&r[..]), known: (step > 0).then_some(&known), fresh: fresh.as_deref(), fixed: &fixed, he: None };
+         // A finer step quantises its new descriptors with the first step's
+         // vocabulary: trained again on every step's, it took 42 s of the
+         // finer step's 96 on IMGS-ALL at 1024, for recall 96.37 -> 96.42%.
+@@ -1014,11 +1025,16 @@ struct Pass<'a> {
+     /// At a finer step: the files with a level the step before did not hold.
+     /// A pair of two others is what it was, so it is not verified again.
+     fresh: Option<&'a [bool]>,
++    /// Each file's words in the fixed vocabulary, which pick a verdict's
++    /// first correspondences (`fixed`).
++    fixed: &'a [fixed::Words],
++    /// SCAFFOLDING (v58-reach): retrieval by Hamming embedding.
++    he: Option<&'a he::HeIndex>,
+ }
+ 
+-/// One worker's scratch for `Pass::verify`: the shared words, the matches
+-/// and the verifier's own.
+-type Work = (Vec<(u32, u32)>, Vec<(u32, u32)>, verify::Scratch);
++/// One worker's scratch for `Pass::verify`: the asker's fixed words by word,
++/// the matches and the verifier's own.
++type Work = (fixed::Table, Vec<(u32, u32)>, verify::Scratch, Option<(usize, WordList)>);
+ 
+ impl Pass<'_> {
+     /// Candidate `j` put to the geometry and the pixels against file `i`,
+@@ -1026,7 +1042,7 @@ impl Pass<'_> {
+     /// as it is). The edge, from the lower index to the higher, when it
+     /// stands at all (`Standing::Corroborating`) or `--dump` records it.
+     #[allow(clippy::too_many_arguments)]
+-    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, (cands, matches, scratch): &mut Work) -> Option<Edge> {
++    fn verify(&self, i: usize, fi: &Features, asks: Option<&WordList>, j: usize, variant: Variant, (table, matches, scratch, cache): &mut Work) -> Option<Edge> {
+         // A pair a coarser step found standing stands for this one as it was
+         // found: the finer step looks for what the coarser could not.
+         if let Some(v) = self.known.and_then(|k| k.get(&(i.min(j) as u32, i.max(j) as u32, variant.mirror, variant.invert))) {
+@@ -1035,18 +1051,28 @@ impl Pass<'_> {
+         if self.fresh.is_some_and(|f| !f[i] && !f[j]) {
+             return None;
+         }
+-        timed!(15, index::shared(wi, &lists[j], cands, 60_000));
+-        if cands.len() < 3 {
++        let items = self.items;
++        let asks = match asks {
++            Some(a) => a,
++            None if !self.fixed[i].asks.is_empty() => &self.fixed[i].asks,
++            None => {
++                if cache.as_ref().map(|c| c.0) != Some(i) {
++                    *cache = Some((i, timed!(46, fixed::words(&items[i].feats)).asks));
++                }
++                &cache.as_ref().unwrap().1
++            }
++        };
++        timed!(15, fixed::correspond(table, i, variant, fi, asks, &items[j].feats, &self.fixed[j].own, verify::GUIDE_D2, matches));
++        if matches.len() < 3 {
+             return None;
+         }
+-        let items = self.items;
+         let p = verify::Pair {
+             fa: fi,
+             fb: &items[j].feats,
+             ta: &items[i].thumb,
+             tb: &items[j].thumb,
+         };
+-        let mut v = verify::verify(&p, cands, variant, self.gate, matches, scratch);
++        let mut v = verify::verify(&p, variant, self.gate, matches, scratch);
+         if let Some(r) = self.bounds {
+             v.lo = 1.0 / (verify::MAX_SCALE * r[j]);
+             v.hi = verify::MAX_SCALE * r[i];
+@@ -1061,6 +1087,13 @@ impl Pass<'_> {
+     }
+ }
+ 
++/// Every matched file's words in the fixed vocabulary (`fixed::words`).
++fn fixed_words(cx: &Ctx, items: &[Item], matched: &[bool]) -> Vec<fixed::Words> {
++    let words: Vec<fixed::Words> = timed!(46, (0..items.len()).into_par_iter().map(|i| if !matched[i] { fixed::Words::default() } else if std::env::var("IMGFP_LAZY").is_ok() { fixed::own_only(&items[i].feats) } else { fixed::words(&items[i].feats) }).collect());
++    stage!(cx, "fixed words: {} entries", words.iter().map(|w| w.asks.len() + w.own.len()).sum::<usize>());
++    words
++}
++
+ /// Anchors only: a pair believed on its own evidence. These are what decide
+ /// which files end up in one cluster. They are read out of the direct
+ /// verdicts where they lie rather than copied: they are nearly all of them,
+@@ -1324,22 +1357,51 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+                 || index.asking(),
+                 |a, ((&i, got), (next, ends))| {
+                     let (from, w) = window[i];
++                    let mut extra: Vec<u32> = Vec::new();
+                     let js: Vec<u32> = if *ends || next.len() >= w {
+                         next.drain(..w.min(next.len())).collect()
+                     } else {
+                         let gone = &decided[i];
+                         let asked_for = from + 2 * w + gone.len();
+-                        let cands = index.candidates(i, &[&index.lists()[i]], asked_for, a);
+-                        *ends = cands.len() < asked_for;
+-                        let ranked: Vec<u32> = cands.iter().map(|&(j, ..)| j).filter(|j| gone.binary_search(j).is_err()).collect();
++                        let geo = (from == 0).then(geo_window).flatten();
++                        let depth = geo.map_or(asked_for, |g| g.0.max(asked_for));
++                        let cands = match pass.he {
++                            Some(he) => {
++                                let mut q = timed!(47, he::signed(&items[i].feats, &pass.fixed[i].asks));
++                                q.sort_unstable_by_key(|e| e.2);
++                                index.candidates_he(he, i, &[&q], depth, a)
++                            }
++                            None => index.candidates(i, &[&index.lists()[i]], depth, a),
++                        };
++                        let all: Vec<u32> = cands.iter().map(|&(j, ..)| j).filter(|j| gone.binary_search(j).is_err()).collect();
++                        let n_asked = cands.len().min(asked_for);
++                        *ends = n_asked < asked_for;
++                        // The first `asked_for` of the ranking, as before.
++                        let in_asked = cands[..n_asked].iter().map(|&(j, ..)| j).filter(|j| gone.binary_search(j).is_err()).count();
++                        let ranked = &all[..in_asked];
+                         let rest = &ranked[from.min(ranked.len())..];
+                         let cut = w.min(rest.len());
+                         *next = rest[cut..].to_vec();
++                        if let Some((_, wmax)) = geo {
++                            let mut sc: Vec<(u32, u32)> = timed!(48, all[cut.min(all.len())..]
++                                .iter()
++                                .map(|&j| { let g = geom_of(items); (wgc(&g[i], &index.lists()[i], &g[j as usize], &index.lists()[j as usize]), j) })
++                                .filter(|e| e.0 >= 3)
++                                .collect());
++                            sc.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
++                            extra = sc.iter().take(wmax).map(|e| e.1).collect();
++                        }
+                         rest[..cut].to_vec()
+                     };
+                     got.store(js.len(), std::sync::atomic::Ordering::Relaxed);
+                     bar.add(items[i].feats.len() as u64);
+                     let i = i as u32;
++                    let mut js = js;
++                    for e in extra {
++                        if !js.contains(&e) {
++                            js.push(e);
++                        }
++                    }
+                     js.into_iter().map(|j| if j < i { (j, i << 1 | 1) } else { (i, j << 1) }).collect::<Vec<_>>()
+                 },
+             )
+@@ -1396,15 +1458,32 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+         // Which files clean verdicts had joined before this round's.
+         let joined_before: Vec<usize> = (0..n).map(|i| joined.id(i)).collect();
+         for (slice, by) in held.chunks(VERIFY_SLICE).zip(by.chunks(VERIFY_SLICE)) {
+-            let part: Vec<Edge> = slice
++            // Grouped by the lower file, which asks: its fixed words are made
++            // once a group. In order, so the list is the one a pair at a time gave.
++            let mut groups: Vec<(usize, usize)> = Vec::new();
++            let mut g0 = 0;
++            for k in 1..=slice.len() {
++                if k == slice.len() || slice[k].0 != slice[g0].0 {
++                    groups.push((g0, k));
++                    g0 = k;
++                }
++            }
++            let part: Vec<Edge> = groups
+                 .par_iter()
+-                .zip(by.par_iter())
+-                .filter(|&(_, &b)| b & NEW != 0)
+-                .map_init(Work::default, |work, (&(i, j), _)| timed!(42, {
+-                    vbar.tick();
+-                    let (i, j) = (i as usize, j as usize);
+-                    pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j, Variant::SAME, work)
+-                }))
++                .map_init(Work::default, |work, &(g0, g1)| {
++                    let mut out = Vec::new();
++                    for k in g0..g1 {
++                        if by[k] & NEW == 0 {
++                            continue;
++                        }
++                        out.extend(timed!(42, {
++                            vbar.tick();
++                            let (i, j) = (slice[k].0 as usize, slice[k].1 as usize);
++                            pass.verify(i, &items[i].feats, None, j, Variant::SAME, work)
++                        }));
++                    }
++                    out
++                })
+                 .flatten()
+                 .collect();
+             for e in anchors(&part, pass.policy) {
+@@ -1479,6 +1558,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+         }
+         round += 1;
+     }
++    *TRACE_WINDOWS.lock().unwrap() = window.clone();
+     let n_edges = anchors(&all_direct, pass.policy).count();
+     stage!(cx, "-k counts rejections: {extended} windows more in {round} rounds, {verified} candidates verified");
+     stage!(cx, "anchors: {} of {} verified pairs", n_edges, all_direct.len());
+@@ -1531,10 +1611,47 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct:
+             |(a, work), ((at, &i), &w)| timed!(38, {
+                 let seen: [Features; 3] = timed!(40, std::array::from_fn(|v| items[i].feats.seen_as(Variant::TURNED[v])));
+                 let words = index.turned(at, &seen);
++                // The fixed words seen turned are the file's own, relabelled.
++                let mine = if pass.fixed[i].asks.is_empty() { std::borrow::Cow::Owned(fixed::words(&items[i].feats).asks) } else { std::borrow::Cow::Borrowed(&pass.fixed[i].asks) };
++                let asks: [WordList; 3] = std::array::from_fn(|v| fixed::turned(&mine, Variant::TURNED[v]));
+                 let mut out: Vec<Edge> = Vec::new();
+-                for &(j, _, v) in index.candidates(i, &[&words[0], &words[1], &words[2]], args.candidates, a) {
++                let qs: Option<[Vec<(u32, u64, u32)>; 3]> = pass.he.map(|_| {
++                    let mut q = he::signed(&items[i].feats, &pass.fixed[i].asks);
++                    q.sort_unstable_by_key(|e| e.2);
++                    std::array::from_fn(|v| {
++                        let x = Variant::TURNED[v].mirror as u32 | (Variant::TURNED[v].invert as u32) << 1;
++                        q.iter().map(|&(w, s, kp)| (w ^ x, s, kp)).collect()
++                    })
++                });
++                let cands = match (pass.he, &qs) {
++                    (Some(he), Some(qs)) => index.candidates_he(he, i, &[&qs[0], &qs[1], &qs[2]], args.candidates, a),
++                    _ => index.candidates(i, &[&words[0], &words[1], &words[2]], args.candidates, a),
++                };
++                let cands: Vec<(u32, f32, u8)> = cands.to_vec();
++                for &(j, _, v) in &cands {
+                     let v = v as usize;
+-                    out.extend(pass.verify(index.lists(), i, &seen[v], &words[v], j as usize, Variant::TURNED[v], work));
++                    out.extend(pass.verify(i, &seen[v], Some(&asks[v]), j as usize, Variant::TURNED[v], work));
++                }
++                // SCAFFOLDING: the geometric look, as it is.
++                if let Some((m, wmax)) = geo2_window() {
++                    let ranked: Vec<u32> = index.candidates(i, &[&index.lists()[i]], m, a).iter().map(|&(j, ..)| j).collect();
++                    let g = geom_of(items);
++                    let k = args.candidates.min(ranked.len());
++                    // (peak, bag-of-words position), best peak first, then the better ranked.
++                    let mut sc: Vec<(u32, u32, u32)> = timed!(48, ranked[k..].iter().enumerate().map(|(r, &j)| (wgc(&g[i], &index.lists()[i], &g[j as usize], &index.lists()[j as usize]), r as u32, j)).filter(|e| e.0 >= 3).collect());
++                    sc.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
++                    GEO2_EXTRA.fetch_add(sc.len().min(wmax) as u64, std::sync::atomic::Ordering::Relaxed);
++                    for (pos, &(peak, _, j)) in sc.iter().take(wmax).enumerate() {
++                        let e = pass.verify(i, &items[i].feats, Some(&mine), j as usize, Variant::SAME, work);
++                        if let Some(e) = &e {
++                            if policy.standing(&e.v) != Standing::Rejected {
++                                let b = [10, 20, 50, 100, usize::MAX].iter().position(|&x| pos < x).unwrap();
++                                GEO2_POS[b].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                                GEO2_PEAK[(peak as usize).min(15)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                            }
++                        }
++                        out.extend(e);
++                    }
+                 }
+                 bar.add(w);
+                 out
+@@ -1545,7 +1662,8 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct:
+     if args.skip_mirrored {
+         stage!(cx, "variants: skipped");
+     } else {
+-        stage!(cx, "variants: {} more pairs from {} unmatched images", anchors(&turned, policy).count(), askers.len());
++        stage!(cx, "variants: {} more pairs from {} unmatched images ({} geometric candidates)", anchors(&turned, policy).count(), askers.len(), GEO2_EXTRA.load(std::sync::atomic::Ordering::Relaxed));
++        stage!(cx, "geometric standing by position <10/<20/<50/<100/rest {:?}, by peak {:?}", GEO2_POS.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>(), GEO2_PEAK.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>());
+     }
+     // Nothing after this matches a descriptor against another, so the
+     // vocabulary, the inverted file and the word lists go with this stage.
+@@ -2380,12 +2498,10 @@ mod tests {
+                 ..Default::default()
+             })
+             .collect();
+-        let pool: Vec<&[u8; DESC_LEN]> = items.iter().flat_map(|it| (0..it.feats.len()).map(|i| it.feats.d(i).try_into().unwrap())).collect();
+-        let vocab = Vocabulary::build(pool, &index::VocabParams::for_corpus(items.iter().map(|it| it.feats.len()).sum()));
+-        let lists: Vec<WordList> = items.iter().map(|it| quantise(&vocab, &it.feats)).collect();
+         let policy = verify::Policy::new(MIN_ALIGNED_POINTS, 0.5, 0.6);
+-        let pass = Pass { items: &items, matched: &[true, true], policy: &policy, gate: (3, 0.2), dumping: false, bounds: None, known: None, fresh: None };
+-        let ask = |i: usize, j: usize| pass.verify(&lists, i, &items[i].feats, &lists[i], j, Variant::SAME, &mut Work::default());
++        let fixed: Vec<fixed::Words> = items.iter().map(|it| fixed::words(&it.feats)).collect();
++        let pass = Pass { items: &items, matched: &[true, true], policy: &policy, gate: (3, 0.2), dumping: false, bounds: None, known: None, fresh: None, fixed: &fixed, he: None };
++        let ask = |i: usize, j: usize| pass.verify(i, &items[i].feats, Some(&fixed[i].asks), j, Variant::SAME, &mut Work::default());
+         let low = ask(0, 1).expect("a picture and its downscale match");
+         let high = ask(1, 0).expect("asked from the other end too");
+         assert!(policy.standing(&low.v) >= Standing::Anchor && policy.standing(&high.v) >= Standing::Anchor, "an anchor from either end");
+@@ -2418,3 +2534,125 @@ mod tests {
+         }
+     }
+ }
++
++// SCAFFOLDING (v58-reach): IMGFP_TRACE=file of "stemA stemB" lines.
++static TRACE_WINDOWS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
++fn trace_pairs(files: &[PathBuf], pass: &Pass, index: &Index) {
++    let Ok(t) = std::env::var("IMGFP_TRACE") else { return };
++    let stem = |p: &PathBuf| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
++    let by: HashMap<String, usize> = files.iter().enumerate().map(|(i, p)| (stem(p), i)).collect();
++    let win = TRACE_WINDOWS.lock().unwrap().clone();
++    let mut a = index.asking();
++    let n = pass.items.len();
++    let lines: Vec<String> = std::fs::read_to_string(&t).unwrap().lines().map(str::to_owned).collect();
++    let mut out = String::new();
++    for line in lines {
++        let w: Vec<&str> = line.split_whitespace().collect();
++        let (Some(&i), Some(&j)) = (by.get(w[0]), by.get(w[1])) else { continue };
++        let mut rank = |x: usize, y: usize| {
++            let c = match pass.he {
++                Some(he) => {
++                    let mut q = he::signed(&pass.items[x].feats, &pass.fixed[x].asks);
++                    q.sort_unstable_by_key(|e| e.2);
++                    index.candidates_he(he, x, &[&q], n, &mut a).to_vec()
++                }
++                None => index.candidates(x, &[&index.lists()[x]], n, &mut a).to_vec(),
++            };
++            let pos = c.iter().position(|&(z, ..)| z as usize == y);
++            (pos, c.len(), pos.map(|p| c[p].1).unwrap_or(0.0), c.first().map(|c| c.1).unwrap_or(0.0))
++        };
++        let (ri, ni, si, ti) = rank(i, j);
++        let (rj, nj, sj, tj) = rank(j, i);
++        let mut wg = |x: usize, y: usize| {
++            let c = index.candidates(x, &[&index.lists()[x]], 3000, &mut a).to_vec();
++            let g = geom_of(pass.items);
++            let mut sc: Vec<(u32, u32)> = c.iter().map(|&(z, ..)| (wgc(&g[x], &index.lists()[x], &g[z as usize], &index.lists()[z as usize]), z)).collect();
++            let mine = sc.iter().find(|e| e.1 as usize == y).map(|e| e.0);
++            sc.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
++            let pos = sc.iter().position(|e| e.1 as usize == y);
++            (pos, mine, sc.get(149).map(|e| e.0), sc.first().map(|e| e.0))
++        };
++        let wq = wg(i, j);
++        let wr = wg(j, i);
++        let wgs = format!(" | wgc_q {:?} {:?} k150 {:?} top {:?} | wgc_r {:?} {:?} k150 {:?} top {:?}", wq.0, wq.1, wq.2, wq.3, wr.0, wr.1, wr.2, wr.3);
++        let mut seeds = Vec::new();
++        fixed::correspond(&mut fixed::Table::default(), i, Variant::SAME, &pass.items[i].feats, &pass.fixed[i].asks, &pass.items[j].feats, &pass.fixed[j].own, verify::GUIDE_D2, &mut seeds);
++        let sh = seeds.len();
++        let (nm, ni_, blk) = if sh >= 3 {
++            let p = verify::Pair { fa: &pass.items[i].feats, fb: &pass.items[j].feats, ta: &pass.items[i].thumb, tb: &pass.items[j].thumb };
++            let v = verify::verify(&p, Variant::SAME, pass.gate, &mut seeds, &mut verify::Scratch::default());
++            (v.n_match, v.n_in, v.blk)
++        } else { (0, 0, 0.0) };
++        out += &format!("{} {} rank_q {:?}/{} s {:.4} top {:.4} asked_q {} | rank_r {:?}/{} s {:.4} top {:.4} asked_r {} | shared {} n_match {} n_in {} blk {:.3}\n",
++            w[0], w[1], ri, ni, si, ti, win.get(i).map(|w| w.0 + w.1).unwrap_or(0), rj, nj, sj, tj, win.get(j).map(|w| w.0 + w.1).unwrap_or(0), sh, nm, ni_, blk);
++        out.pop();
++        out += &wgs;
++        out.push('\n');
++    }
++    std::fs::write(format!("{t}.out"), out).unwrap();
++}
++
++/// SCAFFOLDING: weak geometric consistency of two files' shared words: the
++/// most shared-word keypoint pairs agreeing on one (rotation, scale) bin, each
++/// of A's keypoints counted once a bin.
++fn wgc(ga: &[(u8, u8)], wa: &WordList, gb: &[(u8, u8)], wb: &WordList) -> u32 {
++    thread_local!(static PAIRS: std::cell::RefCell<Vec<(u32, u32)>> = const { std::cell::RefCell::new(Vec::new()) });
++    PAIRS.with_borrow_mut(|pairs| {
++        index::shared(wa, wb, pairs, 60_000);
++        if pairs.len() < 3 {
++            return pairs.len() as u32;
++        }
++        // Rotation in 16ths of a turn, scale ratio in octaves (quarter-octave
++        // units / 4), 16 x 12 bins; each of A's keypoints once a bin.
++        let mut bins = [[0u32; 12]; 16];
++        let mut last = [[u32::MAX; 12]; 16];
++        let mut best = 0;
++        for &(ka, kb) in pairs.iter() {
++            let (a, b) = (ga[ka as usize], gb[kb as usize]);
++            let ab = (b.0.wrapping_sub(a.0) & 15) as usize;
++            let ds = (b.1 as i32 - a.1 as i32).div_euclid(4) + 6;
++            let sb = ds.clamp(0, 11) as usize;
++            if last[ab][sb] != ka {
++                last[ab][sb] = ka;
++                bins[ab][sb] += 1;
++                best = best.max(bins[ab][sb]);
++            }
++        }
++        best
++    })
++}
++
++/// SCAFFOLDING: each file's keypoints as (angle in 16ths of a turn, log2
++/// scale in quarter octaves), built once for the geometric window.
++static GEOM: std::sync::OnceLock<Vec<Vec<(u8, u8)>>> = std::sync::OnceLock::new();
++fn geom_of(items: &[Item]) -> &'static Vec<Vec<(u8, u8)>> {
++    GEOM.get_or_init(|| {
++        items
++            .par_iter()
++            .map(|it| it.feats.kps.iter().map(|k| (((k.angle.rem_euclid(360.0) / 22.5) as u8).min(15), ((k.sigma.max(1e-3).log2() * 4.0 + 64.0).clamp(0.0, 255.0)) as u8)).collect())
++            .collect()
++    })
++}
++
++/// SCAFFOLDING: IMGFP_GEO=M:W, the geometric window.
++fn geo_window() -> Option<(usize, usize)> {
++    static G: std::sync::OnceLock<Option<(usize, usize)>> = std::sync::OnceLock::new();
++    *G.get_or_init(|| {
++        let v = std::env::var("IMGFP_GEO").ok()?;
++        let (m, w) = v.split_once(':')?;
++        Some((m.parse().ok()?, w.parse().ok()?))
++    })
++}
++
++static GEO2_EXTRA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static GEO2_POS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
++static GEO2_PEAK: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
++/// SCAFFOLDING: IMGFP_GEO2=M:W, the geometric look inside the second look.
++fn geo2_window() -> Option<(usize, usize)> {
++    static G: std::sync::OnceLock<Option<(usize, usize)>> = std::sync::OnceLock::new();
++    *G.get_or_init(|| {
++        let v = std::env::var("IMGFP_GEO2").ok()?;
++        let (m, w) = v.split_once(':')?;
++        Some((m.parse().ok()?, w.parse().ok()?))
++    })
++}
+diff --git a/src/prof.rs b/src/prof.rs
+index 59295ee..423da12 100644
+--- a/src/prof.rs
++++ b/src/prof.rs
+@@ -14,7 +14,7 @@
+ //! come to several times the wall clock.
+ #![allow(dead_code)]
+ 
+-pub const N: usize = 46;
++pub const N: usize = 51;
+ 
+ #[rustfmt::skip]
+ pub static NAMES: [&str; N] = [
+@@ -24,7 +24,7 @@ pub static NAMES: [&str; N] = [
+     "thumb", "sift:base", "sift:blur", "sift:extrema", "sift:grad",
+     "sift:describe", "sift:sort",
+     // retrieval and verification
+-    "quantise", "vocab", "invfile", "query", "shared", "correspond",
++    "quantise", "vocab", "invfile", "query", "seed", "correspond",
+     "best_transform", "encloses", "overlap", "pixel_check", "propagate",
+     // decode, by format: each of these *contains* `decode:codec`
+     "decode:jpeg", "decode:png", "decode:webp", "decode:tiff", "decode:jxl",
+@@ -38,7 +38,7 @@ pub static NAMES: [&str; N] = [
+     "main:exact", "main:pool", "main:candsort", "main:output", "main:release",
+     // A third pass (slots 38..), splitting the two retrieval passes apart.
+     // `variant:pass` contains the four slots after it *and* `query`,
+-    // `shared`, `correspond`, `best_transform`, `encloses`, `overlap` and
++    // `seed`, `correspond`, `best_transform`, `encloses`, `overlap` and
+     // `pixel_check`; `verify:direct` contains the same seven for the direct
+     // pass. The two together are what the matcher spends.
+     "variant:pass", "variant:quantise", "variant:mkfeats", "cand:rank",
+@@ -54,6 +54,10 @@ pub static NAMES: [&str; N] = [
+     // Guided matching (`verify::guided`), inside `verify:direct` and the
+     // second look's verification.
+     "guided",
++    // Every file's words in the fixed vocabulary (`fixed::words`).
++    "fixed:words",
++    // SCAFFOLDING v58: Hamming retrieval.
++    "he:sign", "he:scan", "he:acc", "he:query",
+ ];
+ 
+ pub static ACC: [std::sync::atomic::AtomicU64; N] =
+diff --git a/src/retrieve.rs b/src/retrieve.rs
+index 78ea2e8..11f27be 100644
+--- a/src/retrieve.rs
++++ b/src/retrieve.rs
+@@ -78,6 +78,9 @@ pub(crate) struct Index<'a> {
+ 
+ /// One worker's scratch for `Index::candidates`.
+ pub(crate) struct Asking {
++    tag: Vec<u32>,
++    touched: Vec<u32>,
++    pass: Vec<u32>,
+     acc: Vec<f32>,
+     scored: Vec<(u32, f32)>,
+     merged: Vec<(u32, f32, u8)>,
+@@ -109,7 +112,7 @@ impl<'a> Index<'a> {
+     }
+ 
+     pub(crate) fn asking(&self) -> Asking {
+-        Asking { acc: vec![0f32; self.items.len()], scored: Vec::new(), merged: Vec::new() }
++        Asking { tag: vec![0u32; self.items.len()], touched: Vec::new(), pass: Vec::new(), acc: vec![0f32; self.items.len()], scored: Vec::new(), merged: Vec::new() }
+     }
+ 
+     /// File `i`'s best `k` candidates over every list it asks with (`asked`,
+@@ -142,6 +145,25 @@ impl<'a> Index<'a> {
+         &a.merged
+     }
+ 
++    /// SCAFFOLDING (v58-reach): `candidates` by Hamming embedding; `qs` is
++    /// each variant's entries (word, signature, keypoint), in keypoint order.
++    pub(crate) fn candidates_he<'s>(&self, he: &crate::he::HeIndex, i: usize, qs: &[&[(u32, u64, u32)]], k: usize, a: &'s mut Asking) -> &'s [(u32, f32, u8)] {
++        a.merged.clear();
++        for (v, q) in qs.iter().enumerate() {
++            timed!(50, he.query(q, he.mass[i], i as u32, &mut a.acc, &mut a.tag, &mut a.touched, &mut a.pass, &mut a.scored));
++            a.scored.retain(|&(j, _)| self.matched[j as usize]);
++            if self.mass.is_some() {
++                both_ways(&mut a.scored, he.mass[i], &he.mass);
++            }
++            rank_best(&mut a.scored, k);
++            a.merged.extend(a.scored.iter().map(|&(j, s)| (j, s, v as u8)));
++        }
++        if qs.len() > 1 {
++            merge_variants(&mut a.merged, k);
++        }
++        &a.merged
++    }
++
+     /// The postings let go until the next pass asks: built again from the
+     /// same lists, they are the same postings (the build is deterministic).
+     ///
+diff --git a/src/verify.rs b/src/verify.rs
+index 1edda72..2df427e 100644
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -373,95 +373,11 @@ impl Verdict {
+ // instructions for the same number.
+ use crate::index::dist2;
+ 
+-/// Nearest neighbour in B for each keypoint of A, over a restricted candidate
+-/// set.
+-///
+-/// `cands` holds, for each keypoint of A, the keypoints of B worth comparing
+-/// against (from the shared-word index).
+-///
+-/// There is no ratio test here. There was: Lowe's, at 0.9, comparing the best
+-/// match against the runner-up from the same candidate set and dropping the
+-/// ambiguous ones. It was doing nothing. Swept from 0.7 to 1.0 — which is the
+-/// whole usable range, 1.0 being no test at all — it moved F1 by 0.001 and the
+-/// count of false pairs by single digits, on both halves of the corpus
+-/// independently. The reason is that this tool does not decide anything on a
+-/// descriptor distance: an ambiguous match is one vote for a transform that
+-/// then has to explain hundreds of other correspondences and survive a pixel
+-/// comparison, and a wrong vote loses there. The code already said as much,
+-/// in the comment excusing single-candidate keypoints from the test it no
+-/// longer has.
+-#[cfg_attr(dispatch, inline(always))]
+-pub fn correspond(
+-    a: &Features,
+-    b: &Features,
+-    cands: &[(u32, u32)],
+-    out: &mut Vec<(u32, u32)>,
+-) {
+-    out.clear();
+-    if cands.is_empty() {
+-        return;
+-    }
+-    let mut i = 0;
+-    while i < cands.len() {
+-        let qi = cands[i].0;
+-        let mut best = (u32::MAX, 0u32);
+-        let da: &[u8; DESC_LEN] = a.d(qi as usize).try_into().unwrap();
+-        while i < cands.len() && cands[i].0 == qi {
+-            let tj = cands[i].1;
+-            // The next few candidates' descriptors, asked for now.
+-            //
+-            // This loop is not bound by `dist2` — a descriptor is 128 bytes and
+-            // sixteen integer lanes measure it in about twenty cycles — it is
+-            // bound by *finding* the descriptor. `b`'s block is 76 KB, the
+-            // candidates land in it at random, and on a corpus of nine thousand
+-            // images nothing in it is in cache: two lines per candidate, fetched
+-            // one dependent gather at a time. Measured against a pool of images
+-            // too large to cache, the same call costs two to three times what it
+-            // costs against a warm one. So the addresses are handed to the
+-            // prefetcher while the current distance is still being summed; it
+-            // changes nothing about what is computed.
+-            prefetch_descriptor(b, cands, i + PREFETCH);
+-            let d = dist2(da, b.d(tj as usize));
+-            if d < best.0 {
+-                best = (d, tj);
+-            }
+-            i += 1;
+-        }
+-        if best.0 != u32::MAX {
+-            out.push((qi, best.1));
+-        }
+-    }
+-}
+-
+-/// How far ahead the candidate walk asks for its descriptors. Two cache lines
+-/// each and a DRAM round trip of a few hundred cycles against the twenty a
+-/// distance takes, so the distance is worth about eight candidates of lead.
++/// How far ahead `best_transform` asks for the keypoints of its
++/// correspondences: a DRAM round trip of a few hundred cycles, about eight
++/// correspondences of lead.
+ const PREFETCH: usize = 8;
+ 
+-/// Ask for the descriptor and the keypoint of `cands[k]`'s B side. Out of range
+-/// is not an error — the walk is near its end and there is nothing to fetch.
+-#[cfg_attr(dispatch, inline(always))]
+-#[cfg_attr(not(dispatch), inline)]
+-fn prefetch_descriptor(b: &Features, cands: &[(u32, u32)], k: usize) {
+-    let Some(&(_, tj)) = cands.get(k) else { return };
+-    let tj = tj as usize;
+-    if tj >= b.kps.len() {
+-        return;
+-    }
+-    #[cfg(target_arch = "x86_64")]
+-    unsafe {
+-        use std::arch::x86_64::_mm_prefetch;
+-        let d = b.desc.as_ptr().add(tj * DESC_LEN);
+-        _mm_prefetch(d as *const i8, std::arch::x86_64::_MM_HINT_T0);
+-        _mm_prefetch(d.add(64) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+-        // `best_transform` reads this keypoint next, out of the same cold
+-        // block, and one prefetch here is cheaper than a miss there.
+-        _mm_prefetch(b.kps.as_ptr().add(tj) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+-    }
+-    #[cfg(not(target_arch = "x86_64"))]
+-    let _ = (b, tj);
+-}
+-
+ // ------------------------------------------------------------ geometry
+ 
+ #[cfg_attr(dispatch, inline(always))]
+@@ -617,9 +533,7 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
+     sc.bx.clear();
+     sc.by.clear();
+     for (k, &(p, q)) in pairs.iter().enumerate() {
+-        // Both keypoint arrays are cold and read at random — see
+-        // `prefetch_descriptor`, which has already asked for `b`'s side of the
+-        // candidates this list came from.
++        // Both keypoint arrays are cold and read at random.
+         prefetch_keypoints(a, b, pairs, k + PREFETCH);
+         let ka = &a.kps[p as usize];
+         let kb = &b.kps[q as usize];
+@@ -722,7 +636,7 @@ fn best_transform(a: &Features, b: &Features, pairs: &[(u32, u32)], bw: f32, bh:
+ /// over unrelated pairs, p10-p90 283-351). Below ~250 it is a descriptor
+ /// cut that takes siblings, warps and recall down together; from 250 to
+ /// 1000 small families are a plateau (`out/v46-matcher`, section 5).
+-const GUIDE_D2: u32 = 320 * 320;
++pub(crate) const GUIDE_D2: u32 = 320 * 320;
+ 
+ /// Correspondences found again at a transform, without the vocabulary: each of
+ /// A's keypoints is carried by `m` into B, and matched to the B keypoint within
+@@ -2158,29 +2072,29 @@ pub struct Pair<'a> {
+ }
+ 
+ crate::simd::dispatched! {
+-    /// Full verification from a candidate correspondence list.
++    /// Full verification from the pair's correspondences (`fixed::correspond`),
++    /// which guided matching replaces with its own.
+     ///
+     /// `gate` is the weakest (inliers, overlap) any consumer of this verdict
+     /// will accept. Below it the verdict is discarded whatever the pixels say,
+     /// so the pixels are not read: the check is the most expensive thing in
+     /// the pipeline and a third of the pairs reaching it have already lost on
+     /// geometry.
+-    pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict => verify_any;
++    pub fn verify(p: &Pair, var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict => verify_any;
+ }
+ 
+ /// `verify`, for whichever copy `dispatched!` chose.
+ #[cfg_attr(dispatch, inline(always))]
+-fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
++fn verify_any(p: &Pair, var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {
+     let mut v = Verdict { variant: var, ..Default::default() };
+-    timed!(16, correspond(p.fa, p.fb, cands, matches));
+     v.n_match = matches.len() as u32;
+     let (bw, bh) = (p.fb.w as f32, p.fb.h as f32);
+     let (aw, ah) = (p.fa.w as f32, p.fa.h as f32);
+     let Some((m, n_agreeing)) = timed!(17, best_transform(p.fa, p.fb, matches, bw, bh, scratch)) else { return v };
+-    // The vocabulary's correspondences are only those within shared words,
+-    // which a vocabulary fine around one picture's descriptors thins: found
+-    // again by position at the transform they give, a verdict no longer
+-    // depends on what else was scanned.
++    // The seed correspondences are those within shared fixed words (`fixed`):
++    // found again by position at the transform they give, every
++    // correspondence within `GUIDE_D2` that the transform explains is counted,
++    // whatever word it fell in.
+     let (m, n_agreeing) = if n_agreeing >= 3 { timed!(45, guided(p.fa, p.fb, m, bw, bh, GUIDE_D2, matches, scratch)) } else { (m, n_agreeing) };
+     // `p.fa` is the query image already mirrored, so `m` maps mirrored-A
+     // coordinates into B. Composing the mirror back in gives a transform from
+@@ -2340,6 +2254,12 @@ mod bench {
+         // are cold.
+         const POOL: usize = 96;
+         let imgs: Vec<Features> = (0..POOL).map(|_| feats(&mut rng, 600, 640, 480)).collect();
++        let words: Vec<crate::fixed::Words> = imgs.iter().map(crate::fixed::words).collect();
++        let mut table = crate::fixed::Table::default();
++        let mut correspond = |k: usize, matches: &mut Vec<(u32, u32)>| {
++            let j = (k + 1) % POOL;
++            crate::fixed::correspond(&mut table, k, Variant::SAME, &imgs[k], &words[k].asks, &imgs[j], &words[j].own, GUIDE_D2, matches)
++        };
+         for &n_cand in &[16usize, 56, 200] {
+             // Candidate pairs as `shared` emits them: sorted, deduplicated,
+             // several B keypoints for some A keypoints.
+@@ -2356,14 +2276,15 @@ mod bench {
+             let mut scratch = Scratch::default();
+             let t_corr = ms(|| {
+                 for k in 0..POOL {
+-                    correspond(&imgs[k], &imgs[(k + 1) % POOL], &sets[k], &mut matches);
++                    let _ = &sets[k];
++                    correspond(k, &mut matches);
+                     std::hint::black_box(&matches);
+                 }
+             });
+             // Geometry on the correspondences those produce.
+             let mut ms_sets: Vec<Vec<(u32, u32)>> = Vec::new();
+             for k in 0..POOL {
+-                correspond(&imgs[k], &imgs[(k + 1) % POOL], &sets[k], &mut matches);
++                correspond(k, &mut matches);
+                 ms_sets.push(matches.clone());
+             }
+             let n_match: usize = ms_sets.iter().map(|m| m.len()).sum::<usize>() / POOL;

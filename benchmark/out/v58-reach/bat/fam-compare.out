@@ -1,0 +1,32 @@
+== all
+                                fam-base                          fam-ship
+n0      17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R
+n1      16.7 j 15.7 o  85.31 P  96.87 R  16.7 j 15.7 o  85.31 P  96.87 R
+n2      16.7 j 13.7 o  89.22 P  95.63 R  16.7 j 13.7 o  89.22 P  95.63 R
+f       15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R
+total     65.3 joined                        65.3 joined                    
+sibs      65.3 joined                        65.3 joined                    
+== i5
+                                fam-base                          fam-ship
+n0       9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+n1      10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R
+n2      12.7 j 10.7 o  64.78 P  96.48 R  12.7 j 10.7 o  64.78 P  96.48 R
+f        9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+total     40.7 joined                        40.7 joined                    
+sibs      40.7 joined                        40.7 joined                    
+== all2
+                                fam-base                          fam-ship
+n0      17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R
+n1      13.7 j 12.0 o  89.25 P  93.15 R  13.7 j 12.0 o  89.25 P  93.15 R
+n2      17.3 j 14.3 o  89.84 P  91.30 R  17.3 j 14.3 o  89.81 P  91.30 R
+f       15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R
+total     63.0 joined                        63.0 joined                    
+sibs      63.0 joined                        63.0 joined                    
+== hdev
+                                fam-base                          fam-ship
+n0     248.0 j 248.0 o      - P      - R 249.0 j 249.0 o      - P      - R
+n1     240.3 j 216.7 o  50.74 P  97.46 R 240.3 j 216.7 o  50.74 P  97.46 R
+n2     249.3 j 207.0 o  58.41 P  95.66 R 249.3 j 207.0 o  58.41 P  95.66 R
+f      231.0 j 231.0 o      - P      - R 231.0 j 231.0 o      - P      - R
+total    968.7 joined                       969.7 joined                    
+sibs     968.7 joined                       969.7 joined                    

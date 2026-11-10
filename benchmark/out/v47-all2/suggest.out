@@ -1,0 +1,19 @@
+actions {'KEEP': 9000, 'DELETE': 19717, 'REVIEW': 4028}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 52 {'unedited, no unedited holder': 52} {'unedited, no unedited holder': [('ORIGINAL', 2), ('rot90', 2), ('jpeg_magick', 2), ('messaging_app', 2), ('jpeg_ffmpeg', 2), ('rot180', 2), ('copy_exact', 2), ('strip_metadata', 2)]}
+families whose original or exact/lossless copy survives: 357 / 364
+families left with a faithful full copy: 364 / 364 [(('barrel_distort', 'blur_fill', 'flip_h', 'invert', 'perspective', 'perspective_two'), 8), (('barrel_distort', 'blur_fill', 'crop_micro', 'crop_panoramic', 'flip_h', 'invert'), 8), (('blur_fill', 'flip_h', 'invert', 'perspective', 'perspective_two', 'photo_of_screen'), 5), (('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', 'invert', 'perspective'), 5), (('barrel_distort', 'blur_fill', 'blur_patch', 'flip_h', 'invert', 'perspective'), 5), (('blur_fill', 'flip_h', 'invert', 'perspective', 'perspective_two', 'pinch'), 4)]
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 4 / 364 ['IMGS/b&w2.jpeg', 'IMGS/document1.jpeg', 'IMGS3/Acueducto1.jpg', 'IMGS3/red_rocks_sign1.jpg']
+DELETE  edit                           7444
+DELETE  original/lossless copy         1817
+DELETE  unedited version               10456
+KEEP    composite                      4033
+KEEP    edit                           2958
+KEEP    original/lossless copy         356
+KEEP    trap                           496
+KEEP    unedited version               1157
+REVIEW  composite                      299
+REVIEW  edit                           2845
+REVIEW  original/lossless copy         6
+REVIEW  trap                           190
+REVIEW  unedited version               688

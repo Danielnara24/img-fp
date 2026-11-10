@@ -1,0 +1,106 @@
+== all-ssim-k10.json ==
+   config: {"candidates": 10, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.7490  precision 99.91%  recall 59.90%
+   proposed 685,456  TP 684,829  FP 627  FN 458,465  groups 715
+   FP: trap 517  cross-family 110  seed-pairs 14  merges 14
+     cross IMGS2/bust1.jpg <-> IMGS2/bust2.jpg: 66 pairs
+     cross IMGS3/Henares1.jpg <-> IMGS3/Henares2.jpg: 12 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 11 pairs
+     cross IMGS2/sea_photo1.jpg <-> IMGS2/sea_photo2.jpg: 9 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 2 pairs
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 2 pairs
+     cross IMGS/panoramic.avif <-> IMGS2/temple1.jpg: 1 pairs
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 1 pairs
+     cross IMGS/noisy2.jpg <-> IMGS4/club.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS4/golf-club.JPG: 1 pairs
+   half[alt] F1 0.7661  P 99.93%  R 62.11%  (152 seeds)
+   half[hash] F1 0.7614  P 99.92%  R 61.51%  (160 seeds)
+   perfect transforms: 10 of 87
+     mirror_crop               56/304
+     flip_h                    58/304
+     transpose_diag            58/304
+     tiled_watermark           95/304
+     crop_micro               125/304
+     wave_vertical            125/304
+     barrel_distort           129/304
+     embed_tiny               137/304
+     contact_sheet            139/304
+     keystone_side            147/304
+     perspective_top          149/304
+     halftone                 163/304
+     photo_of_screen          166/304
+     crop_strip_top           171/304
+     picture_in_picture       173/304
+     crop_quarter             176/304
+     wall_poster              176/304
+     embed_small              177/304
+     magazine_spread          177/304
+     pdf_page                 177/304
+     phone_screenshot         178/304
+     scale_nearest            178/304
+     scale_small              178/304
+     slide_deck               178/304
+     crop_half                179/304
+     crop_off_centre          179/304
+     thumbnail                179/304
+     blur_fill                180/304
+     video_call_frame         180/304
+     collage_cell             181/304
+     pincushion               181/304
+     rotate_large             181/304
+     swirl                    181/304
+     crop_panoramic           182/304
+     crop_slight              183/304
+     jpeg_low                 183/304
+     shear                    183/304
+     browser_window           184/304
+     crop_square              184/304
+     webp_lossy               184/304
+     hue_rotate               185/304
+     posterize                185/304
+     motion_blur              187/304
+     rotate_small             187/304
+     noise                    190/304
+     print_scan               191/304
+     jpeg_generations         193/304
+     scale_mid                193/304
+     aspect_distort           194/304
+     blur                     194/304
+     chromatic_aberration     196/304
+     to_avif                  196/304
+     jpeg_mid                 197/304
+     to_jxl                   201/304
+     channel_swap             208/304
+     vignette                 212/304
+     gamma                    216/304
+     sharpen                  216/304
+     to_heif                  217/304
+     jpeg_ffmpeg              219/304
+     caption_bar              226/304
+     messaging_app            230/304
+     jpeg_magick              232/304
+     scale_large              237/304
+     cinematic_grade          257/304
+     contrast                 261/304
+     redaction_bars           274/304
+     upscale                  278/304
+     brightness               279/304
+     saturation               287/304
+     temperature              291/304
+     blur_patch               294/304
+     rot180                   294/304
+     invert                   298/304
+     rot90                    299/304
+     watermark_corner         300/304
+     qr_sticker               302/304
+     alpha_on_black           304/304
+     alpha_on_white           304/304
+     copy_exact               304/304
+     duotone                  304/304
+     greyscale                304/304
+     jpeg_high                304/304
+     strip_metadata           299/299
+     to_png                   304/304
+     to_tiff                  304/304
+     webp_lossless            304/304
+

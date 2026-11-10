@@ -1,0 +1,3 @@
+head true 512 220996 1024 222404 lost 0 added 1408 false 512/1024 526 557
+ship true 512 220953 1024 222493 lost 0 added 1540 false 512/1024 523 554
+ship vs head true pairs: 512 lost 655 added 612 ; 1024 lost 576 added 665

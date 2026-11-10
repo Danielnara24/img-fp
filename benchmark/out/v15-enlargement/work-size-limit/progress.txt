@@ -1,0 +1,42 @@
+01:23:11 lim_found_384                      pairs 1706 | 63s 410cpu
+01:25:12 lim_imgs_384_cold                  rc=2 F1 0.9466 P 99.63 R 90.17 FP 775 trap 775 cross 0 merges 0 perfect 39 | 117s 738cpu 696MB (120s)
+01:27:42 lim_imgs2_384_cold                 rc=0 F1 0.9696 P 99.65 R 94.42 FP 898 trap 898 cross 0 merges 0 perfect 66 | 146s 925cpu 630MB (150s)
+01:30:49 lim_imgs3_384_cold                 rc=0 F1 0.9700 P 99.59 R 94.55 FP 1,497 trap 1,242 cross 255 merges 6 perfect 65 | 180s 1151cpu 863MB (187s)
+01:32:40 lim_all_384                        rc=2 F1 0.9601 P 99.57 R 92.70 FP 3,485 trap 2,956 cross 529 merges 8 perfect 30 | 77s 438cpu 1820MB (111s)
+01:36:48 lim_found_448                      pairs 2438 | 248s 1600cpu
+01:39:17 lim_imgs_448_cold                  rc=2 F1 0.9566 P 99.61 R 92.02 FP 842 trap 842 cross 0 merges 0 perfect 37 | 146s 885cpu 577MB (149s)
+01:42:20 lim_imgs2_448_cold                 rc=0 F1 0.9770 P 99.55 R 95.92 FP 1,158 trap 1,078 cross 80 merges 1 perfect 69 | 179s 1110cpu 683MB (183s)
+01:46:14 lim_imgs3_448_cold                 rc=0 F1 0.9800 P 99.57 R 96.49 FP 1,584 trap 1,422 cross 162 merges 5 perfect 71 | 229s 1449cpu 1022MB (234s)
+01:48:24 lim_all_448                        rc=2 F1 0.9712 P 99.55 R 94.79 FP 3,737 trap 3,307 cross 430 merges 10 perfect 38 | 99s 555cpu 2104MB (131s)
+01:49:39 lim_found_320                      pairs 1706 | 75s 482cpu
+01:51:33 lim_imgs_320_cold                  rc=2 F1 0.9272 P 99.68 R 86.67 FP 644 trap 644 cross 0 merges 0 perfect 27 | 109s 632cpu 594MB (113s)
+01:53:47 lim_imgs2_320_cold                 rc=0 F1 0.9544 P 99.68 R 91.55 FP 779 trap 779 cross 0 merges 0 perfect 61 | 130s 794cpu 565MB (134s)
+01:56:25 lim_imgs3_320_cold                 rc=0 F1 0.9592 P 99.66 R 92.45 FP 1,200 trap 1,110 cross 90 merges 7 perfect 62 | 152s 963cpu 714MB (157s)
+01:57:54 lim_all_320                        rc=2 F1 0.9454 P 99.68 R 89.90 FP 2,503 trap 2,411 cross 92 merges 9 perfect 28 | 65s 361cpu 1502MB (89s)
+01:59:12 lim_found_256                      pairs 1706 | 78s 483cpu
+02:01:05 lim_imgs_256_cold                  rc=2 F1 0.9005 P 99.75 R 82.07 FP 479 trap 479 cross 0 merges 0 perfect 35 | 109s 536cpu 602MB (113s)
+02:03:00 lim_imgs2_256_cold                 rc=0 F1 0.9311 P 99.75 R 87.29 FP 573 trap 572 cross 1 merges 1 perfect 58 | 111s 664cpu 498MB (115s)
+02:05:09 lim_imgs3_256_cold                 rc=0 F1 0.9349 P 99.73 R 87.99 FP 910 trap 751 cross 159 merges 5 perfect 56 | 124s 777cpu 553MB (129s)
+02:06:31 lim_all_256                        rc=2 F1 0.9209 P 99.75 R 85.51 FP 1,863 trap 1,775 cross 88 merges 6 perfect 30 | 54s 284cpu 1209MB (82s)
+02:07:33 lim_found_192                      pairs 1279 | 62s 383cpu
+02:08:58 lim_imgs_192_cold                  rc=2 F1 0.8461 P 99.87 R 73.39 FP 221 trap 221 cross 0 merges 0 perfect 26 | 81s 457cpu 603MB (85s)
+02:10:33 lim_imgs2_192_cold                 rc=0 F1 0.8778 P 99.88 R 78.30 FP 253 trap 253 cross 0 merges 0 perfect 46 | 92s 549cpu 530MB (96s)
+02:12:17 lim_imgs3_192_cold                 rc=2 F1 0.8794 P 99.87 R 78.56 FP 400 trap 320 cross 80 merges 2 perfect 34 | 99s 607cpu 517MB (104s)
+02:13:18 lim_all_192                        rc=2 F1 0.8619 P 99.88 R 75.80 FP 785 trap 714 cross 71 merges 2 perfect 14 | 40s 217cpu 997MB (61s)
+02:13:48 lim_found_128                      pairs 830 | 30s 188cpu
+02:15:00 lim_imgs_128_cold                  rc=2 F1 0.6803 P 99.98 R 51.56 FP 25 trap 25 cross 0 merges 0 perfect 1 | 70s 385cpu 460MB (72s)
+02:16:22 lim_imgs2_128_cold                 rc=2 F1 0.7501 P 99.98 R 60.02 FP 26 trap 26 cross 0 merges 0 perfect 1 | 79s 462cpu 472MB (81s)
+02:17:45 lim_imgs3_128_cold                 rc=2 F1 0.7647 P 99.97 R 61.92 FP 61 trap 61 cross 0 merges 0 perfect 2 | 79s 494cpu 432MB (83s)
+02:18:30 lim_all_128                        rc=2 F1 0.7275 P 99.97 R 57.18 FP 139 trap 139 cross 0 merges 0 perfect 1 | 28s 145cpu 851MB (45s)
+02:18:49 lim_found_96                       pairs 430 | 19s 119cpu
+02:19:58 lim_imgs_96_cold                   rc=2 F1 0.4915 P 100.00 R 32.58 FP 3 trap 3 cross 0 merges 0 perfect 1 | 68s 358cpu 519MB (69s)
+02:21:13 lim_imgs2_96_cold                  rc=2 F1 0.5464 P 100.00 R 37.59 FP 4 trap 4 cross 0 merges 0 perfect 1 | 73s 424cpu 474MB (75s)
+02:22:26 lim_imgs3_96_cold                  rc=2 F1 0.5953 P 100.00 R 42.38 FP 6 trap 6 cross 0 merges 0 perfect 1 | 70s 439cpu 283MB (73s)
+02:22:58 lim_all_96                         rc=2 F1 0.5379 P 100.00 R 36.79 FP 11 trap 11 cross 0 merges 0 perfect 1 | 19s 95cpu 544MB (32s)
+02:23:09 lim_found_64                       pairs 73 | 11s 67cpu
+02:24:12 lim_imgs_64_cold                   rc=2 F1 0.0484 P 100.00 R 2.48 FP 0 trap 0 cross 0 merges 0 perfect 1 | 62s 333cpu 472MB (63s)
+02:25:22 lim_imgs2_64_cold                  rc=2 F1 0.1056 P 100.00 R 5.57 FP 0 trap 0 cross 0 merges 0 perfect 1 | 68s 395cpu 409MB (70s)
+02:26:24 lim_imgs3_64_cold                  rc=2 F1 0.0847 P 100.00 R 4.42 FP 0 trap 0 cross 0 merges 0 perfect 1 | 60s 383cpu 236MB (62s)
+02:26:40 lim_all_64                         rc=2 F1 0.0763 P 100.00 R 3.97 FP 0 trap 0 cross 0 merges 0 perfect 1 | 7s 35cpu 171MB (15s)
+02:31:17 lim_found_512                      pairs 2438 | 278s 1748cpu
+LIM DONE

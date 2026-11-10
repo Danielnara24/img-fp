@@ -1,0 +1,106 @@
+
+== all
+step         | base: F1   P%     R%    trap  cross  †  top         | flat: F1   P%     R%    trap  cross  †  top
+default      | 0.9747  99.60  95.43   4398      7  0      1      | 0.9683  99.79  94.04   2238     10  0      2      
+points 8     | 0.9772  99.58  95.93   4561     12  0      1      | 0.9714  99.78  94.63   2336     18  0      3      
+points 6     | 0.9795  99.57  96.38   4741     19  0      1      | 0.9735  99.77  95.05   2437     26  0      2      
+points 5     | 0.9802  99.56  96.53   4821     21  0      1      | 0.9744  99.77  95.22   2486     28  0      2      
+points 4     | 0.9809  99.55  96.68   4983     21  0      1      | 0.9752  99.77  95.37   2530     29  0      3      
+points 3     | 0.9813  99.55  96.75   4978     29  0      5      | 0.9756  99.76  95.45   2549     30  0      3      
+overlap 0.75 | 0.9738  98.98  95.82  11248     11  0      1      | 0.9672  99.22  94.35   8512     15  0      2      
+overlap 0.65 | 0.9716  98.34  96.01  18470     11  0      1      | 0.9650  98.61  94.47  15253     16  0      2      
+overlap 0.6  | 0.9696  97.78  96.16  24953     11  0      1      | 0.9629  98.06  94.58  21406     15  0      1      
+overlap 0.5  | 0.9589  95.47  96.31  52030    178  0    169      | 0.9521  95.76  94.66  47693    178  0    165      
+overlap 0.4  | 0.9585  95.35  96.36  53552    181  0    172      | 0.9518  95.66  94.70  48998    181  0    168      
+overlap 0.3  | 0.9581  95.26  96.36  54663    183  0    173      | 0.9516  95.59  94.73  49807    183  0    169      
+overlap 0.25 | 0.9490  93.45  96.39  77091    184  0    174      | 0.9426  93.74  94.79  72200    181  0    170      
+corr 0.9     | 0.9140  99.75  84.33   2397      0  0      0      | 0.8940  99.92  80.88    715      0  0      0      
+corr 0.8     | 0.9551  99.64  91.71   3737      4  0      4      | 0.9436  99.86  89.43   1378     41  0     39      
+corr 0.6     | 0.9818  99.57  96.84   4753     11  0      1      | 0.9780  99.69  95.98   3436     13  0      1      
+corr 0.5     | 0.9838  99.55  97.23   5007      5  0      1      | 0.9813  99.63  96.67   4118      8  0      1      
+corr 0.4     | 0.9843  99.52  97.37   5327      8  0      3      | 0.9832  99.60  97.08   4500      5  0      1      
+corr 0.3     | 0.9842  99.49  97.37   5513    182  0     66      | 0.9841  99.54  97.30   5045     77  0     57      
+corr 0.2     | 0.9839  99.45  97.37   5643    565  0     80      | 0.9840  99.48  97.35   5412    438  0     78      
+k 100        | 0.9746  99.60  95.42   4395      7  0      1      | 0.9683  99.79  94.04   2238     10  0      2      
+k 50         | 0.9703  99.62  94.57   4105      8  0      1      | 0.9626  99.81  92.96   1991     29  0     20      
+k 25         | 0.9667  99.71  93.80   3058     10  0      2      | 0.9577  99.85  92.01   1505     47  0     20      
+k 10         | 0.7450  99.85  59.41    912    126  0     80      | 0.7417  99.91  58.98    499    107  0     63      
+
+merges (seed pairs >= 300 false pairs):
+
+== i5
+step         | base: F1   P%     R%    trap  cross  †  top         | flat: F1   P%     R%    trap  cross  †  top
+default      | 0.9119  86.35  96.61    874  33601  8   7334      | 0.9405  93.15  94.96    413  15342  5   6578      
+points 8     | 0.9123  86.26  96.81    900  33897  8   7267      | 0.9422  93.10  95.38    426  15528  5   6608      
+points 6     | 0.9126  86.10  97.08    929  34446  8   7350      | 0.9428  93.00  95.59    443  15803  5   6615      
+points 5     | 0.9127  86.11  97.08    944  34398  8   7333      | 0.9431  92.99  95.67    449  15831  5   6618      
+points 4     | 0.9125  86.05  97.11    965  34565  8   7337      | 0.9295  90.25  95.82    459  22900  6   7293      
+points 3     | 0.9126  86.05  97.14    969  34588  8   7339      | 0.9295  90.24  95.83    466  22918  6   7294      
+overlap 0.75 | 0.8706  79.03  96.91   2139  55915  8   7503      | 0.8892  83.38  95.26   1533  41333  7   7332      
+overlap 0.65 | 0.8683  78.54  97.08   3238  56645  8   7611      | 0.8868  82.84  95.42   2551  42059  7   7441      
+overlap 0.6  | 0.8658  78.04  97.20   4633  57096  8   7640      | 0.8846  82.36  95.53   3897  42273  7   7459      
+overlap 0.5  | 0.8547  76.16  97.39  10522  58285  8   7722      | 0.8658  78.80  96.06   9568  48768  7   7537      
+overlap 0.4  | 0.8539  75.99  97.44  10631  58861  8   7852      | 0.8647  78.59  96.10   9887  49200  7   7663      
+overlap 0.3  | 0.8527  75.86  97.34  10645  59252  8   7952      | 0.8640  78.46  96.12   9843  49718  7   7729      
+overlap 0.25 | 0.8445  74.51  97.45  15326  59909  8   8001      | 0.8555  77.07  96.13  14430  50134  7   7803      
+corr 0.9     | 0.8713  89.71  84.69    448  21483  7   5502      | 0.8820  95.38  82.02    133   8830  4   4973      
+corr 0.8     | 0.8982  87.62  92.14    711  28684  8   6721      | 0.9202  94.03  90.09    270  12643  5   6106      
+corr 0.6     | 0.9131  85.52  97.94    942  36491  8   7539      | 0.9463  92.67  96.68    623  16638  5   6838      
+corr 0.5     | 0.9126  85.22  98.24    996  37466  8   7652      | 0.9482  92.47  97.29    778  17105  5   7042      
+corr 0.4     | 0.9120  85.02  98.34   1063  38044  8   7683      | 0.9485  92.28  97.57    865  17560  5   7364      
+corr 0.3     | 0.9119  84.99  98.37   1096  38125  8   7686      | 0.9485  92.15  97.71    991  17792  5   7525      
+corr 0.2     | 0.9119  84.98  98.37   1109  38129  8   7686      | 0.9484  92.10  97.76   1069  17859  5   7620      
+k 100        | 0.9154  87.03  96.54    877  31598  7   7165      | 0.9410  93.28  94.95    415  15036  5   6462      
+k 50         | 0.9226  89.10  95.65    811  25604  5   6974      | 0.9415  94.34  93.96    344  12390  4   6235      
+k 25         | 0.9187  89.15  94.76    554  25489  5   7013      | 0.9363  94.35  92.91    266  12285  4   6263      
+k 10         | 0.7621  96.01  63.18    197   5731  2   2748      | 0.7483  96.21  61.22    101   5348  2   2586      
+
+merges (seed pairs >= 300 false pairs):
+  default       base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Puerto3|Puerto4, Tree1|Tree2, Macizo5|Macizo6
+  default       flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  points 8      base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Puerto3|Puerto4, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, Macizo5|Macizo6
+  points 8      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  points 6      base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Puerto3|Puerto4, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, Macizo5|Macizo6
+  points 6      flat: Fountain3|Fountain5, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, bird1|bird2
+  points 5      base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Puerto3|Puerto4, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, Macizo5|Macizo6
+  points 5      flat: Fountain3|Fountain5, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, bird1|bird2
+  points 4      base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Puerto3|Puerto4, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, Macizo5|Macizo6
+  points 4      flat: Mural1|Mural2, Fountain3|Fountain5, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, bird1|bird2
+  points 3      base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Puerto3|Puerto4, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, Macizo5|Macizo6
+  points 3      flat: Mural1|Mural2, Fountain3|Fountain5, Floriana1|Floriana2, Floriana3|Floriana4, Tree1|Tree2, bird1|bird2
+  overlap 0.75  base: Floriana3|Floriana4, Mural1|Mural2, Floriana1|Floriana2, Fountain3|Fountain5, Puerto3|Puerto4, bird1|bird2, Tree1|Tree2, Macizo5|Macizo6
+  overlap 0.75  flat: Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, Fountain3|Fountain5, Puerto3|Puerto4, Macizo5|Macizo6, bird1|bird2
+  overlap 0.65  base: Floriana3|Floriana4, Mural1|Mural2, Floriana1|Floriana2, Tree1|Tree2, Puerto3|Puerto4, Fountain3|Fountain5, bird1|bird2, Macizo5|Macizo6
+  overlap 0.65  flat: Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, Fountain3|Fountain5, Puerto3|Puerto4, Macizo5|Macizo6, bird1|bird2
+  overlap 0.6   base: Floriana3|Floriana4, Mural1|Mural2, Floriana1|Floriana2, Tree1|Tree2, Puerto3|Puerto4, Fountain3|Fountain5, bird1|bird2, Macizo5|Macizo6
+  overlap 0.6   flat: Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, Fountain3|Fountain5, Puerto3|Puerto4, Macizo5|Macizo6, bird1|bird2
+  overlap 0.5   base: Mural1|Mural2, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, Puerto3|Puerto4, bird1|bird2, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.5   flat: Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2, Puerto3|Puerto4, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.4   base: Floriana3|Floriana4, Mural1|Mural2, Floriana1|Floriana2, Tree1|Tree2, Puerto3|Puerto4, bird1|bird2, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.4   flat: Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2, Puerto3|Puerto4, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.3   base: Floriana3|Floriana4, Mural1|Mural2, Tree1|Tree2, Puerto3|Puerto4, Floriana1|Floriana2, bird1|bird2, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.3   flat: Floriana3|Floriana4, Tree1|Tree2, Floriana1|Floriana2, bird1|bird2, Puerto3|Puerto4, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.25  base: Floriana3|Floriana4, Mural1|Mural2, Floriana1|Floriana2, Tree1|Tree2, Puerto3|Puerto4, bird1|bird2, Fountain3|Fountain5, Macizo5|Macizo6
+  overlap 0.25  flat: Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2, Puerto3|Puerto4, Fountain3|Fountain5, Macizo5|Macizo6
+  corr 0.9      base: bird1|bird2, Fountain3|Fountain5, Mural1|Mural2, Floriana3|Floriana4, Floriana1|Floriana2, Puerto3|Puerto4, Tree1|Tree2
+  corr 0.9      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2
+  corr 0.8      base: Mural1|Mural2, Fountain3|Fountain5, bird1|bird2, Floriana3|Floriana4, Floriana1|Floriana2, Puerto3|Puerto4, Tree1|Tree2, Macizo5|Macizo6
+  corr 0.8      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  corr 0.6      base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Puerto3|Puerto4, Floriana3|Floriana4, Floriana1|Floriana2, Macizo5|Macizo6, Tree1|Tree2
+  corr 0.6      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  corr 0.5      base: Mural1|Mural2, Fountain3|Fountain5, bird1|bird2, Macizo5|Macizo6, Puerto3|Puerto4, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2
+  corr 0.5      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  corr 0.4      base: Mural1|Mural2, Fountain3|Fountain5, bird1|bird2, Macizo5|Macizo6, Puerto3|Puerto4, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2
+  corr 0.4      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  corr 0.3      base: Mural1|Mural2, Fountain3|Fountain5, bird1|bird2, Macizo5|Macizo6, Puerto3|Puerto4, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2
+  corr 0.3      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  corr 0.2      base: Mural1|Mural2, Fountain3|Fountain5, bird1|bird2, Macizo5|Macizo6, Puerto3|Puerto4, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2
+  corr 0.2      flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  k 100         base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Floriana3|Floriana4, Puerto3|Puerto4, Floriana1|Floriana2, Tree1|Tree2
+  k 100         flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, Tree1|Tree2, bird1|bird2
+  k 50          base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2
+  k 50          flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, bird1|bird2
+  k 25          base: Mural1|Mural2, bird1|bird2, Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2
+  k 25          flat: Fountain3|Fountain5, Floriana3|Floriana4, Floriana1|Floriana2, bird1|bird2
+  k 10          base: Floriana3|Floriana4, Floriana1|Floriana2
+  k 10          flat: Floriana3|Floriana4, Floriana1|Floriana2

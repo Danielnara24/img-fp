@@ -1,0 +1,88 @@
+Settings -> Detail: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.5, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: /home/daniel/Documents/DISC21/cache57/c.db
+[   0.0s] scratch file in /home/daniel/Documents/DISC21/cache57
+Scanning: ["/home/daniel/Documents/DISC21/queries/images/queries"]
+Against: ["/home/daniel/Documents/DISC21/refs1/images/references"]
+Searching extensions: ["apng", "avif", "avifs", "bmp", "dib", "exr", "ff", "gif", "hdr", "heic", "heics", "heif", "hif", "ico", "jfi", "jfif", "jif", "jpe", "jpeg", "jpg", "jpg_large", "jpg_orig", "jxl", "pam", "pbm", "pgm", "pjp", "pjpeg", "png", "png_large", "pnm", "ppm", "qoi", "tga", "tif", "tiff", "webp"]
+[   1.6s] 100000 files
+[   1.6s] against: 50000 scanned, 50000 in the library
+[   2.6s] exact duplicates: 5 groups
+[ 231.5s] cache: 99994 usable records
+[ 231.6s] 0 files to analyse
+Found 100000 images; 99994 already cached, 6 identical copies, 0 to analyse.
+[ 261.4s] cache: 50000 files of other scans kept, 0 of them gone (kept for 30 days)
+[ 261.4s] cache: packs of 8565002582 bytes, 0 of them unused, not compacted
+[ 261.4s] cpu: decode 0s, features 0s
+[ 261.4s] described 100000/100000 images, 45121536 descriptors
+Analysis complete. Matching 100000 images...
+[ 313.5s] vocabulary: 1191669 live words of 16777216 from 1280000 samples
+[ 390.0s] quantised
+[ 396.4s] inverted file
+[ 434.6s] candidates: 7066676 pairs
+[ 655.0s]   round 1: 7412 library files asked, 96760 more candidates
+[ 657.9s]   round 2: 894 library files asked, 10471 more candidates
+[ 663.0s]   round 3: 219 library files asked, 3194 more candidates
+[ 663.5s]   round 4: 53 library files asked, 333 more candidates
+[ 663.6s]   round 5: 5 library files asked, 109 more candidates
+[ 663.7s]   round 6: 1 library files asked, 5 more candidates
+[ 663.7s] -k counts rejections: 7995 windows more in 6 rounds, 7177548 candidates verified
+[ 663.7s] anchors: 15708 of 22917 verified pairs
+[1021.3s] variants: 661 more pairs from 48869 unmatched images (96095 deeper candidates)
+[1023.3s] released the index and the descriptors
+[1023.3s] bridges: dropped 0 lone links between clusters
+[1023.3s] weak anchors: 13605 admitted, 2467 refused between clusters
+[1023.5s]   propagation round 1: +1349 pairs
+[1023.5s]   propagation round 2: +53 pairs
+[1023.5s]   propagation round 3: +0 pairs
+[1023.5s] propagated: 1402 of 3870 composed hypotheses (9168 put to the pixels, budget 7177548 a round)
+[1023.5s] corroborated: 698 more pairs inside existing clusters
+20 repeat, 41 better, 109 to review, 49830 new, of 50000 images scanned against 50000 library images in 1024.2s -> /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/disc-repfam1/report.json
+[1024.4s] pace: finding identical files: 100000 files in 0.25s, 20277.0 ns a unit on each of 8 threads
+[1024.4s] pace: reading the cache: 8618852694 bytes in 228.92s, 212.5 ns a unit on each of 8 threads
+[1024.4s] pace: reading headers: 100000 files in 0.01s, 433.0 ns a unit on each of 8 threads
+[1024.4s] pace: describing: 0 pixels analysed in 29.02s, 0.0 ns a unit on each of 8 threads
+[1024.4s] pace: writing the cache: 0 descriptors in 0.89s, 0.0 ns a unit on each of 8 threads
+[1024.4s] pace: building the vocabulary: 1280000 samples in 52.05s, 325306.4 ns a unit on each of 8 threads
+[1024.4s] pace: quantising: 45118027 descriptors in 76.52s, 13567.5 ns a unit on each of 8 threads
+[1024.4s] pace: building the inverted file: 45118027 descriptors in 6.49s, 1150.8 ns a unit on each of 8 threads
+[1024.4s] pace: finding candidates: 25491510 descriptors in 42.79s, 13427.2 ns a unit on each of 8 threads
+[1024.4s] pace: verifying: 7177548 pairs in 226.34s, 252277.3 ns a unit on each of 8 threads
+[1024.4s] pace: propagating: 116177 images and anchors in 0.25s, 17159.8 ns a unit on each of 8 threads
+[1024.4s] pace: grouping and suggesting: 116177 images and anchors in 0.60s, 41112.1 ns a unit on each of 8 threads
+
+Skipped:
+     23  image(s) with no detail to match, such as a blank picture: only an identical copy can match one
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q01298.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q11809.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q12571.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q15563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q16563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q17557.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q21194.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q27539.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30445.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30606.jpg
+         - ... and 13 more (all of them are in the log file)
+	Command being timed: "/home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/img-fp-re /home/daniel/Documents/DISC21/queries/images/queries --against /home/daniel/Documents/DISC21/refs1/images/references --min-pixel-correlation 0.5 -t 8 -v --no-last --cache /home/daniel/Documents/DISC21/cache57/c.db --log-file /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/disc-repfam1/run.log -o /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v58-reach/disc-repfam1/report.json"
+	User time (seconds): 3188.92
+	System time (seconds): 826.15
+	Percent of CPU this job got: 391%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 17:04.51
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3749804
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 6247334
+	Minor (reclaiming a frame) page faults: 3903146
+	Voluntary context switches: 4389445
+	Involuntary context switches: 406414
+	Swaps: 0
+	File system inputs: 566868640
+	File system outputs: 15248376
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

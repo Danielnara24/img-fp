@@ -1,0 +1,19 @@
+== all2-k25-head.json ==
+   config: {"candidates": 25, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9298  precision 99.36%  recall 87.36%
+   proposed 1,217,288  TP 1,209,557  FP 7,731  FN 174,944  groups 996
+   FP: trap 3,973  cross-family 3,758  seed-pairs 70  merges 52
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 1,677 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 522 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 382 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 218 pairs
+     cross IMGS5/Cemetery3.jpg <-> IMGS5/Cemetery4.jpg: 193 pairs
+     cross IMGS2/bust1.jpg <-> IMGS2/bust2.jpg: 183 pairs
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 138 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 85 pairs
+     cross IMGS5/Macizo5.jpg <-> IMGS5/Macizo6.jpg: 73 pairs
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 66 pairs
+   half[alt] F1 0.9290  P 99.65%  R 87.01%  (182 seeds)
+   half[hash] F1 0.9296  P 99.64%  R 87.12%  (184 seeds)
+   perfect transforms: 11 of 88
+

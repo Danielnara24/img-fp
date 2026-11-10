@@ -1,0 +1,13 @@
+14:01:08 start fam hdev
+14:02:50 end fam hdev
+14:02:50 start fam all
+14:04:29 end fam all
+14:04:29 start fam all2
+14:06:09 end fam all2
+14:06:09 start fam i5
+14:07:19 end fam i5
+14:07:19 start size-all
+14:10:20 end size-all exit 0 850.71 36.19 3:00.83 
+14:10:20 start size-all2
+14:12:47 end size-all2 exit 0 727.16 23.87 2:27.12 
+14:12:48 done

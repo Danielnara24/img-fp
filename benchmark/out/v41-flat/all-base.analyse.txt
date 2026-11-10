@@ -1,0 +1,16 @@
+== all-base.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9747  precision 99.60%  recall 95.43%
+   proposed 1,095,467  TP 1,091,062  FP 4,405  FN 52,232  groups 687
+   FP: trap 4,398  cross-family 7  seed-pairs 7  merges 7
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 1 pairs
+     cross IMGS/noisy2.jpg <-> IMGS4/club.jpg: 1 pairs
+     cross IMGS3/docks1.jpg <-> IMGS4/UnionCity.jpg: 1 pairs
+     cross IMGS/panoramic.avif <-> IMGS2/temple1.jpg: 1 pairs
+     cross IMGS/13.webp <-> IMGS3/cross1.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS4/golf-club.JPG: 1 pairs
+     cross IMGS3/docks2.jpg <-> IMGS4/aerial.jpg: 1 pairs
+   half[alt] F1 0.9722  P 99.61%  R 94.94%  (152 seeds)
+   half[hash] F1 0.9747  P 99.59%  R 95.44%  (160 seeds)
+   perfect transforms: 49 of 87
+

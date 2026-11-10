@@ -1,0 +1,9 @@
+mir-repfam 45.35 user 6.81 wall 1299 more pairs from 466 unmatched images (0 deeper candidates)
+found-repfam 456.94 user 66.31 wall 399 more pairs from 8967 unmatched images (6089 deeper candidates)
+all-repfam 912.23 user 181.25 wall 36454 more pairs from 1516 unmatched images (405 deeper candidates)
+all2-repfam 813.98 user 150.07 wall 36944 more pairs from 2253 unmatched images (363 deeper candidates)
+idle 64 C
+A1 start 63C end 93C user/sys/wall 780.89 26.65 150.59
+B2 start 66C end 98C user/sys/wall 712.53 32.84 138.86
+B3 start 66C end 89C user/sys/wall 708.77 19.24 128.60
+A4 start 66C end 88C user/sys/wall 700.36 20.29 135.12

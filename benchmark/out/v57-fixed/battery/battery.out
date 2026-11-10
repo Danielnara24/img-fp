@@ -1,0 +1,42 @@
+15:15:52 pairs head
+15:25:43 pairs ship
+15:29:46 htest head
+15:32:59 htest ship
+15:34:22 against head
+15:36:49 against ship
+15:39:50 detail head 512
+15:40:14 detail head 1024
+15:41:41 detail ship 512
+15:42:39 detail ship 1024
+15:58:44 cliff --min-aligned-points 8
+16:13:26 cliff --min-aligned-points 6
+16:26:57 cliff --min-aligned-points 5
+16:39:42 cliff --min-aligned-points 4
+16:52:14 cliff --min-aligned-points 3
+17:04:45 cliff --min-frame-overlap 0.75
+17:17:22 cliff --min-frame-overlap 0.65
+17:29:31 cliff --min-frame-overlap 0.6
+17:42:22 cliff --min-frame-overlap 0.5
+17:54:37 cliff --min-frame-overlap 0.4
+18:07:01 cliff --min-frame-overlap 0.3
+18:19:43 cliff --min-frame-overlap 0.25
+18:32:12 cliff --min-pixel-correlation 0.9
+18:45:01 cliff --min-pixel-correlation 0.8
+18:57:50 cliff --min-pixel-correlation 0.6
+19:10:26 cliff --min-pixel-correlation 0.5
+19:22:59 cliff --min-pixel-correlation 0.4
+19:35:11 cliff --min-pixel-correlation 0.3
+19:47:42 cliff --min-pixel-correlation 0.2
+20:00:09 cliff -k 100
+20:12:44 cliff -k 50
+20:24:42 cliff -k 25
+20:35:38 cliff -k 10
+20:35:38 fetch references_0
+20:54:15 refs: 50000 files
+20:54:15 disc head
+21:31:05 end disc head exit 0 8106.06 36:50.01
+21:31:05 disc ship
+21:51:33 end disc ship exit 0 1769.40 20:28.57
+21:51:33 proxy head
+21:52:27 proxy ship
+21:53:10 done

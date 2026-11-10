@@ -1,0 +1,19 @@
+== all-k25.json ==
+   config: {"candidates": 25, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9767  precision 99.74%  recall 95.69%
+   proposed 1,096,902  TP 1,094,000  FP 2,902  FN 49,294  groups 761
+   FP: trap 2,498  cross-family 404  seed-pairs 24  merges 20
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 142 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 83 pairs
+     cross IMGS3/docks1.jpg <-> IMGS3/docks2.jpg: 70 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 67 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 23 pairs
+     cross IMGS2/sea_photo3.jpg <-> IMGS4/aerial2.jpg: 1 pairs
+     cross IMGS2/sea_photo3.jpg <-> IMGS3/squirrel2.jpg: 1 pairs
+     cross IMGS2/sea_photo3.jpg <-> IMGS4/bunker.jpg: 1 pairs
+     cross IMGS/noisy2.jpg <-> IMGS4/club.jpg: 1 pairs
+     cross IMGS/13.webp <-> IMGS3/cross1.jpg: 1 pairs
+   half[alt] F1 0.9745  P 99.78%  R 95.22%  (152 seeds)
+   half[hash] F1 0.9761  P 99.73%  R 95.58%  (160 seeds)
+   perfect transforms: 58 of 87
+

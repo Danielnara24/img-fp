@@ -1,0 +1,4 @@
+== IMGS5 d320kr
+  off: clean 86841, seed pairs sharing a cluster (>=5 files each): ['Floriana2.jpg(83)+Floriana1.jpg(83)', 'Floriana4.jpg(84)+Floriana3.jpg(84)', 'Fountain3.jpg(84)+Fountain5.jpg(83)', 'Tree2.jpg(84)+Tree1.jpg(84)', 'bird2.jpg(81)+bird1.jpg(81)']
+  v1 : clean 74618, seed pairs sharing a cluster (>=5 files each): ['Floriana2.jpg(83)+Floriana1.jpg(83)', 'Floriana3.jpg(81)+Floriana4.jpg(5)', 'Fountain3.jpg(84)+Fountain5.jpg(83)', 'bird1.jpg(66)+bird2.jpg(6)', 'bird2.jpg(75)+bird1.jpg(15)']
+  v2 : clean 83450, seed pairs sharing a cluster (>=5 files each): ['Floriana1.jpg(83)+Floriana2.jpg(6)', 'Floriana3.jpg(81)+Floriana4.jpg(11)', 'Fountain3.jpg(83)+Fountain5.jpg(6)', 'bird2.jpg(81)+bird1.jpg(81)']

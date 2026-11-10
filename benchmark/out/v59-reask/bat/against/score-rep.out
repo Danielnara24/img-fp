@@ -1,0 +1,25 @@
+truth over 11,800 scanned files: {'holds': 4430, 'has': 727, 'none': 6643}
+
+== /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v59-reask/../v58-reach/bat/against/ship.json  (['/home/daniel/Documents/IMGS-AGAINST/library'], 158.7s)
+  verdicts: {'repeat': 7165, 'better': 1290, 'review': 396, 'new': 2949}
+  found: 4,849 / 5,157 files the library has (94.03%) name a library file that has them
+  repeat: 3,317 / 4,430 files a library file holds (74.88%)
+  content lost: 0  {}
+  named keeper does not hold: 443  {'library': 240, 'scan': 203}
+  false library claims: 71 {'trap or disjoint': 64, 'cross-family': 7}; partial: 68
+  truth \ verdict      repeat   better   review      new  missing
+  holds                3,317      588      306      219        0
+  has                      0      671       51        5        0
+  none                 3,848       31       39    2,725        0
+
+== /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v59-reask/bat/against/rep.json  (['/home/daniel/Documents/IMGS-AGAINST/library'], 118.8s)
+  verdicts: {'repeat': 7165, 'better': 1290, 'review': 396, 'new': 2949}
+  found: 4,849 / 5,157 files the library has (94.03%) name a library file that has them
+  repeat: 3,317 / 4,430 files a library file holds (74.88%)
+  content lost: 0  {}
+  named keeper does not hold: 443  {'library': 240, 'scan': 203}
+  false library claims: 71 {'trap or disjoint': 64, 'cross-family': 7}; partial: 68
+  truth \ verdict      repeat   better   review      new  missing
+  holds                3,317      588      306      219        0
+  has                      0      671       51        5        0
+  none                 3,848       31       39    2,725        0

@@ -1,0 +1,3 @@
+all new exit 2
+score exit 0
+done

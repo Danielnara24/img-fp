@@ -1,0 +1,16 @@
+20:55:58 fetch references_0
+21:01:59 download failed
+21:12:02 cliffs compressed, 37G free
+21:12:02 fetch references_0
+21:22:36 unzip
+21:28:34 refs: 50000 files
+21:28:34 start head
+22:00:16 end head exit 0 5989.59 31:42.08
+22:00:16 start ship
+22:17:44 end ship exit 0 2763.76 17:27.76
+22:17:44 start proxy head
+22:20:18 end proxy head exit 0
+22:20:18 start proxy ship
+22:21:09 end proxy ship exit 0
+22:21:11 done
+23:03:29 all scored

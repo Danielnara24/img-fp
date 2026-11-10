@@ -1,0 +1,24 @@
+IMGS3_512 {'bar': 3} shipped: m=1 s= 8 x= 8913 reach=0.99661 [('IMGS3/Segovia1.jpg', 'IMGS3/Segovia2.jpg')] | acyclic: m=0 s= 9 x=  723 reach=0.99637  | hub: m=0 s= 9 x=  723 reach=0.99637 
+IMGS3_512 {'bar': 5} shipped: m=1 s= 8 x= 8821 reach=0.99638 [('IMGS3/Segovia1.jpg', 'IMGS3/Segovia2.jpg')] | acyclic: m=0 s= 9 x=  631 reach=0.99614  | hub: m=0 s= 9 x=  631 reach=0.99614 
+IMGS3_512 {'bar': 6} shipped: m=1 s= 8 x= 8820 reach=0.99433 [('IMGS3/Segovia1.jpg', 'IMGS3/Segovia2.jpg')] | acyclic: m=0 s= 9 x=  630 reach=0.99410  | hub: m=0 s= 9 x=  630 reach=0.99410 
+IMGS3_512 {'bar': 7} shipped: m=1 s= 8 x= 8819 reach=0.99406 [('IMGS3/Segovia1.jpg', 'IMGS3/Segovia2.jpg')] | acyclic: m=0 s= 9 x=  629 reach=0.99382  | hub: m=0 s= 9 x=  629 reach=0.99382 
+IMGS3_512 {'bar': 8} shipped: m=1 s= 7 x= 8728 reach=0.99220 [('IMGS3/Segovia1.jpg', 'IMGS3/Segovia2.jpg')] | acyclic: m=0 s= 8 x=  538 reach=0.99196  | hub: m=0 s= 8 x=  538 reach=0.99196 
+IMGS3_512 {'bar': 9} shipped: m=1 s= 6 x= 8727 reach=0.98988 [('IMGS3/Segovia1.jpg', 'IMGS3/Segovia2.jpg')] | acyclic: m=0 s= 7 x=  537 reach=0.98964  | hub: m=0 s= 7 x=  537 reach=0.98964 
+IMGS3_512 {'bar': 10} shipped: m=0 s= 6 x=  446 reach=0.98688  | acyclic: m=0 s= 6 x=  446 reach=0.98688  | hub: m=0 s= 6 x=  446 reach=0.98688 
+IMGS3_512 {'bar': 12} shipped: m=0 s= 5 x=  352 reach=0.97990  | acyclic: m=0 s= 5 x=  352 reach=0.97990  | hub: m=0 s= 5 x=  352 reach=0.97990 
+IMGS3_512 {'corr': 0.2} shipped: m=0 s= 3 x=  174 reach=0.98944  | acyclic: m=0 s= 3 x=  174 reach=0.98944  | hub: m=0 s= 3 x=  174 reach=0.98944 
+IMGS3_512 {'corr': 0.4} shipped: m=0 s= 3 x=  174 reach=0.98944  | acyclic: m=0 s= 3 x=  174 reach=0.98944  | hub: m=0 s= 3 x=  174 reach=0.98944 
+IMGS3_512 {'corr': 0.5} shipped: m=0 s= 3 x=  174 reach=0.98920  | acyclic: m=0 s= 3 x=  174 reach=0.98920  | hub: m=0 s= 3 x=  174 reach=0.98920 
+IMGS3_512 {'corr': 0.55} shipped: m=0 s= 5 x=  355 reach=0.98783  | acyclic: m=0 s= 5 x=  355 reach=0.98783  | hub: m=0 s= 5 x=  355 reach=0.98783 
+IMGS3_512 {'corr': 0.58} shipped: m=0 s= 7 x=  535 reach=0.98736  | acyclic: m=0 s= 7 x=  535 reach=0.98736  | hub: m=0 s= 7 x=  535 reach=0.98736 
+IMGS3_512 {'corr': 0.6} shipped: m=0 s= 6 x=  446 reach=0.98688  | acyclic: m=0 s= 6 x=  446 reach=0.98688  | hub: m=0 s= 6 x=  446 reach=0.98688 
+IMGS3_512 {'corr': 0.65} shipped: m=0 s= 5 x=  265 reach=0.98390  | acyclic: m=0 s= 5 x=  265 reach=0.98390  | hub: m=0 s= 5 x=  265 reach=0.98390 
+IMGS3_512 {'corr': 0.69} shipped: m=0 s= 4 x=  173 reach=0.97652  | acyclic: m=0 s= 4 x=  173 reach=0.97652  | hub: m=0 s= 4 x=  173 reach=0.97652 
+IMGS3_512 {'corr': 0.7} shipped: m=0 s= 7 x=  446 reach=0.97452  | acyclic: m=0 s= 7 x=  446 reach=0.97452  | hub: m=0 s= 7 x=  446 reach=0.97452 
+IMGS3_512 {'corr': 0.75} shipped: m=0 s= 9 x=  706 reach=0.96391  | acyclic: m=0 s= 9 x=  706 reach=0.96391  | hub: m=0 s= 9 x=  706 reach=0.96391 
+IMGS3_512 {'corr': 0.8} shipped: m=0 s= 6 x=  527 reach=0.94703  | acyclic: m=0 s= 6 x=  527 reach=0.94703  | hub: m=0 s= 6 x=  527 reach=0.94703 
+IMGS3_512 {'ov': 0.3} shipped: m=1 s= 6 x= 8557 reach=0.98671 [('IMGS3/Acueducto4.jpg', 'IMGS3/Acueducto3.jpg')] | acyclic: m=1 s= 6 x= 8557 reach=0.98671 [('IMGS3/Acueducto4.jpg', 'IMGS3/Acueducto3.jpg')] | hub: m=1 s= 6 x= 8557 reach=0.98671 [('IMGS3/Acueducto4.jpg', 'IMGS3/Acueducto3.jpg')]
+IMGS3_512 {'ov': 0.4} shipped: m=0 s= 8 x=  727 reach=0.98605  | acyclic: m=0 s= 8 x=  727 reach=0.98605  | hub: m=0 s= 8 x=  727 reach=0.98605 
+IMGS3_512 {'ov': 0.5} shipped: m=0 s= 8 x=  727 reach=0.98605  | acyclic: m=0 s= 8 x=  727 reach=0.98605  | hub: m=0 s= 8 x=  727 reach=0.98605 
+IMGS3_512 {'ov': 0.6} shipped: m=0 s=12 x=  987 reach=0.98668  | acyclic: m=0 s=12 x=  987 reach=0.98668  | hub: m=0 s=12 x=  987 reach=0.98668 
+IMGS3_512 {'ov': 0.7} shipped: m=0 s= 9 x=  717 reach=0.98711  | acyclic: m=0 s= 9 x=  717 reach=0.98711  | hub: m=0 s= 9 x=  717 reach=0.98711 

@@ -1,0 +1,27 @@
+529 true copies in reach
+== head
+  report bar 0.5: true   374 false    380  uAP 65.86  recall 70.70  R@P90 52.93
+  report bar 0.6: true   355 false    160  uAP 63.85  recall 67.11  R@P90 51.80
+  report bar 0.7: true   312 false     87  uAP 56.66  recall 58.98  R@P90 47.83
+  report bar 0.8: true   259 false     38  uAP 47.78  recall 48.96  R@P90 45.18
+  dump   bar 0.2: true   381 false   8748  uAP 44.32  recall 72.02  R@P90 28.92
+  dump   bar 0.3: true   381 false   3968  uAP 50.84  recall 72.02  R@P90 36.29
+  dump   bar 0.4: true   379 false   1041  uAP 61.30  recall 71.64  R@P90 44.42
+  dump   bar 0.5: true   374 false    329  uAP 65.71  recall 70.70  R@P90 52.93
+  dump   bar 0.6: true   355 false    143  uAP 63.79  recall 67.11  R@P90 51.61
+  dump   bar 0.7: true   311 false     81  uAP 56.44  recall 58.79  R@P90 47.83
+  dump   bar 0.8: true   261 false     39  uAP 48.09  recall 49.34  R@P90 45.56
+  dump   bar 0.9: true   181 false     16  uAP 33.68  recall 34.22  R@P90 34.22
+== ship
+  report bar 0.5: true   339 false    384  uAP 60.23  recall 64.08  R@P90 50.09
+  report bar 0.6: true   324 false    140  uAP 58.86  recall 61.25  R@P90 50.66
+  report bar 0.7: true   282 false     62  uAP 51.81  recall 53.31  R@P90 47.07
+  report bar 0.8: true   245 false     29  uAP 45.44  recall 46.31  R@P90 45.37
+  dump   bar 0.2: true   345 false   6465  uAP 46.34  recall 65.22  R@P90 34.22
+  dump   bar 0.3: true   345 false   3275  uAP 51.07  recall 65.22  R@P90 36.67
+  dump   bar 0.4: true   344 false   1100  uAP 57.92  recall 65.03  R@P90 43.48
+  dump   bar 0.5: true   339 false    364  uAP 60.09  recall 64.08  R@P90 49.34
+  dump   bar 0.6: true   323 false    135  uAP 58.65  recall 61.06  R@P90 50.66
+  dump   bar 0.7: true   282 false     61  uAP 51.77  recall 53.31  R@P90 47.07
+  dump   bar 0.8: true   246 false     30  uAP 45.59  recall 46.50  R@P90 45.56
+  dump   bar 0.9: true   175 false     11  uAP 32.67  recall 33.08  R@P90 33.08

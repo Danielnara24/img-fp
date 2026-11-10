@@ -1,0 +1,19 @@
+== all-minpixelcorrelation0.5-cur.json ==
+   config: {"candidates": 150, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.5, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9834  precision 98.61%  recall 98.08%
+   proposed 1,361,645  TP 1,342,721  FP 18,924  FN 26,288  groups 948
+   FP: trap 5,268  cross-family 13,656  seed-pairs 53  merges 47
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 7,222 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 3,062 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 1,167 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 497 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 265 pairs
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 233 pairs
+     cross IMGS3/Acueducto3.jpg <-> IMGS3/Acueducto4.jpg: 217 pairs
+     cross IMGS5/Cemetery3.jpg <-> IMGS5/Cemetery4.jpg: 166 pairs
+     cross IMGS3/docks1.jpg <-> IMGS3/docks2.jpg: 166 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 129 pairs
+   half[alt] F1 0.9819  P 98.57%  R 97.82%  (182 seeds)
+   half[hash] F1 0.9882  P 99.56%  R 98.10%  (184 seeds)
+   perfect transforms: 55 of 87
+

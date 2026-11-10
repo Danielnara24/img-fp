@@ -1,0 +1,24 @@
+IMGS2_512 {'bar': 3} shipped: m=1 s= 2 x= 8282 reach=0.99492 [('IMGS2/bust1.jpg', 'IMGS2/bust2.jpg')] | acyclic: m=1 s= 2 x= 8282 reach=0.99270 [('IMGS2/bust1.jpg', 'IMGS2/bust2.jpg')] | hub: m=1 s= 2 x= 8282 reach=0.99492 [('IMGS2/bust1.jpg', 'IMGS2/bust2.jpg')]
+IMGS2_512 {'bar': 5} shipped: m=1 s= 1 x= 8101 reach=0.99292 [('IMGS2/bust2.jpg', 'IMGS2/bust1.jpg')] | acyclic: m=1 s= 1 x= 8101 reach=0.99070 [('IMGS2/bust2.jpg', 'IMGS2/bust1.jpg')] | hub: m=1 s= 1 x= 8101 reach=0.99292 [('IMGS2/bust2.jpg', 'IMGS2/bust1.jpg')]
+IMGS2_512 {'bar': 6} shipped: m=0 s= 1 x=   91 reach=0.99193  | acyclic: m=0 s= 1 x=   91 reach=0.98971  | hub: m=0 s= 1 x=   91 reach=0.99193 
+IMGS2_512 {'bar': 7} shipped: m=0 s= 1 x=   91 reach=0.98837  | acyclic: m=0 s= 1 x=   91 reach=0.98615  | hub: m=0 s= 1 x=   91 reach=0.98837 
+IMGS2_512 {'bar': 8} shipped: m=0 s= 1 x=   91 reach=0.98614  | acyclic: m=0 s= 1 x=   91 reach=0.98392  | hub: m=0 s= 1 x=   91 reach=0.98614 
+IMGS2_512 {'bar': 9} shipped: m=0 s= 0 x=    0 reach=0.98450  | acyclic: m=0 s= 0 x=    0 reach=0.98228  | hub: m=0 s= 0 x=    0 reach=0.98450 
+IMGS2_512 {'bar': 10} shipped: m=0 s= 1 x=   90 reach=0.98186  | acyclic: m=0 s= 1 x=   90 reach=0.97963  | hub: m=0 s= 1 x=   90 reach=0.98186 
+IMGS2_512 {'bar': 12} shipped: m=0 s= 1 x=   90 reach=0.97502  | acyclic: m=0 s= 1 x=   90 reach=0.97249  | hub: m=0 s= 1 x=   90 reach=0.97502 
+IMGS2_512 {'corr': 0.2} shipped: m=0 s= 2 x=  181 reach=0.98694  | acyclic: m=0 s= 2 x=  181 reach=0.98503  | hub: m=0 s= 2 x=  181 reach=0.98694 
+IMGS2_512 {'corr': 0.4} shipped: m=0 s= 1 x=   90 reach=0.98627  | acyclic: m=0 s= 1 x=   90 reach=0.98436  | hub: m=0 s= 1 x=   90 reach=0.98627 
+IMGS2_512 {'corr': 0.5} shipped: m=0 s= 1 x=   90 reach=0.98435  | acyclic: m=0 s= 1 x=   90 reach=0.98244  | hub: m=0 s= 1 x=   90 reach=0.98435 
+IMGS2_512 {'corr': 0.55} shipped: m=0 s= 1 x=   90 reach=0.98403  | acyclic: m=0 s= 1 x=   90 reach=0.98212  | hub: m=0 s= 1 x=   90 reach=0.98403 
+IMGS2_512 {'corr': 0.58} shipped: m=0 s= 1 x=   90 reach=0.98250  | acyclic: m=0 s= 1 x=   90 reach=0.98028  | hub: m=0 s= 1 x=   90 reach=0.98250 
+IMGS2_512 {'corr': 0.6} shipped: m=0 s= 1 x=   90 reach=0.98186  | acyclic: m=0 s= 1 x=   90 reach=0.97963  | hub: m=0 s= 1 x=   90 reach=0.98186 
+IMGS2_512 {'corr': 0.65} shipped: m=0 s= 1 x=   89 reach=0.97537  | acyclic: m=0 s= 1 x=   89 reach=0.97346  | hub: m=0 s= 1 x=   89 reach=0.97537 
+IMGS2_512 {'corr': 0.69} shipped: m=0 s= 1 x=   89 reach=0.96965  | acyclic: m=0 s= 1 x=   89 reach=0.96717  | hub: m=0 s= 1 x=   89 reach=0.96965 
+IMGS2_512 {'corr': 0.7} shipped: m=0 s= 1 x=   89 reach=0.96934  | acyclic: m=0 s= 1 x=   89 reach=0.96687  | hub: m=0 s= 1 x=   89 reach=0.96934 
+IMGS2_512 {'corr': 0.75} shipped: m=0 s= 1 x=   89 reach=0.96074  | acyclic: m=0 s= 1 x=   89 reach=0.95829  | hub: m=0 s= 1 x=   89 reach=0.96074 
+IMGS2_512 {'corr': 0.8} shipped: m=0 s= 1 x=   89 reach=0.94390  | acyclic: m=0 s= 1 x=   89 reach=0.94116  | hub: m=0 s= 1 x=   89 reach=0.94390 
+IMGS2_512 {'ov': 0.3} shipped: m=0 s= 3 x=  180 reach=0.98314  | acyclic: m=0 s= 3 x=  180 reach=0.97838  | hub: m=0 s= 3 x=  180 reach=0.98314 
+IMGS2_512 {'ov': 0.4} shipped: m=0 s= 3 x=  180 reach=0.98314  | acyclic: m=0 s= 3 x=  180 reach=0.97838  | hub: m=0 s= 3 x=  180 reach=0.98314 
+IMGS2_512 {'ov': 0.5} shipped: m=0 s= 3 x=  178 reach=0.98314  | acyclic: m=0 s= 3 x=  178 reach=0.97838  | hub: m=0 s= 3 x=  178 reach=0.98314 
+IMGS2_512 {'ov': 0.6} shipped: m=0 s= 3 x=  178 reach=0.98286  | acyclic: m=0 s= 3 x=  178 reach=0.98049  | hub: m=0 s= 3 x=  178 reach=0.98286 
+IMGS2_512 {'ov': 0.7} shipped: m=0 s= 3 x=  177 reach=0.98252  | acyclic: m=0 s= 3 x=  177 reach=0.98030  | hub: m=0 s= 3 x=  177 reach=0.98252 

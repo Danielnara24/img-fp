@@ -1,0 +1,8 @@
+families: 266   DELETE: 2366
+original kept:   91 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q97: 168
+  original deleted, kept instead: noise,reencode_q97: 4
+  original deleted, kept instead: crop90,reencode_q97: 2
+  original deleted, kept instead: reencode_q97,stripped: 1

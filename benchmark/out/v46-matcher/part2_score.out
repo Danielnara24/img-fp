@@ -1,0 +1,155 @@
+== all
+                                   p-off                              p-on                             p-on2
+n0       6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R   6.0 j  6.0 o      - P      - R
+n1       7.0 j  7.0 o  91.97 P  96.58 R   7.0 j  7.0 o  91.97 P  96.58 R   7.0 j  7.0 o  91.97 P  96.58 R
+n2       8.0 j  7.0 o  93.56 P  95.15 R   8.0 j  7.0 o  93.56 P  95.15 R   8.0 j  7.0 o  93.56 P  95.15 R
+f        5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R   5.0 j  5.0 o      - P      - R
+full    53.0 j  0.0 o  99.72 P  95.83 R  53.0 j  0.0 o  99.73 P  95.82 R  53.0 j  0.0 o  99.73 P  95.79 R
+total     26.0 joined                        26.0 joined                        26.0 joined                    
+== i5
+                                   p-off                              p-on                             p-on2
+n0       9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+n1      10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R
+n2      12.3 j 10.3 o  65.66 P  96.87 R  12.3 j 10.3 o  65.66 P  96.87 R  12.3 j 10.3 o  65.66 P  96.87 R
+f        9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R
+full    15.0 j  2.0 o  90.66 P  96.30 R  14.0 j  1.0 o  94.62 P  95.64 R  14.0 j  1.0 o  95.74 P  95.64 R
+total     40.3 joined                        40.3 joined                        40.3 joined                    
+== p-off default
+   F1 0.9773  precision 99.72%  recall 95.83%
+   FP: trap 2,666  cross-family 413  seed-pairs 53  merges 35
+   perfect transforms: 58 of 87
+   F1 0.9340  precision 90.66%  recall 96.30%
+   FP: trap 450  cross-family 21,939  seed-pairs 15  merges 15
+     cross bird1.jpg <-> bird2.jpg: 6,827 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,642 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,873 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,665 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,357 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 248 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 113 pairs
+actions {'KEEP': 7369, 'DELETE': 16656, 'REVIEW': 3150}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 55 {'unedited, no unedited holder': 55} 
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', '
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 3 / 304 ['IMGS/b&
+== p-on default
+   F1 0.9774  precision 99.73%  recall 95.82%
+   FP: trap 2,524  cross-family 479  seed-pairs 53  merges 35
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 139 pairs
+   perfect transforms: 58 of 87
+   F1 0.9513  precision 94.62%  recall 95.64%
+   FP: trap 436  cross-family 11,830  seed-pairs 14  merges 14
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,644 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,871 pairs
+     cross bird1.jpg <-> bird2.jpg: 1,238 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 473 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 327 pairs
+actions {'KEEP': 7365, 'DELETE': 16657, 'REVIEW': 3153}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 55 {'unedited, no unedited holder': 55} 
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', '
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 3 / 304 ['IMGS/b&
+== p-on2 default
+   F1 0.9772  precision 99.73%  recall 95.79%
+   FP: trap 2,525  cross-family 479  seed-pairs 53  merges 35
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 139 pairs
+   perfect transforms: 55 of 87
+   F1 0.9569  precision 95.74%  recall 95.64%
+   FP: trap 409  cross-family 9,189  seed-pairs 14  merges 14
+     cross bird1.jpg <-> bird2.jpg: 6,827 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 780 pairs
+     cross Fountain3.jpg <-> Fountain5.jpg: 549 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 429 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 327 pairs
+actions {'KEEP': 7367, 'DELETE': 16655, 'REVIEW': 3153}
+content lost by deletion: {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 55 {'unedited, no unedited holder': 55} 
+families whose original or exact/lossless copy survives: 298 / 304
+families left with a faithful full copy: 304 / 304 [(('barrel_distort', 'blur_fill', 'crop_micro', 'flip_h', '
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 3 / 304 ['IMGS/b&
+off all-k25  F1 0.9767 precision 99.73% recall 95.69%  FP: trap 2,632 cross-family 332 seed-pairs 24 merges 20  | 
+on all-k25  F1 0.9767 precision 99.74% recall 95.68%  FP: trap 2,499 cross-family 404 seed-pairs 24 merges 20  | 
+on2 all-k25  F1 0.9765 precision 99.74% recall 95.66%  FP: trap 2,498 cross-family 404 seed-pairs 24 merges 20  | 
+off all-k50  F1 0.9769 precision 99.72% recall 95.74%  FP: trap 2,681 cross-family 381 seed-pairs 36 merges 27  | 
+on all-k50  F1 0.9769 precision 99.73% recall 95.73%  FP: trap 2,546 cross-family 448 seed-pairs 36 merges 27  | 
+on2 all-k50  F1 0.9768 precision 99.73% recall 95.71%  FP: trap 2,546 cross-family 448 seed-pairs 36 merges 27  | 
+off all-minalignedpoints3  F1 0.9787 precision 99.72% recall 96.10%  FP: trap 2,700 cross-family 416 seed-pairs 54 merges 36  | 
+on all-minalignedpoints3  F1 0.9786 precision 99.72% recall 96.07%  FP: trap 2,556 cross-family 482 seed-pairs 54 merges 36  | 
+on2 all-minalignedpoints3  F1 0.9786 precision 99.72% recall 96.06%  FP: trap 2,558 cross-family 482 seed-pairs 54 merges 36  | 
+off all-minalignedpoints5  F1 0.9786 precision 99.72% recall 96.08%  FP: trap 2,697 cross-family 417 seed-pairs 54 merges 36  | 
+on all-minalignedpoints5  F1 0.9785 precision 99.72% recall 96.05%  FP: trap 2,553 cross-family 483 seed-pairs 54 merges 36  | 
+on2 all-minalignedpoints5  F1 0.9785 precision 99.72% recall 96.04%  FP: trap 2,555 cross-family 483 seed-pairs 54 merges 36  | 
+off all-minalignedpoints8  F1 0.9780 precision 99.72% recall 95.96%  FP: trap 2,684 cross-family 414 seed-pairs 53 merges 35  | 
+on all-minalignedpoints8  F1 0.9779 precision 99.73% recall 95.93%  FP: trap 2,541 cross-family 480 seed-pairs 53 merges 35  | 
+on2 all-minalignedpoints8  F1 0.9779 precision 99.73% recall 95.93%  FP: trap 2,543 cross-family 480 seed-pairs 53 merges 35  | 
+off all-minframeoverlap0.3  F1 0.9576 precision 95.03% recall 96.50%  FP: trap 50,827 cross-family 6,880 seed-pairs 369 merges 78  | IMGS3/docks1 <-> IMGS3/docks2: 6,109;
+on all-minframeoverlap0.3  F1 0.9574 precision 95.03% recall 96.46%  FP: trap 50,819 cross-family 6,881 seed-pairs 370 merges 79  | IMGS3/docks1 <-> IMGS3/docks2: 6,109;
+on2 all-minframeoverlap0.3  F1 0.9575 precision 95.03% recall 96.48%  FP: trap 50,823 cross-family 6,881 seed-pairs 370 merges 79  | IMGS3/docks1 <-> IMGS3/docks2: 6,109;
+off all-minframeoverlap0.4  F1 0.9578 precision 95.09% recall 96.47%  FP: trap 50,091 cross-family 6,851 seed-pairs 336 merges 77  | IMGS3/docks1 <-> IMGS3/docks2: 6,115;
+on all-minframeoverlap0.4  F1 0.9576 precision 95.10% recall 96.44%  FP: trap 50,009 cross-family 6,852 seed-pairs 337 merges 78  | IMGS3/docks1 <-> IMGS3/docks2: 6,115;
+on2 all-minframeoverlap0.4  F1 0.9578 precision 95.09% recall 96.47%  FP: trap 50,091 cross-family 6,851 seed-pairs 336 merges 77  | IMGS3/docks1 <-> IMGS3/docks2: 6,115;
+off all-minframeoverlap0.5  F1 0.9583 precision 95.22% recall 96.46%  FP: trap 48,731 cross-family 6,685 seed-pairs 278 merges 75  | IMGS3/docks1 <-> IMGS3/docks2: 5,972;
+on all-minframeoverlap0.5  F1 0.9584 precision 95.23% recall 96.45%  FP: trap 48,586 cross-family 6,687 seed-pairs 279 merges 76  | IMGS3/docks1 <-> IMGS3/docks2: 5,972;
+on2 all-minframeoverlap0.5  F1 0.9583 precision 95.22% recall 96.46%  FP: trap 48,728 cross-family 6,687 seed-pairs 279 merges 76  | IMGS3/docks1 <-> IMGS3/docks2: 5,972;
+off all-minframeoverlap0.6  F1 0.9719 precision 97.99% recall 96.39%  FP: trap 22,115 cross-family 482 seed-pairs 237 merges 72  | 
+on all-minframeoverlap0.6  F1 0.9719 precision 98.01% recall 96.38%  FP: trap 21,740 cross-family 636 seed-pairs 238 merges 73  | 
+on2 all-minframeoverlap0.6  F1 0.9714 precision 97.99% recall 96.30%  FP: trap 21,990 cross-family 567 seed-pairs 238 merges 73  | 
+off all-minframeoverlap0.75  F1 0.9763 precision 99.15% recall 96.15%  FP: trap 8,979 cross-family 430 seed-pairs 94 merges 49  | 
+on all-minframeoverlap0.75  F1 0.9763 precision 99.16% recall 96.14%  FP: trap 8,875 cross-family 425 seed-pairs 94 merges 49  | 
+on2 all-minframeoverlap0.75  F1 0.9761 precision 99.16% recall 96.11%  FP: trap 8,881 cross-family 425 seed-pairs 94 merges 49  | 
+off all-minpixelcorrelation0.2  F1 0.9842 precision 98.85% recall 97.99%  FP: trap 8,977 cross-family 4,002 seed-pairs 77 merges 61  | IMGS3/red_rocks_sign1 <-> IMGS3/red_rocks_sign2: 346;IMGS3/Henares1 <-> IMGS3/Henares2: 340;
+on all-minpixelcorrelation0.2  F1 0.9841 precision 98.88% recall 97.95%  FP: trap 8,541 cross-family 4,123 seed-pairs 82 merges 65  | IMGS3/red_rocks_sign1 <-> IMGS3/red_rocks_sign2: 346;IMGS3/Henares1 <-> IMGS3/Henares2: 340;
+on2 all-minpixelcorrelation0.2  F1 0.9840 precision 98.88% recall 97.93%  FP: trap 8,623 cross-family 4,087 seed-pairs 78 merges 62  | IMGS3/red_rocks_sign1 <-> IMGS3/red_rocks_sign2: 346;IMGS3/Henares1 <-> IMGS3/Henares2: 340;
+off all-minpixelcorrelation0.4  F1 0.9876 precision 99.36% recall 98.17%  FP: trap 6,256 cross-family 979 seed-pairs 43 merges 33  | 
+on all-minpixelcorrelation0.4  F1 0.9845 precision 98.76% recall 98.15%  FP: trap 5,805 cross-family 8,331 seed-pairs 46 merges 36  | IMGS3/Henares1 <-> IMGS3/Henares2: 7,055;
+on2 all-minpixelcorrelation0.4  F1 0.9875 precision 99.38% recall 98.13%  FP: trap 5,800 cross-family 1,210 seed-pairs 44 merges 34  | 
+off all-minpixelcorrelation0.6  F1 0.9852 precision 99.61% recall 97.45%  FP: trap 3,895 cross-family 463 seed-pairs 68 merges 40  | 
+on all-minpixelcorrelation0.6  F1 0.9852 precision 99.63% recall 97.43%  FP: trap 3,599 cross-family 543 seed-pairs 69 merges 41  | 
+on2 all-minpixelcorrelation0.6  F1 0.9851 precision 99.63% recall 97.41%  FP: trap 3,597 cross-family 541 seed-pairs 68 merges 40  | 
+off all-minpixelcorrelation0.8  F1 0.9563 precision 99.81% recall 91.79%  FP: trap 1,724 cross-family 296 seed-pairs 13 merges 12  | 
+on all-minpixelcorrelation0.8  F1 0.9563 precision 99.81% recall 91.79%  FP: trap 1,715 cross-family 296 seed-pairs 13 merges 12  | 
+on2 all-minpixelcorrelation0.8  F1 0.9561 precision 99.81% recall 91.75%  FP: trap 1,715 cross-family 296 seed-pairs 13 merges 12  | 
+off i5-k25  F1 0.9343 precision 90.86% recall 96.15%  FP: trap 452 cross-family 21,378 seed-pairs 14 merges 14  | bird1 <-> bird2: 6,866;Fountain3 <-> Fountain5: 6,598;Floriana1 <-> Floriana2: 2,774;Floriana3 <-> Floriana4: 2,550;Tree1 <-> Tree2: 2,027;
+on i5-k25  F1 0.9513 precision 94.68% recall 95.59%  FP: trap 436 cross-family 11,695 seed-pairs 13 merges 13  | Fountain3 <-> Fountain5: 6,597;Floriana1 <-> Floriana2: 2,776;bird1 <-> bird2: 1,265;Floriana3 <-> Floriana4: 464;Mural1 <-> Mural2: 320;
+on2 i5-k25  F1 0.9675 precision 98.36% recall 95.20%  FP: trap 411 cross-family 3,179 seed-pairs 13 merges 13  | bird1 <-> bird2: 838;Floriana3 <-> Floriana4: 776;Fountain3 <-> Fountain5: 544;Floriana1 <-> Floriana2: 428;Mural1 <-> Mural2: 320;
+off i5-k50  F1 0.9344 precision 90.75% recall 96.30%  FP: trap 452 cross-family 21,695 seed-pairs 14 merges 14  | bird1 <-> bird2: 6,821;Fountain3 <-> Fountain5: 6,619;Floriana1 <-> Floriana2: 2,803;Floriana3 <-> Floriana4: 2,665;Tree1 <-> Tree2: 2,224;
+on i5-k50  F1 0.9516 precision 94.67% recall 95.65%  FP: trap 437 cross-family 11,713 seed-pairs 13 merges 13  | Fountain3 <-> Fountain5: 6,618;Floriana1 <-> Floriana2: 2,802;bird1 <-> bird2: 1,227;Floriana3 <-> Floriana4: 470;Mural1 <-> Mural2: 320;
+on2 i5-k50  F1 0.9679 precision 98.38% recall 95.26%  FP: trap 411 cross-family 3,137 seed-pairs 13 merges 13  | bird1 <-> bird2: 799;Floriana3 <-> Floriana4: 776;Fountain3 <-> Fountain5: 547;Floriana1 <-> Floriana2: 420;Mural1 <-> Mural2: 319;
+off i5-minalignedpoints3  F1 0.9344 precision 90.66% recall 96.39%  FP: trap 455 cross-family 21,948 seed-pairs 14 merges 14  | bird1 <-> bird2: 6,830;Fountain3 <-> Fountain5: 6,642;Floriana1 <-> Floriana2: 2,873;Floriana3 <-> Floriana4: 2,666;Tree1 <-> Tree2: 2,361;
+on i5-minalignedpoints3  F1 0.9517 precision 94.62% recall 95.73%  FP: trap 441 cross-family 11,833 seed-pairs 13 merges 13  | Fountain3 <-> Fountain5: 6,644;Floriana1 <-> Floriana2: 2,871;bird1 <-> bird2: 1,242;Floriana3 <-> Floriana4: 472;Mural1 <-> Mural2: 329;
+on2 i5-minalignedpoints3  F1 0.9574 precision 95.74% recall 95.73%  FP: trap 414 cross-family 9,190 seed-pairs 13 merges 13  | bird1 <-> bird2: 6,830;Floriana3 <-> Floriana4: 779;Fountain3 <-> Fountain5: 549;Floriana1 <-> Floriana2: 429;Mural1 <-> Mural2: 328;
+off i5-minalignedpoints5  F1 0.9344 precision 90.66% recall 96.39%  FP: trap 455 cross-family 21,947 seed-pairs 14 merges 14  | bird1 <-> bird2: 6,830;Fountain3 <-> Fountain5: 6,642;Floriana1 <-> Floriana2: 2,873;Floriana3 <-> Floriana4: 2,666;Tree1 <-> Tree2: 2,360;
+on i5-minalignedpoints5  F1 0.9517 precision 94.61% recall 95.73%  FP: trap 441 cross-family 11,864 seed-pairs 13 merges 13  | Fountain3 <-> Fountain5: 6,644;Floriana1 <-> Floriana2: 2,871;bird1 <-> bird2: 1,273;Floriana3 <-> Floriana4: 472;Mural1 <-> Mural2: 329;
+on2 i5-minalignedpoints5  F1 0.9573 precision 95.74% recall 95.73%  FP: trap 414 cross-family 9,190 seed-pairs 13 merges 13  | bird1 <-> bird2: 6,830;Floriana3 <-> Floriana4: 779;Fountain3 <-> Fountain5: 549;Floriana1 <-> Floriana2: 429;Mural1 <-> Mural2: 328;
+off i5-minalignedpoints8  F1 0.9343 precision 90.66% recall 96.36%  FP: trap 452 cross-family 21,945 seed-pairs 14 merges 14  | bird1 <-> bird2: 6,830;Fountain3 <-> Fountain5: 6,642;Floriana1 <-> Floriana2: 2,873;Floriana3 <-> Floriana4: 2,666;Tree1 <-> Tree2: 2,359;
+on i5-minalignedpoints8  F1 0.9516 precision 94.63% recall 95.70%  FP: trap 438 cross-family 11,829 seed-pairs 13 merges 13  | Fountain3 <-> Fountain5: 6,644;Floriana1 <-> Floriana2: 2,871;bird1 <-> bird2: 1,238;Floriana3 <-> Floriana4: 473;Mural1 <-> Mural2: 329;
+on2 i5-minalignedpoints8  F1 0.9572 precision 95.74% recall 95.70%  FP: trap 411 cross-family 9,190 seed-pairs 13 merges 13  | bird1 <-> bird2: 6,830;Floriana3 <-> Floriana4: 780;Fountain3 <-> Fountain5: 549;Floriana1 <-> Floriana2: 429;Mural1 <-> Mural2: 328;
+off i5-minframeoverlap0.3  F1 0.8645 precision 77.95% recall 97.03%  FP: trap 10,052 cross-family 51,889 seed-pairs 16 merges 15  | Floriana3 <-> Floriana4: 7,891;Floriana1 <-> Floriana2: 7,682;Tree1 <-> Tree2: 7,526;bird1 <-> bird2: 7,284;Puerto3 <-> Puerto4: 7,284;Fountain3 <-> Fountain5: 6,787;Macizo5 <-> Macizo6: 6,549;Parish Church1 <-> Parish Church2: 398;
+on i5-minframeoverlap0.3  F1 0.8645 precision 77.95% recall 97.03%  FP: trap 10,044 cross-family 51,898 seed-pairs 16 merges 15  | Floriana3 <-> Floriana4: 7,891;Floriana1 <-> Floriana2: 7,682;Tree1 <-> Tree2: 7,526;Puerto3 <-> Puerto4: 7,284;bird1 <-> bird2: 7,284;Fountain3 <-> Fountain5: 6,787;Macizo5 <-> Macizo6: 6,549;Parish Church1 <-> Parish Church2: 398;
+on2 i5-minframeoverlap0.3  F1 0.8645 precision 77.95% recall 97.03%  FP: trap 10,052 cross-family 51,889 seed-pairs 16 merges 15  | Floriana3 <-> Floriana4: 7,891;Floriana1 <-> Floriana2: 7,682;Tree1 <-> Tree2: 7,526;bird1 <-> bird2: 7,284;Puerto3 <-> Puerto4: 7,284;Fountain3 <-> Fountain5: 6,787;Macizo5 <-> Macizo6: 6,549;Parish Church1 <-> Parish Church2: 398;
+off i5-minframeoverlap0.4  F1 0.8653 precision 78.05% recall 97.07%  FP: trap 10,158 cross-family 51,452 seed-pairs 15 merges 15  | Floriana3 <-> Floriana4: 7,815;Floriana1 <-> Floriana2: 7,593;Tree1 <-> Tree2: 7,367;bird1 <-> bird2: 7,280;Puerto3 <-> Puerto4: 7,192;Fountain3 <-> Fountain5: 6,789;Macizo5 <-> Macizo6: 6,534;Parish Church1 <-> Parish Church2: 390;
+on i5-minframeoverlap0.4  F1 0.8773 precision 80.10% recall 96.97%  FP: trap 10,154 cross-family 44,231 seed-pairs 15 merges 15  | Floriana3 <-> Floriana4: 7,815;Floriana1 <-> Floriana2: 7,593;bird1 <-> bird2: 7,241;Puerto3 <-> Puerto4: 7,192;Fountain3 <-> Fountain5: 6,789;Macizo5 <-> Macizo6: 6,534;Parish Church1 <-> Parish Church2: 390;
+on2 i5-minframeoverlap0.4  F1 0.8773 precision 80.10% recall 96.97%  FP: trap 10,150 cross-family 44,230 seed-pairs 15 merges 15  | Floriana3 <-> Floriana4: 7,815;Floriana1 <-> Floriana2: 7,593;bird1 <-> bird2: 7,241;Puerto3 <-> Puerto4: 7,192;Fountain3 <-> Fountain5: 6,789;Macizo5 <-> Macizo6: 6,534;Parish Church1 <-> Parish Church2: 390;
+off i5-minframeoverlap0.5  F1 0.8669 precision 78.31% recall 97.07%  FP: trap 9,756 cross-family 50,917 seed-pairs 13 merges 13  | Floriana3 <-> Floriana4: 7,667;Floriana1 <-> Floriana2: 7,607;Tree1 <-> Tree2: 7,341;bird1 <-> bird2: 7,253;Puerto3 <-> Puerto4: 7,164;Fountain3 <-> Fountain5: 6,729;Macizo5 <-> Macizo6: 6,335;Parish Church1 <-> Parish Church2: 388;
+on i5-minframeoverlap0.5  F1 0.8791 precision 80.38% recall 97.00%  FP: trap 9,679 cross-family 43,760 seed-pairs 13 merges 13  | Floriana3 <-> Floriana4: 7,667;Floriana1 <-> Floriana2: 7,607;bird1 <-> bird2: 7,253;Puerto3 <-> Puerto4: 7,164;Fountain3 <-> Fountain5: 6,729;Macizo5 <-> Macizo6: 6,335;Parish Church1 <-> Parish Church2: 388;
+on2 i5-minframeoverlap0.5  F1 0.8790 precision 80.36% recall 97.00%  FP: trap 9,755 cross-family 43,760 seed-pairs 13 merges 13  | Floriana3 <-> Floriana4: 7,667;Floriana1 <-> Floriana2: 7,607;bird1 <-> bird2: 7,253;Puerto3 <-> Puerto4: 7,164;Fountain3 <-> Fountain5: 6,729;Macizo5 <-> Macizo6: 6,335;Parish Church1 <-> Parish Church2: 388;
+off i5-minframeoverlap0.6  F1 0.8775 precision 80.16% recall 96.95%  FP: trap 4,006 cross-family 50,170 seed-pairs 14 merges 14  | Floriana3 <-> Floriana4: 7,605;Floriana1 <-> Floriana2: 7,573;Tree1 <-> Tree2: 7,194;Puerto3 <-> Puerto4: 7,005;bird1 <-> bird2: 6,900;Fountain3 <-> Fountain5: 6,721;Macizo5 <-> Macizo6: 6,343;Parish Church1 <-> Parish Church2: 385;
+on i5-minframeoverlap0.6  F1 0.9004 precision 84.18% recall 96.77%  FP: trap 3,866 cross-family 37,170 seed-pairs 14 merges 14  | Floriana3 <-> Floriana4: 7,605;Floriana1 <-> Floriana2: 7,565;Puerto3 <-> Puerto4: 7,004;bird1 <-> bird2: 6,900;Fountain3 <-> Fountain5: 6,720;Parish Church1 <-> Parish Church2: 462;Mural1 <-> Mural2: 335;
+on2 i5-minframeoverlap0.6  F1 0.8999 precision 84.15% recall 96.69%  FP: trap 3,946 cross-family 37,163 seed-pairs 14 merges 14  | Floriana3 <-> Floriana4: 7,605;Floriana1 <-> Floriana2: 7,573;Puerto3 <-> Puerto4: 7,004;bird1 <-> bird2: 6,900;Fountain3 <-> Fountain5: 6,721;Parish Church1 <-> Parish Church2: 462;Mural1 <-> Mural2: 325;
+off i5-minframeoverlap0.75  F1 0.8829 precision 81.21% recall 96.72%  FP: trap 1,592 cross-family 48,926 seed-pairs 15 merges 15  | Floriana3 <-> Floriana4: 7,400;Floriana1 <-> Floriana2: 7,375;Tree1 <-> Tree2: 6,890;bird1 <-> bird2: 6,857;Puerto3 <-> Puerto4: 6,851;Fountain3 <-> Fountain5: 6,699;Macizo5 <-> Macizo6: 6,148;
+on i5-minframeoverlap0.75  F1 0.9133 precision 87.08% recall 96.02%  FP: trap 1,539 cross-family 30,627 seed-pairs 15 merges 15  | Floriana3 <-> Floriana4: 7,400;Floriana1 <-> Floriana2: 7,374;Puerto3 <-> Puerto4: 6,850;Fountain3 <-> Fountain5: 6,696;bird1 <-> bird2: 1,222;Mural1 <-> Mural2: 326;Parish Church1 <-> Parish Church2: 300;
+on2 i5-minframeoverlap0.75  F1 0.9054 precision 85.22% recall 96.57%  FP: trap 1,541 cross-family 36,266 seed-pairs 15 merges 15  | Floriana3 <-> Floriana4: 7,400;Floriana1 <-> Floriana2: 7,374;bird1 <-> bird2: 6,857;Puerto3 <-> Puerto4: 6,850;Fountain3 <-> Fountain5: 6,699;Mural1 <-> Mural2: 326;Parish Church1 <-> Parish Church2: 300;
+off i5-minpixelcorrelation0.2  F1 0.9353 precision 89.15% recall 98.36%  FP: trap 1,689 cross-family 25,330 seed-pairs 16 merges 15  | bird1 <-> bird2: 7,677;Fountain3 <-> Fountain5: 7,632;Floriana1 <-> Floriana2: 3,062;Floriana3 <-> Floriana4: 2,979;Tree1 <-> Tree2: 2,956;
+on i5-minpixelcorrelation0.2  F1 0.9545 precision 93.43% recall 97.55%  FP: trap 1,585 cross-family 13,892 seed-pairs 18 merges 17  | Fountain3 <-> Fountain5: 7,632;Floriana1 <-> Floriana2: 3,132;bird1 <-> bird2: 1,554;Floriana3 <-> Floriana4: 513;Mural1 <-> Mural2: 354;
+on2 i5-minpixelcorrelation0.2  F1 0.9566 precision 93.63% recall 97.77%  FP: trap 1,573 cross-family 13,436 seed-pairs 16 merges 15  | bird1 <-> bird2: 7,677;Floriana1 <-> Floriana2: 3,132;Floriana3 <-> Floriana4: 851;Fountain3 <-> Fountain5: 742;Mural1 <-> Mural2: 354;
+off i5-minpixelcorrelation0.4  F1 0.9368 precision 89.44% recall 98.34%  FP: trap 1,397 cross-family 24,816 seed-pairs 17 merges 16  | bird1 <-> bird2: 7,617;Fountain3 <-> Fountain5: 7,479;Floriana1 <-> Floriana2: 3,064;Floriana3 <-> Floriana4: 3,011;Tree1 <-> Tree2: 2,815;
+on i5-minpixelcorrelation0.4  F1 0.9560 precision 93.74% recall 97.54%  FP: trap 1,228 cross-family 13,468 seed-pairs 17 merges 16  | Fountain3 <-> Fountain5: 7,478;Floriana1 <-> Floriana2: 3,111;bird1 <-> bird2: 1,523;Floriana3 <-> Floriana4: 512;Mural1 <-> Mural2: 353;
+on2 i5-minpixelcorrelation0.4  F1 0.9579 precision 93.90% recall 97.75%  FP: trap 1,191 cross-family 13,144 seed-pairs 17 merges 16  | bird1 <-> bird2: 7,617;Floriana1 <-> Floriana2: 3,111;Floriana3 <-> Floriana4: 839;Fountain3 <-> Fountain5: 738;Mural1 <-> Mural2: 353;
+off i5-minpixelcorrelation0.6  F1 0.9391 precision 90.23% recall 97.91%  FP: trap 692 cross-family 23,246 seed-pairs 17 merges 16  | bird1 <-> bird2: 7,374;Fountain3 <-> Fountain5: 6,862;Floriana1 <-> Floriana2: 2,936;Floriana3 <-> Floriana4: 2,771;Tree1 <-> Tree2: 2,649;
+on i5-minpixelcorrelation0.6  F1 0.9577 precision 94.36% recall 97.22%  FP: trap 631 cross-family 12,476 seed-pairs 17 merges 16  | Fountain3 <-> Fountain5: 6,862;Floriana1 <-> Floriana2: 2,913;bird1 <-> bird2: 1,519;Floriana3 <-> Floriana4: 484;Mural1 <-> Mural2: 346;
+on2 i5-minpixelcorrelation0.6  F1 0.9626 precision 95.37% recall 97.17%  FP: trap 611 cross-family 10,032 seed-pairs 17 merges 16  | bird1 <-> bird2: 7,374;Floriana3 <-> Floriana4: 804;Fountain3 <-> Fountain5: 635;Floriana1 <-> Floriana2: 520;Mural1 <-> Mural2: 346;
+off i5-minpixelcorrelation0.8  F1 0.9157 precision 91.22% recall 91.91%  FP: trap 305 cross-family 19,661 seed-pairs 12 merges 12  | Fountain3 <-> Fountain5: 6,304;bird1 <-> bird2: 6,178;Floriana1 <-> Floriana2: 2,577;Floriana3 <-> Floriana4: 2,477;Tree1 <-> Tree2: 1,776;
+on i5-minpixelcorrelation0.8  F1 0.9317 precision 95.01% recall 91.41%  FP: trap 299 cross-family 10,532 seed-pairs 12 merges 12  | Fountain3 <-> Fountain5: 6,304;Floriana1 <-> Floriana2: 2,577;bird1 <-> bird2: 823;Floriana3 <-> Floriana4: 451;
+on2 i5-minpixelcorrelation0.8  F1 0.9355 precision 96.04% recall 91.19%  FP: trap 278 cross-family 8,205 seed-pairs 12 merges 12  | bird1 <-> bird2: 6,178;Floriana3 <-> Floriana4: 716;Fountain3 <-> Fountain5: 518;Floriana1 <-> Floriana2: 416;

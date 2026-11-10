@@ -1,0 +1,57 @@
+22:52:58 i5 ssim default
+22:53:17 i5 raw default
+22:53:38 i5 plane default
+22:55:45 all ssim default
+22:57:52 all raw default
+22:58:00 seeds
+22:58:10 prov
+22:59:55 found
+23:05:06 pairs ssim
+23:10:17 pairs zero
+23:10:38 i5 ssim points8
+23:10:59 i5 ssim points6
+23:11:20 i5 ssim points5
+23:11:43 i5 ssim points4
+23:12:04 i5 ssim points3
+23:12:25 i5 ssim overlap0.75
+23:12:47 i5 ssim overlap0.65
+23:13:08 i5 ssim overlap0.6
+23:13:30 i5 ssim overlap0.5
+23:13:51 i5 ssim overlap0.4
+23:14:12 i5 ssim overlap0.3
+23:14:33 i5 ssim overlap0.25
+23:14:54 i5 ssim corr0.9
+23:15:15 i5 ssim corr0.8
+23:15:35 i5 ssim corr0.6
+23:15:54 i5 ssim corr0.5
+23:16:14 i5 ssim corr0.4
+23:16:33 i5 ssim corr0.3
+23:16:52 i5 ssim corr0.2
+23:17:12 i5 ssim k100
+23:17:30 i5 ssim k50
+23:17:47 i5 ssim k25
+23:18:01 i5 ssim k10
+23:20:15 all ssim points8
+23:22:26 all ssim points6
+23:24:33 all ssim points5
+23:26:52 all ssim points4
+23:29:27 all ssim points3
+23:31:45 all ssim overlap0.75
+23:34:01 all ssim overlap0.65
+23:36:15 all ssim overlap0.6
+23:38:21 all ssim overlap0.5
+23:40:34 all ssim overlap0.4
+23:42:45 all ssim overlap0.3
+23:44:53 all ssim overlap0.25
+23:47:12 all ssim corr0.9
+23:49:29 all ssim corr0.8
+23:51:47 all ssim corr0.6
+23:54:41 all ssim corr0.5
+23:57:15 all ssim corr0.4
+23:59:47 all ssim corr0.3
+00:02:14 all ssim corr0.2
+00:05:01 all ssim k100
+00:07:14 all ssim k50
+00:09:33 all ssim k25
+00:11:40 all ssim k10
+00:11:40 done

@@ -1,0 +1,92 @@
+idle 76.4 C, ceiling 79.4 C
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/00_imgs_v020_512/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    58.2s wall, 408.8s cpu (702%), 712 MB pss / 714 MB rss, 76->92 C
+RESULT 00 imgs v020 512: wall 58.24 s, cpu 408.79 s, PSS 711.9 MB, 2800 MHz, pairs 222879, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-hub /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/01_imgs_new_512/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    65.1s wall, 454.5s cpu (698%), 806 MB pss / 809 MB rss, 77->82 C
+RESULT 01 imgs new 512: wall 65.08 s, cpu 454.5 s, PSS 806.2 MB, 2467 MHz, pairs 222879, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/02_imgs_v020_384/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    47.7s wall, 330.7s cpu (693%), 725 MB pss / 727 MB rss, 78->82 C
+RESULT 02 imgs v020 384: wall 47.75 s, cpu 330.69 s, PSS 724.8 MB, 2613 MHz, pairs 214395, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-hub /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/03_imgs_new_512/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    67.6s wall, 467.1s cpu (691%), 842 MB pss / 845 MB rss, 74->80 C
+RESULT 03 imgs new 512: wall 67.59 s, cpu 467.11 s, PSS 842.1 MB, 2400 MHz, pairs 222879, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/04_imgs_v020_384/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    49.6s wall, 338.8s cpu (683%), 682 MB pss / 685 MB rss, 72->82 C
+RESULT 04 imgs v020 384: wall 49.62 s, cpu 338.77 s, PSS 681.8 MB, 2614 MHz, pairs 214395, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/05_imgs_v020_512/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    68.9s wall, 484.6s cpu (703%), 725 MB pss / 728 MB rss, 78->83 C
+RESULT 05 imgs v020 512: wall 68.9 s, cpu 484.64 s, PSS 725.4 MB, 2326 MHz, pairs 222879, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/06_imgs_v020_384/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    49.9s wall, 344.7s cpu (691%), 641 MB pss / 644 MB rss, 78->86 C
+RESULT 06 imgs v020 384: wall 49.9 s, cpu 344.65 s, PSS 641.0 MB, 2469 MHz, pairs 214395, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/07_imgs_v020_512/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    70.6s wall, 496.3s cpu (703%), 832 MB pss / 834 MB rss, 76->84 C
+RESULT 07 imgs v020 512: wall 70.62 s, cpu 496.27 s, PSS 831.8 MB, 2239 MHz, pairs 222879, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-hub /home/daniel/Documents/IMGS -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/08_imgs_new_512/r.json --format json
+    evicted 5,641 files (2.14 GiB) from page cache; cooled 60s
+    74.8s wall, 516.1s cpu (690%), 762 MB pss / 765 MB rss, 80->84 C
+RESULT 08 imgs new 512: wall 74.77 s, cpu 516.13 s, PSS 762.0 MB, 2150 MHz, pairs 222879, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Downloads/archive -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/09_found_v020_512/r.json --format json
+    evicted 9,285 files (0.22 GiB) from page cache; cooled 60s
+    149.0s wall, 1058.9s cpu (711%), 1126 MB pss / 1128 MB rss, 75->80 C
+RESULT 09 found v020 512: wall 148.99 s, cpu 1058.88 s, PSS 1125.8 MB, 1834 MHz, pairs 2438, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-hub /home/daniel/Downloads/archive -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/10_found_new_512/r.json --format json
+    evicted 9,285 files (0.22 GiB) from page cache; cooled 60s
+    151.7s wall, 1081.5s cpu (713%), 1093 MB pss / 1096 MB rss, 75->80 C
+RESULT 10 found new 512: wall 151.73 s, cpu 1081.48 s, PSS 1092.6 MB, 1814 MHz, pairs 2438, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Downloads/archive -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/11_found_v020_384/r.json --format json
+    evicted 9,285 files (0.22 GiB) from page cache; cooled 60s
+    152.2s wall, 1086.0s cpu (714%), 1106 MB pss / 1109 MB rss, 78->80 C
+RESULT 11 found v020 384: wall 152.2 s, cpu 1086.01 s, PSS 1106.0 MB, 1808 MHz, pairs 2438, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-hub /home/daniel/Downloads/archive -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/12_found_new_512/r.json --format json
+    evicted 9,285 files (0.22 GiB) from page cache; cooled 60s
+    156.4s wall, 1105.9s cpu (707%), 1130 MB pss / 1133 MB rss, 79->80 C
+RESULT 12 found new 512: wall 156.39 s, cpu 1105.92 s, PSS 1130.3 MB, 1750 MHz, pairs 2438, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Downloads/archive -r -x * --no-cache --work-size 384 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/13_found_v020_384/r.json --format json
+    evicted 9,285 files (0.22 GiB) from page cache; cooled 60s
+    148.7s wall, 1065.1s cpu (716%), 1122 MB pss / 1124 MB rss, 79->80 C
+RESULT 13 found v020 384: wall 148.72 s, cpu 1065.12 s, PSS 1122.0 MB, 1846 MHz, pairs 2438, ok True
+
+=== r
+    /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/img-fp-v020 /home/daniel/Downloads/archive -r -x * --no-cache --work-size 512 -o /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/126677f4-6da7-40d2-939b-df724142083d/scratchpad/cost/14_found_v020_512/r.json --format json
+    evicted 9,285 files (0.22 GiB) from page cache; cooled 60s
+    148.9s wall, 1066.1s cpu (716%), 1126 MB pss / 1128 MB rss, 76->80 C
+RESULT 14 found v020 512: wall 148.9 s, cpu 1066.13 s, PSS 1125.6 MB, 1840 MHz, pairs 2438, ok True
+COST DONE

@@ -1,0 +1,19 @@
+== all-base-ov05.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.5, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9589  precision 95.47%  recall 96.31%
+   proposed 1,153,347  TP 1,101,139  FP 52,208  FN 42,155  groups 426
+   FP: trap 52,030  cross-family 178  seed-pairs 10  merges 10
+     cross IMGS3/Antoniego1.jpg <-> IMGS3/Antoniego2.jpg: 169 pairs
+     cross IMGS3/Alameda2.jpg <-> IMGS3/docks2.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS4/golf-club.JPG: 1 pairs
+     cross IMGS3/docks1.jpg <-> IMGS4/UnionCity.jpg: 1 pairs
+     cross IMGS3/ateneul1.jpg <-> IMGS3/mountain1.jpg: 1 pairs
+     cross IMGS/14.jpg <-> IMGS3/cross2.jpg: 1 pairs
+     cross IMGS/13.webp <-> IMGS3/cross1.jpg: 1 pairs
+     cross IMGS/noisy2.jpg <-> IMGS4/club.jpg: 1 pairs
+     cross IMGS/panoramic.avif <-> IMGS2/temple1.jpg: 1 pairs
+     cross IMGS3/docks2.jpg <-> IMGS4/aerial.jpg: 1 pairs
+   half[alt] F1 0.9568  P 95.48%  R 95.87%  (152 seeds)
+   half[hash] F1 0.9583  P 95.42%  R 96.24%  (160 seeds)
+   perfect transforms: 48 of 87
+

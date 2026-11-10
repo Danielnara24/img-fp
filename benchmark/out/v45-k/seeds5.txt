@@ -1,0 +1,60 @@
+/home/daniel/Documents/IMGS5/Cemetery1.jpg
+/home/daniel/Documents/IMGS5/Cemetery2.jpg
+/home/daniel/Documents/IMGS5/Cemetery3.jpg
+/home/daniel/Documents/IMGS5/Cemetery4.jpg
+/home/daniel/Documents/IMGS5/Classroom1.jpg
+/home/daniel/Documents/IMGS5/Classroom2.jpg
+/home/daniel/Documents/IMGS5/Floriana1.jpg
+/home/daniel/Documents/IMGS5/Floriana2.jpg
+/home/daniel/Documents/IMGS5/Floriana3.jpg
+/home/daniel/Documents/IMGS5/Floriana4.jpg
+/home/daniel/Documents/IMGS5/Fountain1.jpg
+/home/daniel/Documents/IMGS5/Fountain2.jpg
+/home/daniel/Documents/IMGS5/Fountain3.jpg
+/home/daniel/Documents/IMGS5/Fountain4.jpg
+/home/daniel/Documents/IMGS5/Fountain5.jpg
+/home/daniel/Documents/IMGS5/Fountain6.jpg
+/home/daniel/Documents/IMGS5/GanyutingStore1.jpg
+/home/daniel/Documents/IMGS5/GanyutingStore2.jpg
+/home/daniel/Documents/IMGS5/Kaper-11.jpg
+/home/daniel/Documents/IMGS5/Kaper-12.jpg
+/home/daniel/Documents/IMGS5/Kaper-13.jpg
+/home/daniel/Documents/IMGS5/Kaper-14.jpg
+/home/daniel/Documents/IMGS5/Lizard1.jpg
+/home/daniel/Documents/IMGS5/Lizard2.jpg
+/home/daniel/Documents/IMGS5/Los Gigantes1.jpg
+/home/daniel/Documents/IMGS5/Los Gigantes2.jpg
+/home/daniel/Documents/IMGS5/Macizo1.jpg
+/home/daniel/Documents/IMGS5/Macizo2.jpg
+/home/daniel/Documents/IMGS5/Macizo3.jpg
+/home/daniel/Documents/IMGS5/Macizo4.jpg
+/home/daniel/Documents/IMGS5/Macizo5.jpg
+/home/daniel/Documents/IMGS5/Macizo6.jpg
+/home/daniel/Documents/IMGS5/Macizo7.jpg
+/home/daniel/Documents/IMGS5/Macizo8.jpg
+/home/daniel/Documents/IMGS5/Mural1.jpg
+/home/daniel/Documents/IMGS5/Mural2.jpg
+/home/daniel/Documents/IMGS5/Parish Church1.jpg
+/home/daniel/Documents/IMGS5/Parish Church2.jpg
+/home/daniel/Documents/IMGS5/Puerto1.jpg
+/home/daniel/Documents/IMGS5/Puerto2.jpg
+/home/daniel/Documents/IMGS5/Puerto3.jpg
+/home/daniel/Documents/IMGS5/Puerto4.jpg
+/home/daniel/Documents/IMGS5/SYSU1.jpg
+/home/daniel/Documents/IMGS5/SYSU2.jpg
+/home/daniel/Documents/IMGS5/School1.jpg
+/home/daniel/Documents/IMGS5/School2.jpg
+/home/daniel/Documents/IMGS5/Seagull1.jpg
+/home/daniel/Documents/IMGS5/Seagull2.jpg
+/home/daniel/Documents/IMGS5/Shenzhen1.jpg
+/home/daniel/Documents/IMGS5/Shenzhen2.jpg
+/home/daniel/Documents/IMGS5/Skałki1.jpg
+/home/daniel/Documents/IMGS5/Skałki2.jpg
+/home/daniel/Documents/IMGS5/Tree1.jpg
+/home/daniel/Documents/IMGS5/Tree2.jpg
+/home/daniel/Documents/IMGS5/Tree3.jpg
+/home/daniel/Documents/IMGS5/Tree4.jpg
+/home/daniel/Documents/IMGS5/Wignacourt Tower1.jpg
+/home/daniel/Documents/IMGS5/Wignacourt Tower2.jpg
+/home/daniel/Documents/IMGS5/bird1.jpg
+/home/daniel/Documents/IMGS5/bird2.jpg

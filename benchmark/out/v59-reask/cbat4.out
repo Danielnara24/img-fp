@@ -1,0 +1,9 @@
+mir-repclean2 43.62 user 6.49 wall 930 more pairs from 520 unmatched images (0 deeper candidates)
+found-repclean2 454.35 user 66.79 wall 395 more pairs from 9181 unmatched images (6107 deeper candidates)
+all-repclean2 1080.62 user 202.14 wall 41488 more pairs from 5923 unmatched images (448 deeper candidates)
+all2-repclean2 1055.30 user 185.81 wall 41304 more pairs from 10005 unmatched images (527 deeper candidates)
+idle 73 C
+A1 start 65C end 93C user/sys/wall 699.88 27.99 149.62
+B2 start 72C end 84C user/sys/wall 938.84 19.65 162.15
+B3 start 71C end 84C user/sys/wall 946.21 19.35 170.23
+A4 start 71C end 87C user/sys/wall 704.36 19.60 131.64

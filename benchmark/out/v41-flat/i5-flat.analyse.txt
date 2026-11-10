@@ -1,0 +1,19 @@
+== i5-flat.json ==
+   config: {"candidates": 150, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content", "work_size": 512}
+   F1 0.9405  precision 93.15%  recall 94.96%
+   proposed 230,095  TP 214,340  FP 15,755  FN 11,375  groups 144
+   FP: trap 413  cross-family 15,342  seed-pairs 12  merges 12
+     cross Fountain3.jpg <-> Fountain5.jpg: 6,578 pairs
+     cross Floriana3.jpg <-> Floriana4.jpg: 2,605 pairs
+     cross Floriana1.jpg <-> Floriana2.jpg: 2,580 pairs
+     cross Tree1.jpg <-> Tree2.jpg: 2,145 pairs
+     cross bird1.jpg <-> bird2.jpg: 972 pairs
+     cross Mural1.jpg <-> Mural2.jpg: 232 pairs
+     cross Cemetery3.jpg <-> Cemetery4.jpg: 78 pairs
+     cross Macizo3.jpg <-> Macizo4.jpg: 74 pairs
+     cross Parish Church1.jpg <-> Parish Church2.jpg: 43 pairs
+     cross Cemetery1.jpg <-> Cemetery2.jpg: 17 pairs
+   half[alt] F1 0.9462  P 94.04%  R 95.20%  (30 seeds)
+   half[hash] F1 0.9655  P 97.58%  R 95.54%  (33 seeds)
+   perfect transforms: 65 of 87
+

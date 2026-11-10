@@ -1,0 +1,18 @@
+all-fill off exit=2 Command exited with non-zero status 2
+569.82 3505.33 68.57 2817392 temp0=65 temp1=78 mhz0=2533 mhz1=2119
+all-base1 base exit=2 Command exited with non-zero status 2
+182.42 922.97 25.19 2920852 temp0=66 temp1=86 mhz0=1399 mhz1=2231
+all-floor1 floor exit=2 Command exited with non-zero status 2
+194.21 995.38 25.83 2873208 temp0=68 temp1=84 mhz0=1681 mhz1=2080
+all-sample1 sample exit=2 Command exited with non-zero status 2
+169.82 936.57 26.00 2814864 temp0=68 temp1=80 mhz0=2282 mhz1=2783
+all-sample2 sample exit=2 Command exited with non-zero status 2
+181.17 925.93 26.10 2819048 temp0=68 temp1=79 mhz0=1807 mhz1=1399
+all-floor2 floor exit=2 Command exited with non-zero status 2
+173.38 990.22 25.66 2837184 temp0=67 temp1=81 mhz0=1542 mhz1=1724
+all-base2 base exit=2 Command exited with non-zero status 2
+177.06 917.66 25.58 2850980 temp0=68 temp1=81 mhz0=1399 mhz1=1810
+all2-fill off exit=0 466.49 2980.65 51.10 2703204 temp0=81 temp1=81 mhz0=1614 mhz1=1890
+all2-base base exit=0 144.95 789.92 19.90 2711988 temp0=67 temp1=80 mhz0=1394 mhz1=1392
+all2-floor floor exit=0 172.56 817.36 28.50 2731256 temp0=67 temp1=80 mhz0=1398 mhz1=1399
+all2-sample sample exit=0 174.83 786.84 26.19 2835832 temp0=68 temp1=79 mhz0=1398 mhz1=1399

@@ -1,0 +1,10 @@
+16:26:51 idle 66,625 C
+16:27:51 start costA1 at 78,375 C
+16:36:44 end costA1 exit 0: 3943.93 46.02 8:52.78 
+16:37:55 start costB1 at 78,5 C
+16:48:41 end costB1 exit 0: 4806.08 47.60 10:46.14 
+16:49:51 start costB2 at 78 C
+17:00:37 end costB2 exit 0: 4814.47 45.35 10:45.85 
+17:01:38 start costA2 at 75,375 C
+17:10:59 end costA2 exit 0: 4196.27 52.63 9:20.90 
+17:10:59 cost done

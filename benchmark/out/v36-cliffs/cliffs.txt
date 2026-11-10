@@ -1,0 +1,112 @@
+
+== ap
+val   512:imgs        512:imgs2       512:imgs3       512:imgs4       512:all         640:imgs        640:imgs2       640:imgs3       640:imgs4       640:all         
+3     0.9837 5        0.9889 1        0.9899 85       0.9901 1        0.9885 25       0.9839 8        0.9897 2        0.9907 7        0.9907 2        0.9890 18       
+5     0.9834 2        0.9878 1        0.9899 11       0.9896 1        0.9876 20       0.9829 5        0.9895 2        0.9905 7        0.9906 2        0.9883 16       
+6     0.9820 2        0.9873 1        0.9895 11       0.9895 1        0.9869 15       0.9823 3        0.9890 2        0.9899 6        0.9901 2        0.9876 15       
+7     0.9804 2        0.9865 1        0.9891 9        0.9891 1        0.9858 13       0.9811 3        0.9885 0        0.9897 2        0.9897 1        0.9870 12       
+8     0.9769 2        0.9863 0        0.9883 8        0.9881 1        0.9850 11       0.9799 2        0.9881 0        0.9896 2        0.9897 1        0.9863 12       
+9     0.9748 2        0.9856 0        0.9879 6        0.9872 1        0.9835 9        0.9778 2        0.9875 0        0.9888 2        0.9892 1        0.9857 11       
+10    0.9719 1        0.9846 0        0.9871 6        0.9860 1        0.9823 7        0.9764 2        0.9867 0        0.9885 2        0.9882 1        0.9846 8        
+12    0.9678 0        0.9831 0        0.9837 3        0.9840 0        0.9794 2        0.9715 0        0.9859 0        0.9878 2        0.9878 0        0.9826 4        
+
+== ov
+val   512:imgs        512:imgs2       512:imgs3       512:imgs4       512:all         640:imgs        640:imgs2       640:imgs3       640:imgs4       640:all         
+0.3   0.9557 3        0.9676 0        0.9691 176      0.9688 2        0.9623†7144     0.9600 65       0.9698 1        0.9625†6892     0.9711 27       0.9647†7065     
+0.4   0.9556 2        0.9681 0        0.9696 175      0.9693 2        0.9626†6903     0.9601 60       0.9703 1        0.9627†6961     0.9714 2        0.9652†6889     
+0.5   0.9558 2        0.9689 0        0.9703 178      0.9695 2        0.9632†6645     0.9606 3        0.9708 1        0.9635†6681     0.9719 1        0.9657†6674     
+0.6   0.9659 2        0.9794 0        0.9818 8        0.9808 2        0.9768 18       0.9707 5        0.9813 0        0.9829 7        0.9826 1        0.9785†1294     
+0.7   0.9704 1        0.9839 0        0.9863 7        0.9845 1        0.9812 16       0.9749 2        0.9858 0        0.9875 2        0.9863 1        0.9834 11       
+0.8   0.9724 1        0.9851 0        0.9873 6        0.9865 1        0.9827 13       0.9768 2        0.9871 0        0.9888 2        0.9885 1        0.9850 8        
+0.85  0.9719 1        0.9846 0        0.9871 6        0.9860 1        0.9823 7        0.9764 2        0.9867 0        0.9885 2        0.9882 1        0.9846 8        
+
+== corr
+val   512:imgs        512:imgs2       512:imgs3       512:imgs4       512:all         640:imgs        640:imgs2       640:imgs3       640:imgs4       640:all         
+0.2   0.9741 337      0.9862 165      0.9888 94       0.9873 0        0.9840 645      0.9772 558      0.9876 180      0.9890†358      0.9893 8        0.9860 789      
+0.4   0.9745 46       0.9871 0        0.9888 93       0.9879 0        0.9843 168      0.9786 35       0.9888 0        0.9893†356      0.9894 0        0.9864 337      
+0.5   0.9739 2        0.9868 0        0.9884 91       0.9876 0        0.9841 4        0.9780 1        0.9885 0        0.9899 5        0.9893 1        0.9863 5        
+0.55  0.9732 1        0.9859 0        0.9883 3        0.9872 0        0.9835 6        0.9775 1        0.9880 0        0.9896 2        0.9890 1        0.9858 5        
+0.6   0.9719 1        0.9846 0        0.9871 6        0.9860 1        0.9823 7        0.9764 2        0.9867 0        0.9885 2        0.9882 1        0.9846 8        
+0.65  0.9694 1        0.9810 0        0.9849 4        0.9836 1        0.9797 8        0.9739 1        0.9833 1        0.9865 3        0.9858 1        0.9821 10       
+0.7   0.9653 1        0.9758 0        0.9807 1        0.9795 0        0.9750 4        0.9703 2        0.9781 0        0.9817 1        0.9814 1        0.9776 7        
+0.8   0.9497 1        0.9564 0        0.9597 5        0.9606 0        0.9556 6        0.9543 1        0.9579 0        0.9611 0        0.9628 0        0.9584 9        
+
+== k
+val   512:imgs        512:imgs2       512:imgs3       512:imgs4       512:all         640:imgs        640:imgs2       640:imgs3       640:imgs4       640:all         
+10    0.7373 1        0.7319 19       0.7554 109      0.7366 1        0.7544 74       0.7356 2        0.7368 28       0.7380 76       0.7586 2        0.7553 83       
+25    0.9674 1        0.9814 1        0.9837 73       0.9834 2        0.9787 15       0.9728 2        0.9836 1        0.9854 143      0.9854 2        0.9813 119      
+50    0.9701 1        0.9827 1        0.9850 4        0.9843 2        0.9805 11       0.9747 2        0.9845 0        0.9865 93       0.9868 1        0.9827 77       
+100   0.9719 1        0.9846 0        0.9870 5        0.9860 1        0.9823 6        0.9764 2        0.9867 0        0.9884 1        0.9882 1        0.9845 7        
+150   0.9719 1        0.9846 0        0.9871 6        0.9860 1        0.9823 7        0.9764 2        0.9867 0        0.9885 2        0.9882 1        0.9846 8        
+300   0.9719 1        0.9846 0        0.9871 6        0.9860 1        0.9823 7        0.9764 2        0.9867 0        0.9885 2        0.9882 1        0.9846 8        
+
+== merges (>=300 between two seeds)
+all 512 ov0.3 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6954)]
+all 512 ov0.4 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6716)]
+all 512 ov0.5 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6460)]
+all 640 ov0.3 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6795)]
+all 640 ov0.4 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6621)]
+all 640 ov0.5 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 6403)]
+all 640 ov0.6 [('IMGS3/docks1.jpg|IMGS3/docks2.jpg', 1283)]
+imgs3 640 corr0.2 [('game2.jpg|game3.jpg', 352)]
+imgs3 640 corr0.4 [('game2.jpg|game3.jpg', 350)]
+imgs3 640 ov0.3 [('docks1.jpg|docks2.jpg', 6719)]
+imgs3 640 ov0.4 [('docks1.jpg|docks2.jpg', 6788)]
+imgs3 640 ov0.5 [('docks1.jpg|docks2.jpg', 6505)]
+
+== stray files (seed pair 50-299)
+all 512 corr0.2 [('IMGS2/png3.png|IMGS4/baseball5.JPG', 84), ('IMGS/small-image3.jpg|IMGS4/house3.png', 79), ('IMGS/panoramic.avif|IMGS2/temple1.jpg', 76), ('IMGS2/manhole3.jpg|IMGS3/ResidentBuildingGoldTri1.JPG', 72), ('IMGS/small-image.jpg|IMGS4/baseball5.JPG', 70), ('IMGS/earth.jpeg|IMGS3/ResidentBuildingGoldTri1.JPG', 70), ('IMGS3/docks1.jpg|IMGS4/house5.png', 65), ('IMGS2/bw5.jpeg|IMGS2/train1.jpg', 59), ('IMGS2/bw4.jpeg|IMGS2/manhole3.jpg', 52)]
+all 512 corr0.4 [('IMGS3/docks1.jpg|IMGS4/house5.png', 79), ('IMGS/earth.jpeg|IMGS4/baseball5.JPG', 65)]
+all 512 ov0.3 [('IMGS3/Antoniego1.jpg|IMGS3/Antoniego2.jpg', 176)]
+all 512 ov0.4 [('IMGS3/Antoniego1.jpg|IMGS3/Antoniego2.jpg', 175)]
+all 512 ov0.5 [('IMGS3/Antoniego1.jpg|IMGS3/Antoniego2.jpg', 173)]
+all 640 corr0.2 [('IMGS3/game2.jpg|IMGS3/game3.jpg', 89), ('IMGS/low-light.avif|IMGS3/cross1.jpg', 86), ('IMGS/product-white-bg.webp|IMGS3/dave2.jpg', 84), ('IMGS/product-white-bg.webp|IMGS2/backyard1.jpg', 78), ('IMGS2/bw5.jpeg|IMGS4/Cassidy_Bridge_construction_work_in_April_2026.jpg', 76), ('IMGS/small-image2.jpg|IMGS3/swans1.jpg', 72), ('IMGS/earth.jpeg|IMGS3/ResidentBuildingGoldTri1.JPG', 70), ('IMGS2/manhole3.jpg|IMGS3/ResidentBuildingGoldTri1.JPG', 66), ('IMGS/small-image3.jpg|IMGS2/bw4.jpeg', 64), ('IMGS/low-light.avif|IMGS2/boat_photo1.jpg', 57)]
+all 640 corr0.4 [('IMGS3/game2.jpg|IMGS3/game3.jpg', 89), ('IMGS/low-light.avif|IMGS3/cross1.jpg', 67), ('IMGS/small-image.jpg|IMGS3/ResidentBuildingGoldTri1.JPG', 58), ('IMGS/earth.jpeg|IMGS3/ResidentBuildingGoldTri1.JPG', 54)]
+all 640 k25 [('IMGS3/Acueducto1.jpg|IMGS3/Acueducto2.jpg', 72)]
+all 640 k50 [('IMGS3/Acueducto1.jpg|IMGS3/Acueducto2.jpg', 69)]
+all 640 ov0.3 [('IMGS3/Antoniego1.jpg|IMGS3/Antoniego2.jpg', 260)]
+all 640 ov0.4 [('IMGS3/Antoniego1.jpg|IMGS3/Antoniego2.jpg', 258)]
+all 640 ov0.5 [('IMGS3/Antoniego1.jpg|IMGS3/Antoniego2.jpg', 262)]
+imgs 512 corr0.2 [('low-light2.jpg|noisy2.jpg', 82), ('low-light.avif|small-image2.jpg', 78), ('UI.jpg|earth.jpeg', 75)]
+imgs 640 corr0.2 [('product-white-bg.webp|sunflowers.jpeg', 261), ('low-light.avif|noisy.jpg', 86), ('earth.jpeg|underwater.jpg', 75), ('11.webp|product-white-bg.webp', 60)]
+imgs 640 ov0.3 [('14.jpg|earth.jpeg', 62)]
+imgs 640 ov0.4 [('14.jpg|earth.jpeg', 57)]
+imgs2 512 corr0.2 [('bw4.jpeg|manhole3.jpg', 64), ('png1.png|png3.png', 52)]
+imgs2 640 corr0.2 [('bw5.jpeg|train1.jpg', 73), ('bw4.jpeg|manhole3.jpg', 55), ('bw4.jpeg|png3.png', 50)]
+imgs3 512 ap3 [('docks1.jpg|docks2.jpg', 74)]
+imgs3 512 corr0.2 [('game2.jpg|game3.jpg', 88)]
+imgs3 512 corr0.4 [('game2.jpg|game3.jpg', 88)]
+imgs3 512 corr0.5 [('game2.jpg|game3.jpg', 87)]
+imgs3 512 k10 [('Antoniego1.jpg|Antoniego2.jpg', 57)]
+imgs3 512 k25 [('Acueducto3.jpg|Acueducto4.jpg', 67)]
+imgs3 512 ov0.3 [('Antoniego1.jpg|Antoniego2.jpg', 172)]
+imgs3 512 ov0.4 [('Antoniego1.jpg|Antoniego2.jpg', 171)]
+imgs3 512 ov0.5 [('Antoniego1.jpg|Antoniego2.jpg', 174)]
+imgs3 640 k25 [('Acueducto1.jpg|Acueducto2.jpg', 91)]
+imgs3 640 k50 [('Acueducto1.jpg|Acueducto2.jpg', 92)]
+imgs3 640 ov0.3 [('Antoniego1.jpg|Antoniego2.jpg', 172)]
+imgs3 640 ov0.4 [('Antoniego1.jpg|Antoniego2.jpg', 172)]
+imgs3 640 ov0.5 [('Antoniego1.jpg|Antoniego2.jpg', 175)]
+
+== defaults
+imgs 512: F1 0.9719 P 0.9956 R 0.9492 trap 969 cross 1 perfect 48 pairs 225064 hash 849edeca2622
+imgs2 512: F1 0.9846 P 0.9955 R 0.9740 trap 1170 cross 0 perfect 72 pairs 264832 hash 90bbdf5a901e
+imgs3 512: F1 0.9871 P 0.9956 R 0.9787 trap 1642 cross 6 perfect 79 pairs 378729 hash c6de54b8c259
+imgs4 512: F1 0.9860 P 0.9956 R 0.9767 trap 1146 cross 1 perfect 78 pairs 261932 hash 303ee4155cf9
+all 512: F1 0.9823 P 0.9957 R 0.9693 trap 4814 cross 7 perfect 48 pairs 1128340 hash c6ad0f3e35a6
+imgs 640: F1 0.9764 P 0.9954 R 0.9580 trap 1023 cross 2 perfect 55 pairs 227185 hash b66cd76c06f4
+imgs2 640: F1 0.9867 P 0.9954 R 0.9781 trap 1199 cross 0 perfect 76 pairs 265968 hash b2a5c5ca70c9
+imgs3 640: F1 0.9885 P 0.9955 R 0.9816 trap 1701 cross 2 perfect 79 pairs 379913 hash 511e002602dd
+imgs4 640: F1 0.9882 P 0.9954 R 0.9811 trap 1187 cross 1 perfect 82 pairs 263138 hash a9c4d055d55e
+all 640: F1 0.9846 P 0.9954 R 0.9740 trap 5113 cross 8 perfect 51 pairs 1134086 hash dca5cf5ceaf8
+
+== margins, shipped value to the nearest merge (0.51.0; 0.44.0 base in out/v31-cost-cliff)
+          512                          640
+ap 10     none to 3 (was none)         none to 3 (was 3 steps, bust at 7)
+ov 0.85   0.35, docks at 0.5 (same)    0.25, docks at 0.6, 1,283 pairs (same)
+corr 0.6  none 0.2-0.8 (same)          0.2 below, IMGS3 game2|game3 at 0.4, 350 (same)
+k 150     none from 10 up (same)       none (same)
+nearest misses, no seed pair >= 300: IMGS 640 corr0.2 product-white-bg|sunflowers 261;
+IMGS-ALL 640 ov<=0.5 Antoniego1|2 258-262 (under the docks merge); 512 ap3 IMGS3 docks 74.
+Henares no longer merges at 512 ov0.3 (0.44.0 area rule build did).
+identity: cl_all_512_def = 1,128,340 pairs, F1 0.9823, 7 cross, 48 perfect (0.51.0's figures).

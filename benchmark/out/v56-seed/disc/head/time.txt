@@ -1,0 +1,288 @@
+Settings -> Detail: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.5, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: /home/daniel/Documents/DISC21/cache/cache.bin
+[   0.1s] scratch file in /home/daniel/Documents/DISC21/cache
+Scanning: ["/home/daniel/Documents/DISC21/queries/images/queries"]
+Against: ["/home/daniel/Documents/DISC21/refs0/images/references"]
+Searching extensions: ["apng", "avif", "avifs", "bmp", "dib", "exr", "ff", "gif", "hdr", "heic", "heics", "heif", "hif", "ico", "jfi", "jfif", "jif", "jpe", "jpeg", "jpg", "jpg_large", "jpg_orig", "jxl", "pam", "pbm", "pgm", "pjp", "pjpeg", "png", "png_large", "pnm", "ppm", "qoi", "tga", "tif", "tiff", "webp"]
+[   2.5s] 100000 files
+[   2.5s] against: 50000 scanned, 50000 in the library
+[  27.5s] exact duplicates: 5 groups
+[ 129.4s] cache: 99993 usable records
+[ 131.5s] 50000 files to analyse
+Found 100000 images; 49994 already cached, 6 identical copies, 50000 to analyse.
+[ 133.1s]   described 250
+[ 134.8s]   described 500
+[ 136.7s]   described 750
+[ 139.2s]   described 1000
+[ 141.1s]   described 1250
+[ 143.0s]   described 1500
+[ 145.0s]   described 1750
+[ 146.9s]   described 2000
+[ 148.9s]   described 2250
+[ 150.9s]   described 2500
+[ 153.3s]   described 2750
+[ 155.7s]   described 3000
+[ 158.5s]   described 3250
+[ 160.4s]   described 3500
+[ 162.4s]   described 3750
+[ 164.2s]   described 4000
+[ 166.0s]   described 4250
+[ 167.7s]   described 4500
+[ 169.4s]   described 4750
+[ 171.1s]   described 5000
+[ 173.5s]   described 5250
+[ 176.7s]   described 5500
+[ 180.1s]   described 5750
+[ 183.6s]   described 6000
+[ 185.8s]   described 6250
+[ 187.7s]   described 6500
+[ 189.4s]   described 6750
+[ 191.2s]   described 7000
+[ 192.9s]   described 7250
+[ 194.7s]   described 7500
+[ 196.3s]   described 7750
+[ 198.0s]   described 8000
+[ 199.9s]   described 8250
+[ 202.0s]   described 8500
+[ 204.0s]   described 8750
+[ 206.0s]   described 9000
+[ 207.9s]   described 9250
+[ 209.8s]   described 9500
+[ 211.7s]   described 9750
+[ 213.6s]   described 10000
+[ 215.7s]   described 10250
+[ 217.8s]   described 10500
+[ 220.5s]   described 10750
+[ 223.6s]   described 11000
+[ 227.0s]   described 11250
+[ 228.8s]   described 11500
+[ 230.7s]   described 11750
+[ 232.6s]   described 12000
+[ 234.5s]   described 12250
+[ 236.4s]   described 12500
+[ 238.3s]   described 12750
+[ 240.2s]   described 13000
+[ 242.7s]   described 13250
+[ 246.1s]   described 13500
+[ 248.8s]   described 13750
+[ 251.7s]   described 14000
+[ 255.2s]   described 14250
+[ 258.0s]   described 14500
+[ 261.1s]   described 14750
+[ 264.6s]   described 15000
+[ 266.5s]   described 15250
+[ 268.5s]   described 15500
+[ 270.4s]   described 15750
+[ 272.3s]   described 16000
+[ 274.2s]   described 16250
+[ 276.2s]   described 16500
+[ 278.1s]   described 16750
+[ 280.9s]   described 17000
+[ 283.4s]   described 17250
+[ 285.8s]   described 17500
+[ 288.6s]   described 17750
+[ 291.7s]   described 18000
+[ 293.5s]   described 18250
+[ 295.4s]   described 18500
+[ 297.3s]   described 18750
+[ 299.2s]   described 19000
+[ 301.2s]   described 19250
+[ 303.2s]   described 19500
+[ 305.4s]   described 19750
+[ 308.9s]   described 20000
+[ 312.9s]   described 20250
+[ 315.6s]   described 20500
+[ 318.6s]   described 20750
+[ 321.1s]   described 21000
+[ 323.5s]   described 21250
+[ 326.0s]   described 21500
+[ 328.6s]   described 21750
+[ 331.1s]   described 22000
+[ 333.7s]   described 22250
+[ 336.5s]   described 22500
+[ 339.1s]   described 22750
+[ 342.1s]   described 23000
+[ 344.8s]   described 23250
+[ 347.5s]   described 23500
+[ 350.1s]   described 23750
+[ 352.8s]   described 24000
+[ 355.6s]   described 24250
+[ 358.2s]   described 24500
+[ 361.4s]   described 24750
+[ 364.2s]   described 25000
+[ 366.9s]   described 25250
+[ 369.6s]   described 25500
+[ 372.3s]   described 25750
+[ 375.1s]   described 26000
+[ 377.7s]   described 26250
+[ 381.1s]   described 26500
+[ 383.9s]   described 26750
+[ 386.7s]   described 27000
+[ 389.3s]   described 27250
+[ 392.0s]   described 27500
+[ 394.6s]   described 27750
+[ 397.4s]   described 28000
+[ 400.2s]   described 28250
+[ 403.2s]   described 28500
+[ 406.6s]   described 28750
+[ 409.5s]   described 29000
+[ 412.4s]   described 29250
+[ 415.0s]   described 29500
+[ 417.7s]   described 29750
+[ 420.3s]   described 30000
+[ 423.0s]   described 30250
+[ 425.9s]   described 30500
+[ 428.7s]   described 30750
+[ 431.5s]   described 31000
+[ 434.2s]   described 31250
+[ 436.8s]   described 31500
+[ 439.5s]   described 31750
+[ 442.1s]   described 32000
+[ 444.8s]   described 32250
+[ 447.6s]   described 32500
+[ 450.6s]   described 32750
+[ 453.4s]   described 33000
+[ 456.0s]   described 33250
+[ 458.7s]   described 33500
+[ 461.3s]   described 33750
+[ 463.9s]   described 34000
+[ 466.5s]   described 34250
+[ 469.3s]   described 34500
+[ 472.8s]   described 34750
+[ 476.2s]   described 35000
+[ 479.0s]   described 35250
+[ 481.6s]   described 35500
+[ 484.1s]   described 35750
+[ 486.8s]   described 36000
+[ 489.4s]   described 36250
+[ 492.1s]   described 36500
+[ 495.3s]   described 36750
+[ 498.3s]   described 37000
+[ 501.1s]   described 37250
+[ 503.8s]   described 37500
+[ 506.5s]   described 37750
+[ 509.0s]   described 38000
+[ 511.7s]   described 38250
+[ 514.2s]   described 38500
+[ 516.9s]   described 38750
+[ 520.0s]   described 39000
+[ 522.8s]   described 39250
+[ 525.5s]   described 39500
+[ 528.2s]   described 39750
+[ 530.8s]   described 40000
+[ 533.5s]   described 40250
+[ 536.1s]   described 40500
+[ 538.6s]   described 40750
+[ 541.5s]   described 41000
+[ 544.6s]   described 41250
+[ 548.4s]   described 41500
+[ 550.9s]   described 41750
+[ 553.5s]   described 42000
+[ 556.1s]   described 42250
+[ 558.6s]   described 42500
+[ 561.3s]   described 42750
+[ 563.8s]   described 43000
+[ 567.1s]   described 43250
+[ 570.3s]   described 43500
+[ 573.2s]   described 43750
+[ 576.0s]   described 44000
+[ 578.5s]   described 44250
+[ 581.1s]   described 44500
+[ 583.7s]   described 44750
+[ 586.4s]   described 45000
+[ 588.9s]   described 45250
+[ 591.8s]   described 45500
+[ 594.5s]   described 45750
+[ 598.1s]   described 46000
+[ 600.7s]   described 46250
+[ 603.2s]   described 46500
+[ 605.9s]   described 46750
+[ 608.5s]   described 47000
+[ 611.1s]   described 47250
+[ 614.1s]   described 47500
+[ 616.9s]   described 47750
+[ 619.5s]   described 48000
+[ 622.3s]   described 48250
+[ 624.8s]   described 48500
+[ 627.5s]   described 48750
+[ 630.1s]   described 49000
+[ 632.7s]   described 49250
+[ 635.5s]   described 49500
+[ 638.1s]   described 49750
+[ 641.4s]   described 50000
+[ 918.0s] cpu: decode 1183s, features 2697s
+[ 918.1s] described 100000/100000 images, 45081168 descriptors
+Analysis complete. Matching 100000 images...
+[1008.9s] vocabulary: 1191405 live words of 16777216 from 1280000 samples
+[1087.6s] quantised
+[1094.2s] inverted file
+[1131.0s] candidates: 7071448 pairs
+[1471.1s]   round 1: 7742 library files asked, 105959 more candidates
+[1508.8s]   round 2: 963 library files asked, 10599 more candidates
+[1511.7s]   round 3: 208 library files asked, 3114 more candidates
+[1512.0s]   round 4: 54 library files asked, 832 more candidates
+[1512.0s]   round 5: 10 library files asked, 249 more candidates
+[1512.0s]   round 6: 2 library files asked, 5 more candidates
+[1512.2s] -k counts rejections: 8317 windows more in 6 rounds, 7192206 candidates verified
+[1512.2s] anchors: 15817 of 256944 verified pairs
+[1892.0s] variants: 3697 more pairs from 50486 unmatched images
+[1896.8s] released the index and the descriptors
+[1896.9s] bridges: dropped 0 lone links between clusters
+[1896.9s] weak anchors: 13746 admitted, 2558 refused between clusters
+[1897.1s]   propagation round 1: +1534 pairs
+[1897.1s]   propagation round 2: +44 pairs
+[1897.1s]   propagation round 3: +0 pairs
+[1897.1s] propagated: 1578 of 5802 composed hypotheses (10045 put to the pixels, budget 7192206 a round)
+[1897.1s] corroborated: 724 more pairs inside existing clusters
+dumped verdicts -> /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v56-seed/disc/head/dump.csv
+35 repeat, 51 better, 114 to review, 49800 new, of 50000 images scanned against 50000 library images in 1901.2s -> /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v56-seed/disc/head/report.json
+[1901.5s] pace: finding identical files: 100000 files in 25.02s, 2001549.5 ns a unit on each of 8 threads
+[1901.5s] pace: reading the cache: 5820476952 bytes in 101.93s, 140.1 ns a unit on each of 8 threads
+[1901.5s] pace: reading headers: 100000 files in 2.09s, 166990.7 ns a unit on each of 8 threads
+[1901.5s] pace: describing: 9927913307 pixels analysed in 556.71s, 448.6 ns a unit on each of 8 threads
+[1901.5s] pace: writing the cache: 0 descriptors in 229.97s, 0.0 ns a unit on each of 8 threads
+[1901.5s] pace: building the vocabulary: 1280000 samples in 90.70s, 566868.3 ns a unit on each of 8 threads
+[1901.5s] pace: quantising: 45077659 descriptors in 78.75s, 13976.6 ns a unit on each of 8 threads
+[1901.5s] pace: building the inverted file: 45077659 descriptors in 6.75s, 1198.3 ns a unit on each of 8 threads
+[1901.5s] pace: finding candidates: 25635173 descriptors in 50.54s, 15771.3 ns a unit on each of 8 threads
+[1901.5s] pace: verifying: 7192206 pairs in 368.90s, 410338.2 ns a unit on each of 8 threads
+[1901.5s] pace: propagating: 116421 images and anchors in 3.68s, 253029.1 ns a unit on each of 8 threads
+[1901.5s] pace: grouping and suggesting: 116421 images and anchors in 0.65s, 44967.7 ns a unit on each of 8 threads
+[1901.5s] pace: describing, past the decode: 9927913307 pixels analysed in 395.23s, 318.5 ns a unit on each of 8 threads
+
+Skipped:
+     27  image(s) with no detail to match, such as a blank picture: only an identical copy can match one
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q01298.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q11809.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q12571.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q15563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q16563.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q17557.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q21194.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q27539.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30445.jpg
+         - /home/daniel/Documents/DISC21/queries/images/queries/Q30606.jpg
+         - ... and 17 more (all of them are in the log file)
+	Command being timed: "/home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v56-seed/img-fp-head /home/daniel/Documents/DISC21/queries/images/queries --against /home/daniel/Documents/DISC21/refs0/images/references --min-pixel-correlation 0.5 -t 8 -v --no-last --cache /home/daniel/Documents/DISC21/cache/cache.bin --log-file /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v56-seed/disc/head/run.log -o /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v56-seed/disc/head/report.json --dump /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v56-seed/disc/head/dump.csv"
+	User time (seconds): 5989.59
+	System time (seconds): 529.59
+	Percent of CPU this job got: 342%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 31:42.08
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3591124
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 3935942
+	Minor (reclaiming a frame) page faults: 4115886
+	Voluntary context switches: 5117097
+	Involuntary context switches: 849691
+	Swaps: 0
+	File system inputs: 498553624
+	File system outputs: 32749040
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

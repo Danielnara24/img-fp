@@ -1,0 +1,78 @@
+Settings -> Work size: 512, Candidates: 150, Min aligned points: 10, Min frame overlap: 0.85, Min pixel correlation: 0.7, Mirrored and inverted: searched, Threads: 8, Recursive: false, Follow symlinks: false, Hidden folders: false
+Cache: cache.bin
+[   0.0s] scratch file in .
+Scanning: 5460 path(s) read from g320/i5-full.list
+Searching every file, whatever its extension (-x '*').
+[   0.1s] 5460 files
+[   0.1s] exact duplicates: 120 groups
+[   1.3s] cache: 47084 usable records
+[   1.3s] 0 files to analyse
+Found 5460 files; 5276 already cached, 184 identical copies, 0 to analyse.
+[   1.6s] cache: 41761 records kept from other scans
+[   1.6s] cache: 47084 records, 47 of them unused, not compacted
+[   1.6s] cpu: decode 0s, features 0s
+[   1.6s] described 5460/5460 images, 2550515 descriptors
+[   1.6s] same pixels: 180 files decode to a picture another file already holds
+Analysis complete. Matching 5460 images...
+[   3.2s] vocabulary: 225617 live words of 1048576 from 236046 samples
+[   5.4s] quantised
+[   5.5s] inverted file
+[   5.8s] candidates: 487481 pairs
+[  16.4s] anchors: 192928 of 214401 verified pairs
+[  17.5s] variants: 5225 more pairs from 209 unmatched images
+[  17.5s] released the index and the descriptors
+[  17.5s] bridges: dropped 10 lone links between clusters
+[  17.6s] weak anchors: 93074 admitted, 18279 refused between clusters
+[  18.1s]   propagation round 1: +22995 pairs
+[  18.3s]   propagation round 2: +423 pairs
+[  18.4s]   propagation round 3: +25 pairs
+[  18.5s]   propagation round 4: +0 pairs
+[  18.5s] propagated: 23443 of 35795 composed hypotheses (122236 put to the pixels, budget 487481 a round)
+[  18.5s] corroborated: 6128 more pairs inside existing clusters
+[  19.6s] groups: 145 representatives over 5382 files, 3708 of them in more than one group
+[  19.6s] suggested: 1465 to keep, 3264 to delete, 653 to review
+145 groups, 242433 pairs over 5460 images in 19.6s -> /dev/null
+--- profile (cpu seconds; stages nest; tsc 2300 MHz) ---
+     verify:direct     83.56
+            guided     45.46
+       pixel_check     17.99
+          quantise     17.90
+    best_transform     10.37
+            shared      6.34
+  pixel_check:prop      4.66
+      variant:pass      3.80
+  variant:quantise      3.16
+          encloses      2.30
+        correspond      1.93
+             vocab      1.55
+             query      1.44
+         propagate      0.83
+           suggest      0.76
+           invfile      0.31
+         cand:rank      0.27
+      main:release      0.26
+           overlap      0.18
+   variant:mkfeats      0.14
+       main:output      0.03
+             group      0.02
+     main:candsort      0.01
+        main:exact      0.01
+         main:pool      0.00
+     decode:permit      0.00
+     #guided:calls  0
+    #guided:rounds  0
+      #guided:dist  0
+      #guided:same  0
+[  19.6s] pace: finding identical files: 5460 files in 0.02s, 26077.0 ns a unit on each of 8 threads
+[  19.6s] pace: reading the cache: 2830589028 bytes in 1.20s, 3.4 ns a unit on each of 8 threads
+[  19.6s] pace: reading headers: 5460 files in 0.00s, 1028.8 ns a unit on each of 8 threads
+[  19.6s] pace: describing: 0 pixels analysed in 0.21s, 0.0 ns a unit on each of 8 threads
+[  19.6s] pace: writing the cache: 2360460 descriptors in 0.08s, 254.5 ns a unit on each of 8 threads
+[  19.6s] pace: building the vocabulary: 236046 samples in 1.55s, 52636.3 ns a unit on each of 8 threads
+[  19.6s] pace: quantising: 2360460 descriptors in 2.24s, 7591.0 ns a unit on each of 8 threads
+[  19.6s] pace: building the inverted file: 2360460 descriptors in 0.15s, 510.0 ns a unit on each of 8 threads
+[  19.6s] pace: finding candidates: 2360460 descriptors in 0.24s, 801.3 ns a unit on each of 8 threads
+[  19.6s] pace: verifying: 487481 pairs in 10.62s, 174271.4 ns a unit on each of 8 threads
+[  19.6s] pace: propagating: 203243 images and anchors in 1.04s, 40907.7 ns a unit on each of 8 threads
+[  19.6s] pace: grouping and suggesting: 203243 images and anchors in 1.01s, 39648.4 ns a unit on each of 8 threads
+g 19.66 s 124.19+2.31 cpu

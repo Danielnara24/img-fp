@@ -1,0 +1,19 @@
+== all-k10-rep.json ==
+   config: {"candidates": 10, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9713  precision 98.97%  recall 95.36%
+   proposed 1,319,115  TP 1,305,515  FP 13,600  FN 63,494  groups 792
+   FP: trap 1,981  cross-family 11,619  seed-pairs 45  merges 40
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 6,519 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 3,013 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 920 pairs
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 234 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 158 pairs
+     cross IMGS3/Acueducto1.jpg <-> IMGS3/Acueducto2.jpg: 129 pairs
+     cross IMGS5/Cemetery3.jpg <-> IMGS5/Cemetery4.jpg: 84 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 83 pairs
+     cross IMGS5/Parish Church1.jpg <-> IMGS5/Parish Church2.jpg: 77 pairs
+     cross IMGS2/subway1.jpg <-> IMGS2/subway2.jpg: 74 pairs
+   half[alt] F1 0.9692  P 98.87%  R 95.05%  (182 seeds)
+   half[hash] F1 0.9738  P 99.82%  R 95.05%  (184 seeds)
+   perfect transforms: 56 of 87
+
