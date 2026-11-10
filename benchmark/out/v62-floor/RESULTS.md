@@ -118,3 +118,7 @@ F1, merges and perfect transforms identical. With the bar a floor, corroboration
 adds 19 and 34 true pairs out of 1.2-1.3 M: what it carried before was the slack.
 Only the pass was switched off; `Standing::Corroborating` also decides which
 verdicts stand for the `-k` windows, which this run left as it was.
+
+## 8. Decision
+
+Not shipped (user, 2026-11-10): the correctness is not worth the recall. `src/verify.rs` reverted; the patch is `../v61-acceptance/floor.patch`.

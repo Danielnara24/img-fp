@@ -3016,6 +3016,16 @@ Do not retry without new evidence:
   deletes IMGS `document2`'s original for its `motion_blur` copy once that
   copy is fitted right (0.995; base's wrong fit hid it), strict line 64 ->
   83; and DISC21 recall rests on the retrieval's three descent paths.
+- **The correlation bar as a hard floor** (2026-11-10, user's decision:
+  the correctness is not worth the recall; `out/v61-acceptance` section 10,
+  `out/v62-floor`, patch `v61-acceptance/floor.patch`): `CLUSTER_SLACK_CORRELATION`
+  removed, so no stated pair is below `--min-pixel-correlation` (HEAD states
+  3.1% of IMGS-ALL2's pairs below 0.7). At 0.7 IMGS-ALL F1 0.9749 -> 0.9650,
+  IMGS-ALL2 0.9417 -> 0.9272; swept 0.5-1.0 it is HEAD's curve moved about
+  0.05 of bar (precision at equal recall -0.01 to +0.05 points, traps -8 to
+  -17% at 0.7-0.85, cross-family and merges level); cost, DISC21 shard 0,
+  IMGS-PROVENANCE and cliffs level. With the floor, the corroboration pass
+  adds only 19 / 34 true pairs: the slack was all it carried.
 - Claim graph (0.54.0 survey, each rule off alone, cached IMGS-ALL at 512
   and its cliffs, IMGS3 alone): one cover test for every join, clean
   anchors included (recall -1.0, 17 perfect transforms, Segovia merges at
