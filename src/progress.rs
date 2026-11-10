@@ -253,7 +253,7 @@ pub struct Known {
     pub work_size: usize,
     pub candidates: usize,
     /// How many times the matching runs: once, and once more for each
-    /// doubling a finer `--detail` adds (`pipeline::match_by_detail`). 0 is
+    /// doubling a finer `--detail` adds (`pipeline::match_all`). 0 is
     /// taken as 1.
     pub steps: usize,
     /// How many files the cache and the exact pass leave to be described.

@@ -295,6 +295,20 @@ the direct pass's (`Verdict::variant` says which asked). `--dump` is a `Dump` th
 Every run ends in `finish` (verdicts or groups; an empty walk is the same
 path with nothing `Found`). Logging goes through `Ctx` (`stage!`, `say!`).
 
+The matching (`match_all`) is a list of steps (`detail_steps`): the working
+size, then each doubling up to `--detail` some picture reaches. A run that
+reaches none, the default's among them, is the one step. The first step is
+the default's matching whatever the detail. A finer step is a `Finer` on
+its `Pass` (scale bounds, the verdicts earlier steps settled, the files
+with a new level), which `Pass::verify` and `retrieve_and_verify` read.
+Its other differences are in the loop: windows a fifteenth of `-k`, words
+added to the first step's vocabulary (`index_adding`), no second look, and
+the veto on joins of two families the first step holds apart. Until
+2026-11 the steps were a second function beside the default's
+(`match_by_detail`), and its first step kept the better of two verdicts the
+second look met from both ends under one variant (`merge_best`), where the
+default keeps the first.
+
 **Adding a mode or a stage**: what the run was asked is a `Scope` method;
 a verdict recorded for its own sake goes to `Dump`; a new stage is a function
 between two others with its inputs and outputs typed. Not an `if` on an
