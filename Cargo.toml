@@ -15,11 +15,12 @@ repository = "https://github.com/Danielnara24/img-fp"
 readme = "README.md"
 keywords = ["image", "duplicate", "deduplication", "fingerprint", "cli"]
 categories = ["command-line-utilities", "multimedia::images"]
-# CLAUDE.md is internal design notes addressed to a coding agent; it is on
-# GitHub for contributors and has nothing to say to a crate consumer. The
+# CLAUDE.md (one here and in some folders) and HISTORY.md are internal design
+# notes and measurements addressed to a coding agent; they are on
+# GitHub for contributors and have nothing to say to a crate consumer. The
 # Flatpak's manifest, crate list and screenshots (2.8 MB) and the release
 # workflow build from the repository, never from the crate.
-exclude = ["CLAUDE.md", "flatpak/", ".github/"]
+exclude = ["CLAUDE.md", "HISTORY.md", "flatpak/", ".github/"]
 
 [dependencies]
 anyhow = "1.0.104"

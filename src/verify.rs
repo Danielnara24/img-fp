@@ -253,7 +253,7 @@ impl Policy {
     /// frame rather than a fragment of one, and the agreement bar is the only
     /// thing standing between the tool and a wrong family merge. Loosening the
     /// first costs traps and merges nothing; loosening the second merges
-    /// families and costs almost no traps. The sweeps are in `CLAUDE.md`.
+    /// families and costs almost no traps. The sweeps are in `HISTORY.md`.
     fn frames(&self, v: &Verdict) -> bool {
         let (least, most) = axis_scales(&v.m);
         v.scale.is_finite()
