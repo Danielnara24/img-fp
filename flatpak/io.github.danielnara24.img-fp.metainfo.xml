@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.84.0" date="2026-11-09">
+      <description>
+        <p>Every picture is now checked for mirrored and upside-down copies, not only pictures with few copies of their own.</p>
+      </description>
+    </release>
     <release version="0.83.0" date="2026-11-08">
       <description>
         <p>In large folders more copies are found whose shared detail is too little to rank them near the top, at a little more time.</p>

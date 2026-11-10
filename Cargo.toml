@@ -1,6 +1,6 @@
 [package]
 name = "img-fp"
-version = "0.83.0"
+version = "0.84.0"
 edition = "2024"
 # The oldest compiler the whole crate builds with: the CLI's dependencies
 # (`image`, `jxl-oxide`'s parts) need 1.88, the window's (gtk4 0.11, glib and
