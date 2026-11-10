@@ -1,0 +1,75 @@
+diff --git a/src/verify.rs b/src/verify.rs
+index 1edda72..7df0a17 100644
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -115,11 +115,15 @@ pub enum Standing {
+     /// A direct match between two files an anchor has *already* placed in one
+     /// cluster. It cannot merge anything, so the question is no longer "are
+     /// these the same picture" but "does this pair hold up", and it faces the
+-    /// anchor's rule with the correlation bar lowered
+-    /// (`CLUSTER_SLACK_CORRELATION`) and without the demand that its evidence
+-    /// enclose what it claims: that demand exists only to stop evidence from
+-    /// one corner of a frame putting two files together on the strength of
+-    /// the rest.
++    /// anchor's rule without the demand that its evidence enclose what it
++    /// claims: that demand exists only to stop evidence from one corner of a
++    /// frame putting two files together on the strength of the rest. The
++    /// correlation bar it faces is the anchor's: every pair a run states
++    /// meets `--min-pixel-correlation`. Until the audit after 0.84.1 it
++    /// faced the bar less 0.1 (`CLUSTER_SLACK_CORRELATION`), so 3.1% of the
++    /// pairs IMGS-ALL2 states at 0.7 correlated below it, 37% at 0.98, and a
++    /// higher bar left the pairs inside a join of two sibling photographs
++    /// standing (Fountain3/5 at 0.98: 2,185 at median 0.944).
+     Corroborating,
+     /// Believed on its own: enough aligned points, enough of the frame, and
+     /// agreeing pixels, with the points enclosing the centre of the overlap
+@@ -165,20 +169,6 @@ pub const CLEAN_WORST_BLOCK: f32 = 0.9;
+ /// scan, the next most unequal transform 6:1 and inside the bound.
+ pub const MAX_SCALE: f32 = 16.0;
+ 
+-/// How much easier it is to be believed *inside* a cluster than to create one
+-/// (`Standing::Corroborating`): the correlation bar, this much lower.
+-///
+-/// The one number in the acceptance rule read off a corpus rather than
+-/// derived, and it earned it: the held-out corpus preferred the margin too
+-/// (without it validation recall fell from 93.1% to 90.7%), and on IMGS-ALL it
+-/// is half a point of recall and moves no merge cliff. What it admits is a
+-/// pair whose pixels agree less than its fit accounts for: a whole-picture
+-/// overlay (`tiled_watermark`, 39 of the 60 pairs it adds) and non-affine
+-/// warps (barrel, wave, keystone, perspective). A margin of two aligned
+-/// points stood beside it, carried 0.03 points of recall and no cliff, and
+-/// is gone: a corroborated match has the anchor's points or a whole frame.
+-const CLUSTER_SLACK_CORRELATION: f32 = 0.1;
+-
+ /// The three bars a user sets, and what a verdict is worth against them: a
+ /// direct one's `Standing`, or whether a composed one stands (`composed`).
+ ///
+@@ -292,7 +282,7 @@ impl Policy {
+             Standing::Rejected
+         } else if v.centred && agrees {
+             Standing::Anchor
+-        } else if v.blk >= (self.min_pixel_correlation - CLUSTER_SLACK_CORRELATION).max(0.0) {
++        } else if agrees {
+             Standing::Corroborating
+         } else {
+             Standing::Rejected
+@@ -2485,6 +2475,19 @@ mod tests {
+         assert_eq!(at(Verdict { n_in: 10, framed: false, blk_min: 0.5, ..v }), Standing::Anchor, "the bar met is the bar as it was");
+     }
+ 
++    /// Every standing a verdict can have meets the correlation bar: a pair
++    /// believed only inside a cluster is spared the enclosure test, not the
++    /// bar, so a higher `--min-pixel-correlation` takes it away.
++    #[test]
++    fn nothing_stands_below_the_correlation_bar() {
++        let policy = Policy::new(10, 0.85, 0.7);
++        let v = Verdict { n_in: 40, centred: false, ov_a: 1.0, ov_b: 1.0, scale: 1.0, blk: 0.72, blk_min: 0.5, ..Default::default() };
++        assert_eq!(policy.standing(&v), Standing::Corroborating);
++        assert_eq!(policy.standing(&Verdict { blk: 0.69, ..v }), Standing::Rejected);
++        assert_eq!(policy.standing(&Verdict { blk: 0.69, centred: true, ..v }), Standing::Rejected);
++        assert_eq!(policy.standing(&Verdict { blk: 0.69, framed: true, n_in: 5, blk_min: 0.95, ..v }), Standing::Rejected);
++    }
++
+     /// Reversed, a verdict's scale bounds are the other way round: what A
+     /// may be of B is what B may be of A, inverted.
+     #[test]

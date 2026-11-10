@@ -80,3 +80,32 @@ dumped). Scripts here: `where.py`, `negative.py`, `oneway.py`, `sim.py`,
    precision 98.6 -> 98.7%), small families 91.76 -> 91.40%. CLAUDE.md
    had the slack at "~0.5 recall"; on IMGS-ALL2 now it is 2.7 points. Not
    changed: user's decision.
+
+10. **The hard floor, built** (`floor.patch`: `CLUSTER_SLACK_CORRELATION`
+    gone, a corroborating verdict needs `blk >= bar` like every other; test
+    `nothing_stands_below_the_correlation_bar`). Base = 4d56d07's build, new
+    = the patch, IMGS-ALL cold into the scratch cache then both from it.
+    IMGS-ALL2 identical to the scratch no-slack build (pairs and groups).
+    - **Floor holds**: pairs stated below 0.7, IMGS-ALL 29,562 of 1,350,087
+      -> 0 of 1,320,402; IMGS-ALL2 39,792 -> 0.
+    - **IMGS-ALL**: F1 0.9749 -> 0.9650, precision 98.83 -> 98.92%, recall
+      96.18 -> 94.20% (TP -27,108), traps 3,207 -> 2,383, cross-family 12,334
+      -> 11,659, precision without sibling pairs 99.75 -> 99.81%, merges 59
+      -> 59 (Fountain3/5 6,793 -> 6,635, Floriana1/2 3,042 -> 2,928, bird1/2
+      853 -> 673, Mural1/2 252 -> 180), perfect transforms 53 -> 50. Losses:
+      `tiled_watermark` 241 -> 169 / 364, `barrel_distort` 349 -> 283,
+      `keystone_side` 347 -> 313, `perspective_top` 349 -> 318,
+      `redaction_bars` 356 -> 328, `wave_vertical` 312 -> 292,
+      `photo_of_screen` 359 -> 349; no transform gains.
+    - **IMGS-ALL2**: F1 0.942 -> 0.927, precision 98.6 -> 98.7%, recall
+      90.11 -> 87.44%.
+    - **Small families** (`families.py compare`): unrelated joins 0 both;
+      IMGS-ALL joined 65.3 both (n1 P 89.22 -> 90.26%, R 95.63 -> 95.40%),
+      IMGS-ALL2 63.0 both (n2 P 89.81 -> 90.59%, R 91.30 -> 90.82%), HOLI-DEV
+      969.7 -> 926.3 (n1 P 50.74 -> 52.66%, R 97.46 -> 97.42%).
+    - **Keep rule**: identical. IMGS-ALL 0 lost, 358 / 364, 364 / 364, strict
+      line 64, DELETE +5; IMGS-ALL2 351 / 364, 364 / 364, the one
+      `phone_screenshot` loss in both; `pairs.py` identical to the total (loss
+      26, originals deleted 344, REVIEW 35,229).
+    - Not run: cliffs at other bars than the sweep's, IMGS-PROVENANCE, DISC21,
+      cost (no stage changes; fewer pairs stated).
