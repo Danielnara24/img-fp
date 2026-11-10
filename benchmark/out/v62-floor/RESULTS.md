@@ -75,7 +75,7 @@ points, cross-family pairs within ±4% either way. The one steady gain is
 equal recall level (53 / 51.6, 12 / 12.8 at 0.7).
 
 **Merges** (seed pairs analyse.py counts) are the same for both builds at every
-bar, and so are the seed pairs past 300 except IMGS-ALL 0.9 (4 -> 3) and
+bar, and so are the seed pairs past 300 except IMGS-ALL 0.9 (4 -> 3), 0.95 (3 -> 2) and
 IMGS-ALL2 0.8 (4 -> 3). But merges depend on the bar, not on recall: at the
 floor's equivalent of 0.7 (~0.65) they are those of 0.65, IMGS-ALL 62 against
 HEAD's 59 at 0.7, IMGS-ALL2 74 against 69. So "move the default to keep the
