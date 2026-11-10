@@ -1834,8 +1834,11 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   **bust2 | Classroom1 at 0.3-0.2** (402, 4,557). `-k` 10 recall IMGS-ALL2
   83.5 -> 87.4%. The shipped build reproduces the scaffolding's per-family
   runs byte for byte (MIRFAM, found, IMGS-ALL, IMGS-ALL2, `--detail` 512 /
-  1024 on IMGS); tests pass. Not done: the bar's bound (`Scope::settled`)
-  counts a family's representative as settled, one asker a family low.
+  1024 on IMGS); tests pass. After 0.84.0, the bar's bound on the second
+  look (`Settling`) leaves out each family's representative: at the end of
+  verification it is the askers to the file (IMGS 313, IMGS3 403) and over
+  their descriptors by 3% / 1.5% (it keeps each family's largest file);
+  0.84.0 counted the representatives as settled, one asker a family low.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
@@ -2342,8 +2345,11 @@ square working plane per file). A bound tightens as the stage that decides
 it goes: while the cache is read, each original it is seen to hold under
 its file's key is one less to describe (`cache::open`'s `met`); while
 verification runs, a file anchored twice is past the second look
-(`Scope::settled`, the rule `re_askers` applies; not against a library,
-where a component's best-connected member is asked however many it has).
+(`Scope::settled`, the rule `re_askers` applies) but for one file a family,
+its representative, the one of most descriptors until it is known
+(`pipeline::Settling`, families joined as anchors come in); against a
+library nothing is settled, since a component's best-connected member is
+asked however many it has.
 "Every file asked again" is what a photo library is (97% of the found
 corpus is asked again) and far from a folder of copies (6% of IMGS), where
 the bar runs slow until verification and then catches up; half was tried:

@@ -198,14 +198,67 @@ impl Scope {
         ReAsk { askers, clean_only }
     }
 
-    /// Whether a matched file with `degree` anchors so far is past being
-    /// asked again whatever verification finds next (`re_askers`), which is
-    /// what the bar reads while it verifies. Anchors only add up, so two of
-    /// them settle a file but for its family's one representative, which
-    /// the bar leaves out: a bound one asker a family low. Against a library
-    /// a component's best-connected member is asked however many it has.
+    /// Whether a matched file with `degree` anchors so far no longer asks
+    /// again for itself whatever verification finds next (`re_askers`):
+    /// anchors only add up, so two of them settle it. One file of its family
+    /// still asks, as the family's representative (`Settling`). Against a
+    /// library a component's best-connected member is asked however many it
+    /// has, and nothing is settled.
     fn settled(&self, degree: u32) -> bool {
         !self.against && degree >= 2
+    }
+}
+
+/// What verification has put past the second look so far, the bar's bound on
+/// it (`progress::Known::settled`): the files and descriptors of settled
+/// files (`Scope::settled`), less one file of each family that holds any,
+/// which will ask as its representative. Which one is decided only when
+/// verification ends, so the bound keeps the one with the most descriptors.
+/// Families only join and files only settle, so it only grows.
+struct Settling {
+    families: Clusters,
+    degree: Vec<u32>,
+    /// By family: its settled files, their descriptors, the most of one.
+    held: Vec<(usize, usize, usize)>,
+    past: (usize, usize),
+}
+
+impl Settling {
+    fn new(n: usize) -> Settling {
+        Settling { families: Clusters::new(n), degree: vec![0; n], held: vec![(0, 0, 0); n], past: (0, 0) }
+    }
+
+    /// What a family's settled files put past the second look: all but its
+    /// representative.
+    fn past_of((files, desc, most): (usize, usize, usize)) -> (usize, usize) {
+        if files == 0 { (0, 0) } else { (files - 1, desc - most) }
+    }
+
+    /// An anchor between `a` and `b`; `settles(x, degree)` is the
+    /// descriptors of `x` when that many anchors settle it.
+    fn anchor(&mut self, settles: impl Fn(usize, u32) -> Option<usize>, a: usize, b: usize) {
+        let (ra, rb) = (self.families.id(a), self.families.id(b));
+        let roots: &[usize] = if ra == rb { &[ra] } else { &[ra, rb] };
+        for &r in roots {
+            let (f, d) = Self::past_of(self.held[r]);
+            self.past = (self.past.0 - f, self.past.1 - d);
+        }
+        for x in [a, b] {
+            self.degree[x] += 1;
+            if self.degree[x] == 2 && let Some(d) = settles(x, 2) {
+                let r = self.families.id(x);
+                let h = &mut self.held[r];
+                *h = (h.0 + 1, h.1 + d, h.2.max(d));
+            }
+        }
+        self.families.join(a, b);
+        let r = self.families.id(a);
+        if ra != rb {
+            let (x, y) = (std::mem::take(&mut self.held[ra]), std::mem::take(&mut self.held[rb]));
+            self.held[r] = (x.0 + y.0, x.1 + y.1, x.2.max(y.2));
+        }
+        let (f, d) = Self::past_of(self.held[r]);
+        self.past = (self.past.0 + f, self.past.1 + d);
     }
 }
 
@@ -1329,10 +1382,9 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
     let mut all_direct: Vec<Edge> = Vec::new();
     let mut verified = 0usize;
     let mut round = 0usize;
-    // Anchors each file has so far, and the files and descriptors they have
-    // put past the second look (`Scope::settled`): the bar's bound on it.
-    let mut degree = vec![0u32; n];
-    let mut settled = (0usize, 0usize);
+    // What the anchors so far have put past the second look: the bar's bound
+    // on it.
+    let mut settling = Settling::new(n);
     loop {
         for &i in ask.iter() {
             asked[i] = true;
@@ -1447,14 +1499,9 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
                 if pass.policy.standing(&e.v) == Standing::Clean {
                     joined.join(e.a(), e.b());
                 }
-                for i in [e.a(), e.b()] {
-                    degree[i] += 1;
-                    if matched[i] && degree[i] == 2 && scope.settled(degree[i]) {
-                        settled = (settled.0 + 1, settled.1 + items[i].feats.len());
-                    }
-                }
+                settling.anchor(|x, d| (matched[x] && scope.settled(d)).then(|| items[x].feats.len()), e.a(), e.b());
             }
-            progress.learn(|k| k.settled = settled);
+            progress.learn(|k| k.settled = settling.past);
             all_direct.extend(part);
         }
         verified += fresh;
@@ -2343,6 +2390,37 @@ fn as_typed(v: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bar's bound on the second look counts each family's settled files
+    /// less one, the representative (the one with the most descriptors), and
+    /// is what `re_askers` leaves out at the end: it never falls as anchors
+    /// come in, whatever their order.
+    #[test]
+    fn settling_leaves_one_asker_a_family() {
+        let desc = [10, 20, 30, 40, 50, 60, 70];
+        let settles = |x: usize, d: u32| (d >= 2).then(|| desc[x]);
+        // Two families: 0-1-2 in a triangle, 3-4-5 a chain, 6 alone.
+        let edges = [(0, 1), (3, 4), (1, 2), (4, 5), (2, 0), (5, 3)];
+        let mut s = Settling::new(7);
+        let mut last = (0, 0);
+        for &(a, b) in &edges {
+            s.anchor(settles, a, b);
+            assert!(s.past.0 >= last.0 && s.past.1 >= last.1, "{:?} after {:?}", s.past, last);
+            last = s.past;
+        }
+        // Every file of both families has two anchors: six settled, less one
+        // a family (files 2 and 5, the largest), leaves 0, 1, 3, 4.
+        assert_eq!(s.past, (4, 10 + 20 + 40 + 50));
+        // Two families joined by one more anchor are one family: one asker.
+        s.anchor(settles, 2, 3);
+        assert_eq!(s.past, (5, 10 + 20 + 30 + 40 + 50));
+        // Against a library nothing settles.
+        let mut s = Settling::new(7);
+        for &(a, b) in &edges {
+            s.anchor(|_, _| None, a, b);
+        }
+        assert_eq!(s.past, (0, 0));
+    }
 
     /// A file's features at each detail: the default's analysis, then each
     /// finer level it has; a picture with fewer levels than the detail has
