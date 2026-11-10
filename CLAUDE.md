@@ -1798,6 +1798,44 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   runs' noise: few files there are re-asked). The `Shape`s are made only
   when the second look runs (not under `--skip-mirrored`), and not for
   `--detail`'s finer steps, which ask no second look.
+- **0.84.0, the family's representative** (`Scope::re_askers`, see *How
+  it works*; `out/v59-reask`, scaffolding `IMGFP_REASK` removed). Point (4) of the
+  brief: the second look was asked only by files with fewer than two
+  anchors, so whether a picture's mirror was looked for depended on the
+  folder. **MIRFAM** (`~/Documents/MIRFAM`, truth `MIRFAM-truth.csv`,
+  `make_mirfam.py`): each IMGS-ALL seed as o, o_q80, o_s70 and a turned
+  family m, m_q78, m_s60 (flip_h / flip_v / rot180 by hash; rot180 is
+  found directly). Turned families linked to their seed, of 364: HEAD 187
+  (99 of 276 real mirrors), every matched file asking 364, the library
+  rule (one asker per clean-anchor component, any answer) 363, shipped
+  (component of any anchors, representative keeps clean verdicts) 358.
+  Against HEAD (0.83.0), cached, the library rule / shipped: IMGS-ALL F1
+  0.9748 -> 0.9734 / **0.9749** (recall 96.17 -> 96.30 / 96.18%; library
+  rule bird1/2 851 -> 6,839); IMGS-ALL2 0.9414 -> 0.9401 / **0.9417**
+  (90.06 -> 90.24 / 90.11%; library rule Mural1/2 187 -> 6,775); found
+  corpus pairs +474 / -166 (231 new pairs, photos of one butterfly
+  species) / identical. Cost, cooled ABBA: library rule found +2.6%,
+  IMGS-ALL +26%, IMGS-ALL2 +37% (askers 1,354 -> 5,923, 2,024 -> 10,005);
+  shipped found 362 / 346 vs 348 / 349, IMGS-ALL 950 / 818 vs 819 / 828,
+  IMGS-ALL2 781 / 700 vs 713 / 709 CPU-s: level (askers +162, +229, +86).
+  Keep rule 0 lost both corpora; originals kept IMGS-ALL 358 / 364 all,
+  IMGS-ALL2 350 -> 349 / 351; `pairs.py` identical (26); small families
+  identical; HOLI-DEV 969.7 -> 973.0 / 969.7; HOLI-TEST 711.0 -> 716.7 /
+  712.3 (no different-scene join either way); `--detail` 512 -> 1024
+  containment library rule 1 true pair lost, shipped 0. Against a library
+  the shipped build is HEAD's rule: IMGS-AGAINST and DISC21 shard 0
+  reports identical to HEAD's; per-family there lost one mirrored true copy
+  a shard (0.51, 0.67 correlation; false 393 -> 383, 403 -> 385), hence
+  the split. Cliffs (every step, IMGS-ALL and IMGS-ALL2, `bat/cliffs`):
+  shipped as HEAD at every points, overlap and `-k` step but IMGS-ALL2
+  overlap 0.5 (Acueducto3/4 236 -> 306), and at IMGS-ALL2 correlation
+  0.6-0.2 Segovia1/2 merges (334-455), Henares1/2 from 0.4 (324-337),
+  Mural1/2 out at 0.6; library rule Mural1/2 at points 6-3, game2/3 at 0.6,
+  **bust2 | Classroom1 at 0.3-0.2** (402, 4,557). `-k` 10 recall IMGS-ALL2
+  83.5 -> 87.4%. The shipped build reproduces the scaffolding's per-family
+  runs byte for byte (MIRFAM, found, IMGS-ALL, IMGS-ALL2, `--detail` 512 /
+  1024 on IMGS); tests pass. Not done: the bar's bound (`Scope::settled`)
+  counts a family's representative as settled, one asker a family low.
 - **`--dump` changed the pairs, 0.73.0 to 0.76.0** (fixed in 0.77.0): `-k`
   counting rejections credited a window with every verdict in `all_direct` (`stood`), and a dumping run keeps verdicts the
   run's bars reject (three points, overlap 0.2), so it asked other windows.
@@ -1859,9 +1897,7 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 - Precision: on IMGS every false pair is a rearrangement trap. On the
   near-miss corpora stray single files join a sibling photograph's family
   (the clean-anchor rule's lone-file allowance). **Watch merges, not pairs.**
-- Open: no downscaled JPEG decode path (worth ~4%); the second look (and
-  the geometric look in it) is re-asked only where the first pass anchored
-  <2 times; nothing tested above
+- Open: no downscaled JPEG decode path (worth ~4%); nothing tested above
   ~30k images; on the found corpus about half of sampled reported pairs are
   different specimens of one species, leaking through the propagated tier;
   5 of the 7 families not keeping their original are grey or near-grey
@@ -2402,7 +2438,7 @@ Each was measured; changing one needs a re-measure.
   found corpus (byte for byte) as before. Passing such files over unverified
   was tried: IMGS5 bird1/2's merged burst lost 826 true pairs (recall -0.37).
 - **The geometric look** (0.83.0, `retrieve::Index::deeper`, in the second
-  look): a re-asked file (fewer than two anchors) also reads its own ranking
+  look): a re-asked file (see *The family's representative*) also reads its own ranking
   past `-k` down to `GEOMETRIC_DEPTH` (1,000), scores each candidate's weak
   geometric consistency (`Asker::peak`: keypoint pairs sharing a word, the
   asker's three-path words against the candidate's best word, voting in 16
@@ -2414,6 +2450,18 @@ Each was measured; changing one needs a re-measure.
   of 529 true copies never verified, 40 passing alone); `-k` cannot reach
   them (ranks 150 to 82,000, score ~0.005 against a top ~0.16). Depth swept
   (`out/v58-reach` section 6). See *Status* 0.83.0.
+- **The family's representative** (0.84.0, `Scope::re_askers`,
+  `ReAsk`): the second look asks every matched file with fewer than two
+  anchors, and in a plain scan also each family (a component of anchors)
+  once, through its best-connected member, which keeps only the *clean*
+  verdicts it finds; propagation carries them to the family. Why: a file
+  with two copies never asked for its mirror, the same file alone did.
+  Against a library: each clean-anchor component holding a scanned file,
+  every answer kept (clean only lost a mirrored true copy in each of two
+  DISC21 shards). Families of any anchors, not clean ones, and clean
+  answers, not any: the library rule applied to plain scans cost +26% /
+  +37% CPU on IMGS-ALL / IMGS-ALL2 and merged bird1/2, Mural1/2 and, at
+  correlation 0.3, bust2 | Classroom1. See *Status*.
 - **Shared-part rule** (0.73.0, `claims::demote_shared_parts`): a one-way
   clean link (overlap bar one side only) makes a part; a part whose containers
   lie in two clusters keeps only the most-linked cluster's links clean. A

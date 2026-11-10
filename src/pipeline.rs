@@ -122,7 +122,8 @@ impl Scope {
     /// (`sift::Variant`). Doing that for every image would roughly double the
     /// retrieval cost for a handful of pairs, so it is asked only where the
     /// first pass came up short: a file with no matches, or with so few that
-    /// it may be hanging off the edge of its real cluster.
+    /// it may be hanging off the edge of its real cluster, and once for each
+    /// family it found.
     ///
     /// A byte-identical copy is not counted. It is the same picture, so it says
     /// nothing about whether the picture's other versions were found — and
@@ -138,6 +139,22 @@ impl Scope {
     /// at all", costs a seed apiece on three of the held-out mirror
     /// transforms.
     ///
+    /// A file with two anchors would never ask, though, and the same file
+    /// alone would: whether a picture's mirror was looked for depended on the
+    /// rest of the folder. A mirror of one file of a picture's family is a
+    /// mirror of the family, so each family (a component of anchors) is also
+    /// asked once, through its best-connected member, and propagation carries
+    /// what that finds to the rest. Asked only for that, a file keeps only the
+    /// clean verdicts it finds (`ReAsk::clean_only`): the family is already
+    /// found, and what it adds is a family's mirror, which agrees cleanly.
+    /// Every answer kept (as against a library, below) cost +26-37% CPU on
+    /// folders of many copies (5,923 askers on IMGS-ALL against 1,354) and
+    /// merged near-miss siblings through their mirrored copies (IMGS5's bird
+    /// and Mural, and two unrelated pictures at correlation 0.3); clean only,
+    /// the CPU is level and no merge is added at the defaults
+    /// (`out/v59-reask`). Components of clean anchors alone are smaller and
+    /// asked more: +24-33% CPU for the same finds.
+    ///
     /// Against a library, a library file is asked as any file is once the scan
     /// has reached it: one with no match at all is no part of an answer, and
     /// asking each of those is what made matching both sides as one four times
@@ -147,48 +164,57 @@ impl Scope {
     /// having no match, and here is found from the scan's side or not at all.
     /// Counting a scanned file's matches cannot tell when to look — on
     /// IMGS-AGAINST the files it caught had six — and re-asking every scanned
-    /// file found them at a third more CPU. A mirror of one file of a picture's
-    /// family is a mirror of the family, so each clean-anchor component that
-    /// holds a scanned file is re-asked once, through its best-connected
-    /// member, and propagation carries what that finds to the rest: 2,635
-    /// files re-asked there against 11,024, the same finds. Clean anchors,
-    /// because weak ones join families into a few large components, and one
-    /// member of each found ten fewer.
-    fn re_askers(&self, direct: &[Edge], policy: &verify::Policy, matched: &[bool]) -> Vec<usize> {
+    /// file found them at a third more CPU. So each clean-anchor component
+    /// that holds a scanned file is re-asked once, and keeps every answer:
+    /// 2,635 files re-asked there against 11,024, the same finds. Clean
+    /// anchors, because weak ones join families into a few large components,
+    /// and one member of each found ten fewer; every answer, because clean
+    /// only lost a mirrored true copy in each of two DISC21 shards.
+    fn re_askers(&self, direct: &[Edge], policy: &verify::Policy, matched: &[bool]) -> ReAsk {
         let n = matched.len();
         let mut degree = vec![0u32; n];
         for e in anchors(direct, policy) {
             degree[e.a()] += 1;
             degree[e.b()] += 1;
         }
-        let mut rep = vec![false; n];
-        if self.against {
-            let d = Clusters::joined(n, anchors(direct, policy).filter(|e| policy.standing(&e.v) == Standing::Clean));
-            // Per component: whether a scanned file is in it, and its best-
-            // connected member, ties to the lowest index.
-            let mut best: HashMap<usize, (bool, usize)> = HashMap::new();
-            for i in (0..n).filter(|&i| degree[i] > 0) {
-                let e = best.entry(d.id(i)).or_insert((false, i));
-                e.0 |= !self.library[i];
-                if degree[i] > degree[e.1] {
-                    e.1 = i;
-                }
-            }
-            for (scanned, i) in best.into_values() {
-                rep[i] |= scanned;
+        let families = Clusters::joined(n, anchors(direct, policy).filter(|e| !self.against || policy.standing(&e.v) == Standing::Clean));
+        // Per component: whether a scanned file is in it, and its best-
+        // connected member, ties to the lowest index.
+        let mut best: HashMap<usize, (bool, usize)> = HashMap::new();
+        for i in (0..n).filter(|&i| degree[i] > 0) {
+            let e = best.entry(families.id(i)).or_insert((false, i));
+            e.0 |= !self.library[i];
+            if degree[i] > degree[e.1] {
+                e.1 = i;
             }
         }
-        (0..n).filter(|&i| matched[i] && (rep[i] || (degree[i] < 2 && !(self.library[i] && degree[i] == 0)))).collect()
+        let mut rep = vec![false; n];
+        for (scanned, i) in best.into_values() {
+            rep[i] |= scanned;
+        }
+        let short = |i: usize| degree[i] < 2 && !(self.library[i] && degree[i] == 0);
+        let askers: Vec<usize> = (0..n).filter(|&i| matched[i] && (rep[i] || short(i))).collect();
+        let clean_only = askers.iter().map(|&i| !self.against && !short(i)).collect();
+        ReAsk { askers, clean_only }
     }
 
     /// Whether a matched file with `degree` anchors so far is past being
     /// asked again whatever verification finds next (`re_askers`), which is
     /// what the bar reads while it verifies. Anchors only add up, so two of
-    /// them settle a file in a plain scan; against a library a component's
-    /// best-connected member is asked however many it has.
+    /// them settle a file but for its family's one representative, which
+    /// the bar leaves out: a bound one asker a family low. Against a library
+    /// a component's best-connected member is asked however many it has.
     fn settled(&self, degree: u32) -> bool {
         !self.against && degree >= 2
     }
+}
+
+/// Who the second look asks (`Scope::re_askers`), and of each, by its place
+/// in `askers`, whether it was asked only as its family's representative and
+/// so keeps only the clean verdicts it finds.
+struct ReAsk {
+    askers: Vec<usize>,
+    clean_only: Vec<bool>,
 }
 
 /// One scan, from the paths asked for to the report: each stage below hands
@@ -1506,7 +1532,8 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct: 
     index.let_go();
     // `--skip-mirrored` asks it of nobody, and everything below then does
     // nothing: no word lists made, no postings rebuilt, no verdicts.
-    let askers: Vec<usize> = if args.skip_mirrored { Vec::new() } else { scope.re_askers(direct, policy, pass.matched) };
+    let ReAsk { askers, clean_only } =
+        if args.skip_mirrored { ReAsk { askers: Vec::new(), clean_only: Vec::new() } } else { scope.re_askers(direct, policy, pass.matched) };
     // Each variant is asked the same retrieval question it always was, and
     // then the three answers are spent as one: a candidate is verified once,
     // under the variant it scored highest for, and only the best `-k` of the
@@ -1554,6 +1581,9 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct: 
                 n_deeper.fetch_add(deeper.len(), std::sync::atomic::Ordering::Relaxed);
                 for j in deeper {
                     out.extend(pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j as usize, Variant::SAME, work));
+                }
+                if clean_only[at] {
+                    out.retain(|e| policy.standing(&e.v) == Standing::Clean);
                 }
                 bar.add(w);
                 out
