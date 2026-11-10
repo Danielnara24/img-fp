@@ -1,0 +1,88 @@
+maps checked: 3,630 anchors (deduped); maps disagreeing with blk / blk_min: 13
+non-clean anchors: {'cross': 293, 'true': 1776, 'trap': 3}
+
+feature              true p10/p50/p90        cross p10/p50/p90  best single cut: cross removed at true kept 95% / 99%
+blk            0.771   0.925   0.977    0.709   0.788   0.939     32%< /   11%<
+blk_min        0.024   0.474   0.866    0.018   0.109   0.653      6%< /    1%>
+med            0.892   0.976   0.997    0.804   0.906   0.972     25%< /    4%<
+q25            0.667   0.934   0.988    0.510   0.725   0.944     24%< /    2%<
+gap            0.113   0.489   0.936    0.290   0.740   0.883      1%< /    0%<
+hi_mean        0.869   0.949   0.981    0.827   0.878   0.948     22%< /    4%<
+low0.3         0.000   0.000   4.000    0.000   2.000   5.000      6%> /    0%>
+frac0.3        0.000   0.000   0.111    0.000   0.067   0.148     11%> /    1%>
+comp0.3        0.000   0.000   3.000    0.000   1.000   3.000      4%> /    0%<
+compact0.3     0.500   1.000   1.000    0.500   1.000   1.000      9%< /    2%<
+low0.5         0.000   1.000   6.000    0.000   4.000   8.000      6%> /    0%>
+frac0.5        0.000   0.028   0.182    0.000   0.130   0.250     13%> /    3%>
+comp0.5        0.000   1.000   5.000    0.000   2.000   5.000      7%> /    0%<
+ncomp0.5       0.000   1.000   2.000    0.000   2.000   4.000     14%> /    4%>
+low0.7         0.000   2.000  10.000    1.000   7.000  13.000     16%> /    8%>
+frac0.7        0.000   0.056   0.278    0.029   0.226   0.389     27%> /    9%>
+oneflat        0.000   0.000   3.000    0.000   0.000   3.000      1%> /    0%<
+
+true non-clean anchors by transform (count, median comp0.5, median frac0.5, median blk_min):
+  slide_deck                   52     1  0.03  0.434
+  qr_sticker                   51     6  0.18  0.039
+  watermark_corner             49     1  0.06  0.280
+  posterize                    48     1  0.03  0.436
+  redaction_bars               47     4  0.12  0.080
+  blur_patch                   47     3  0.14  0.052
+  pincushion                   45     2  0.12  0.108
+  swirl                        44     4  0.14  0.102
+  photo_of_screen              43     2  0.11  0.126
+  browser_window               37     1  0.03  0.446
+  embed_small                  37     1  0.03  0.493
+  to_heif                      36     0  0.00  0.727
+  pdf_page                     36     1  0.03  0.343
+  thumbnail                    35     0  0.00  0.680
+  vignette                     35     1  0.06  0.223
+  greyscale                    33     1  0.03  0.354
+  jpeg_low                     33     0  0.00  0.736
+  perspective_two              32     2  0.15  0.162
+  wall_poster                  31     1  0.05  0.105
+  print_scan                   31     0  0.00  0.805
+  duotone                      31     1  0.03  0.455
+  saturation                   29     0  0.00  0.578
+  to_avif                      29     0  0.00  0.783
+  magazine_spread              28     1  0.03  0.354
+  hue_rotate                   27     0  0.00  0.696
+  embed_tiny                   27     0  0.00  0.669
+  contact_sheet                27     0  0.00  0.680
+  barrel_distort               26     2  0.12  0.103
+  cinematic_grade              25     0  0.00  0.787
+  wave                         24     1  0.08  0.250
+
+cross non-clean anchors by seed pair:
+  IMGS5/Mural1.jpg | IMGS5/Mural2.jpg                        26     2  0.06  0.323
+  IMGS5/Fountain3.jpg | IMGS5/Fountain5.jpg                  19     1  0.03  0.397
+  IMGS5/Macizo1.jpg | IMGS5/Macizo2.jpg                      19     2  0.20  0.060
+  IMGS2/sea_photo1.jpg | IMGS2/sea_photo2.jpg                18     3  0.20  0.022
+  IMGS5/Seagull1.jpg | IMGS5/Seagull2.jpg                    17     1  0.08  0.178
+  IMGS5/bird1.jpg | IMGS5/bird2.jpg                          17     0  0.00  0.720
+  IMGS3/game2.jpg | IMGS3/game3.jpg                          16     2  0.08  0.149
+  IMGS5/Macizo3.jpg | IMGS5/Macizo4.jpg                      15     2  0.19  0.053
+  IMGS3/Segovia1.jpg | IMGS3/Segovia2.jpg                    14     0  0.00  0.598
+  IMGS3/Henares1.jpg | IMGS3/Henares2.jpg                    11     2  0.15  0.068
+  IMGS2/bust1.jpg | IMGS2/bust2.jpg                          10     2  0.07  0.392
+  IMGS3/red_rocks_sign1.jpg | IMGS3/red_rocks_sign2.jpg      10     4  0.19  0.058
+  IMGS5/Cemetery3.jpg | IMGS5/Cemetery4.jpg                  10     2  0.09  0.217
+  IMGS5/Floriana3.jpg | IMGS5/Floriana4.jpg                   8     0  0.00  0.820
+  IMGS5/Wignacourt Tower1.jpg | IMGS5/Wignacourt Tower2.jpg     8     2  0.20  0.058
+  IMGS2/boat_photo1.jpg | IMGS2/boat_photo2.jpg               7     3  0.21  0.087
+  IMGS3/Acueducto1.jpg | IMGS3/Acueducto2.jpg                 7     3  0.21  0.174
+  IMGS5/GanyutingStore1.jpg | IMGS5/GanyutingStore2.jpg       7     5  0.21  0.099
+  IMGS5/Puerto3.jpg | IMGS5/Puerto4.jpg                       6     1  0.03  0.297
+  IMGS5/Puerto1.jpg | IMGS5/Puerto2.jpg                       5     5  0.25  0.059
+  IMGS2/subway1.jpg | IMGS2/subway2.jpg                       5     1  0.03  0.340
+  IMGS5/Floriana1.jpg | IMGS5/Floriana2.jpg                   5     6  0.18  0.061
+  IMGS5/Parish Church1.jpg | IMGS5/Parish Church2.jpg         5     7  0.19  0.027
+  IMGS3/mclaren1.jpg | IMGS3/mclaren2.jpg                     4     4  0.18  0.067
+  IMGS5/Los Gigantes1.jpg | IMGS5/Los Gigantes2.jpg           4     5  0.22  0.038
+
+two features (drop when blk < a or f2 beyond b): cross removed at true kept 95% / 99%
+  blk + frac0.7   (0.310580204778157, (0.734, 0.344))  (0.09556313993174062, (0.701, 0.394))
+  blk + ncomp0.5  (0.28668941979522183, (0.734, 4))  (0.04778156996587031, (0.701, 4))
+  blk + q25       (0.27986348122866894, (0.734, 0.488))  (0.027303754266211604, (0.701, 0.425))
+  blk + blk_min   (0.2696245733788396, (0.734, 0.0))  (0.0034129692832764505, (0.701, 0.0))
+  blk + comp0.5   (0.27303754266211605, (0.734, 8))  (0.0034129692832764505, (0.701, 9))
+  blk + gap       (0.2696245733788396, (0.734, 0.998))  (0.0034129692832764505, (0.701, 0.998))

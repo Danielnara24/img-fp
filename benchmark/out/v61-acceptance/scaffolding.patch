@@ -1,0 +1,97 @@
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 1c0eaf7..398e6d5 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -1876,9 +1876,25 @@ fn dump_columns<'a>() -> table::Table<Dumped<'a>> {
+         col("ah", |r| Cell::Count(r.items[r.e.ends().0].feats.h.into())),
+         col("bw", |r| Cell::Count(r.items[r.e.ends().1].feats.w.into())),
+         col("bh", |r| Cell::Count(r.items[r.e.ends().1].feats.h.into())),
++        // SCAFFOLDING (v61): the pixel check's 36 blocks, row by row, for
++        // verdicts worth reading (10 points, mean 0.6); kinds n / f / a / p.
++        col("blocks", |r| Cell::Text(blocks_of(r).0.into())),
++        col("kinds", |r| Cell::Text(blocks_of(r).1.into())),
+     ])
+ }
+ 
++/// SCAFFOLDING (v61): a dumped verdict's block map, as text.
++fn blocks_of(r: &Dumped) -> (String, String) {
++    let v = &r.e.v;
++    if v.n_in < 10 || v.blk < 0.6 {
++        return (String::new(), String::new());
++    }
++    let (a, b) = (&r.items[r.e.a()], &r.items[r.e.b()]);
++    let map = verify::block_map(&a.thumb, &b.thumb, &v.m, a.feats.w as f32, a.feats.h as f32, b.feats.w as f32, b.feats.h as f32, v.variant.invert);
++    let vals: Vec<String> = map.iter().map(|(x, _)| if x.is_nan() { String::new() } else { format!("{x:.3}") }).collect();
++    (vals.join(";"), map.iter().map(|(_, k)| *k as char).collect())
++}
++
+ /// Write `--dump`: one row per verdict (`dump_columns`).
+ fn write_dump(cx: &Ctx, to: &To, files: &[PathBuf], items: &[Item], direct: &[Edge], dump: Dump) -> Result<()> {
+     let write = |w: &mut dyn Write| -> std::io::Result<()> {
+diff --git a/src/verify.rs b/src/verify.rs
+index 1edda72..c317a48 100644
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -1879,6 +1879,30 @@ fn pixel_check(
+     r
+ }
+ 
++thread_local! {
++    /// SCAFFOLDING (v61 block maps): when set, each block's |r| and kind of
++    /// the last pixel check, row by row: 'n' both detailed, 'f' flat on one
++    /// side, 'a' flat on both (abstains), 'p' partly outside the overlap.
++    static BLOCK_MAP: std::cell::RefCell<Option<Vec<(f32, u8)>>> = const { std::cell::RefCell::new(None) };
++}
++
++fn record_block(k: usize, r: f32, kind: u8) {
++    BLOCK_MAP.with(|c| {
++        if let Some(v) = c.borrow_mut().as_mut() {
++            v[k] = (r, kind);
++        }
++    });
++}
++
++/// SCAFFOLDING (v61): the pixel check's blocks for one transform.
++pub fn block_map(ta: &Thumb, tb: &Thumb, m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32, invert: bool) -> Vec<(f32, u8)> {
++    const NB: usize = (GRID / BLOCK) * (GRID / BLOCK);
++    BLOCK_MAP.with(|c| *c.borrow_mut() = Some(vec![(f32::NAN, b'p'); NB]));
++    let mut pyr = (Pyramid::default(), Pyramid::default());
++    let _ = pixel_check_with(ta, tb, m, aw, ah, bw, bh, invert, (&mut pyr.0, &mut pyr.1));
++    BLOCK_MAP.with(|c| c.borrow_mut().take()).unwrap()
++}
++
+ thread_local! {
+     /// Each worker's pyramid scratch, one per side of a comparison.
+     static PYRAMIDS: std::cell::RefCell<(Pyramid, Pyramid)> = std::cell::RefCell::new(Default::default());
+@@ -2055,6 +2079,7 @@ fn pixel_check_with(
+             tbb += sbb;
+             tab += sab;
+             tn += n as f64;
++            let bk = (by / BLOCK) * (GRID / BLOCK) + bx / BLOCK;
+             if n < BLOCK * BLOCK {
+                 continue;
+             }
+@@ -2064,6 +2089,7 @@ fn pixel_check_with(
+             let flat = 4.0 * 4.0 * nf;
+             let (flat_a, flat_b) = (vara < flat, varb < flat);
+             if flat_a && flat_b {
++                record_block(bk, f32::NAN, b'a');
+                 // A block with no detail on either side cannot disagree, so
+                 // counting it as agreement is counting nothing as evidence.
+                 // It abstains: out of the numerator and out of the
+@@ -2088,6 +2114,7 @@ fn pixel_check_with(
+                 // 94.56% (0.71.0: 95.43%), IMGS5 merges 5 both (0.71.0: 8),
+                 // `pairs.py` copies deleted 4,849 -> 5,024 (0.71.0: 5,043).
+                 let r = (2.0 * (sab - sa * sb / nf).abs() / (vara + varb)) as f32;
++                record_block(bk, r, b'f');
+                 total += 1;
+                 agree += r;
+                 worst = worst.min(r);
+@@ -2101,6 +2128,7 @@ fn pixel_check_with(
+             // difference between a block that just failed and one that matched
+             // nothing at all. The mean keeps it, and needs no cut.
+             let r = (cov / (vara * varb).sqrt()).abs() as f32;
++            record_block(bk, r, b'n');
+             agree += r;
+             worst = worst.min(r);
+         }

@@ -31,3 +31,23 @@ dumped). Scripts here: `where.py`, `negative.py`, `oneway.py`, `sim.py`,
    (warps, photo_of_screen, vignette, stickers), so a bar on them is a recall
    trade, as CLAUDE.md already records for blk_min. `famwhere-all2.out`,
    `families-all2.out` (total joined 63.0).
+
+6. **A: the block map holds no separator** (scaffolding `scaffolding.patch`:
+   `--dump` writes each verdict's 36 block correlations and kinds, re-run
+   from the thumbnails; reproduces `blk` / `blk_min` on direct verdicts, 13 of
+   3,630 off by ~0.001; turned verdicts are checked against the turned
+   picture and do not reproduce, so left out). IMGS-ALL2 small families,
+   direct non-clean anchors: 1,776 true, 293 cross. The hypothesis was that
+   a sibling fails in one compact region and a warp diffusely; it is the
+   other way round: siblings fail in more blocks and more separate regions
+   (median low0.5 4 vs 1, ncomp0.5 2 vs 1). Every feature, cross removed with
+   95% / 99% of true kept: `blk` 32% / 11% (best), `med` 25 / 4, `q25` 24 / 2,
+   `frac0.7` 27 / 9, `ncomp0.5` 14 / 4, `blk_min` 6 / 1, largest low region
+   7 / 0, its compactness 9 / 2. Two at once (blk plus each) no better: 31% /
+   10% at most. So what separates is the mean itself, i.e. a stricter
+   `--min-pixel-correlation`, which was measured and reverted (0.8: recall
+   95.98 -> 91.91% on IMGS-ALL, user's decision). The true anchors that look
+   most like siblings are the truth's local edits: `qr_sticker`,
+   `redaction_bars`, `blur_patch` (median 4-6 connected low blocks, blk_min
+   0.04-0.08), and warps (`pincushion`, `swirl`, `barrel_distort`,
+   `photo_of_screen`). `blocks.py`, `blocks-fam-all2.out`.
