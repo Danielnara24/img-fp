@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.84.1" date="2026-11-09">
+      <description>
+        <p>The progress bar's time left is closer in folders with many copies of each picture.</p>
+      </description>
+    </release>
     <release version="0.84.0" date="2026-11-09">
       <description>
         <p>Every picture is now checked for mirrored and upside-down copies, not only pictures with few copies of their own.</p>
