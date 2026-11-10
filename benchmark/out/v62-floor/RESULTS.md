@@ -102,3 +102,19 @@ cost is level. On the generated corpora it is mostly a move along the
 precision-recall curve (about 0.05 of bar), with a small real gain in
 rearrangement traps between 0.7 and 0.9 and no gain in cross-family pairs or
 merges. DISC21, cost and provenance do not move.
+
+## 7. With the floor, does corroboration still add anything? (`nocorr/`)
+
+The floor build with the corroboration pass switched off (temporary
+`IMGFP_NO_CORR` in `pipeline::cluster`'s filter, removed after; `nocorr/run.sh`),
+correlation 0.7, the same cache:
+
+| | floor | floor, no corroboration |
+|---|---|---|
+| IMGS-ALL TP / traps / cross | 1,289,583 / 2,383 / 11,659 | 1,289,564 / 2,383 / 11,658 |
+| IMGS-ALL2 TP / traps / cross | 1,210,558 / 3,390 / 12,654 | 1,210,524 / 3,388 / 12,653 |
+
+F1, merges and perfect transforms identical. With the bar a floor, corroboration
+adds 19 and 34 true pairs out of 1.2-1.3 M: what it carried before was the slack.
+Only the pass was switched off; `Standing::Corroborating` also decides which
+verdicts stand for the `-k` windows, which this run left as it was.
