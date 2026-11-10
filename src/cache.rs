@@ -138,8 +138,11 @@ const STAMP: usize = 16;
 pub struct Settings {
     pub work_size: u32,
     /// The most keypoints a record holds: `FEATURES` at the default, more at
-    /// a finer `--detail` (`analysis::features_at`). What a record is checked
-    /// against (`misshapen`), not what a run reads it by (`reads_as`).
+    /// a finer `--detail` (`analysis::features_at`). Kept on the record's row,
+    /// and a record is checked against its own row's (`misshapen`), not the
+    /// reading run's: checked against the run's, every record a finer detail
+    /// made with more than the default's keypoints was damage to a run at the
+    /// default, and its file was analysed again (10,519 of IMGS-ALL2's).
     pub features: u32,
     pub thumb: u32,
 }
@@ -1021,7 +1024,7 @@ struct Asked {
 
 /// Where a wanted file's analysis is: file, pack, offset, length, the day it
 /// was last used, and the colour kept on it.
-type Place = (usize, i64, u64, u64, i64, Option<f64>);
+type Place = (usize, i64, u64, u64, i64, Option<f64>, u32);
 
 /// The pack a run appends to: its number, the file, held `flock`ed alone, and
 /// where the next record goes.
@@ -1188,22 +1191,26 @@ impl Store {
         // Where each wanted file's analysis is, if it has one.
         let found: rusqlite::Result<Vec<Place>> = (|| {
             let conn = lock(&db.conn);
-            let mut q = conn.prepare_cached("SELECT pack, at, len, made_by, used, colour FROM analyses WHERE hash = ?1 AND version = ?2 AND work = ?3 AND thumb = ?4")?;
+            let mut q = conn.prepare_cached("SELECT pack, at, len, made_by, used, colour, features FROM analyses WHERE hash = ?1 AND version = ?2 AND work = ?3 AND thumb = ?4")?;
             let mut out = Vec::new();
             for (i, a) in self.asked.iter().enumerate() {
                 let Some(h) = a.hash.filter(|_| wanted(i)) else { continue };
                 let row = q
                     .query_row(params![&h.hash[..], &self.version[..], s.work_size, s.thumb], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, Option<f64>>(5)?))
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, Option<f64>>(5)?, r.get::<_, i64>(6)?))
                     })
                     .optional()?;
-                let Some((pack, at, len, made_by, used, colour)) = row else { continue };
+                let Some((pack, at, len, made_by, used, colour, features)) = row else { continue };
                 // Pixels another version of libheif made are not this one's.
                 if made_by.is_some_and(|m| Some(m.as_str()) != crate::heif::version()) {
                     continue;
                 }
                 met(i);
-                out.push((i, pack, at, len, used, colour));
+                // A record is checked against the cap it was made under, which a
+                // finer `--detail` raises (`Settings::features`); never past
+                // what any run makes.
+                let features = features.clamp(0, crate::analysis::MOST_KEYPOINTS as i64 - 1) as u32;
+                out.push((i, pack, at, len, used, colour, features));
             }
             Ok(out)
         })();
@@ -1229,11 +1236,11 @@ impl Store {
                 let mut b = Vec::new();
                 chunk
                     .iter()
-                    .map(|&(i, pack, at, len, used, colour)| {
+                    .map(|&(i, pack, at, len, used, colour, features)| {
                         let rec = packs[&pack].as_ref().and_then(|f| {
                             b.resize(len as usize, 0);
                             f.read_exact_at(&mut b, at).ok()?;
-                            let mut r = unrecord(&b, &asked[i].hash?.hash, settings).ok()?;
+                            let mut r = unrecord(&b, &asked[i].hash?.hash, Settings { features, ..settings }).ok()?;
                             // A colour kept on the row, which the record's
                             // own traits do not carry.
                             r.traits.colour_kept = colour.map(|c| c as f32);
@@ -1765,10 +1772,14 @@ mod tests {
     /// one. Each file's analysis as the run had it: `Some(true)` read,
     /// `Some(false)` made, `None` neither.
     fn run(path: &Path, version: [u8; 16], files: &[PathBuf], make: impl Fn(usize) -> Option<Item>) -> (Store, Vec<Option<bool>>, Problems<'static>) {
+        run_at(path, SETTINGS, version, files, make)
+    }
+
+    fn run_at(path: &Path, settings: Settings, version: [u8; 16], files: &[PathBuf], make: impl Fn(usize) -> Option<Item>) -> (Store, Vec<Option<bool>>, Problems<'static>) {
         let log = Box::leak(Box::new(crate::problems::Log::default()));
         let mut problems = Problems::new(log);
         let named = files.iter().map(|f| (f.clone(), std::fs::metadata(f).ok().and_then(|m| key_from(&m)))).collect();
-        let mut store = open(path, SETTINGS, version, named, &mut problems);
+        let mut store = open(path, settings, version, named, &mut problems);
         let samples = store.samples();
         let stats: Vec<crate::walk::Stat> = files.iter().map(|f| crate::walk::Stat { len: std::fs::metadata(f).map_or(0, |m| m.len()), key: None }).collect();
         let hashes = crate::same::content_hashes(files, &stats, |_| true, |i| store.hash_of(i), |l| samples.iter().any(|s| s.0 == l), |l, s| samples.contains(&(l, s)), || ());
@@ -1915,6 +1926,27 @@ mod tests {
         }
         let (store, _, _) = run(&other, V, std::slice::from_ref(&pic), |_| Some(analysis(2, 1)));
         assert_eq!(store.other_version(), Some(format!("IMGFPD{:02}", SCHEMA + 1).as_str()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_record_a_finer_detail_made_is_read_by_the_default() {
+        // A finer `--detail` raises the cap (`analysis::features_at`); a run
+        // at the default reads such a record as a prefix (`Item::cached_at`),
+        // so it must not take the keypoints past its own cap for damage.
+        let dir = scratch("finer");
+        let path = dir.join(file_name());
+        let files = vec![dir.join("a.jpg")];
+        write(&files[0], b"a picture");
+        let (fine, coarse) = (Settings { features: 8, ..SETTINGS }, Settings { features: 6, ..SETTINGS });
+        let (mut store, got, _) = run_at(&path, fine, V, &files, |_| Some(analysis(7, 1)));
+        assert_eq!(got, [Some(false)]);
+        assert!(store.finish(false).failure.is_none());
+        drop(store);
+        let (store, got, problems) = run_at(&path, coarse, V, &files, |_| None);
+        assert_eq!(got, [Some(true)], "read, not made again");
+        assert!(!problems.any(), "no record would not read");
+        drop(store);
         std::fs::remove_dir_all(&dir).ok();
     }
 

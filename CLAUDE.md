@@ -1305,7 +1305,7 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
   `--work-size`; scripts and runs in `~/Documents/DISC21/lv`, batches
   13-22). The user's brief: going up the knob, no step costs more than
   today's `--work-size` at that size for what it finds, a step that finds
-  nothing costs nothing, true pairs are only added, the default may change
+  nothing costs nothing (not kept: see below), true pairs are only added, the default may change
   (it did not: option C, user's choice). As built:
   - **Default**: today's 512 exactly (`analyse_plain`, `match_all`).
     `--fast` is today's `--work-size 256`, outside the knob (a coarser base
@@ -1385,6 +1385,38 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
     one at 1024: nothing saved); one grey row for all levels (kept, saved
     nothing measurable: the log's "cpu: decode" is wall per thread,
     waiting on the decode budget included, not CPU).
+  - **"A step that finds nothing costs nothing" cannot be kept; dropped
+    from the brief** (2026-11-09, after 0.84.1; `out/v60-detail-cost`: `gains.py`,
+    `gains.out`, the run scripts).
+    What holds, and what `--help` says: a step costs nothing on pictures
+    too small to reach it, and a doubling no picture reaches is no step.
+    Where pictures reach it, the cost is describing the finer level, not
+    matching it: IMGS-ALL2 at 1024 cold 3,849 CPU-s, features 2,456
+    thread-s, the finer matching step ~25 s wall of 610; DISC21 shard 5 the
+    same shape (describing ~1,000 s wall, finer step ~120 of 2,167). Each
+    level is already one octave, only keypoints finer than the level below.
+    So the only saving left is not describing a picture's level when it
+    will find nothing, and nothing known before describing it says that.
+    Tested the best evidence there is, the 512 matching itself (IMGS-ALL2,
+    512 and 1024 `--dump` from one cache): 1024 adds 6,316 true pairs (1
+    lost, 277 false). 2,295 of them (36%; `embed_tiny` 640 of 927,
+    `crop_micro` 339 of 632, `contact_sheet` 234 of 363) left no verdict at
+    all at 512, even at the dump's 3 points, so no rule reading 512's
+    verdicts can ask for them. And describing only the side a 512 verdict
+    shows magnified (where a finer level could add detail) still describes
+    16,552 of the 18,096 files that have a level (91.5%) and covers 5,599
+    of the 6,316: -8% of the cost for -11% of the finds. 552 of the gains
+    are between two files neither of which has a level (the finer step's
+    other pairs moving the claim graph). Not built.
+  - **Found on the way, fixed**: since 0.82.0 a run read a record against
+    its own keypoint cap (`cache::misshapen` with the run's `Settings`), so
+    every record a finer `--detail` made with more than the default's 600
+    keypoints was "damage" to a run at the default and its file analysed
+    again (IMGS-ALL2 at 512 after 1024: 10,519 "would not read", 10,536
+    analysed, 1,627 CPU-s). Now each record is checked against the cap on
+    its own row: 17 analysed (the uncacheable), 759 CPU-s; 512 and 1024
+    reports identical to before. Test
+    `a_record_a_finer_detail_made_is_read_by_the_default`.
 - **Audit after 0.77.0** (A-H, uncommitted; no report changes but (A)'s
   folders of small pictures):
   - **A** a cache record is read at any `--detail` of its working size

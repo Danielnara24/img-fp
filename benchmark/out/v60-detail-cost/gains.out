@@ -1,0 +1,36 @@
+true pairs 512 1,247,528  1024 1,253,843  gained 6,316  lost 1  false gained 277
+files with a finer level at 1024: 18,096 of 33,483
+gained pairs by (a finer, b finer): {(True, True): 3036, (False, False): 552, (False, True): 1352, (True, False): 1376}
+512 trace of gained pairs: {'propagated n_in>=3': 1334, 'direct n_in>=10': 1994, 'no verdict': 2295, 'direct n_in>=3': 638, 'variant n_in>=3': 35, 'variant n_in>=10': 20}
+by transform (top 25):
+  embed_tiny                   {'none': 640, 'some': 287}
+  crop_micro                   {'some': 293, 'none': 339}
+  contact_sheet                {'none': 234, 'some': 129}
+  pinch                        {'some': 318, 'none': 33}
+  swirl                        {'some': 217, 'none': 20}
+  perspective                  {'some': 163, 'none': 18}
+  wave                         {'some': 161, 'none': 9}
+  aspect_distort               {'none': 57, 'some': 93}
+  tiled_watermark              {'some': 120, 'none': 17}
+  wall_poster                  {'some': 123, 'none': 10}
+  perspective_two              {'some': 100, 'none': 13}
+  embed_small                  {'some': 102, 'none': 9}
+  pdf_page                     {'some': 92, 'none': 7}
+  magazine_spread              {'some': 96, 'none': 2}
+  redaction_bars               {'some': 83, 'none': 11}
+  barrel_distort               {'some': 80, 'none': 14}
+  blur_patch                   {'some': 78, 'none': 15}
+  slide_deck                   {'some': 86, 'none': 4}
+  picture_in_picture           {'some': 70, 'none': 12}
+  crop_off_centre              {'some': 62, 'none': 11}
+  to_heif                      {'none': 48, 'some': 21}
+  browser_window               {'none': 12, 'some': 40}
+  gamma                        {'some': 33, 'none': 16}
+  photo_of_screen              {'some': 43, 'none': 6}
+  posterize                    {'some': 40, 'none': 8}
+hint n_in>=3 magnified>1.00: 16,552 files (91.5% of finer), covers 5,599/6,316 gained pairs (a hinted side has a level)
+hint n_in>=3 magnified>0.80: 16,626 files (91.9% of finer), covers 5,634/6,316 gained pairs (a hinted side has a level)
+hint n_in>=3 magnified>0.67: 16,656 files (92.0% of finer), covers 5,634/6,316 gained pairs (a hinted side has a level)
+hint n_in>=10 magnified>1.00: 16,438 files (90.8% of finer), covers 5,194/6,316 gained pairs (a hinted side has a level)
+
+[exited with code 0]
