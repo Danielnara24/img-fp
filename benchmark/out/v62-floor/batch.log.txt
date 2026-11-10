@@ -1,0 +1,110 @@
+2026-11-10 00:47:13 cost: idle 74 C
+2026-11-10 00:50:17 cost found 1 head start 77C end 98C 782.99 1:43.47 
+2026-11-10 00:52:58 cost found 2 floor start 65C end 105C 763.13 1:41.16 
+2026-11-10 00:55:56 cost found 3 floor start 72C end 90C 880.75 1:56.99 
+2026-11-10 00:58:55 cost found 4 head start 66C end 92C 902.47 1:59.17 
+2026-11-10 01:06:07 cost all2 1 head start 67C end 83C 2710.91 6:11.13 
+2026-11-10 01:13:18 cost all2 2 floor start 70C end 85C 2706.81 6:10.73 
+2026-11-10 01:20:36 cost all2 3 floor start 75C end 85C 2746.04 6:16.61 
+2026-11-10 01:27:42 cost all2 4 head start 73C end 82C 2655.88 6:05.44 
+2026-11-10 01:42:19 disc head 0.4 3446.41 14:37.00 3884768 
+2026-11-10 01:57:03 disc floor 0.4 3476.56 14:43.69 3761796 
+2026-11-10 02:11:16 disc floor 0.7 3422.94 14:12.75 3787228 
+2026-11-10 02:25:13 disc head 0.7 3380.67 13:56.96 3761800 
+2026-11-10 02:28:37 sweep all 0.5 head
+2026-11-10 02:31:56 sweep all 0.5 floor
+2026-11-10 02:34:55 sweep all2 0.5 head
+2026-11-10 02:37:56 sweep all2 0.5 floor
+2026-11-10 02:41:16 sweep all 0.55 head
+2026-11-10 02:44:34 sweep all 0.55 floor
+2026-11-10 02:47:43 sweep all2 0.55 head
+2026-11-10 02:50:53 sweep all2 0.55 floor
+2026-11-10 02:54:19 sweep all 0.6 head
+2026-11-10 02:57:48 sweep all 0.6 floor
+2026-11-10 03:00:54 sweep all2 0.6 head
+2026-11-10 03:04:01 sweep all2 0.6 floor
+2026-11-10 03:07:27 sweep all 0.65 head
+2026-11-10 03:10:52 sweep all 0.65 floor
+2026-11-10 03:13:55 sweep all2 0.65 head
+2026-11-10 03:16:59 sweep all2 0.65 floor
+2026-11-10 03:20:30 sweep all 0.7 head
+2026-11-10 03:23:52 sweep all 0.7 floor
+2026-11-10 03:26:54 sweep all2 0.7 head
+2026-11-10 03:30:01 sweep all2 0.7 floor
+2026-11-10 03:33:23 sweep all 0.75 head
+2026-11-10 03:36:42 sweep all 0.75 floor
+2026-11-10 03:39:47 sweep all2 0.75 head
+2026-11-10 03:42:57 sweep all2 0.75 floor
+2026-11-10 03:46:21 sweep all 0.8 head
+2026-11-10 03:49:44 sweep all 0.8 floor
+2026-11-10 03:52:50 sweep all2 0.8 head
+2026-11-10 03:55:53 sweep all2 0.8 floor
+2026-11-10 03:59:16 sweep all 0.85 head
+2026-11-10 04:02:41 sweep all 0.85 floor
+2026-11-10 04:05:52 sweep all2 0.85 head
+2026-11-10 04:09:01 sweep all2 0.85 floor
+2026-11-10 04:12:32 sweep all 0.9 head
+2026-11-10 04:16:04 sweep all 0.9 floor
+2026-11-10 04:19:22 sweep all2 0.9 head
+2026-11-10 04:22:41 sweep all2 0.9 floor
+2026-11-10 04:26:15 sweep all 0.95 head
+2026-11-10 04:29:48 sweep all 0.95 floor
+2026-11-10 04:32:56 sweep all2 0.95 head
+2026-11-10 04:36:09 sweep all2 0.95 floor
+2026-11-10 04:41:19 sweep all 1.0 head
+2026-11-10 04:46:28 sweep all 1.0 floor
+2026-11-10 04:50:41 sweep all2 1.0 head
+2026-11-10 04:54:53 sweep all2 1.0 floor
+2026-11-10 04:58:11 cliff all minalignedpoints6 head
+2026-11-10 05:01:27 cliff all minalignedpoints6 floor
+2026-11-10 05:04:27 cliff all2 minalignedpoints6 head
+2026-11-10 05:07:25 cliff all2 minalignedpoints6 floor
+2026-11-10 05:10:39 cliff all minalignedpoints3 head
+2026-11-10 05:13:54 cliff all minalignedpoints3 floor
+2026-11-10 05:16:53 cliff all2 minalignedpoints3 head
+2026-11-10 05:19:53 cliff all2 minalignedpoints3 floor
+2026-11-10 05:23:11 cliff all minframeoverlap0.6 head
+2026-11-10 05:26:26 cliff all minframeoverlap0.6 floor
+2026-11-10 05:29:26 cliff all2 minframeoverlap0.6 head
+2026-11-10 05:32:21 cliff all2 minframeoverlap0.6 floor
+2026-11-10 05:35:39 cliff all minframeoverlap0.5 head
+2026-11-10 05:38:55 cliff all minframeoverlap0.5 floor
+2026-11-10 05:41:54 cliff all2 minframeoverlap0.5 head
+2026-11-10 05:44:49 cliff all2 minframeoverlap0.5 floor
+2026-11-10 05:48:08 cliff all minframeoverlap0.4 head
+2026-11-10 05:51:19 cliff all minframeoverlap0.4 floor
+2026-11-10 05:54:26 cliff all2 minframeoverlap0.4 head
+2026-11-10 05:57:26 cliff all2 minframeoverlap0.4 floor
+2026-11-10 06:00:46 cliff all minframeoverlap0.3 head
+2026-11-10 06:04:02 cliff all minframeoverlap0.3 floor
+2026-11-10 06:07:04 cliff all2 minframeoverlap0.3 head
+2026-11-10 06:10:00 cliff all2 minframeoverlap0.3 floor
+2026-11-10 06:13:14 cliff all minframeoverlap0.25 head
+2026-11-10 06:16:32 cliff all minframeoverlap0.25 floor
+2026-11-10 06:19:41 cliff all2 minframeoverlap0.25 head
+2026-11-10 06:22:50 cliff all2 minframeoverlap0.25 floor
+2026-11-10 06:26:02 cliff all minpixelcorrelation0.4 head
+2026-11-10 06:29:12 cliff all minpixelcorrelation0.4 floor
+2026-11-10 06:32:07 cliff all2 minpixelcorrelation0.4 head
+2026-11-10 06:34:59 cliff all2 minpixelcorrelation0.4 floor
+2026-11-10 06:38:11 cliff all minpixelcorrelation0.3 head
+2026-11-10 06:41:19 cliff all minpixelcorrelation0.3 floor
+2026-11-10 06:44:13 cliff all2 minpixelcorrelation0.3 head
+2026-11-10 06:47:07 cliff all2 minpixelcorrelation0.3 floor
+2026-11-10 06:50:17 cliff all minpixelcorrelation0.2 head
+2026-11-10 06:53:27 cliff all minpixelcorrelation0.2 floor
+2026-11-10 06:56:19 cliff all2 minpixelcorrelation0.2 head
+2026-11-10 06:59:12 cliff all2 minpixelcorrelation0.2 floor
+2026-11-10 07:02:19 cliff all k50 head
+2026-11-10 07:05:21 cliff all k50 floor
+2026-11-10 07:08:10 cliff all2 k50 head
+2026-11-10 07:10:54 cliff all2 k50 floor
+2026-11-10 07:13:30 cliff all k10 head
+2026-11-10 07:16:13 cliff all k10 floor
+2026-11-10 07:18:51 cliff all2 k10 head
+2026-11-10 07:21:26 cliff all2 k10 floor
+2026-11-10 07:21:52 prov dated head
+2026-11-10 07:21:58 prov dated floor
+2026-11-10 07:22:05 prov same-time head
+2026-11-10 07:22:11 prov same-time floor
+2026-11-10 07:22:11 ALL DONE

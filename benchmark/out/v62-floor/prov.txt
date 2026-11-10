@@ -1,0 +1,40 @@
+##### prov/dated-floor.score
+families: 266   DELETE: 2368
+original kept:   126 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q85: 131
+  original deleted, kept instead: reencode_q90: 3
+  original deleted, kept instead: crop90,reencode_q85: 3
+  original deleted, kept instead: stripped: 2
+  original deleted, kept instead: noise,reencode_q85: 1
+##### prov/dated-head.score
+families: 266   DELETE: 2368
+original kept:   126 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q85: 131
+  original deleted, kept instead: reencode_q90: 3
+  original deleted, kept instead: crop90,reencode_q85: 3
+  original deleted, kept instead: stripped: 2
+  original deleted, kept instead: noise,reencode_q85: 1
+##### prov/same-time-floor.score
+families: 266   DELETE: 2368
+original kept:   126 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q85: 131
+  original deleted, kept instead: reencode_q90: 3
+  original deleted, kept instead: crop90,reencode_q85: 3
+  original deleted, kept instead: stripped: 2
+  original deleted, kept instead: noise,reencode_q85: 1
+##### prov/same-time-head.score
+families: 266   DELETE: 2368
+original kept:   126 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q85: 131
+  original deleted, kept instead: reencode_q90: 3
+  original deleted, kept instead: crop90,reencode_q85: 3
+  original deleted, kept instead: stripped: 2
+  original deleted, kept instead: noise,reencode_q85: 1
