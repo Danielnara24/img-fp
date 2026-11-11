@@ -1,0 +1,22 @@
+529 true copies in reach
+== fast/disc-default-0.5.json
+  bar 0.4: true  382 false   399  uAP 66.87  recall 72.21  R@P90 53.12
+  bar 0.5: true  382 false   393  uAP 66.89  recall 72.21  R@P90 53.12
+  bar 0.6: true  362 false   164  uAP 64.88  recall 68.43  R@P90 51.98
+  bar 0.7: true  318 false    88  uAP 57.62  recall 60.11  R@P90 49.34
+  bar 0.8: true  264 false    39  uAP 48.61  recall 49.91  R@P90 45.18
+  bar 0.9: true  181 false    15  uAP 33.73  recall 34.22  R@P90 34.22
+== fast/disc-fast-0.5.json
+  bar 0.4: true  327 false   106  uAP 59.00  recall 61.81  R@P90 50.28
+  bar 0.5: true  327 false   106  uAP 59.00  recall 61.81  R@P90 50.28
+  bar 0.6: true  315 false    64  uAP 57.43  recall 59.55  R@P90 51.04
+  bar 0.7: true  279 false    50  uAP 51.16  recall 52.74  R@P90 45.94
+  bar 0.8: true  239 false    26  uAP 44.37  recall 45.18  R@P90 45.18
+  bar 0.9: true  162 false    16  uAP 30.27  recall 30.62  R@P90 30.62
+== fast/disc-fast-0.7.json
+  bar 0.4: true  279 false    50  uAP 51.16  recall 52.74  R@P90 45.94
+  bar 0.5: true  279 false    50  uAP 51.16  recall 52.74  R@P90 45.94
+  bar 0.6: true  279 false    50  uAP 51.16  recall 52.74  R@P90 45.94
+  bar 0.7: true  279 false    50  uAP 51.16  recall 52.74  R@P90 45.94
+  bar 0.8: true  239 false    26  uAP 44.37  recall 45.18  R@P90 45.18
+  bar 0.9: true  162 false    16  uAP 30.27  recall 30.62  R@P90 30.62

@@ -1,0 +1,321 @@
+diff --git a/src/analysis.rs b/src/analysis.rs
+index 7d057cc..5c817e5 100644
+--- a/src/analysis.rs
++++ b/src/analysis.rs
+@@ -225,30 +225,51 @@ pub(crate) fn analyse_plain(path: &Path, work: usize, p: &sift::Params, header:
+ pub(crate) struct Finer {
+     pub size: usize,
+     pub whole: bool,
++    /// How many times the plane is doubled before it is described, as an
++    /// analysis at working size `size` doubles a small picture
++    /// (`sift::enlargement`, up to `enlarge_below`).
++    pub up: usize,
+ }
+ 
++/// The working size the analysis's levels are counted from: every analysis
++/// is the one at this size, then its finer levels (`finer_levels`).
++pub(crate) const BASE: usize = 256;
++
++/// The detail a run describes unless asked otherwise; also the size the
++/// levels past it count their features from (`level_caps`).
++pub(crate) const DEFAULT_DETAIL: usize = 512;
++
+ /// The levels a picture shown `w` x `h` is described at beyond working size
+-/// `work`, up to `detail`: each doubling of `work` the picture reaches, and
+-/// the picture itself where it stops between two. They depend on the
+-/// picture and on `work` alone, so a run at a finer `detail` describes every
+-/// level a run at a coarser one does, and the same.
++/// `work`, up to `detail`: each doubling of `work` at which the plane an
++/// analysis at that working size would describe (the picture fitted to it,
++/// or itself where it is smaller, doubled as a small picture is) is larger
++/// than the level below's. They depend on the picture and on `work` alone,
++/// so a run at a finer `detail` describes every level a run at a coarser
++/// one does, and the same.
+ pub(crate) fn finer_levels(w: usize, h: usize, work: usize, detail: usize) -> Vec<Finer> {
+     let af = decode::area_factor(w, h);
+     let long = w.max(h);
+     let side = |g: usize| (g as f64 * af).round() as usize;
+-    // The analysis at `work` holds the picture up to its working size.
+-    let mut below = long.min(side(work));
++    let ub = sift::Params::default().upsample_below;
++    // The plane an analysis at working size `g` describes, on its long side,
++    // and how many times it is doubled.
++    let plane = |g: usize| {
++        let fit = long.min(side(g));
++        let up = sift::enlargement(fit, enlarge_below(g, ub));
++        (fit, up)
++    };
+     let mut out = Vec::new();
++    if work == 0 {
++        return out;
++    }
++    let (f0, u0) = plane(work);
++    let mut below = f0 * u0;
+     let mut g = work * 2;
+-    while work > 0 && g <= detail {
+-        if long >= side(g) {
+-            out.push(Finer { size: g, whole: false });
+-            below = side(g);
+-        } else {
+-            if long > below {
+-                out.push(Finer { size: g, whole: true });
+-            }
+-            break;
++    while g <= detail {
++        let (fit, up) = plane(g);
++        if fit * up > below {
++            out.push(Finer { size: g, whole: long < side(g), up });
++            below = fit * up;
+         }
+         g *= 2;
+     }
+@@ -271,12 +292,29 @@ pub(crate) fn features_at(size: usize, work: usize) -> usize {
+ 
+ /// `analyse` with finer levels: the analysis at `work` exactly as
+ /// `analyse_plain` makes it, and after its features each finer level's, only
+-/// keypoints finer than the level below can find, up to `features_at` its
+-/// size. The levels' ends are kept (`Features::ends`), so a run at a coarser
+-/// `detail` reads its own analysis as a prefix of this one.
++/// keypoints finer than the level below can find (`level_caps` many). The
++/// levels' ends are kept (`Features::ends`), so a run at a coarser `detail`
++/// reads its own analysis as a prefix of this one.
+ fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, header: Option<&decode::Probe>, twins: &Planes, hash: bool) -> (Item, Duration) {
+     let t0 = Instant::now();
+-    let works: Vec<usize> = std::iter::once(work).chain(ups.iter().filter(|u| !u.whole).map(|u| u.size)).chain(ups.iter().any(|u| u.whole).then_some(0)).collect();
++    // Each level's plane: the picture fitted to its size, or the picture
++    // itself, which is the working size's plane where that holds it whole.
++    let held_whole = header.is_some_and(|h| (h.w.max(h.h) as usize) <= (work as f64 * decode::area_factor(h.w as usize, h.h as usize)).round() as usize);
++    let mut works = vec![work];
++    let mut src = Vec::with_capacity(ups.len());
++    for u in ups {
++        if !u.whole {
++            works.push(u.size);
++            src.push(works.len() - 1);
++        } else if held_whole {
++            src.push(0);
++        } else {
++            if !works[1..].contains(&0) {
++                works.push(0);
++            }
++            src.push(works.iter().position(|&w| w == 0).unwrap());
++        }
++    }
+     let r = decode::decode_guarded(|| decode::decode_levels(path, &works, header, hash));
+     let decode = t0.elapsed();
+     T_DECODE.fetch_add(decode.as_micros() as u64, Ordering::Relaxed);
+@@ -286,34 +324,43 @@ fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, head
+             let base = &planes[0];
+             let (feats, thumb, grid) = twins.levels(&planes, || {
+                 let pb = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
+-                let up = sift::enlargement(base.w.max(base.h), pb.upsample_below);
+-                let finer_px: usize = planes[1..].iter().map(|g| g.w * g.h).sum();
+-                let _room = decode::describing((base.w * base.h * up * up + finer_px) as u64);
++                let base_up = sift::enlargement(base.w.max(base.h), pb.upsample_below);
++                let finer_px: usize = ups.iter().zip(&src).map(|(u, &k)| planes[k].w * planes[k].h * u.up * u.up).sum();
++                let _room = decode::describing((base.w * base.h * base_up * base_up + finer_px) as u64);
+                 let b = sift::extract(base, &pb);
+                 let thumb = timed!(4, Thumb::build(base, ((THUMB_LONG as f64 * decode::area_factor(base.w, base.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
+                 // Each finer level in the frame of the analysis at `work`,
+-                // keeping only what is finer than the level below: that
+-                // level's octave starts at scale 1.6 of its own pixels.
++                // keeping only what is finer than the level below can find:
++                // that level detects from its second layer, scale 1.6 k of
++                // its own (enlarged) pixels.
+                 let flong = b.w.max(b.h) as f32;
+-                let to_frame = |g: &decode::Gray| flong / g.w.max(g.h) as f32;
+-                let mut below = 1.0f32;
+-                let mut fit = planes[1..].iter();
+-                let whole = planes.last();
++                let k = 2f32.powf(1.0 / p.n_layers as f32);
++                let mut below = 1.0 / base_up as f32;
+                 let mut ins = Vec::with_capacity(ups.len());
+-                for (k, u) in ups.iter().enumerate() {
+-                    let g = if u.whole { whole.unwrap() } else { fit.next().unwrap() };
+-                    let s = to_frame(g);
+-                    ins.push(sift::LevelIn { plane: g, to_frame: s, tag: k as u32 + 1, cap: features_at(u.size, work).saturating_sub(b.len()), finer_than: 1.6 * below });
+-                    below = s;
++                for (t, (u, &i)) in ups.iter().zip(&src).enumerate() {
++                    let g = &planes[i];
++                    let unit = flong / g.w.max(g.h) as f32 / u.up as f32;
++                    ins.push(sift::LevelIn { plane: g, to_frame: unit, up: u.up, tag: t as u32 + 1, cap: 0, finer_than: 1.6 * k * below });
++                    below = unit;
++                }
++                let n_near = ups.iter().filter(|u| u.size <= DEFAULT_DETAIL).count();
++                let (near, far) = ins.split_at_mut(n_near);
++                for lv in near.iter_mut() {
++                    lv.cap = FEATURES;
++                }
++                let f1 = sift::extract_levels(near, b.w, b.h, p);
++                let held = b.len() + f1.len();
++                for lv in far.iter_mut() {
++                    lv.cap = features_at(ups[lv.tag as usize - 1].size, DEFAULT_DETAIL).saturating_sub(held.min(FEATURES));
+                 }
+-                let f = sift::extract_levels(&ins, b.w, b.h, p);
++                let f2 = sift::extract_levels(far, b.w, b.h, p);
+                 let mut ends = vec![b.len() as u32];
+-                for k in 0..ups.len() {
+-                    let n = f.kps.iter().filter(|kp| sift::level_tag(kp) == k as u32 + 1).count();
+-                    ends.push(ends[k] + n as u32);
++                for t in 0..ups.len() {
++                    let n = f1.kps.iter().chain(f2.kps.iter()).filter(|kp| sift::level_tag(kp) == t as u32 + 1).count();
++                    ends.push(ends[t] + n as u32);
+                 }
+-                let kps: Vec<sift::Keypoint> = b.kps.iter().chain(f.kps.iter()).copied().collect();
+-                let desc: Vec<u8> = b.desc.iter().chain(f.desc.iter()).copied().collect();
++                let kps: Vec<sift::Keypoint> = b.kps.iter().chain(f1.kps.iter()).chain(f2.kps.iter()).copied().collect();
++                let desc: Vec<u8> = b.desc.iter().chain(f1.desc.iter()).chain(f2.desc.iter()).copied().collect();
+                 let feats = Features { w: b.w, h: b.h, kps: kps.into(), desc: desc.into(), ends }.spilled();
+                 (std::sync::Arc::new(feats), std::sync::Arc::new(thumb.spilled()), grey_grid(base))
+             });
+@@ -569,4 +616,34 @@ mod tests {
+         assert!(read(&b, 512).is_some() && read(&a, 4096).is_some(), "a picture with no finer level is read at any detail");
+         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+     }
++
++    /// Scaffolding (v64): how today's 512 analysis splits by scale, against
++    /// the 256 analysis. IMGFP_PROBE = a file of paths.
++    #[test]
++    #[ignore]
++    fn probe_scale_split() {
++        let list = std::env::var("IMGFP_PROBE").unwrap();
++        let p = sift::Params { max_features: FEATURES, ..Default::default() };
++        let (mut n512, mut fine, mut n256, mut files) = (0usize, 0usize, 0usize, 0usize);
++        let mut hist = [0usize; 8];
++        for line in std::fs::read_to_string(list).unwrap().lines() {
++            let path = std::path::Path::new(line);
++            let header = decode::probe(path);
++            let a = analyse(path, 512, 512, &p, header.as_ref(), &Planes::default(), false).0;
++            let b = analyse(path, 256, 256, &p, header.as_ref(), &Planes::default(), false).0;
++            if a.feats.len() == 0 { continue; }
++            files += 1;
++            n512 += a.feats.len();
++            n256 += b.feats.len();
++            // the 512 plane's scale against the 256 plane's: 2 when both fit
++            let r = a.feats.w.max(a.feats.h) as f32 / b.feats.w.max(b.feats.h).max(1) as f32;
++            for k in a.feats.kps.iter() {
++                if k.sigma < 1.6 * r { fine += 1; }
++                let o = ((k.sigma / 1.6).log2().floor().max(0.0) as usize).min(7);
++                hist[o] += 1;
++            }
++        }
++        println!("files {files}: 512 kps {n512} ({:.0}/file), finer than the 256 plane's first octave {fine} ({:.1}%), 256 kps {n256} ({:.0}/file); 512 by octave {hist:?}",
++            n512 as f64 / files as f64, 100.0 * fine as f64 / n512 as f64, n256 as f64 / files as f64);
++    }
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index 283338e..d6262bb 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -339,7 +339,7 @@ impl Args {
+     /// The working size every picture is analysed at: the default's, or half
+     /// it under `--fast`.
+     fn work_size(&self) -> usize {
+-        if self.fast { 256 } else { 512 }
++        crate::analysis::BASE
+     }
+ 
+     /// The finest detail described: `--detail`, or the working size under
+@@ -382,8 +382,8 @@ fn aligned_points(args: &Args) -> u32 {
+ /// each a doubling of the default's (`analysis::finer_levels`).
+ fn parse_detail(s: &str) -> std::result::Result<usize, String> {
+     match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
+-        v @ (512 | 1024 | 2048 | FINEST_DETAIL) => Ok(v),
+-        _ => Err("must be 512, 1024, 2048 or 4096".into()),
++        v @ (256 | 512 | 1024 | 2048 | FINEST_DETAIL) => Ok(v),
++        _ => Err("must be 256, 512, 1024, 2048 or 4096".into()),
+     }
+ }
+ 
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 09aaaa4..5a4583a 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -574,7 +574,7 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+                 }
+                 known = k;
+                 fresh = b.iter().zip(&n_of).map(|(x, y)| y > x).collect();
+-                Some(Finer { bounds: &bounds, known: &known, fresh: &fresh })
++                Some(Finer { size, bounds: &bounds, known: &known, fresh: &fresh })
+             }
+         };
+         let dumping = top && dump.is_some();
+@@ -592,7 +592,7 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+         let (mut d, v) = retrieve_and_verify(cx, scope, &pass, &index);
+         // The second look is the first step's: asked again at a finer one
+         // it cost 66 CPU-s cached on IMGS-ALL at 1024 for recall +0.02.
+-        if step == 0 {
++        if step == 0 || (size <= crate::analysis::DEFAULT_DETAIL && scaf("IMGFP_SL512", 0) == 1) {
+             let t = second_look(cx, scope, &pass, &mut index, &d);
+             d.extend(t);
+         }
+@@ -628,7 +628,7 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+         let mut step_notes = Vec::new();
+         let c = cluster(cx, items, &policy, &all, verified, if top { dump.as_mut() } else { None }, &mut step_notes);
+         notes = step_notes;
+-        if step == 0 {
++        if step == 0 || (size <= crate::analysis::DEFAULT_DETAIL && scaf("IMGFP_VETO512", 1) == 0) {
+             base = c.iter().map(|c| c.e.ends()).collect();
+         }
+         // Each pair once among the coarser steps' claims, as the coarsest
+@@ -1075,6 +1075,11 @@ fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted,
+ /// collect is no transient worth the name.
+ const VERIFY_SLICE: usize = 1 << 16;
+ 
++/// Scaffolding (v64): a number from the environment.
++fn scaf(name: &str, default: usize) -> usize {
++    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
++}
++
+ /// A proposed pair not verified before (`retrieve_and_verify`).
+ const NEW: u8 = 4;
+ 
+@@ -1095,6 +1100,8 @@ struct Pass<'a> {
+ 
+ /// A step of the matching finer than the working size (`match_all`).
+ struct Finer<'a> {
++    /// The step's detail.
++    size: usize,
+     /// Each file's finest plane over its frame, which widens the scale a
+     /// verdict may claim (`level_bound`).
+     bounds: &'a [f32],
+@@ -1369,7 +1376,11 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+     // and without the finer second look 75 / 40 / 20 / 10 1,227 / 1,168 /
+     // 1,092 / 1,052 (96.34 / 96.32 / 96.24 / 96.20%); leaving the decided
+     // pairs out, 20 / 10 1,099 / 1,045 (96.31 / 96.27%).
+-    let k0 = if pass.finer.is_some() { args.candidates.div_ceil(15) } else { args.candidates };
++    let k0 = match &pass.finer {
++        Some(f) if f.size <= crate::analysis::DEFAULT_DETAIL => args.candidates.div_ceil(scaf("IMGFP_W512", 15)),
++        Some(_) => args.candidates.div_ceil(15),
++        None => args.candidates,
++    };
+     let mut window: Vec<(usize, usize)> = vec![(0, k0); n];
+     let mut joined = Clusters::new(n);
+     // The pairs a coarser step decided, by file.
+diff --git a/src/sift.rs b/src/sift.rs
+index 920e468..9fa7200 100644
+--- a/src/sift.rs
++++ b/src/sift.rs
+@@ -1125,7 +1125,10 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
+ /// keypoints must be finer than (where the level below it starts).
+ pub struct LevelIn<'a> {
+     pub plane: &'a Gray,
++    /// The frame's pixels to one of the level's own, after `up`.
+     pub to_frame: f32,
++    /// How many times the plane is doubled before it is described.
++    pub up: usize,
+     pub tag: u32,
+     pub cap: usize,
+     pub finer_than: f32,
+@@ -1173,8 +1176,10 @@ fn extract_levels_any(levels: &[LevelIn], w: u32, h: u32, p: &Params) -> Feature
+         if layers == 0 {
+             continue;
+         }
+-        let sig_diff = (p.sigma * p.sigma - 0.25).max(0.01).sqrt();
+-        let base = timed!(5, blur_plane(g.w, g.h, &g.px, sig_diff));
++        // Enlarged as `extract` enlarges a small picture.
++        let init_sigma = 0.5 * lv.up.max(1) as f32;
++        let sig_diff = (p.sigma * p.sigma - init_sigma * init_sigma).max(0.01).sqrt();
++        let base = timed!(5, if lv.up > 1 { blur(&upsample(g, lv.up), sig_diff) } else { blur_plane(g.w, g.h, &g.px, sig_diff) });
+         let height = base.h;
+         let (dog, layer_grads, _) = timed!(6, Octave::new(&base, &sig[..layers + 3], layers, false).run());
+         let mut cands: Vec<Cand> = Vec::new();
