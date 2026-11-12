@@ -1,0 +1,4 @@
+user: A mean 379.1 median 378.5 | B mean 373.2 median 373.1 | B/A 0.9844 (median 0.9858)  n=8
+wall: A mean 51.2 median 51.0 | B mean 51.8 median 51.8 | B/A 1.0120 (median 1.0147)  n=8
+decode: A mean 55.5 median 55.0 | B mean 59.2 median 59.5 | B/A 1.0676 (median 1.0818)  n=8
+features: A mean 190.0 median 190.0 | B mean 194.6 median 194.0 | B/A 1.0243 (median 1.0211)  n=8

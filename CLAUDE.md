@@ -1181,6 +1181,18 @@ Do not retry without new evidence:
   -17% at 0.7-0.85, cross-family and merges level); cost, DISC21 shard 0,
   IMGS-PROVENANCE and cliffs level. With the floor, the corroboration pass
   adds only 19 / 34 true pairs: the slack was all it carried.
+- **256 as the base of `--detail`, replacing `--fast`** (2026-11-10/12,
+  three builds, user's decision; `out/v64-ladder`, `out/v65-ladder`). The
+  step above the base is then the default itself. Leaning on the 256 step's
+  verdicts (windows `-k` / 3, no second look, one feature budget) it costs
+  no more than HEAD and scores level or better on IMGS-ALL / IMGS-ALL2, but
+  DISC21 shard 0 falls 66.89 -> 62.50 at 0.5 (33 true copies lost, never
+  verified) and 256 -> 512 is not contained. As a matching of its own on
+  top of the 256 scan (256 contained, one cache for every detail, DISC21
+  66.48, recall +0.4 to +0.7) it costs +42-47% cached and +21% cold. Between
+  the two, pairs the 256 step judged keep its weaker evidence (median 75
+  aligned points against 118; µAP 63.2). `--fast` stays a scan of its own
+  with records of its own.
 - Claim graph (0.54.0 survey, each rule off alone, cached IMGS-ALL at 512
   and its cliffs, IMGS3 alone): one cover test for every join, clean
   anchors included (recall -1.0, 17 perfect transforms, Segovia merges at

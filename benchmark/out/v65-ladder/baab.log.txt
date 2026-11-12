@@ -1,0 +1,8 @@
+06:04:13 1 g5 start 76C end 78C 2159.38 5:08.97  cpu: decode 410s, features 1077s
+06:14:23 2 head start 65C end 84C 2218.68 5:08.51  cpu: decode 405s, features 1095s
+06:24:31 3 head start 66C end 75C 2205.62 5:07.58  cpu: decode 418s, features 1079s
+06:34:45 4 g5 start 68C end 83C 2206.42 5:13.44  cpu: decode 405s, features 1121s
+06:44:51 5 head start 70C end 84C 2207.80 5:05.30  cpu: decode 393s, features 1085s
+06:54:58 6 g5 start 70C end 83C 2174.60 5:06.16  cpu: decode 384s, features 1091s
+07:05:11 7 g5 start 67C end 74C 2171.42 5:12.10  cpu: decode 418s, features 1101s
+07:15:38 8 head start 62C end 70C 2336.15 5:27.03  cpu: decode 390s, features 1207s

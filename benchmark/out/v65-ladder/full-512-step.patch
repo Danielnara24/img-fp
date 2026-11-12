@@ -1,0 +1,875 @@
+diff --git a/README.md b/README.md
+index 7901c48..4aee8f7 100644
+--- a/README.md
++++ b/README.md
+@@ -125,7 +125,7 @@ img-fp ~/Pictures -r -o dupes.csv
+ img-fp ~/Pictures -r --detail 1024
+ 
+ # A quicker, less thorough scan
+-img-fp ~/Pictures -r --fast
++img-fp ~/Pictures -r --detail 256
+ ```
+ 
+ By default the scan is **not** recursive. Add `-r` to include subfolders. The
+@@ -454,8 +454,7 @@ to stderr.
+ | `-x`, `--extensions <EXT>` | Extensions a folder walk treats as images, comma-separated or repeated. `-x '*'` takes every file; an entry starting with `!` is an exception, so `-x '!gif'` takes every file but GIFs. A file with no extension is taken only by those two forms | every supported format |
+ | `-o`, `--output <FILE>` | Save the report as `.txt`, `.csv` or `.json`. `-` writes it to stdout | stdout |
+ | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
+-| `--detail <PX>` | How fine a detail is looked for: `512`, `1024`, `2048` or `4096`. Each step up finds everything the step below finds, and more, mostly small pictures inside large ones and copies cut from a small part of a photo. It is slower, but only for pictures large enough to show the finer detail. At `4096` a large picture takes much memory to analyse, so fewer are analysed at once and the scan takes longer | `512` |
+-| `--fast` | Analyse every picture at less detail: about twice as fast, and finds less, mostly small and cropped copies | off |
++| `--detail <PX>` | How fine a detail is looked for: `256`, `512`, `1024`, `2048` or `4096`. Each step up finds more, mostly small pictures inside large ones and copies cut from a small part of a photo. It is slower, but only for pictures large enough to show the finer detail. `256` is about twice as fast as the default and finds less, mostly small and cropped copies. At `4096` a large picture takes much memory to analyse, so fewer are analysed at once and the scan takes longer | `512` |
+ | `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3. An image that is all of the other, only resized, needs 3 if every part of it agrees | `10` |
+ | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
+ | `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.7` |
+diff --git a/src/analysis.rs b/src/analysis.rs
+index 7d057cc..140c8d4 100644
+--- a/src/analysis.rs
++++ b/src/analysis.rs
+@@ -161,7 +161,7 @@ pub(crate) static T_DECODE: AtomicU64 = AtomicU64::new(0);
+ pub(crate) static T_SIFT: AtomicU64 = AtomicU64::new(0);
+ 
+ /// How far a small picture may be enlarged: up to `upsample_below`, but never
+-/// past the working size (512, or 256 under `--fast`), so that nothing is
++/// past the working size it is analysed at, so that nothing is
+ /// analysed above it and it bounds what every picture costs. It used to
+ /// enlarge anything under 256 pixels to between 257 and 512 whatever the
+ /// working size said (a 120-pixel thumbnail cost what a 480-pixel photograph
+@@ -180,7 +180,10 @@ pub(crate) fn enlarge_below(work: usize, upsample_below: usize) -> usize {
+ /// at `work` alone.
+ pub(crate) fn analyse(path: &Path, work: usize, detail: usize, p: &sift::Params, header: Option<&decode::Probe>, planes: &Planes, hash: bool) -> (Item, Duration) {
+     let ups = header.map(|h| finer_levels(h.w as usize, h.h as usize, work, detail)).unwrap_or_default();
+-    if ups.is_empty() {
++    // From the base every analysis is the one made of levels, whatever the
++    // detail: a run that stops at the base makes the base as a finer run
++    // does, so each reads the other's records.
++    if ups.is_empty() && work != BASE {
+         return analyse_plain(path, work, p, header, planes, hash);
+     }
+     analyse_finer(path, work, &ups, p, header, planes, hash)
+@@ -225,30 +228,51 @@ pub(crate) fn analyse_plain(path: &Path, work: usize, p: &sift::Params, header:
+ pub(crate) struct Finer {
+     pub size: usize,
+     pub whole: bool,
++    /// How many times the plane is doubled before it is described, as an
++    /// analysis at working size `size` doubles a small picture
++    /// (`sift::enlargement`, up to `enlarge_below`).
++    pub up: usize,
+ }
+ 
++/// The working size the analysis's levels are counted from: every analysis
++/// is the one at this size, then its finer levels (`finer_levels`).
++pub(crate) const BASE: usize = 256;
++
++/// The detail a run describes unless asked otherwise; also the size the
++/// levels past it count their features from (`level_caps`).
++pub(crate) const DEFAULT_DETAIL: usize = 512;
++
+ /// The levels a picture shown `w` x `h` is described at beyond working size
+-/// `work`, up to `detail`: each doubling of `work` the picture reaches, and
+-/// the picture itself where it stops between two. They depend on the
+-/// picture and on `work` alone, so a run at a finer `detail` describes every
+-/// level a run at a coarser one does, and the same.
++/// `work`, up to `detail`: each doubling of `work` at which the plane an
++/// analysis at that working size would describe (the picture fitted to it,
++/// or itself where it is smaller, doubled as a small picture is) is larger
++/// than the level below's. They depend on the picture and on `work` alone,
++/// so a run at a finer `detail` describes every level a run at a coarser
++/// one does, and the same.
+ pub(crate) fn finer_levels(w: usize, h: usize, work: usize, detail: usize) -> Vec<Finer> {
+     let af = decode::area_factor(w, h);
+     let long = w.max(h);
+     let side = |g: usize| (g as f64 * af).round() as usize;
+-    // The analysis at `work` holds the picture up to its working size.
+-    let mut below = long.min(side(work));
++    let ub = sift::Params::default().upsample_below;
++    // The plane an analysis at working size `g` describes, on its long side,
++    // and how many times it is doubled.
++    let plane = |g: usize| {
++        let fit = long.min(side(g));
++        let up = sift::enlargement(fit, enlarge_below(g, ub));
++        (fit, up)
++    };
+     let mut out = Vec::new();
++    if work == 0 {
++        return out;
++    }
++    let (f0, u0) = plane(work);
++    let mut below = f0 * u0;
+     let mut g = work * 2;
+-    while work > 0 && g <= detail {
+-        if long >= side(g) {
+-            out.push(Finer { size: g, whole: false });
+-            below = side(g);
+-        } else {
+-            if long > below {
+-                out.push(Finer { size: g, whole: true });
+-            }
+-            break;
++    while g <= detail {
++        let (fit, up) = plane(g);
++        if fit * up > below {
++            out.push(Finer { size: g, whole: long < side(g), up });
++            below = fit * up;
+         }
+         g *= 2;
+     }
+@@ -269,51 +293,104 @@ pub(crate) fn features_at(size: usize, work: usize) -> usize {
+     (n.round() as usize).min(MOST_KEYPOINTS - 1)
+ }
+ 
++/// The most features an analysis up to `detail` holds: the base's, and from
++/// the default detail on that level's own and what `features_at` adds past
++/// it.
++pub(crate) fn most_features(detail: usize) -> usize {
++    if detail < DEFAULT_DETAIL {
++        return FEATURES;
++    }
++    (FEATURES + features_at(detail, DEFAULT_DETAIL)).min(MOST_KEYPOINTS - 1)
++}
++
+ /// `analyse` with finer levels: the analysis at `work` exactly as
+ /// `analyse_plain` makes it, and after its features each finer level's, only
+-/// keypoints finer than the level below can find, up to `features_at` its
+-/// size. The levels' ends are kept (`Features::ends`), so a run at a coarser
+-/// `detail` reads its own analysis as a prefix of this one.
++/// keypoints finer than the level below can find (`level_caps` many). The
++/// levels' ends are kept (`Features::ends`), so a run at a coarser `detail`
++/// reads its own analysis as a prefix of this one.
+ fn analyse_finer(path: &Path, work: usize, ups: &[Finer], p: &sift::Params, header: Option<&decode::Probe>, twins: &Planes, hash: bool) -> (Item, Duration) {
+     let t0 = Instant::now();
+-    let works: Vec<usize> = std::iter::once(work).chain(ups.iter().filter(|u| !u.whole).map(|u| u.size)).chain(ups.iter().any(|u| u.whole).then_some(0)).collect();
+-    let r = decode::decode_guarded(|| decode::decode_levels(path, &works, header, hash));
++    // Each level's plane: the picture fitted to its size, or the picture
++    // itself, which is the working size's plane where that holds it whole.
++    // The picture is reduced once, to the default detail's plane; the
++    // working size's plane is that one reduced again, at any detail.
++    let held_whole = header.is_some_and(|h| (h.w.max(h.h) as usize) <= (DEFAULT_DETAIL as f64 * decode::area_factor(h.w as usize, h.h as usize)).round() as usize);
++    let mut works = vec![DEFAULT_DETAIL];
++    let mut src = Vec::with_capacity(ups.len());
++    for u in ups {
++        if u.size <= DEFAULT_DETAIL {
++            src.push(0);
++        } else if !u.whole {
++            works.push(u.size);
++            src.push(works.len() - 1);
++        } else if held_whole {
++            src.push(0);
++        } else {
++            if !works[1..].contains(&0) {
++                works.push(0);
++            }
++            src.push(works.iter().position(|&w| w == 0).unwrap());
++        }
++    }
++    // One plane is the plain reduction's, which reads a row once.
++    let r = decode::decode_guarded(|| {
++        if works.len() == 1 {
++            decode::decode_with(path, works[0], header, hash).map(|d| (vec![d.work], d.size, d.damaged, d.traits, d.made_by, d.hash))
++        } else {
++            decode::decode_levels(path, &works, header, hash)
++        }
++    });
+     let decode = t0.elapsed();
+     T_DECODE.fetch_add(decode.as_micros() as u64, Ordering::Relaxed);
+     let item = match r {
+         Ok((planes, size, damaged, traits, made_by, hash)) => {
+             let t1 = Instant::now();
+-            let base = &planes[0];
++            let base = &decode::fitted(&planes[0], work);
+             let (feats, thumb, grid) = twins.levels(&planes, || {
+                 let pb = sift::Params { upsample_below: enlarge_below(work, p.upsample_below), ..*p };
+-                let up = sift::enlargement(base.w.max(base.h), pb.upsample_below);
+-                let finer_px: usize = planes[1..].iter().map(|g| g.w * g.h).sum();
+-                let _room = decode::describing((base.w * base.h * up * up + finer_px) as u64);
++                let base_up = sift::enlargement(base.w.max(base.h), pb.upsample_below);
++                let finer_px: usize = ups.iter().zip(&src).map(|(u, &k)| planes[k].w * planes[k].h * u.up * u.up).sum();
++                let _room = decode::describing((base.w * base.h * base_up * base_up + finer_px) as u64);
+                 let b = sift::extract(base, &pb);
+                 let thumb = timed!(4, Thumb::build(base, ((THUMB_LONG as f64 * decode::area_factor(base.w, base.h)).round() as usize).min(THUMB_LONG * THUMB_MAX_SIDES)));
+                 // Each finer level in the frame of the analysis at `work`,
+-                // keeping only what is finer than the level below: that
+-                // level's octave starts at scale 1.6 of its own pixels.
++                // keeping only what is finer than the level below can find:
++                // that level detects from its second layer, scale 1.6 k of
++                // its own (enlarged) pixels.
+                 let flong = b.w.max(b.h) as f32;
+-                let to_frame = |g: &decode::Gray| flong / g.w.max(g.h) as f32;
+-                let mut below = 1.0f32;
+-                let mut fit = planes[1..].iter();
+-                let whole = planes.last();
++                let k = 2f32.powf(1.0 / p.n_layers as f32);
++                let mut below = 1.0 / base_up as f32;
+                 let mut ins = Vec::with_capacity(ups.len());
+-                for (k, u) in ups.iter().enumerate() {
+-                    let g = if u.whole { whole.unwrap() } else { fit.next().unwrap() };
+-                    let s = to_frame(g);
+-                    ins.push(sift::LevelIn { plane: g, to_frame: s, tag: k as u32 + 1, cap: features_at(u.size, work).saturating_sub(b.len()), finer_than: 1.6 * below });
+-                    below = s;
++                for (t, (u, &i)) in ups.iter().zip(&src).enumerate() {
++                    let g = &planes[i];
++                    let unit = flong / g.w.max(g.h) as f32 / u.up as f32;
++                    ins.push(sift::LevelIn { plane: g, to_frame: unit, up: u.up, tag: t as u32 + 1, cap: 0, finer_than: 1.6 * k * below });
++                    below = unit;
++                }
++                let n_near = ups.iter().filter(|u| u.size <= DEFAULT_DETAIL).count();
++                let (near, far) = ins.split_at_mut(n_near);
++                // The default detail's level holds up to `FEATURES` of its
++                // own, as the base does: sharing the base's `FEATURES` with
++                // it, a picture whose base was full had no finer feature at
++                // all.
++                for lv in near.iter_mut() {
++                    lv.cap = FEATURES;
++                }
++                let f1 = sift::extract_levels(near, b.w, b.h, p);
++                let held = b.len() + f1.len();
++                for lv in far.iter_mut() {
++                    // Past it a level adds what it adds to an analysis at
++                    // the default detail's size, which holds `FEATURES`.
++                    lv.cap = features_at(ups[lv.tag as usize - 1].size, DEFAULT_DETAIL).saturating_sub(held.min(FEATURES)).min((MOST_KEYPOINTS - 1).saturating_sub(held));
+                 }
+-                let f = sift::extract_levels(&ins, b.w, b.h, p);
++                let f2 = sift::extract_levels(far, b.w, b.h, p);
+                 let mut ends = vec![b.len() as u32];
+-                for k in 0..ups.len() {
+-                    let n = f.kps.iter().filter(|kp| sift::level_tag(kp) == k as u32 + 1).count();
+-                    ends.push(ends[k] + n as u32);
++                for t in 0..ups.len() {
++                    let n = f1.kps.iter().chain(f2.kps.iter()).filter(|kp| sift::level_tag(kp) == t as u32 + 1).count();
++                    ends.push(ends[t] + n as u32);
+                 }
+-                let kps: Vec<sift::Keypoint> = b.kps.iter().chain(f.kps.iter()).copied().collect();
+-                let desc: Vec<u8> = b.desc.iter().chain(f.desc.iter()).copied().collect();
++                let kps: Vec<sift::Keypoint> = b.kps.iter().chain(f1.kps.iter()).chain(f2.kps.iter()).copied().collect();
++                let desc: Vec<u8> = b.desc.iter().chain(f1.desc.iter()).chain(f2.desc.iter()).copied().collect();
+                 let feats = Features { w: b.w, h: b.h, kps: kps.into(), desc: desc.into(), ends }.spilled();
+                 (std::sync::Arc::new(feats), std::sync::Arc::new(thumb.spilled()), grey_grid(base))
+             });
+@@ -508,7 +585,7 @@ mod tests {
+         assert_eq!(finer_levels(700, 525, 512, 2048), vec![whole(1024)]);
+         assert_eq!(finer_levels(400, 300, 512, 2048), vec![], "held whole at 512");
+         assert_eq!(finer_levels(4000, 3000, 512, 512), vec![], "the default");
+-        assert_eq!(finer_levels(4000, 3000, 256, 256), vec![], "--fast");
++        assert_eq!(finer_levels(4000, 3000, 256, 256), vec![], "the base alone");
+         for (w, h) in [(4000, 3000), (1500, 1000), (700, 525), (5000, 900), (513, 600), (2048, 1536)] {
+             let all = finer_levels(w, h, 512, 2048);
+             assert!(all.starts_with(&finer_levels(w, h, 512, 1024)), "{w}x{h}");
+diff --git a/src/cache.rs b/src/cache.rs
+index c32649f..3b3d76c 100644
+--- a/src/cache.rs
++++ b/src/cache.rs
+@@ -41,10 +41,12 @@
+ //! when what nothing reads is a quarter of them.
+ //!
+ //! **The settings are a record's.** A run reads the records made at its own
+-//! working size and thumbnail and carries the rest, so a run with `--fast`
+-//! costs the default's records nothing. A `--detail` is not a setting of its
+-//! own: a record at any detail is read by a run at another as far as that run
+-//! goes (`Settings`), and the finer replaces the coarser.
++//! working size and thumbnail and carries the rest. A run at `--detail 256`
++//! keeps records of its own (its plane is the picture reduced straight to
++//! 256), so it costs the finer runs' records nothing. Past that a `--detail`
++//! is not a setting of its own: a record at any detail from the default up is
++//! read by a run at another as far as that run goes (`Settings`), and the
++//! finer replaces the coarser.
+ //!
+ //! **What a record costs.** An analysis is 128 bytes of descriptor and 16 of
+ //! keypoint for each of up to 600 keypoints, plus a thumbnail of up to
+diff --git a/src/decode/mod.rs b/src/decode/mod.rs
+index b4b8df4..89db54e 100644
+--- a/src/decode/mod.rs
++++ b/src/decode/mod.rs
+@@ -48,7 +48,7 @@ mod tests;
+ pub use budget::describing;
+ pub use jpeg::same_jpeg_coding;
+ pub use measure::{chroma_distance, Chroma, Traits};
+-pub use reduce::{area_factor, resize_area, working_size};
++pub use reduce::{area_factor, fitted, resize_area, working_size};
+ pub use shown::fit_preview;
+ pub use sniff::{is_a_picture, may_be_image, Kind, EXTENSIONS};
+ 
+diff --git a/src/decode/reduce.rs b/src/decode/reduce.rs
+index 6adff1f..246fd78 100644
+--- a/src/decode/reduce.rs
++++ b/src/decode/reduce.rs
+@@ -813,6 +813,15 @@ unsafe fn grey_eight<const CH: usize, const ALPHA: bool>(src: &[u8], out: &mut [
+     }
+ }
+ 
++/// `g` as a reduction to working size `work` would hold it: itself where it
++/// fits, else area-resampled to that size.
++pub fn fitted(g: &Gray, work: usize) -> Gray {
++    match Fit::size(g.w, g.h, work) {
++        Some((tw, th)) => resize_area(g, tw, th),
++        None => Gray { w: g.w, h: g.h, px: g.px.clone() },
++    }
++}
++
+ /// Area-resample so the long side is exactly `work` (never upscales).
+ #[cfg(test)]
+ pub(super) fn fit_to(g: Gray, work: usize) -> Gray {
+diff --git a/src/gui/options.rs b/src/gui/options.rs
+index e407be9..3b4b1ee 100644
+--- a/src/gui/options.rs
++++ b/src/gui/options.rs
+@@ -94,8 +94,8 @@ const CHECK: Kind = Kind::Check { inverted: false };
+ // nothing), threads to this machine's cores (the scan runs no more: see
+ // `img_fp::threads`). They were 2,000, 200 and 1,024, from nothing.
+ 
+-/// `--detail`, and `--fast` below it: one choice, passed by hand
+-/// (`Settings::argv`), since Fast is a flag of its own.
++/// `--detail`: one choice, passed by hand (`Settings::argv`), since the
++/// default passes nothing.
+ pub static DETAIL: Opt = Opt {
+     default: Some("Normal"),
+     tip: Some("How fine a detail is looked for. Each step up finds everything the step below finds, and more, mostly small \
+@@ -104,7 +104,7 @@ pub static DETAIL: Opt = Opt {
+     ..plain(
+         "detail",
+         None,
+-        Kind::Choice(&[("Fast", Some("fast"), "Fast"), ("Normal", None, "Normal"), ("Fine", Some("1024"), "Fine"), ("Finer", Some("2048"), "Finer"), ("Finest", Some("4096"), "Finest")]),
++        Kind::Choice(&[("Fast", Some("256"), "Fast"), ("Normal", None, "Normal"), ("Fine", Some("1024"), "Fine"), ("Finer", Some("2048"), "Finer"), ("Finest", Some("4096"), "Finest")]),
+         l::DETAIL,
+     )
+ };
+@@ -281,7 +281,7 @@ mod tests {
+ 
+     /// img-fp's options the window passes by hand (`Settings::argv`): the paths,
+     /// and what the switches above stand for.
+-    const BY_HAND: [&str; 11] = ["roots", "exclude", "output", "format", "no_cache", "cache", "clear_cache", "prune_cache", "log_file", "detail", "fast"];
++    const BY_HAND: [&str; 10] = ["roots", "exclude", "output", "format", "no_cache", "cache", "clear_cache", "prune_cache", "log_file", "detail"];
+ 
+     /// img-fp's options the window never passes: another kind of run, an output
+     /// it has no place for, or what its own worker decides.
+diff --git a/src/gui/settings.rs b/src/gui/settings.rs
+index 5ffb40e..3434e3e 100644
+--- a/src/gui/settings.rs
++++ b/src/gui/settings.rs
+@@ -92,7 +92,7 @@ impl From<Saved> for Settings {
+ }
+ 
+ /// The Detail choice a window before 0.77.0's Work size stands for: Fast for
+-/// 256 and below (`--fast` is 256), the default for up to 512, then the
++/// 256 and below, the default for up to 512, then the
+ /// finest step no coarser than the size asked, and Finest for 0 (full size).
+ fn detail_for_work_size(px: u64) -> Option<&'static str> {
+     match px {
+@@ -197,11 +197,9 @@ impl Settings {
+         for (opt, v) in o::ALL.iter().zip(&self.values) {
+             a.extend(opt.command_line(v).into_iter().map(OsString::from));
+         }
+-        // How fine a detail: a flag of its own below the default.
+-        match o::DETAIL.choice_flag(self.get(&o::DETAIL)) {
+-            Some("fast") => a.push("--fast".into()),
+-            Some(px) => a.extend(["--detail".into(), px.into()]),
+-            None => {}
++        // How fine a detail: nothing at the default.
++        if let Some(px) = o::DETAIL.choice_flag(self.get(&o::DETAIL)) {
++            a.extend(["--detail".into(), px.into()]);
+         }
+         // The window's own switches, each with the path it stands for.
+         let mut flag = |f: &str, v: &str| {
+diff --git a/src/lib.rs b/src/lib.rs
+index 283338e..8e66a91 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -199,23 +199,19 @@ struct Args {
+     #[arg(short = 't', long, value_name = "N", default_value_t = 0)]
+     threads: usize,
+ 
+-    /// How fine a detail is looked for: 512, 1024, 2048 or 4096.
++    /// How fine a detail is looked for: 256, 512, 1024, 2048 or 4096.
+     ///
+-    /// Each step up finds everything the step below finds, and more, mostly
+-    /// small pictures inside large ones, such as a photo on a slide or in a
+-    /// collage, and copies cut from a small part of a photo. It is slower,
+-    /// but only for pictures large enough to show finer detail: on pictures
+-    /// smaller than the step, a step up costs nothing and finds nothing new.
++    /// Each step up finds more, mostly small pictures inside large ones,
++    /// such as a photo on a slide or in a collage, and copies cut from a
++    /// small part of a photo. It is slower, but only for pictures large
++    /// enough to show finer detail: on pictures smaller than the step, a
++    /// step up costs nothing and finds nothing new. 256 is about twice as
++    /// fast as the default and finds less, mostly small and cropped copies.
+     /// At 4096 a large picture takes much memory to analyse, so fewer are
+     /// analysed at once and the scan takes longer.
+     #[arg(long, value_name = "PX", default_value_t = 512, value_parser = parse_detail)]
+     detail: usize,
+ 
+-    /// Analyse every picture at less detail: about twice as fast, and finds
+-    /// less, mostly small and cropped copies.
+-    #[arg(long, conflicts_with = "detail")]
+-    fast: bool,
+-
+     /// Candidate matches checked per image.
+     #[arg(short = 'k', long, value_name = "N", default_value_t = 150, value_parser = parse_candidates, hide = true)]
+     candidates: usize,
+@@ -289,8 +285,8 @@ struct Args {
+     clear_cache: bool,
+ 
+     /// Drop cached entries this scan did not use: images it did not find,
+-    /// images that have gone, analyses made with `--fast` when this scan is
+-    /// without it, or the other way round, and analyses made by other
++    /// images that have gone, analyses made at `--detail 256` when this scan
++    /// is finer, or the other way round, and analyses made by other
+     /// versions.
+     ///
+     /// Skipped when the scan could not read everything it was given.
+@@ -336,16 +332,15 @@ struct Args {
+ }
+ 
+ impl Args {
+-    /// The working size every picture is analysed at: the default's, or half
+-    /// it under `--fast`.
++    /// The working size every picture is analysed at, which every detail is
++    /// counted from (`analysis::BASE`).
+     fn work_size(&self) -> usize {
+-        if self.fast { 256 } else { 512 }
++        crate::analysis::BASE
+     }
+ 
+-    /// The finest detail described: `--detail`, or the working size under
+-    /// `--fast`, which describes nothing finer.
++    /// The finest detail described: `--detail`.
+     fn detail(&self) -> usize {
+-        if self.fast { self.work_size() } else { self.detail.max(self.work_size()) }
++        self.detail.max(self.work_size())
+     }
+ }
+ 
+@@ -378,12 +373,12 @@ fn aligned_points(args: &Args) -> u32 {
+     args.min_aligned_points.max(MIN_ALIGNED_POINTS)
+ }
+ 
+-/// `--detail`: a working size the analysis can describe finer levels at,
+-/// each a doubling of the default's (`analysis::finer_levels`).
++/// `--detail`: the working size, or one the analysis describes finer
++/// levels at, each a doubling of it (`analysis::finer_levels`).
+ fn parse_detail(s: &str) -> std::result::Result<usize, String> {
+     match s.trim().parse::<usize>().map_err(|e| format!("{e}"))? {
+-        v @ (512 | 1024 | 2048 | FINEST_DETAIL) => Ok(v),
+-        _ => Err("must be 512, 1024, 2048 or 4096".into()),
++        v @ (256 | 512 | 1024 | 2048 | FINEST_DETAIL) => Ok(v),
++        _ => Err("must be 256, 512, 1024, 2048 or 4096".into()),
+     }
+ }
+ 
+@@ -1275,26 +1270,25 @@ mod tests {
+         let ok = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).is_ok();
+         assert!(ok(&[]));
+         for good in [&["--min-frame-overlap", "0"][..], &["--min-frame-overlap", "1"], &["--min-pixel-correlation", "0.5"],
+-            &["-k", "1"], &["--min-aligned-points", "0"], &["--min-aligned-points", "2"], &["--detail", "1024"], &["--detail", "2048"], &["--detail", "4096"], &["--fast"]] {
++            &["-k", "1"], &["--min-aligned-points", "0"], &["--min-aligned-points", "2"], &["--detail", "256"], &["--detail", "1024"], &["--detail", "2048"], &["--detail", "4096"]] {
+             assert!(ok(good), "{good:?}");
+         }
+         for bad in [&["--min-frame-overlap", "7"][..], &["--min-frame-overlap", "NaN"], &["--min-pixel-correlation=-3"],
+-            &["--min-pixel-correlation", "1.01"], &["-k", "0"], &["--detail", "640"], &["--detail", "0"], &["--detail", "8192"], &["--work-size", "512"],
+-            &["--fast", "--detail", "1024"]] {
++            &["--min-pixel-correlation", "1.01"], &["-k", "0"], &["--detail", "640"], &["--detail", "0"], &["--detail", "8192"], &["--work-size", "512"], &["--fast"]] {
+             assert!(!ok(bad), "{bad:?}");
+         }
+     }
+ 
+-    /// `--fast` analyses at half the default's size and describes nothing
+-    /// finer; `--detail` describes up to its size over the default's.
++    /// Every detail is counted from the one working size; `--detail`
++    /// describes up to its size over it.
+     #[test]
+-    fn detail_and_fast_set_the_analysis() {
++    fn detail_sets_the_analysis() {
+         let args = |extra: &[&str]| Args::try_parse_from(["img-fp"].iter().chain(extra).chain(&["."])).unwrap();
+         let at = |a: Args| (a.work_size(), a.detail());
+-        assert_eq!(at(args(&[])), (512, 512));
+-        assert_eq!(at(args(&["--detail", "2048"])), (512, 2048));
+-        assert_eq!(at(args(&["--detail", "4096"])), (512, 4096));
+-        assert_eq!(at(args(&["--fast"])), (256, 256));
++        assert_eq!(at(args(&[])), (256, 512));
++        assert_eq!(at(args(&["--detail", "2048"])), (256, 2048));
++        assert_eq!(at(args(&["--detail", "4096"])), (256, 4096));
++        assert_eq!(at(args(&["--detail", "256"])), (256, 256));
+     }
+ 
+     /// `--last` rewrites a kept scan: it takes the options that say how,
+@@ -1309,7 +1303,7 @@ mod tests {
+             assert!(ok(good), "{good:?}");
+         }
+         for bad in [&["."][..], &["--from-file", "f"], &["--against", "/a"], &["-r"], &["-e", "/x"], &["--follow-symlinks"], &["--hidden"],
+-            &["-x", "png"], &["--detail", "1024"], &["--fast"], &["-k", "20"], &["--min-aligned-points", "5"], &["--min-frame-overlap", "0.5"],
++            &["-x", "png"], &["--detail", "1024"], &["--detail", "256"], &["-k", "20"], &["--min-aligned-points", "5"], &["--min-frame-overlap", "0.5"],
+             &["--min-pixel-correlation", "0.5"], &["--skip-mirrored"], &["--dump", "d.csv"], &["--no-cache"], &["--clear-cache"],
+             &["--prune-cache"], &["--no-last"]] {
+             let e = parse(["img-fp", "--last"].iter().chain(bad)).err().unwrap_or_else(|| panic!("{bad:?} accepted"));
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 09aaaa4..2223132 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -312,7 +312,7 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
+         "Settings -> Detail: {}, Candidates: {}, Min aligned points: {}, Min frame overlap: {}, \
+          Min pixel correlation: {}, Mirrored and inverted: {}, Threads: {}, Recursive: {}, Follow symlinks: {}, \
+          Hidden folders: {}",
+-        if args.fast { "fast".to_string() } else { args.detail().to_string() },
++        args.detail(),
+         args.candidates,
+         args.min_aligned_points,
+         args.min_frame_overlap,
+@@ -561,9 +561,11 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+         let bounds: Vec<f32>;
+         let known: HashMap<(u32, u32, bool, bool), Verdict>;
+         let fresh: Vec<bool>;
++        // The default detail above the base is a matching of its own, as the
++        // base is: nothing the base found is taken as decided.
++        let pass_authority = step > 0 && size == crate::analysis::DEFAULT_DETAIL;
+         let finer = match &below {
+-            None => None,
+-            Some(b) => {
++            Some(b) if !pass_authority => {
+                 bounds = items.iter().map(|it| level_bound(it, work, size)).collect();
+                 // A pair the second look met from both ends under one
+                 // variant has two verdicts; the first met stands, as in the
+@@ -574,29 +576,33 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+                 }
+                 known = k;
+                 fresh = b.iter().zip(&n_of).map(|(x, y)| y > x).collect();
+-                Some(Finer { bounds: &bounds, known: &known, fresh: &fresh })
++                Some(Finer { size, authority: false, bounds: &bounds, known: &known, fresh: &fresh })
+             }
++            _ => None,
+         };
+         let dumping = top && dump.is_some();
+         let pass = Pass { items: &items_r, matched, policy: &policy, gate: if dumping { dump_gate } else { gate }, dumping, finer };
+-        // A finer step quantises its new descriptors with the first step's
+-        // vocabulary: trained again on every step's, it took 42 s of the
+-        // finer step's 96 on IMGS-ALL at 1024, for recall 96.37 -> 96.42%.
++        // The base trains a vocabulary on its own descriptors, so its
++        // matching is the one a run that stops there makes, and such a
++        // run's pairs are this one's. The default detail trains another on
++        // its own; a step past it quantises its new descriptors with that
++        // one (trained again at 1024, it took 42 s of that step's 96 on
++        // IMGS-ALL for recall 96.37 -> 96.42%).
+         let mut index = match (carried.take(), &below) {
+-            (Some((vocab, lists)), Some(b)) => index_adding(cx, scope, &pass, vocab, lists, b)?,
++            (Some((vocab, lists)), Some(b)) if !pass_authority => index_adding(cx, scope, &pass, vocab, lists, b)?,
+             _ => index_all(cx, scope, &pass)?,
+         };
+-        if !top {
++        if sizes.get(step + 1).is_some_and(|&s| s > crate::analysis::DEFAULT_DETAIL) {
+             index.keep_vocab();
+         }
+         let (mut d, v) = retrieve_and_verify(cx, scope, &pass, &index);
+         // The second look is the first step's: asked again at a finer one
+         // it cost 66 CPU-s cached on IMGS-ALL at 1024 for recall +0.02.
+-        if step == 0 {
++        if step == 0 || pass_authority {
+             let t = second_look(cx, scope, &pass, &mut index, &d);
+             d.extend(t);
+         }
+-        if !top {
++        if sizes.get(step + 1).is_some_and(|&s| s > crate::analysis::DEFAULT_DETAIL) {
+             carried = Some(index.into_parts());
+         } else {
+             drop(index);
+@@ -607,6 +613,35 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+         // graph is the default's.
+         if step == 0 {
+             all = d;
++        } else if pass_authority {
++            // This step's verdicts, and the coarser step's between files
++            // these join (and its second look's, which this step has none
++            // of): what its claim graph is made from.
++            // The clusters this step's own verdicts make under the claim
++            // graph's rules: a lone link between two is no join.
++            let j = {
++                let own: Vec<Edge> = claims::unique_pairs(anchors(&d, &policy));
++                let mut clean: Vec<bool> = own.iter().map(|e| policy.standing(&e.v) == Standing::Clean).collect();
++                claims::demote_shared_parts(&own, &mut clean, items.len(), policy.min_frame_overlap());
++                claims::demote_bridges(&own, &mut clean, items.len());
++                claims::admit(own, &clean, items.len()).0
++            };
++            // Between files this step has not joined, a coarser verdict is
++            // an anchor and no more: it adds a file, and joins two clusters
++            // only under the cover test. The second look's are the coarser
++            // step's alone, and stand as they are.
++            let coarser: Vec<Edge> = std::mem::take(&mut all)
++                .into_iter()
++                .map(|mut e| {
++                    let trusted = j.id(e.a()) == j.id(e.b()) || e.v.variant != Variant::SAME;
++                    if !trusted && policy.standing(&e.v) == Standing::Clean {
++                        e.v.blk_min = e.v.blk_min.min(verify::CLEAN_WORST_BLOCK - 0.001);
++                    }
++                    e
++                })
++                .collect();
++            all = d;
++            merge_best(&mut all, coarser, &policy);
+         } else {
+             merge_best(&mut all, d, &policy);
+         }
+@@ -626,10 +661,13 @@ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], mat
+             stage!(cx, "released the index and the descriptors");
+         }
+         let mut step_notes = Vec::new();
+-        let c = cluster(cx, items, &policy, &all, verified, if top { dump.as_mut() } else { None }, &mut step_notes);
++        let carried: &[Claim] = if pass_authority { &last_claims } else { &[] };
++        let c = cluster(cx, items, &policy, &all, verified, if top { dump.as_mut() } else { None }, &mut step_notes, carried);
+         notes = step_notes;
+-        if step == 0 {
+-            base = c.iter().map(|c| c.e.ends()).collect();
++        // What the base and the default detail state is stated at any
++        // detail; a step past them joins no two families these hold apart.
++        if step == 0 || pass_authority {
++            base.extend(c.iter().map(|c| c.e.ends()));
+         }
+         // Each pair once among the coarser steps' claims, as the coarsest
+         // stated it: every step states nearly every pair the one before did,
+@@ -775,7 +813,7 @@ fn analyse_all(
+     let n = files.len();
+     let settings = cache::Settings {
+         work_size: args.work_size() as u32,
+-        features: crate::analysis::features_at(args.detail().max(args.work_size()), args.work_size()) as u32,
++        features: crate::analysis::most_features(args.detail().max(args.work_size())) as u32,
+         thumb: THUMB_LONG as u32,
+     };
+     // The cache is keyed on the paths themselves, not on their printable
+@@ -1075,6 +1113,14 @@ fn tell_problems(files: &[PathBuf], items: &[Item], wanted: &extensions::Wanted,
+ /// collect is no transient worth the name.
+ const VERIFY_SLICE: usize = 1 << 16;
+ 
++/// At the default detail's step above the base, how many of a file's best
++/// candidates are verified with
++/// its own features though the base holds a verdict for them: the pairs
++/// its claim graph trusts the base's verdicts between. Cached IMGS-ALL2,
++/// 3 against 10: 1,252,562 true pairs against 1,254,028, for 815 CPU-s
++/// against 917.
++const SKELETON: usize = 3;
++
+ /// A proposed pair not verified before (`retrieve_and_verify`).
+ const NEW: u8 = 4;
+ 
+@@ -1095,6 +1141,12 @@ struct Pass<'a> {
+ 
+ /// A step of the matching finer than the working size (`match_all`).
+ struct Finer<'a> {
++    /// The step's detail.
++    size: usize,
++    /// Whether this is the default detail's step above a coarser one: it
++    /// takes a coarser verdict on trust only between files its own clean
++    /// verdicts have joined.
++    authority: bool,
+     /// Each file's finest plane over its frame, which widens the scale a
+     /// verdict may claim (`level_bound`).
+     bounds: &'a [f32],
+@@ -1116,15 +1168,28 @@ impl Pass<'_> {
+     /// as it is). The edge, from the lower index to the higher, when it
+     /// stands at all (`Standing::Corroborating`) or `--dump` records it.
+     #[allow(clippy::too_many_arguments)]
+-    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, (cands, matches, scratch): &mut Work) -> Option<Edge> {
++    fn verify(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, work: &mut Work) -> Option<Edge> {
+         // A pair a coarser step found standing stands for this one as it was
+         // found: the finer step looks for what the coarser could not.
++        if let Some(e) = self.known(i, j, variant) {
++            return Some(e);
++        }
++        self.fresh(lists, i, fi, wi, j, variant, work)
++    }
++
++    /// The verdict a coarser step holds for the pair, if one stands.
++    fn known(&self, i: usize, j: usize, variant: Variant) -> Option<Edge> {
++        let f = self.finer.as_ref()?;
++        f.known.get(&(i.min(j) as u32, i.max(j) as u32, variant.mirror, variant.invert)).map(|v| Edge::new(i.min(j), i.max(j), *v))
++    }
++
++    /// `verify` without what a coarser step holds for the pair, unless
++    /// neither file has a level the coarser step did not.
++    #[allow(clippy::too_many_arguments)]
++    fn fresh(&self, lists: &[WordList], i: usize, fi: &Features, wi: &WordList, j: usize, variant: Variant, (cands, matches, scratch): &mut Work) -> Option<Edge> {
+         if let Some(f) = &self.finer {
+-            if let Some(v) = f.known.get(&(i.min(j) as u32, i.max(j) as u32, variant.mirror, variant.invert)) {
+-                return Some(Edge::new(i.min(j), i.max(j), *v));
+-            }
+             if !f.fresh[i] && !f.fresh[j] {
+-                return None;
++                return self.known(i, j, variant);
+             }
+         }
+         timed!(15, index::shared(wi, &lists[j], cands, 60_000));
+@@ -1369,8 +1434,13 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+     // and without the finer second look 75 / 40 / 20 / 10 1,227 / 1,168 /
+     // 1,092 / 1,052 (96.34 / 96.32 / 96.24 / 96.20%); leaving the decided
+     // pairs out, 20 / 10 1,099 / 1,045 (96.31 / 96.27%).
+-    let k0 = if pass.finer.is_some() { args.candidates.div_ceil(15) } else { args.candidates };
++    let k0 = match &pass.finer {
++        Some(f) if f.authority => args.candidates,
++        Some(_) => args.candidates.div_ceil(15),
++        None => args.candidates,
++    };
+     let mut window: Vec<(usize, usize)> = vec![(0, k0); n];
++    let authority = pass.finer.as_ref().is_some_and(|f| f.authority);
+     let mut joined = Clusters::new(n);
+     // The pairs a coarser step decided, by file.
+     let mut decided: Vec<Vec<u32>> = vec![Vec::new(); n];
+@@ -1379,13 +1449,15 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+             if !m && !inv {
+                 decided[a as usize].push(b);
+                 decided[b as usize].push(a);
+-                if pass.policy.standing(v) == Standing::Clean {
++                if !authority && pass.policy.standing(v) == Standing::Clean {
+                     joined.join(a as usize, b as usize);
+                 }
+             }
+         }
+         decided.par_iter_mut().for_each(|d| d.sort_unstable());
+     }
++    // At the authority step, how far down its whole ranking each file has
++    // read: what it leaves out changes as its verdicts join files.
+     let mut extended = 0usize;
+     let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
+     let mut stood: std::collections::HashSet<(u32, u32)> = Default::default();
+@@ -1398,6 +1470,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+     // What the anchors so far have put past the second look: the bar's bound
+     // on it.
+     let mut settling = Settling::new(n);
++    let w0 = if authority { SKELETON } else { 0 };
+     loop {
+         for &i in ask.iter() {
+             asked[i] = true;
+@@ -1416,21 +1489,34 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+         // total order), so a window read from there is the window a query
+         // for it gives.
+         let got: Vec<std::sync::atomic::AtomicUsize> = ask.iter().map(|_| Default::default()).collect();
++        let read: Vec<std::sync::atomic::AtomicUsize> = ask.iter().map(|_| Default::default()).collect();
++        // Which files clean verdicts had joined before this round's.
++        let joined_before: Vec<usize> = (0..n).map(|i| joined.id(i)).collect();
+         let mut taken: Vec<(Vec<u32>, bool)> = ask.iter().map(|&i| std::mem::take(&mut ahead[i])).collect();
+         let mut held: Vec<(u32, u32)> = ask
+             .par_iter()
+             .zip(got.par_iter())
++            .zip(read.par_iter())
+             .zip(taken.par_iter_mut())
+             .map_init(
+                 || index.asking(),
+-                |a, ((&i, got), (next, ends))| {
++                |a, (((&i, got), read), (next, ends))| {
+                     let (from, w) = window[i];
++                    let _ = read;
++                    // The skeleton, at the default detail's step above a
++                    // coarser one: the file's best few candidates are looked
++                    // at with this step's features whatever the coarser step
++                    // holds of them.
++                    let mut skeleton: Vec<u32> = Vec::new();
+                     let js: Vec<u32> = if *ends || next.len() >= w {
+                         next.drain(..w.min(next.len())).collect()
+                     } else {
+                         let gone = &decided[i];
+                         let asked_for = from + 2 * w + gone.len();
+                         let cands = index.candidates(i, &[&index.lists()[i]], asked_for, a);
++                        if first {
++                            skeleton.extend(cands.iter().take(w0).map(|&(j, ..)| j).filter(|j| gone.binary_search(j).is_ok()));
++                        }
+                         *ends = cands.len() < asked_for;
+                         let ranked: Vec<u32> = cands.iter().map(|&(j, ..)| j).filter(|j| gone.binary_search(j).is_err()).collect();
+                         let rest = &ranked[from.min(ranked.len())..];
+@@ -1441,7 +1527,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+                     got.store(js.len(), std::sync::atomic::Ordering::Relaxed);
+                     bar.add(items[i].feats.len() as u64);
+                     let i = i as u32;
+-                    js.into_iter().map(|j| if j < i { (j, i << 1 | 1) } else { (i, j << 1) }).collect::<Vec<_>>()
++                    js.into_iter().chain(skeleton).map(|j| if j < i { (j, i << 1 | 1) } else { (i, j << 1) }).collect::<Vec<_>>()
+                 },
+             )
+             .flatten()
+@@ -1449,6 +1535,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+         for (&i, t) in ask.iter().zip(taken.iter_mut()) {
+             ahead[i] = std::mem::take(t);
+         }
++
+         drop(taken);
+         timed!(35, held.par_sort_unstable());
+         // The pairs proposed, and which ends proposed each (bit 0 the lower,
+@@ -1494,8 +1581,6 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+         // order and each is collected in order, so the list is the one a single
+         // collect gave, verdict for verdict.
+         let from = all_direct.len();
+-        // Which files clean verdicts had joined before this round's.
+-        let joined_before: Vec<usize> = (0..n).map(|i| joined.id(i)).collect();
+         for (slice, by) in held.chunks(VERIFY_SLICE).zip(by.chunks(VERIFY_SLICE)) {
+             let part: Vec<Edge> = slice
+                 .par_iter()
+@@ -1504,6 +1589,9 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+                 .map_init(Work::default, |work, (&(i, j), _)| timed!(42, {
+                     vbar.tick();
+                     let (i, j) = (i as usize, j as usize);
++                    if authority {
++                        return pass.fresh(index.lists(), i, &items[i].feats, &index.lists()[i], j, Variant::SAME, work);
++                    }
+                     pass.verify(index.lists(), i, &items[i].feats, &index.lists()[i], j, Variant::SAME, work)
+                 }))
+                 .flatten()
+@@ -1535,7 +1623,7 @@ fn retrieve_and_verify(cx: &Ctx, scope: &Scope, pass: &Pass, index: &Index) -> (
+         let credited: Vec<(u32, u32, u8)> = held
+             .par_iter()
+             .zip(by.par_iter())
+-            .filter(|(p, _)| joined_before[p.0 as usize] != joined_before[p.1 as usize] && stood.contains(p))
++            .filter(|(p, _)| joined_before[p.0 as usize] != joined_before[p.1 as usize] && stood.contains(p) && !(authority && decided[p.0 as usize].binary_search(&p.1).is_ok()))
+             .map(|(&(lo, hi), &b)| (lo, hi, b))
+             .collect();
+         for (lo, hi, b) in credited {
+@@ -1673,6 +1761,7 @@ fn cluster(
+     prop_budget: usize,
+     dump: Option<&mut Dump>,
+     notes: &mut Vec<String>,
++    carried: &[Claim],
+ ) -> Vec<Claim> {
+     let progress = &cx.progress;
+     let n = items.len();
+@@ -1713,6 +1802,12 @@ fn cluster(
+     // three rounds. What is claimed so far is the anchors, then each round's
+     // composed pairs.
+     let n_anchors = claimed.len();
++    // What a coarser step composed inside what is one cluster here stands
++    // as composed: the thumbnails it was put to are the same.
++    if !carried.is_empty() {
++        let mut have: std::collections::HashSet<(usize, usize)> = claimed.iter().map(Edge::ends).collect();
++        claimed.extend(carried.iter().filter(|c| matches!(c.how, How::Propagated) && clusters.same(c.e.a(), c.e.b()) && have.insert(c.e.ends())).map(|c| c.e));
++    }
+     // Every hypothesis a round considered, kept only for `--dump`. A round
+     // proposes every unmatched pair inside each component, which is quadratic
+     // in the component and an order of magnitude more than it accepts, so the
+@@ -2371,10 +2466,9 @@ fn numbered_groups(files: &[PathBuf], grouping: Vec<group::Group>, pairs: &[Pair
+ fn run_config(args: &Args) -> serde_json::Value {
+     let mut c = serde_json::json!({
+         "detail": args.detail(),
+-        "fast": args.fast,
+         // The most an image is described by at this detail, not the
+         // default's alone (it said 600 at every `--detail`).
+-        "features": crate::analysis::features_at(args.detail(), args.work_size()),
++        "features": crate::analysis::most_features(args.detail()),
+         "candidates": args.candidates,
+         "min_aligned_points": aligned_points(args),
+         "min_frame_overlap": as_typed(args.min_frame_overlap),
+diff --git a/src/sift.rs b/src/sift.rs
+index 920e468..9fa7200 100644
+--- a/src/sift.rs
++++ b/src/sift.rs
+@@ -1125,7 +1125,10 @@ fn extract_any(g: &Gray, p: &Params) -> Features {
+ /// keypoints must be finer than (where the level below it starts).
+ pub struct LevelIn<'a> {
+     pub plane: &'a Gray,
++    /// The frame's pixels to one of the level's own, after `up`.
+     pub to_frame: f32,
++    /// How many times the plane is doubled before it is described.
++    pub up: usize,
+     pub tag: u32,
+     pub cap: usize,
+     pub finer_than: f32,
+@@ -1173,8 +1176,10 @@ fn extract_levels_any(levels: &[LevelIn], w: u32, h: u32, p: &Params) -> Feature
+         if layers == 0 {
+             continue;
+         }
+-        let sig_diff = (p.sigma * p.sigma - 0.25).max(0.01).sqrt();
+-        let base = timed!(5, blur_plane(g.w, g.h, &g.px, sig_diff));
++        // Enlarged as `extract` enlarges a small picture.
++        let init_sigma = 0.5 * lv.up.max(1) as f32;
++        let sig_diff = (p.sigma * p.sigma - init_sigma * init_sigma).max(0.01).sqrt();
++        let base = timed!(5, if lv.up > 1 { blur(&upsample(g, lv.up), sig_diff) } else { blur_plane(g.w, g.h, &g.px, sig_diff) });
+         let height = base.h;
+         let (dog, layer_grads, _) = timed!(6, Octave::new(&base, &sig[..layers + 3], layers, false).run());
+         let mut cands: Vec<Cand> = Vec::new();
