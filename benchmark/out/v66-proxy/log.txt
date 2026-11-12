@@ -1,0 +1,42 @@
+03:27:37 p-head 256.36 0:54.55
+p-head   bar 0.5: true 392 false 48 uAP 73.50 of 529
+p-head   bar 0.7: true 322 false 2 uAP 60.76 of 529
+03:28:28 p-k50 242.23 0:51.36
+p-k50   bar 0.5: true 382 false 30 uAP 71.79 of 529
+p-k50   bar 0.7: true 315 false 2 uAP 59.44 of 529
+03:28:58 p-nomirror 125.80 0:30.00
+p-nomirror   bar 0.5: true 352 false 24 uAP 66.08 of 529
+p-nomirror   bar 0.7: true 289 false 2 uAP 54.52 of 529
+03:32:41 p-h3 1397.84 3:42.10
+p-h3   bar 0.5: true 394 false 40 uAP 73.85 of 529
+p-h3   bar 0.7: true 324 false 3 uAP 61.15 of 529
+03:47:35 s-head 3339.99 14:54.36
+s-head   bar 0.5: true 382 false 393 uAP 66.89 of 529
+s-head   bar 0.7: true 318 false 88 uAP 57.62 of 529
+03:59:48 s-k50 3205.78 12:11.91
+s-k50   bar 0.5: true 364 false 257 uAP 64.84 of 529
+s-k50   bar 0.7: true 302 false 70 uAP 55.20 of 529
+04:08:49 s-nomirror 1064.28 9:00.92
+s-nomirror   bar 0.5: true 339 false 257 uAP 60.12 of 529
+s-nomirror   bar 0.7: true 282 false 68 uAP 51.30 of 529
+DONE
+04:12:04 p-h1 1296.87 3:09.51
+p-h1   bar 0.5: true 388 false 25 uAP 72.58 of 529
+p-h1   bar 0.7: true 318 false 3 uAP 59.98 of 529
+DONE2
+04:15:13 q-head 388.43 1:44.73
+q-head   bar 0.5: true 382 false 50 uAP 71.55 of 529
+q-head   bar 0.7: true 313 false 6 uAP 59.00 of 529
+04:16:35 q-k50 403.24 1:22.05
+q-k50   bar 0.5: true 376 false 33 uAP 70.49 of 529
+q-k50   bar 0.7: true 310 false 6 uAP 58.44 of 529
+04:17:45 q-nomirror 248.40 1:09.48
+q-nomirror   bar 0.5: true 343 false 35 uAP 64.47 of 529
+q-nomirror   bar 0.7: true 281 false 5 uAP 53.00 of 529
+04:23:12 q-h1 2256.56 5:27.32
+q-h1   bar 0.5: true 385 false 34 uAP 72.15 of 529
+q-h1   bar 0.7: true 317 false 8 uAP 59.77 of 529
+04:29:12 q-h3 2479.96 6:00.08
+q-h3   bar 0.5: true 390 false 49 uAP 73.12 of 529
+q-h3   bar 0.7: true 323 false 12 uAP 60.83 of 529
+DONE3

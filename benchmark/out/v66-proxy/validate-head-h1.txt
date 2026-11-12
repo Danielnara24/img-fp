@@ -1,0 +1,16 @@
+base /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/79c88b7d-101f-408e-a430-7e7a78976241/scratchpad/px/img-fp-head
+new  /tmp/claude-1000/-home-daniel-Documents-Vscode-repositories-img-fp/79c88b7d-101f-408e-a430-7e7a78976241/scratchpad/px/img-fp-h1
+
+                                                base    new
+DISC21 proxy 0.5 true copies of 529              392    388  WORSE
+DISC21 proxy 0.5 base's true copies not found            18  lost
+DISC21 proxy 0.5 µAP                           73.50  72.58  WORSE
+DISC21 proxy 0.5 recall at 90% precision       74.10  73.35  WORSE
+DISC21 proxy 0.5 false copies                     48     25  +
+DISC21 proxy 0.7 true copies of 529              322    321  WORSE
+DISC21 proxy 0.7 base's true copies not found            15  lost
+DISC21 proxy 0.7 µAP                           60.76  60.55  WORSE
+DISC21 proxy 0.7 recall at 90% precision       60.87  60.68  WORSE
+DISC21 proxy 0.7 false copies                      2      3  more
+
+WORSE or over: DISC21 proxy 0.5 true copies of 529; DISC21 proxy 0.5 µAP; DISC21 proxy 0.5 recall at 90% precision; DISC21 proxy 0.7 true copies of 529; DISC21 proxy 0.7 µAP; DISC21 proxy 0.7 recall at 90% precision

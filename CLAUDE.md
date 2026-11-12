@@ -102,8 +102,17 @@ is measured where siblings cannot meet* and *Scoring on small families*.
 - No downscaled JPEG decode path (~4%); nothing tested above ~150k images;
   on the found corpus about half of sampled pairs are two specimens of one
   species (the propagated tier).
-- No accuracy check in CI; the `ref.sh`, `last.sh`, `lastag.sh` batteries
-  are lost.
+- No accuracy check in CI. The `ref.sh`, `last.sh`, `lastag.sh` batteries
+  are lost; `benchmark/validate.py` (2026-11-12) is the battery a matcher or
+  analysis change answers to. Its DISC21 stage (the whole shard) and
+  `cold` have not been run through `run` yet. `--stages proxy` is a sixth
+  of the shard for a first look, five minutes a build (`out/v66-proxy`):
+  it has the sign of every loss tried at a half to all of the shard's
+  size, but read `h1`'s -11 copies as -4, and level builds differ by a
+  few copies there.
+- The keep rule loses content once on IMGS-ALL2 at HEAD (a
+  `phone_screenshot` composite deleted; `validate.py`'s first run), where
+  the baseline above says 0. Not looked into.
 
 Docs split: `benchmark/BASELINE.md` (competition; the held-out experiment's
 write-up, `VALIDATION.md`, was deleted 2026-10-28), `README.md` is **users only**: install and usage, no
@@ -179,6 +188,10 @@ benchmark/
   score.py      F1 vs generated ground truth
   analyse.py    + traps vs cross-family, merges, two seed halves
   suggest_score.py / against_score.py   score `action` / --against reports
+  validate.py   a build against a base build on everything a change is
+                judged by (DISC21, both corpora, --fast, containment, small
+                families, the keep rule, cached and cold cost), resumable;
+                `report` marks what got worse
   pairs.py      the keep rule on two-file families (each transform alone)
   replay.py     replay anchor tier + bridge test off one --dump
   runners/      one wrapper per competitor -> canonical JSON
@@ -1289,6 +1302,12 @@ Do not retry without new evidence:
   matcher.
 - Accuracy reproduces to the pair; cost figures are soft (third significant
   figure means nothing).
+- **A matcher or analysis change is judged by `benchmark/validate.py run
+  BASE NEW OUT`** before anything is said of it: DISC21 shard 0 first (a
+  build level on IMGS-ALL and IMGS-ALL2 lost 33 of 382 true copies there,
+  `out/v65-ladder`). About seven hours whole; `--stages` and `--corpora`
+  pick (`--stages proxy`: a five-minute first look at DISC21, not a
+  verdict), `--base-results` takes the base's accuracy from an earlier run.
 
 ## Working style
 
