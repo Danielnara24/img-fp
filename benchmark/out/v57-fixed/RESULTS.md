@@ -195,3 +195,43 @@ path, which DISC21 shows costs recall on heavy edits (-9% of true copies). With 
 at three paths DISC21 recall is level (+3) but false pairs at 0.5 rise 380 -> 548 and CPU is
 +24% there (+16-23% on IMGS-ALL2). Neither version meets "no recall or precision lost, <= 5%
 CPU".
+
+## 8. The DISC21 false pairs, each scanned alone (2026-11-13)
+
+Question left by section 7: with retrieval at three paths the fixed build states 548 false
+pairs on shard 0 at 0.5 against base's 380. Are they pairs base states too when the folder
+does not hide them (section 6's finding on IMGS-ALL), or pairs the fixed seeding lets in?
+
+`battery/disc/alone.py`: every false Q | R pair of `head/report.json` and `ship-r3/report.json`
+(550 and 386 by this count, 175 in both), each run as a scan of its two files, both binaries
+(`img-fp-head`, `img-fp-ship`), `--no-cache -t 1 --min-pixel-correlation 0.5`. Result per
+pair in `battery/disc/alone.json` (points, correlation; empty when not stated).
+
+| false at 0.5 in the shard run | n | base states it alone | fixed states it alone |
+|---|---|---|---|
+| only the fixed build | 375 | 68 | 253 |
+| only base | 211 | 64 | 12 |
+| both | 175 | 153 | 145 |
+| all | 761 | 285 | 410 |
+
+Of the 375, 329 are direct (base alone 57, fixed alone 251) and 46 propagated (11, 2); 49 of
+base's 211 are propagated.
+
+**Not the folder hiding them.** 201 of the fixed build's own false pairs are stated by it
+alone and by base not even alone: the fixed words seed verdicts the per-folder words do not,
+whatever else is scanned. Median 17 points, correlation 0.543; 4 of the 201 reach 0.7.
+
+**It is between 0.5 and 0.7.** Read at 0.7 off the same reports the two are level: false 87
+(base) and 89 (fixed, three paths), 21 only the fixed build's, of which base states 10 alone
+at 0.7 and the fixed build 15. (µAP at 0.7, section 7: 57.14 against 56.66.)
+
+So section 6's reading ("a pair-intrinsic verdict cannot keep base's figure, which is its
+vocabulary hiding pairs") holds for the siblings of IMGS-ALL and not for DISC21 at 0.5: there
+thorough seeding passes unrelated pairs at 10-25 points and 0.5-0.6 that sparse seeding does
+not reach, in a folder of two as in one of 100,000. Part of base's precision below the
+default bar is its seeding, not its acceptance. A rework proposed on the first reading
+(fixed seeding, retrieval left at three paths, verdicts kept by content pair) was withdrawn
+on this.
+
+Not run: the same at a real 0.7 run; base's own false pairs that it does not state alone
+(147 of 211) were not traced further.
