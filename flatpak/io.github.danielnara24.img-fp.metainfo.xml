@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.85.0" date="2026-11-13">
+      <description>
+        <p>Suggested deletions are more careful: every one is checked against the file that stays, a picture is not deleted for a much smaller copy, and a collage or slide showing a whole photo at full size can stand in for it. A scan after one with more detail no longer analyses its pictures again.</p>
+      </description>
+    </release>
     <release version="0.84.1" date="2026-11-09">
       <description>
         <p>The progress bar's time left is closer in folders with many copies of each picture.</p>
