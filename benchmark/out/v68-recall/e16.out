@@ -1,0 +1,27 @@
+== ALL2 e16  (in 14.23s)
+  e16   TP  16860  FP    0  FN  11156  TN   5467   precision 100.0000%  recall 60.18%
+        recall by kind: unedited 11873/14548 (81.6%), edit 4987/13468 (37.0%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+== ALL e16  (in 12.65s)
+  e16   TP  19560  FP    0  FN   8099  TN   5460   precision 100.0000%  recall 70.72%
+        recall by kind: unedited 12100/14555 (83.1%), edit 7460/13104 (56.9%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+e16/small all2 n1: 379 deleted, 0 lost; all2 n2: 742 deleted, 0 lost; all n1: 214 deleted, 0 lost; all n2: 551 deleted, 3 lost;
+   all n2-d1 unedited, no unedited holder: ORIGINAL 1
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 1
+transform              pairs origDEL  varDEL    loss   lossX  REVIEW
+blur_fill                364       2       0       2       2      16
+browser_window           364      16       0       0       0     338
+caption_bar              364       7       0       0       0     344
+contact_sheet            364      25       0       0       0     245
+copy_exact               364     141     223       0       0       0
+embed_small              364       1       0       0       0     372
+messaging_app            364      13      13       0       0     396
+phone_screenshot         364       1       0       1       1     225
+slide_deck               364       1       0       0       0     412
+strip_metadata           359     113     246       0       0       0
+to_png                   364       1      13       0       0     700
+upscale                  364      20       0       0       0     344
+wall_poster              364       1       0       1       1     420
+webp_lossless            364       2      12       0       0     700
+TOTAL                  32755     344    6277       4       4   35020
+done e16

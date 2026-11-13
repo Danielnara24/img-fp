@@ -1,0 +1,879 @@
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 09aaaa4..d54fd96 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -1879,6 +1879,10 @@ fn dump_columns<'a>() -> table::Table<Dumped<'a>> {
+         col("centred", |r| Cell::Count(r.e.v.centred.into())),
+         col("inverted", |r| Cell::Count(r.e.inverted().into())),
+         col("blk_min", |r| Cell::Fixed(r.e.v.blk_min, 4)),
++        col("x0", |r| Cell::Fixed(r.e.v.x[0], 4)),
++        col("x1", |r| Cell::Fixed(r.e.v.x[1], 4)),
++        col("x2", |r| Cell::Fixed(r.e.v.x[2], 4)),
++        col("x3", |r| Cell::Fixed(r.e.v.x[3], 4)),
+         col("m0", m::<0>),
+         col("m1", m::<1>),
+         col("m2", m::<2>),
+@@ -2113,7 +2117,24 @@ fn suggest_content(
+         measured.lock().unwrap().insert(o, c);
+         c
+     };
+-    suggest::suggest_pinned(&pics, &links, args.min_pixel_correlation, colour, scope.pinned())
++    let out = suggest::suggest_pinned(&pics, &links, args.min_pixel_correlation, colour, scope.pinned());
++    // SCAFFOLD(v67): the chain a deletion rests on.
++    if std::env::var_os("IMGFP_REF").is_some() || std::env::var_os("IMGFP_SIDES").is_some() {
++        for (i, f) in files.iter().enumerate() { eprintln!("IDX {i} {}", f.display()); }
++    }
++    if let Ok(w) = std::env::var("IMGFP_WHY") {
++        for (i, f) in files.iter().enumerate() {
++            if !f.to_string_lossy().contains(&w) { continue; }
++            let mut k = i;
++            eprintln!("WHY {:?} {:?}", out.0[i], f);
++            while let Some(n) = out.1[k] {
++                let l = stated.iter().find(|&&(a, b, _)| (a, b) == (k, n) || (a, b) == (n, k));
++                eprintln!("  by {:?} {:?} {:?} dims {:?} work {:?}", out.0[n], files[n], l.map(|&(a, b, s)| (a == k, s.verdict().map(|v| (v.n_in, v.composed_points, v.blk, v.blk_min, v.m)))), items[n].dims, (items[n].feats.w, items[n].feats.h));
++                k = n;
++            }
++        }
++    }
++    out
+ }
+ 
+ /// What a run found, as its report states it. Empty for a walk that found
+diff --git a/src/stated.rs b/src/stated.rs
+index d0d616b..045cdf3 100644
+--- a/src/stated.rs
++++ b/src/stated.rs
+@@ -38,7 +38,7 @@ pub(crate) enum Stated<'a> {
+ }
+ 
+ impl<'a> Stated<'a> {
+-    fn verdict(&self) -> Option<&'a Verdict> {
++    pub(crate) fn verdict(&self) -> Option<&'a Verdict> {
+         match self {
+             Stated::Claim(c) => Some(&c.e.v),
+             _ => None,
+diff --git a/src/suggest.rs b/src/suggest.rs
+index f4d6449..9acc3e9 100644
+--- a/src/suggest.rs
++++ b/src/suggest.rs
+@@ -424,6 +424,31 @@ struct Side {
+     clean: bool,
+ }
+ 
++/// The two sides of a pair whose transform `m` takes `a`'s working image to
++/// `b`'s, fitted to `points` points (`Verdict::fit_points`).
++fn edge_sides((a, pa): (usize, &Picture), (b, pb): (usize, &Picture), m: &Affine, points: f32, clean: bool, link: u32) -> (Side, Side) {
++    // Working pixels to the file's own, for each.
++    let shrink = |p: &Picture| {
++        let file = p.dims.0.max(p.dims.1) as f32;
++        if file > 0.0 { p.work.0.max(p.work.1) as f32 / file } else { 1.0 }
++    };
++    let k = shrink(pa) / shrink(pb);
++    let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
++    let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
++    let mi = invert_affine(m);
++    let a_out = outside(m, pa.work, pb.work);
++    let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
++    // A corner may land outside by what the fit may be off by
++    // (`FIT_ERROR`), and by nothing where nothing says.
++    // and past it by more than it could be (`FIT_ERROR_MOST`).
++    let (near, far) = if points > 0.0 { (FIT_ERROR / points, FIT_ERROR_MOST / points) } else { (0.0, 0.0) };
++    let (a_by, b_by) = (out_by(m, pa.work, pb.work), mi.map_or(f32::INFINITY, |mi| out_by(&mi, pb.work, pa.work)));
++    let (a_in_b, b_in_a) = (a_by <= near, b_by <= near);
++    let (a_past, b_past) = (a_by > far, b_by > far);
++    let s = Side { to: b as u32, link, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, f_past: a_past, past_f: b_past, sx, sy, f_out: a_out, clean };
++    (s, Side { to: a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, f_past: b_past, past_f: a_past, sx: -sx, sy: -sy, f_out: b_out, ..s })
++}
++
+ /// The action for every file in a pair, by index; `None` for the rest.
+ #[cfg(test)]
+ pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation: f32, colour: impl Fn(usize) -> f32 + Sync) -> Vec<Option<Action>> {
+@@ -479,21 +504,7 @@ pub fn suggest_pinned(
+                 if *inverted {
+                     return None;
+                 }
+-                let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
+-                let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
+-                let mi = invert_affine(m);
+-                let a_out = outside(m, pa.work, pb.work);
+-                let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
+-                // A corner may land outside by what the fit may be off by
+-                // (`FIT_ERROR`), and by nothing where nothing says.
+-                // and past it by more than it could be (`FIT_ERROR_MOST`).
+-                let points = v.fit_points();
+-                let (near, far) = if points > 0.0 { (FIT_ERROR / points, FIT_ERROR_MOST / points) } else { (0.0, 0.0) };
+-                let (a_by, b_by) = (out_by(m, pa.work, pb.work), mi.map_or(f32::INFINITY, |mi| out_by(&mi, pb.work, pa.work)));
+-                let (a_in_b, b_in_a) = (a_by <= near, b_by <= near);
+-                let (a_past, b_past) = (a_by > far, b_by > far);
+-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, f_past: a_past, past_f: b_past, sx, sy, f_out: a_out, clean };
+-                (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, f_past: b_past, past_f: a_past, sx: -sx, sy: -sy, f_out: b_out, ..s })
++                edge_sides((*a, pa), (*b, pb), m, v.fit_points(), clean, li as u32)
+             }
+         };
+         let usable = match link {
+@@ -791,47 +802,6 @@ impl Ctx<'_> {
+         s.binary_search_by_key(&(g as u32), |e| e.to).ok().map(|k| &s[k])
+     }
+ 
+-    /// All of `f`'s frame lands in `g`'s.
+-    fn frame(&self, f: usize, g: usize) -> bool {
+-        self.side(f, g).is_some_and(|e| e.exact || e.f_in)
+-    }
+-
+-    fn same(&self, f: usize, g: usize) -> bool {
+-        self.frame(f, g) && self.frame(g, f)
+-    }
+-
+-    /// All of `f`'s frame lands in `g`'s, and `g`'s reaches past it.
+-    fn strict_in(&self, f: usize, g: usize) -> bool {
+-        self.frame(f, g) && self.side(f, g).is_some_and(|e| e.past_f)
+-    }
+-
+-    /// `k` is the size of `d` and softer than it by more than `SOFT_GAP`:
+-    /// it does not show `d` at `d`'s detail, so it may not stand in for it.
+-    fn softer(&self, k: usize, d: usize) -> bool {
+-        let Some(e) = self.side(d, k) else { return false };
+-        !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.pics[k].traits) - softness(self.pics[d].traits) > SOFT_GAP
+-    }
+-
+-    /// `d` is a lossless file of `k`'s frame and size whose pixels are not
+-    /// `k`'s (not the same bytes, nor the same decoded pixels): two
+-    /// pictures, as far as anything says.
+-    ///
+-    /// **The run cannot see what tells two such files apart.** Every check
+-    /// it has reads the picture at a thumbnail's 128 pixels, or at a
+-    /// sixty-fourth of the frame, and its keypoints at the working size: two
+-    /// screenshots of an invoice, one total reading $1,250 and the other
+-    /// $9,750, agreed at 1.00 and shared every keypoint at distance 0, and of
+-    /// an invoice, its re-encode and the other invoice, the other was deleted;
+-    /// a line of text changed, the original was. A lossy file differs from
+-    /// its source by the codec everywhere, so its pixels say nothing either
+-    /// way; a lossless one differs only where it was changed. No number is
+-    /// read here: the formats say it.
+-    fn own_pixels(&self, k: usize, d: usize) -> bool {
+-        self.pics[d].traits.lossless
+-            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME)
+-            && self.same(k, d)
+-    }
+-
+     /// `d` carries something besides its pixels that `k` does not: more
+     /// than eight bits a sample, a colour profile, EXIF (`besides`).
+     ///
+@@ -847,71 +817,6 @@ impl Ctx<'_> {
+         a.iter().zip(&b).any(|(&k, &d)| d && !k)
+     }
+ 
+-    /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
+-    /// besides `d` holds no picture.
+-    ///
+-    /// **Read off the detail both files already measured.** Over its whole
+-    /// frame `k`'s detail is `d`'s where `d` lies and the rest's elsewhere,
+-    /// so if the rest is flat `k` reads `f` times `d`'s, `f` the share of
+-    /// `k`'s frame that is `d`; if it is more of the picture, about `d`'s
+-    /// own. `k` is a canvas when it is nearer the first, split at their
+-    /// geometric middle, `sqrt(f)`. Eight pixels apart, the coarsest the
+-    /// measure has: that is the structure a picture's content holds, which
+-    /// two renderings of one region share, where pixel-scale detail is what
+-    /// re-encoding, noise and resampling move. At one pixel apart a third of
+-    /// slightly cropped photographs read as canvases.
+-    ///
+-    /// It decides only what nothing else can (`settle`'s `lone`): a set with
+-    /// no picture copied at its own frame. On the pairs benchmark
+-    /// (`benchmark/pairs.py`), composites deleted their original 971 times,
+-    /// 133 of them losing content; with this, 40 and 2 — a caption bar of a
+-    /// tenth of the frame is near the split — while crops and turns kept
+-    /// 2,729 of their 3,014 deletions. On IMGS-ALL it never applies: every
+-    /// family there has its picture copied at its own frame.
+-    fn on_canvas(&self, k: usize, d: usize) -> bool {
+-        let Some(e) = self.side(d, k) else { return false };
+-        let (pd, pk) = (&self.pics[d], &self.pics[k]);
+-        let area = |p: &Picture| p.dims.0 as f32 * p.dims.1 as f32;
+-        if area(pk) <= 0.0 || area(pd) <= 0.0 {
+-            return false;
+-        }
+-        let f = (area(pd) * (e.sx + e.sy).exp2() / area(pk)).clamp(1e-3, 1.0);
+-        // How many of `d`'s pixels one of `k`'s spans.
+-        let s = (-(e.sx + e.sy) / 2.0).exp2();
+-        let (td, tk) = (&pd.traits.detail, &pk.traits.detail);
+-        tk[3] / at_distance(&td[..4], 8.0 * s).max(1e-4) < f.sqrt()
+-    }
+-
+-    /// `g` shows all of `f`'s picture, at `f`'s detail or finer.
+-    fn holds(&self, g: usize, f: usize) -> bool {
+-        let Some(e) = self.side(f, g) else { return false };
+-        if e.exact {
+-            return true;
+-        }
+-        if !e.f_in {
+-            return false;
+-        }
+-        let l = e.sx.min(e.sy);
+-        !(-l > SHRINK && extra(self.pics[g].traits, self.pics[f].traits, (-l).exp2()) > EXTRA_PER_OCTAVE * -l + EXTRA_FLOOR)
+-    }
+-
+-    /// `g` holds `f` and shows more of it: more frame, or real detail `f`
+-    /// lacks.
+-    fn more(&self, g: usize, f: usize) -> bool {
+-        if !self.holds(g, f) {
+-            return false;
+-        }
+-        let e = self.side(f, g).unwrap();
+-        if e.exact {
+-            return false;
+-        }
+-        if e.past_f {
+-            return true;
+-        }
+-        let l = e.sx.min(e.sy);
+-        l > SAME && extra(self.pics[f].traits, self.pics[g].traits, l.exp2()) > EXTRA_PER_OCTAVE * l + EXTRA_FLOOR
+-    }
+-
+     /// The transform from `f`'s working image to `g`'s.
+     fn transform(&self, f: usize, g: usize) -> Option<Affine> {
+         let e = self.side(f, g)?;
+@@ -931,7 +836,9 @@ impl Ctx<'_> {
+         // The pinned files are kept before anything is chosen, and deletion
+         // spreads from them first: a file both a pinned file and another
+         // could delete is the pinned one's.
+-        let mut q: VecDeque<usize> = members.iter().copied().filter(|&f| self.is_pinned(f)).collect();
++        // Each entry is a file whose pairs are followed and the kept file
++        // that asks: itself, for a file that stays.
++        let mut q: VecDeque<(usize, usize)> = members.iter().copied().filter(|&f| self.is_pinned(f)).map(|f| (f, f)).collect();
+         // Each class's choice, kept unless a file of another class may delete
+         // it. A class holding a pinned file keeps that, kept already.
+         let mut chosen = Vec::with_capacity(c.classes.len());
+@@ -939,29 +846,49 @@ impl Ctx<'_> {
+             if class.iter().any(|&f| self.is_pinned(f)) {
+                 continue;
+             }
+-            let k = self.choose(class, colour);
++            let k = self.choose(&c, class, colour);
+             chosen.push(k);
+             if !self.sides[k].iter().any(|e| c.class[&(e.to as usize)] != ci && c.refusal(e.to as usize, k).is_none()) {
+-                q.push_back(k);
++                q.push_back((k, k));
+             }
+         }
+-        for &k in &q {
++        for &(k, _) in &q {
+             state.insert(k, State::Keep);
+         }
+         loop {
+-            // Every settled file deletes what it may of the open files it is
+-            // paired with; each refusal is noted against the file refused.
+-            while let Some(x) = q.pop_front() {
+-                for e in &self.sides[x] {
++            // Every kept file deletes what it may of the open files it is
++            // paired with, and of those its deleted files are paired with
++            // (`Component::through`); each refusal is noted against the file
++            // refused.
++            //
++            // **A deletion rests on a file that stays, and was checked
++            // against it.** A deleted file used to delete in its turn, by
++            // its own pairs: each step allowed what one pair allows (a
++            // corner out by the fit's error, a size half an octave smaller,
++            // twelve grey levels a block), and nothing asked what the steps
++            // came to. A phone's screenshot of a dark photograph was deleted
++            // for a deleted copy it was the frame of to a composed fit of
++            // five points, and so for an original that shows none of its
++            // bars; 39 of IMGS-ALL2's deletions and 64 of IMGS-ALL's rested
++            // on nothing but a composite or a turned copy. Now a deleted file
++            // only says where to look: the kept file answers.
++            while let Some((r, k)) = q.pop_front() {
++                for e in &self.sides[r] {
+                     let y = e.to as usize;
+                     if state.contains_key(&y) {
+                         continue;
+                     }
+-                    match c.refusal(x, y) {
++                    // A file `k` is paired with was `k`'s to answer for, and
++                    // one already looked at through another file is not
++                    // asked again.
++                    if r != k && (c.side(y, k).is_some() || !c.through(y, r, k)) {
++                        continue;
++                    }
++                    match c.refusal(k, y) {
+                         None => {
+-                            state.insert(y, State::Delete(x));
+-                            deletes.insert(x);
+-                            q.push_back(y);
++                            state.insert(y, State::Delete(k));
++                            deletes.insert(k);
++                            q.push_back((y, k));
+                         }
+                         Some(r) => {
+                             let w = refused.entry(y).or_insert(r);
+@@ -974,18 +901,60 @@ impl Ctx<'_> {
+             // file of another class could delete and no settled file did
+             // (what could have was never settled itself), and a file only a
+             // softer one could have deleted (`Refusal::Softer`).
+-            q.extend(chosen.iter().copied().filter(|k| !state.contains_key(k)));
++            q.extend(chosen.iter().copied().filter(|k| !state.contains_key(k)).map(|k| (k, k)));
+             let mut softer: Vec<usize> =
+-                refused.iter().filter(|&(d, &r)| r == Refusal::Softer && !state.contains_key(d) && !q.contains(d)).map(|(&d, _)| d).collect();
++                refused.iter().filter(|&(d, &r)| r == Refusal::Softer && !state.contains_key(d) && !q.contains(&(*d, *d))).map(|(&d, _)| d).collect();
+             softer.sort_unstable();
+-            q.extend(softer);
++            q.extend(softer.into_iter().map(|d| (d, d)));
+             if q.is_empty() {
+                 break;
+             }
+-            for &k in &q {
++            for &(k, _) in &q {
+                 state.insert(k, State::Keep);
+             }
+         }
++        // SCAFFOLD(v67): every strong pair's whole-frame residual, fitted and frame onto frame.
++        if std::env::var_os("IMGFP_SIDES").is_some() {
++            use std::io::Write;
++            let mut out = Vec::new();
++            for &f in members {
++                for e in &self.sides[f] {
++                    let g = e.to as usize;
++                    if e.exact || g < f { continue; }
++                    let pts = match &self.links[e.link as usize].2 { Link::Edge(v, ..) => (v.fit_points(), v.n_in, v.blk, v.blk_min), _ => (-1.0, 0, 0.0, 0.0) };
++                    let w = |k: usize, d: usize, exact: bool| -> f32 {
++                        let Some(m) = self.transform(d, k) else { return -1.0 };
++                        let (pd, pk) = (&self.pics[d], &self.pics[k]);
++                        let m = if exact { frame_onto_frame(&m, pd.work, pk.work) } else { m };
++                        whole_worst(&mut c.blurs.borrow_mut(), (d, pd), (k, pk), &m)
++                    };
++                    let m = self.transform(f, g).unwrap();
++                    let (a_by, b_by) = (out_by(&m, self.pics[f].work, self.pics[g].work), invert_affine(&m).map_or(9.0, |mi| out_by(&mi, self.pics[g].work, self.pics[f].work)));
++                    writeln!(out, "SIDE {f} {g} {:.2} {} {:.4} {:.4} {:.3} {:.3} {:.5} {:.5} {:.2} {:.2} {:.2} {:.2}", pts.0, pts.1, pts.2, pts.3, e.sx, e.sy, a_by, b_by, w(g, f, false), w(f, g, false), w(g, f, true), w(f, g, true)).unwrap();
++                }
++            }
++            std::io::stderr().write_all(&out).unwrap();
++        }
++        // SCAFFOLD(v67): why each kept file refused each file left open.
++        if std::env::var_os("IMGFP_REF").is_some() {
++            for &y in members.iter().filter(|y| !state.contains_key(y)) {
++                for e in &self.sides[y] {
++                    let x = e.to as usize;
++                    if state.get(&x) != Some(&State::Keep) { continue; }
++                    let pts = match &self.links[e.link as usize].2 { Link::Edge(v, ..) => v.fit_points(), _ => -1.0 };
++                    eprintln!("REF {y} {x} {:?} holds={} same={} strict_in={} part={} plain_k={} whole={:.1} sx={:.2} sy={:.2} f_in={} in_f={} f_past={} past_f={} pts={:.1} clean={}",
++                        c.refusal(x, y), c.holds(x, y), c.same(x, y), c.strict_in(y, x), c.part[&y], c.plain[&x], c.whole(x, y), e.sx, e.sy, e.f_in, e.in_f, e.f_past, e.past_f, pts, e.clean);
++                }
++            }
++            let made: Vec<(usize, usize)> = c.made.borrow().keys().copied().collect();
++            for (y, x) in made {
++                if matches!(state.get(&y), Some(State::Delete(_))) || state.get(&x) != Some(&State::Keep) || x == y { continue; }
++                let e = c.side(y, x).unwrap();
++                eprintln!("REF {y} {x} {:?} holds={} same={} strict_in={} part={} plain_k={} whole={:.1} sx={:.2} sy={:.2} f_in={} in_f={} f_past={} past_f={} pts={:.1} clean={} made=1",
++                    c.refusal(x, y), c.holds(x, y), c.same(x, y), c.strict_in(y, x), c.part[&y], c.plain[&x], c.whole(x, y), e.sx, e.sy, e.f_in, e.in_f, e.f_past, e.past_f, c.points(y, x), e.clean);
++            }
++            for &y in members { eprintln!("STATE {y} {:?}", state.get(&y)); }
++        }
+         // Files left open beside their own bytes (`Side::proven`: the same
+         // bytes, or two JPEGs of one coded picture) keep one of them: deleting
+         // the rest loses nothing, whatever is undecided about the picture. In
+@@ -1022,7 +991,7 @@ impl Ctx<'_> {
+                 }
+                 let mut cands: Vec<usize> = self.sides[y].iter().map(|e| e.to as usize).filter(|&x| self.is_pinned(x)).collect();
+                 while !cands.is_empty() {
+-                    let k = self.choose(&cands, colour);
++                    let k = self.choose(&c, &cands, colour);
+                     if c.refusal(k, y).is_none() {
+                         state.insert(y, State::Delete(k));
+                         break;
+@@ -1074,7 +1043,7 @@ impl Ctx<'_> {
+     }
+ 
+     /// The file of a class to keep.
+-    fn choose(&self, class: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> usize {
++    fn choose(&self, c: &Component, class: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> usize {
+         // One that decoded whole, where there is one: a cut-off file is
+         // filled with grey where its data ends, and the same pixels as an
+         // intact file only when nothing but its end marker was lost.
+@@ -1082,7 +1051,7 @@ impl Ctx<'_> {
+         let class = if whole.is_empty() { class } else { &whole[..] };
+         // Not one another file of the class shows more of.
+         let mut c: Vec<usize> =
+-            class.iter().copied().filter(|&f| !class.iter().any(|&g| g != f && self.side(f, g).is_some() && self.more(g, f))).collect();
++            class.iter().copied().filter(|&f| !class.iter().any(|&g| g != f && self.side(f, g).is_some() && c.more(g, f))).collect();
+         if c.is_empty() {
+             c = class.to_vec();
+         }
+@@ -1162,8 +1131,13 @@ struct Component<'c, 'a> {
+     /// Classes: files of one frame, each holding the other.
+     class: HashMap<usize, usize>,
+     classes: Vec<Vec<usize>>,
+-    /// `whole_worst` by (keeper, deleted), and the blurs it read.
++    /// `whole_worst` by (keeper, deleted), under the fitted transform and
++    /// under the frames' own (`exact`), and the blurs it read.
+     whole: RefCell<HashMap<(usize, usize), f32>>,
++    exact: RefCell<HashMap<(usize, usize), f32>>,
++    /// The sides made through other files (`through`), with each one's
++    /// transform and the points it is worth.
++    made: RefCell<HashMap<(usize, usize), (Side, Option<Affine>, f32)>>,
+     blurs: RefCell<Blurs>,
+ }
+ 
+@@ -1190,21 +1164,22 @@ impl<'c, 'a> Component<'c, 'a> {
+                 (f, !holds_plain)
+             })
+             .collect();
++        let mut c = Component { ctx, plain, part, any_plain, class: HashMap::new(), classes: Vec::new(), whole: Default::default(), exact: Default::default(), made: Default::default(), blurs: Default::default() };
+         let mut class: HashMap<usize, usize> = HashMap::new();
+         let mut classes: Vec<Vec<usize>> = Vec::new();
+         for &f in members {
+             if class.contains_key(&f) {
+                 continue;
+             }
+-            let c = classes.len();
+-            class.insert(f, c);
++            let n = classes.len();
++            class.insert(f, n);
+             let mut list = vec![f];
+             let mut q = vec![f];
+             while let Some(x) = q.pop() {
+                 for e in &ctx.sides[x] {
+                     let y = e.to as usize;
+-                    if !class.contains_key(&y) && ctx.same(x, y) && ctx.holds(x, y) && ctx.holds(y, x) {
+-                        class.insert(y, c);
++                    if !class.contains_key(&y) && c.same(x, y) && c.holds(x, y) && c.holds(y, x) {
++                        class.insert(y, n);
+                         list.push(y);
+                         q.push(y);
+                     }
+@@ -1213,7 +1188,214 @@ impl<'c, 'a> Component<'c, 'a> {
+             list.sort_unstable();
+             classes.push(list);
+         }
+-        Component { ctx, plain, part, any_plain, class, classes, whole: Default::default(), blurs: Default::default() }
++        (c.class, c.classes) = (class, classes);
++        c
++    }
++
++    /// `f`'s side to `g`: the pair's own, or the one made through the files
++    /// between them (`through`).
++    fn side(&self, f: usize, g: usize) -> Option<Side> {
++        self.ctx.side(f, g).copied().or_else(|| self.made.borrow().get(&(f, g)).map(|v| v.0))
++    }
++
++    /// The transform from `f`'s working image to `g`'s, and the points it is
++    /// worth (`Verdict::fit_points`); none between two files of the same
++    /// pixels, whose working images are one.
++    fn transform(&self, f: usize, g: usize) -> Option<Affine> {
++        match self.ctx.side(f, g) {
++            Some(_) => self.ctx.transform(f, g),
++            None => self.made.borrow().get(&(f, g)).and_then(|v| v.1),
++        }
++    }
++
++    fn points(&self, f: usize, g: usize) -> f32 {
++        match self.ctx.side(f, g) {
++            Some(e) => match &self.ctx.links[e.link as usize].2 {
++                Link::Edge(v, ..) => v.fit_points(),
++                _ => f32::INFINITY,
++            },
++            None => self.made.borrow().get(&(f, g)).map_or(0.0, |v| v.2),
++        }
++    }
++
++    /// Make `y`'s side to `k` through `r`, a file paired with both, where
++    /// the two have no pair of their own: the two transforms one after the
++    /// other, worth the points a single fit as uncertain would have, as a
++    /// transform composed by the matching is (`claims::propagate`). Whether
++    /// there is now one.
++    ///
++    /// **It carries no evidence, only where to look.** What `k` shows of `y`
++    /// is then read off the two files themselves, as for any pair
++    /// (`refusal`): their frames, their sizes and detail, and `k`'s pixels
++    /// over `y`'s whole frame.
++    fn through(&self, y: usize, r: usize, k: usize) -> bool {
++        let (Some(a), Some(b)) = (self.side(y, r), self.side(r, k)) else { return false };
++        let (px, pk) = (&self.ctx.pics[y], &self.ctx.pics[k]);
++        if a.exact && b.exact {
++            let s = Side { to: k as u32, link: u32::MAX, forward: true, proven: a.proven && b.proven, sx: a.sx + b.sx, sy: a.sy + b.sy, ..a };
++            self.made.borrow_mut().insert((y, k), (s, None, f32::INFINITY));
++            self.made.borrow_mut().insert((k, y), (Side { to: y as u32, forward: false, sx: -s.sx, sy: -s.sy, ..s }, None, f32::INFINITY));
++            return true;
++        }
++        const SAME_IMAGE: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
++        let (m1, m2) = (self.transform(y, r).unwrap_or(SAME_IMAGE), self.transform(r, k).unwrap_or(SAME_IMAGE));
++        let m: Affine = [
++            m2[0] * m1[0] + m2[1] * m1[3],
++            m2[0] * m1[1] + m2[1] * m1[4],
++            m2[0] * m1[2] + m2[1] * m1[5] + m2[2],
++            m2[3] * m1[0] + m2[4] * m1[3],
++            m2[3] * m1[1] + m2[4] * m1[4],
++            m2[3] * m1[2] + m2[4] * m1[5] + m2[5],
++        ];
++        let Some(mi) = invert_affine(&m) else { return false };
++        let points = 1.0 / (1.0 / self.points(y, r) + 1.0 / self.points(r, k));
++        let (fwd, back) = edge_sides((y, px), (k, pk), &m, points, a.clean && b.clean, u32::MAX);
++        self.made.borrow_mut().insert((y, k), (fwd, Some(m), points));
++        self.made.borrow_mut().insert((k, y), (back, Some(mi), points));
++        true
++    }
++
++    /// `k` is the size of `d` and softer than it by more than `SOFT_GAP`:
++    /// it does not show `d` at `d`'s detail, so it may not stand in for it.
++    fn softer(&self, k: usize, d: usize) -> bool {
++        let Some(e) = self.side(d, k) else { return false };
++        !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.ctx.pics[k].traits) - softness(self.ctx.pics[d].traits) > SOFT_GAP
++    }
++
++    /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
++    /// besides `d` holds no picture.
++    ///
++    /// **Read off the detail both files already measured.** Over its whole
++    /// frame `k`'s detail is `d`'s where `d` lies and the rest's elsewhere,
++    /// so if the rest is flat `k` reads `f` times `d`'s, `f` the share of
++    /// `k`'s frame that is `d`; if it is more of the picture, about `d`'s
++    /// own. `k` is a canvas when it is nearer the first, split at their
++    /// geometric middle, `sqrt(f)`. Eight pixels apart, the coarsest the
++    /// measure has: that is the structure a picture's content holds, which
++    /// two renderings of one region share, where pixel-scale detail is what
++    /// re-encoding, noise and resampling move. At one pixel apart a third of
++    /// slightly cropped photographs read as canvases.
++    ///
++    /// It decides only what nothing else can (`settle`'s `lone`): a set with
++    /// no picture copied at its own frame. On the pairs benchmark
++    /// (`benchmark/pairs.py`), composites deleted their original 971 times,
++    /// 133 of them losing content; with this, 40 and 2 — a caption bar of a
++    /// tenth of the frame is near the split — while crops and turns kept
++    /// 2,729 of their 3,014 deletions. On IMGS-ALL it never applies: every
++    /// family there has its picture copied at its own frame.
++    fn on_canvas(&self, k: usize, d: usize) -> bool {
++        let Some(e) = self.side(d, k) else { return false };
++        let (pd, pk) = (&self.ctx.pics[d], &self.ctx.pics[k]);
++        let area = |p: &Picture| p.dims.0 as f32 * p.dims.1 as f32;
++        if area(pk) <= 0.0 || area(pd) <= 0.0 {
++            return false;
++        }
++        let f = (area(pd) * (e.sx + e.sy).exp2() / area(pk)).clamp(1e-3, 1.0);
++        // How many of `d`'s pixels one of `k`'s spans.
++        let s = (-(e.sx + e.sy) / 2.0).exp2();
++        let (td, tk) = (&pd.traits.detail, &pk.traits.detail);
++        tk[3] / at_distance(&td[..4], 8.0 * s).max(1e-4) < f.sqrt()
++    }
++
++    /// What `k` shows of `d` under the transform that takes `d`'s frame onto
++    /// `k`'s whole (`frame_onto_frame`), read over all of it (`whole_worst`).
++    fn exact(&self, k: usize, d: usize) -> f32 {
++        if let Some(&w) = self.exact.borrow().get(&(k, d)) {
++            return w;
++        }
++        let w = match self.transform(d, k) {
++            None => 0.0,
++            Some(m) => {
++                let (pd, pk) = (&self.ctx.pics[d], &self.ctx.pics[k]);
++                whole_worst(&mut self.blurs.borrow_mut(), (d, pd), (k, pk), &frame_onto_frame(&m, pd.work, pk.work))
++            }
++        };
++        self.exact.borrow_mut().insert((k, d), w);
++        w
++    }
++
++    /// `f` and `g` are one frame: the same bytes or pixels, or each shows the
++    /// other over its whole frame when the one is laid on the other corner
++    /// to corner.
++    ///
++    /// **The pixels say it, not the fitted corners.** A fit puts a frame's
++    /// corners where its points say, and a corner is as far from the points
++    /// as a frame gets: `FIT_ERROR` over the points is how far off a fit to
++    /// well-spread points is, and nothing bounds one whose points are
++    /// bunched (a dark street whose lamps are all it has: its re-encodes'
++    /// corners 2-13% out at 34 points) or one composed through other files
++    /// (5.5 points: 12.7% either way, and a phone screenshot's bars are 8%).
++    /// Read by the corners, the first were no frame of their original's and
++    /// only a chain of other files deleted them, and the second was the
++    /// frame of the photograph it holds, and was deleted for it. Two files
++    /// of one frame need no fit: the transform between them is their sizes',
++    /// exactly, and under it they agree or they do not. The fit says only
++    /// which way round, and that neither reaches past the other by more than
++    /// it could be off (`FIT_ERROR_MOST`).
++    fn same(&self, f: usize, g: usize) -> bool {
++        let Some(e) = self.side(f, g) else { return false };
++        e.exact || (e.f_in && e.in_f && self.exact(f, g) <= WHOLE_RESIDUAL && self.exact(g, f) <= WHOLE_RESIDUAL)
++    }
++
++    /// All of `f`'s frame lands in `g`'s: they are one frame, or the fit
++    /// puts it there (`FIT_ERROR`).
++    fn frame(&self, f: usize, g: usize) -> bool {
++        self.side(f, g).is_some_and(|e| e.exact || e.f_in) || self.same(f, g)
++    }
++
++    /// All of `f`'s frame lands in `g`'s, and `g`'s reaches past it.
++    fn strict_in(&self, f: usize, g: usize) -> bool {
++        self.side(f, g).is_some_and(|e| e.f_in && e.past_f) && !self.same(f, g)
++    }
++
++    /// `d` is a lossless file of `k`'s frame and size whose pixels are not
++    /// `k`'s (not the same bytes, nor the same decoded pixels): two
++    /// pictures, as far as anything says.
++    ///
++    /// **The run cannot see what tells two such files apart.** Every check
++    /// it has reads the picture at a thumbnail's 128 pixels, or at a
++    /// sixty-fourth of the frame, and its keypoints at the working size: two
++    /// screenshots of an invoice, one total reading $1,250 and the other
++    /// $9,750, agreed at 1.00 and shared every keypoint at distance 0, and of
++    /// an invoice, its re-encode and the other invoice, the other was deleted;
++    /// a line of text changed, the original was. A lossy file differs from
++    /// its source by the codec everywhere, so its pixels say nothing either
++    /// way; a lossless one differs only where it was changed. No number is
++    /// read here: the formats say it.
++    fn own_pixels(&self, k: usize, d: usize) -> bool {
++        self.ctx.pics[d].traits.lossless
++            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME)
++            && self.same(k, d)
++    }
++
++    /// `g` shows all of `f`'s picture, at `f`'s detail or finer.
++    fn holds(&self, g: usize, f: usize) -> bool {
++        let Some(e) = self.side(f, g) else { return false };
++        if e.exact {
++            return true;
++        }
++        if !self.frame(f, g) {
++            return false;
++        }
++        let l = e.sx.min(e.sy);
++        !(-l > SHRINK && extra(self.ctx.pics[g].traits, self.ctx.pics[f].traits, (-l).exp2()) > EXTRA_PER_OCTAVE * -l + EXTRA_FLOOR)
++    }
++
++    /// `g` holds `f` and shows more of it: more frame, or real detail `f`
++    /// lacks.
++    fn more(&self, g: usize, f: usize) -> bool {
++        if !self.holds(g, f) {
++            return false;
++        }
++        let e = self.side(f, g).unwrap();
++        if e.exact {
++            return false;
++        }
++        if e.past_f {
++            return true;
++        }
++        let l = e.sx.min(e.sy);
++        l > SAME && extra(self.ctx.pics[f].traits, self.ctx.pics[g].traits, l.exp2()) > EXTRA_PER_OCTAVE * l + EXTRA_FLOOR
+     }
+ 
+     /// How many different pictures of the frame `k` and `d` share class `c`
+@@ -1228,16 +1410,19 @@ impl<'c, 'a> Component<'c, 'a> {
+     /// as deletion spreads: 600 re-encodes of one picture spent 5.0 s here,
+     /// now 0.9.
+     fn pictures_of_one_frame(&self, c: usize, k: usize, d: usize) -> usize {
+-        let x = self.ctx;
+-        let strict = |f: usize, g: usize| x.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f));
+-        let narrow = strict(k, d);
+-        let of = self.classes[c].iter().copied().filter(|&g| !narrow || g == k || g == d || (strict(g, k) && strict(g, d))).collect::<Vec<_>>();
+-        of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| x.side(f, g).is_some_and(|e| e.exact))).take(3).count()
++        let narrow = self.same(k, d);
++        let of = self.classes[c].iter().copied().filter(|&g| !narrow || g == k || g == d || (self.same(g, k) && self.same(g, d))).collect::<Vec<_>>();
++        of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| self.side(f, g).is_some_and(|e| e.exact))).take(3).count()
+     }
+ 
+-    /// The whole-frame check of deleting `d` for `k` (`whole_worst`).
++    /// The whole-frame check of deleting `d` for `k` (`whole_worst`): under
++    /// the frames' own transform where the two are one frame, the fitted one
++    /// otherwise.
+     fn whole(&self, k: usize, d: usize) -> f32 {
+-        let Some(m) = self.ctx.transform(d, k) else { return 0.0 };
++        if self.side(d, k).is_some_and(|e| !e.exact) && self.same(k, d) {
++            return self.exact(k, d);
++        }
++        let Some(m) = self.transform(d, k) else { return 0.0 };
+         let (pd, pk) = (&self.ctx.pics[d], &self.ctx.pics[k]);
+         *self.whole.borrow_mut().entry((k, d)).or_insert_with(|| whole_worst(&mut self.blurs.borrow_mut(), (d, pd), (k, pk), &m))
+     }
+@@ -1247,12 +1432,12 @@ impl<'c, 'a> Component<'c, 'a> {
+     /// refusal makes of `d` is `Refusal`'s to say.
+     fn refusal(&self, k: usize, d: usize) -> Option<Refusal> {
+         let x = self.ctx;
+-        if !x.holds(k, d) {
++        if !self.holds(k, d) {
+             return Some(Refusal::No);
+         }
+         // A file of several pictures shows more than the first, which is
+         // all any match was made on: only a copy of its bytes holds it.
+-        if x.pics[d].traits.frames && !x.side(d, k).is_some_and(|e| e.exact) {
++        if x.pics[d].traits.frames && !self.side(d, k).is_some_and(|e| e.exact) {
+             return Some(Refusal::Held);
+         }
+         // Nor is a file deleted for the same pixels without what it carries
+@@ -1260,14 +1445,14 @@ impl<'c, 'a> Component<'c, 'a> {
+         // read alike only, the file that carries more may be the one whose
+         // pixels are not the original's (a posterized PNG with the profile,
+         // against a lossless WebP without it).
+-        if x.side(d, k).is_some_and(|e| e.proven) && x.carries_more(k, d) {
++        if self.side(d, k).is_some_and(|e| e.proven) && x.carries_more(k, d) {
+             return Some(Refusal::Held);
+         }
+         // In a set with no picture copied at its own frame — a photograph
+         // and its crop, say — nothing says which file is a composite, and
+         // the larger frame may delete what it holds: unless what it has
+         // besides reads as a canvas rather than more of the picture.
+-        let shape = x.same(k, d) || (x.strict_in(d, k) && self.part[&d] && (self.plain[&k] || !self.any_plain && !x.on_canvas(k, d)));
++        let shape = self.same(k, d) || (self.strict_in(d, k) && self.part[&d] && (self.plain[&k] || !self.any_plain && !self.on_canvas(k, d)));
+         if !shape || self.whole(k, d) > WHOLE_RESIDUAL {
+             return Some(Refusal::No);
+         }
+@@ -1279,10 +1464,10 @@ impl<'c, 'a> Component<'c, 'a> {
+         // pinned file is kept whatever it is, so against a library the
+         // question is not asked.
+         if !x.is_pinned(k)
+-            && x.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
++            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
+             && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.pictures_of_one_frame(c, k, d) < 3)
+-            && !x.more(k, d)
+-            && !x.more(d, k)
++            && !self.more(k, d)
++            && !self.more(d, k)
+         {
+             return Some(Refusal::Undecided);
+         }
+@@ -1294,7 +1479,7 @@ impl<'c, 'a> Component<'c, 'a> {
+         // stand in for a lossless one: against a library, whose lossy copy
+         // of a picture answers for it by the user's decision, only a
+         // lossless library file is asked.
+-        if x.own_pixels(k, d) {
++        if self.own_pixels(k, d) {
+             if x.pics[k].traits.lossless {
+                 return Some(Refusal::Undecided);
+             }
+@@ -1305,13 +1490,37 @@ impl<'c, 'a> Component<'c, 'a> {
+         // Asked last, so that what it refuses is what it alone refused. A
+         // file that decoded only in part shows less than an intact file of
+         // its picture, by what was cut off, as a softer one does by detail.
+-        if x.softer(k, d) || x.pics[k].damaged && !x.pics[d].damaged {
++        if self.softer(k, d) || x.pics[k].damaged && !x.pics[d].damaged {
+             return Some(Refusal::Softer);
+         }
+         None
+     }
+ }
+ 
++/// The transform that takes frame `a` onto frame `b` whole, each corner onto a
++/// corner, turned the way `m` turns it: of the four turns, the one whose
++/// corners lie nearest where `m` puts them.
++fn frame_onto_frame(m: &Affine, a: (u32, u32), b: (u32, u32)) -> Affine {
++    let (aw, ah, bw, bh) = (a.0.max(1) as f32, a.1.max(1) as f32, b.0 as f32, b.1 as f32);
++    let turns: [Affine; 4] = [
++        [bw / aw, 0.0, 0.0, 0.0, bh / ah, 0.0],
++        [0.0, -bw / ah, bw, bh / aw, 0.0, 0.0],
++        [-bw / aw, 0.0, bw, 0.0, -bh / ah, bh],
++        [0.0, bw / ah, 0.0, -bh / aw, 0.0, bh],
++    ];
++    let at = |t: &Affine, x: f32, y: f32| (t[0] * x + t[1] * y + t[2], t[3] * x + t[4] * y + t[5]);
++    let off = |t: &Affine| -> f32 {
++        [(0.0, 0.0), (aw, 0.0), (0.0, ah), (aw, ah)]
++            .iter()
++            .map(|&(x, y)| {
++                let ((u, v), (p, q)) = (at(t, x, y), at(m, x, y));
++                (u - p) * (u - p) + (v - q) * (v - q)
++            })
++            .sum()
++    };
++    *turns.iter().min_by(|s, t| off(s).total_cmp(&off(t))).unwrap()
++}
++
+ /// How far a frame mapped through `m` lands outside the other, as a fraction
+ /// of the other's side: zero when every corner lands inside.
+ fn out_by(m: &Affine, a: (u32, u32), b: (u32, u32)) -> f32 {
+diff --git a/src/verify.rs b/src/verify.rs
+index df41b7b..0aabef3 100644
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -75,6 +75,9 @@ pub struct Verdict {
+     /// which no fit of its own made: the aligned points a single fit as
+     /// uncertain would have (`fit_points`). Zero for a fitted one.
+     pub composed_points: f32,
++    /// SCAFFOLD(v67): median and p90 inlier residual over the keypoint's size, then the pixel
++    /// check on a grid twice as fine (mean, worst block).
++    pub x: [f32; 4],
+ }
+ 
+ impl Default for Verdict {
+@@ -97,6 +100,7 @@ impl Default for Verdict {
+             lo: 1.0 / MAX_SCALE,
+             hi: MAX_SCALE,
+             composed_points: 0.0,
++            x: [0.0; 4],
+         }
+     }
+ }
+@@ -2235,10 +2239,80 @@ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), ma
+         v.blk_n = n;
+         v.ncc = ncc;
+         v.blk_min = worst;
++        // SCAFFOLD(v67)
++        if std::env::var_os("IMGFP_FINE").is_some() {
++            let mut r: Vec<f32> = matches.iter().zip(&scratch.mask).filter(|&(_, &k)| k).map(|(&(i, j), _)| {
++                let (ka, kb) = (&p.fa.kps[i as usize], &p.fb.kps[j as usize]);
++                let (u, w) = apply(&m_query, ka.x, ka.y);
++                ((u - kb.x) * (u - kb.x) + (w - kb.y) * (w - kb.y)).sqrt() / kb.sigma.max(1e-3)
++            }).collect();
++            r.sort_by(f32::total_cmp);
++            if !r.is_empty() { v.x[0] = r[r.len() / 2]; v.x[1] = r[(r.len() * 9 / 10).min(r.len() - 1)]; }
++            let f = fine_check(p.ta, p.tb, &m, aw, ah, bw, bh, var.invert);
++            v.x[2] = f.0; v.x[3] = f.1;
++        }
+     }
+     v
+ }
+ 
++/// SCAFFOLD(v67): the pixel check's blocks on a grid of 96 samples a side, 12 blocks each way.
++fn fine_check(ta: &Thumb, tb: &Thumb, m: &Affine, aw: f32, ah: f32, bw: f32, bh: f32, invert: bool) -> (f32, f32) {
++    #[allow(non_snake_case)]
++    let G: usize = std::env::var("IMGFP_FINE").ok().and_then(|v| v.parse().ok()).unwrap_or(96);
++    const B: usize = 8;
++    const P: usize = 24;
++    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
++    for iy in 0..P {
++        for ix in 0..P {
++            let (x, y) = ((ix as f32 + 0.5) / P as f32 * aw, (iy as f32 + 0.5) / P as f32 * ah);
++            let (u, v) = apply(m, x, y);
++            if u >= 0.0 && u < bw && v >= 0.0 && v < bh { x0 = x0.min(x); y0 = y0.min(y); x1 = x1.max(x); y1 = y1.max(y); }
++        }
++    }
++    if !(x1 > x0 && y1 > y0) { return (0.0, 0.0); }
++    let step_a = ((x1 - x0) / (G - 1) as f32).max((y1 - y0) / (G - 1) as f32);
++    let lin = linear_scale(m);
++    let (raw_a, raw_b) = ((step_a * ta.scale).max(1e-6), (step_a * lin * tb.scale).max(1e-6));
++    let (fa, fb) = (raw_a * (1.0 / raw_b).max(1.0), raw_b * (1.0 / raw_a).max(1.0));
++    let (mut pa, mut pb) = (Pyramid::default(), Pyramid::default());
++    let (la, lb) = (ta.lod(fa, &mut pa), tb.lod(fb, &mut pb));
++    let (sa, sb) = ((ta.w as f32 / aw, ta.h as f32 / ah), (tb.w as f32 / bw, tb.h as f32 / bh));
++    let mut va = vec![0f32; G * G]; let mut vb = vec![0f32; G * G]; let mut ok = vec![false; G * G];
++    for iy in 0..G {
++        for ix in 0..G {
++            let (x, y) = (x0 + (x1 - x0) * ix as f32 / (G - 1) as f32, y0 + (y1 - y0) * iy as f32 / (G - 1) as f32);
++            let (u, v) = apply(m, x, y);
++            if u < 0.0 || u >= bw || v < 0.0 || v >= bh { continue; }
++            let s = la.at((x + 0.5) * sa.0, (y + 0.5) * sa.1);
++            va[iy * G + ix] = if invert { 255.0 - s } else { s };
++            vb[iy * G + ix] = lb.at((u + 0.5) * sb.0, (v + 0.5) * sb.1);
++            ok[iy * G + ix] = true;
++        }
++    }
++    let (mut agree, mut total, mut worst) = (0f32, 0u32, f32::INFINITY);
++    for by in (0..G).step_by(B) {
++        for bx in (0..G).step_by(B) {
++            let (mut n, mut s1, mut s2, mut s11, mut s22, mut s12) = (0usize, 0f64, 0f64, 0f64, 0f64, 0f64);
++            for y in by..by + B { for x in bx..bx + B {
++                let k = y * G + x;
++                if !ok[k] { continue; }
++                n += 1;
++                let (p, q) = (va[k] as f64, vb[k] as f64);
++                s1 += p; s2 += q; s11 += p * p; s22 += q * q; s12 += p * q;
++            } }
++            if n < B * B { continue; }
++            let nf = n as f64;
++            let (v1, v2) = (s11 - s1 * s1 / nf, s22 - s2 * s2 / nf);
++            let flat = 4.0 * 4.0 * nf;
++            if v1 < flat && v2 < flat { continue; }
++            let cov = s12 - s1 * s2 / nf;
++            let r = if v1 < flat || v2 < flat { (2.0 * cov.abs() / (v1 + v2)) as f32 } else { (cov / (v1 * v2).sqrt()).abs() as f32 };
++            total += 1; agree += r; worst = worst.min(r);
++        }
++    }
++    if total == 0 { (0.0, 0.0) } else { (agree / total as f32, worst) }
++}
++
+ crate::simd::dispatched! {
+     /// Check a transform that came from somewhere else — composed through a
+     /// third image — using pixels only. No descriptor matching, so it costs

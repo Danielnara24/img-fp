@@ -1,0 +1,47 @@
+== ALL2 k-composite  (in 14.04s)
+  k-composite TP  15946  FP    0  FN  12070  TN   5467   precision 100.0000%  recall 56.92%
+        recall by kind: unedited 11580/14548 (79.6%), edit 4366/13468 (32.4%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+== ALL k-composite  (in 12.92s)
+  k-composite TP  19252  FP    0  FN   8407  TN   5460   precision 100.0000%  recall 69.60%
+        recall by kind: unedited 12042/14555 (82.7%), edit 7210/13104 (55.0%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+k-composite/small all2 n1: 368 deleted, 1 lost; all2 n2: 718 deleted, 1 lost; all n1: 262 deleted, 7 lost; all n2: 662 deleted, 28 lost;
+   all2 n1-d2 unedited, no unedited holder: ORIGINAL 1
+   all2 n2-d2 unedited, no unedited holder: ORIGINAL 1
+   all n1-d1 unedited, no unedited holder: ORIGINAL 1
+   all n1-d2 unedited, no unedited holder: ORIGINAL 3
+   all n1-d3 unedited, no unedited holder: ORIGINAL 3
+   all n2-d1 unedited, no unedited holder: ORIGINAL 2
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d1 edit, no holder: temperature 1
+   all n2-d2 unedited, no unedited holder: alpha_on_black 1
+   all n2-d2 unedited, no unedited holder: ORIGINAL 11
+   all n2-d2 unedited, no unedited holder: copy_exact 1
+   all n2-d2 unedited, no unedited holder: jpeg_high 1
+   all n2-d2 unedited, no unedited holder: webp_lossless 1
+   all n2-d2 edit, no holder: duotone 1
+   all n2-d2 edit, no holder: jpeg_low 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 5
+   all n2-d3 unedited, no unedited holder: copy_exact 1
+   all n2-d3 edit, no holder: motion_blur 1
+transform              pairs origDEL  varDEL    loss   lossX  REVIEW
+blur_fill                364     228       0      59      59       7
+browser_window           364     206       0       2       2     178
+caption_bar              364     237       0       0       0     150
+collage_cell             364      69       0       0       0      86
+contact_sheet            364       5       0       0       0     257
+copy_exact               364     141     223       0       0       0
+embed_small              364      81       0       1       1     286
+embed_tiny               364       9       0       0       0     326
+magazine_spread          364      45       0       0       0     347
+messaging_app            364      13      13       0       0     472
+pdf_page                 364      34       0       2       2     403
+phone_screenshot         364     143       0      53      53     161
+picture_in_picture       364      17       0       0       0     315
+slide_deck               364      64       0      35      35     334
+strip_metadata           359     113     246       0       0       0
+to_png                   364       1      13       0       0     700
+upscale                  364      20       0       0       0     343
+wall_poster              364       8       0       8       8     412
+webp_lossless            364       2      12       0       0     700
+TOTAL                  32755    1436    6531     160     160   34378
+done k-composite

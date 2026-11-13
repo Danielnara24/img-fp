@@ -17,14 +17,17 @@
 //! - **A pair is clean** when no block of its overlap disagrees
 //!   (`Standing::Clean`'s bar). A pair that is not may still delete when it
 //!   agrees at `WEAK_DELETES` overall; below that it decides nothing, and a
-//!   negative or a mirror image never does. A file left reached only through such pairs is
+//!   negative never does (a mirror image is a picture of the frame like any
+//!   other). A file left reached only through such pairs is
 //!   REVIEW when one of them agrees at `REVIEW` — a copy tinted or
 //!   watermarked, which no pair could prove — and KEEP below it, where it is
 //!   another photograph of the same subject.
 //! - **"Holds"**: `g` holds `f` when all four corners of `f` land inside `g`
 //!   (by no more than the fit is usually off, `FIT_ERROR`; and `g` is the
 //!   larger frame only past the most it was ever off, `FIT_ERROR_MOST`,
-//!   neither deleting the other between) and `g` does not
+//!   neither deleting the other between; two files are one frame when the
+//!   corners say so both ways and the pixels do too, laid corner to corner,
+//!   `Component::same`) and `g` does not
 //!   shrink `f`'s picture by more than `SHRINK` on either axis, unless `f`'s
 //!   extra pixels hold no detail an enlargement of `g` would lack, which is
 //!   an upscale (`extra`). Two crops of a picture, each missing a strip the
@@ -35,34 +38,42 @@
 //!   (`whole_worst`), flat areas included, which the pixel check lets
 //!   abstain. Without it, a caption bar's white strip "matched" the white
 //!   background of a slide holding the same photograph.
-//! - **A composite is never deleted but by a copy of itself, and never stands
-//!   in for the plain picture.** A file that strictly holds a picture which
-//!   has its own same-frame copies (`plain`) is a slide, a collage, a meme: it
-//!   holds something nothing else does, and a thumbnail cannot check what.
-//!   Weak pairs count for that, since a composite matches its photograph
-//!   weakly. Where no file of a set is copied at its own frame — a photograph
-//!   and a crop of it — the larger frame may delete what it holds, unless
-//!   what it has besides reads as a canvas rather than more of the picture
-//!   (`on_canvas`): a border, a caption bar, a slide.
+//! - **A composite is never deleted but by a copy of itself, and stands in
+//!   for a picture it holds whole.** A file that strictly holds a picture
+//!   which has its own same-frame copies (`plain`) is a slide, a collage, a
+//!   meme: it holds something nothing else does, and a thumbnail cannot
+//!   check what, so it stays. It may delete the plain picture it holds (the
+//!   user's decision of 2026-11-13; until then both were kept) when the pair
+//!   is clean, it shows the picture as it is, turned or resized and nothing
+//!   else (`shown_as_it_is`: not a photograph of a poster), and the picture's
+//!   file shows no more than another file itself (`shows_more_than_one`).
+//!   Where no file of a set is copied at its own frame, a photograph and a
+//!   crop of it, the larger frame may also delete what it holds unless what
+//!   it has besides reads as a canvas rather than more of the picture
+//!   (`on_canvas`).
 //! - **Of files that hold each other, one is kept**: the one closest to the
 //!   rest in grey (`TAU`), not softer than the rest, then the one leaving out
-//!   least of the others, colour over grey, lossless over lossy, EXIF, and the
-//!   smaller file. Pixel-identical files stand as one, the smallest.
-//! - **Choosing needs a majority.** The keeper is the middle of what the
-//!   files of a frame agree on, and two different pictures of one frame have
-//!   no middle: an original and its re-encode, its edit, its recolouring look
+//!   least of the others, colour over grey, lossless over lossy, EXIF, the
+//!   one nearest the rest, and the smaller file. Pixel-identical files stand
+//!   as one, the smallest.
+//! - **Choosing needs a second copy.** The keeper is the middle of what the
+//!   files of a frame agree on, and different pictures of one frame have no
+//!   middle: an original and its re-encode, its edit, its recolouring look
 //!   alike to every measure the run has, and file size or name order decided
-//!   which went. So two pictures of a frame with no third, of which nothing
-//!   measured says one shows more (`more`, or a size gap past `SHRINK` that
-//!   `holds` tested), are neither deleted,
-//!   and both are REVIEW (same bytes or same pixels count as one picture, and
-//!   a library file, being kept whatever it is, decides as before). Taken two
-//!   files at a time, IMGS-ALL's families lost content in 2,241 of 27,355
-//!   pairs that way, the original deleted for its brightened, sharpened,
-//!   recoloured or watermarked copy; now in 22 (and the composites' 133 in
-//!   2, `on_canvas`). The price is REVIEW: 29,368 of the 54,710 files, from
-//!   8,114, every lone re-encode or format conversion among them; on
-//!   IMGS-ALL 3,004 from 2,499, and 386 fewer deletions.
+//!   which went. So a file deletes a different picture of its frame and size
+//!   only beside a third that is its own as nearly as a re-encode is
+//!   (`Component::corroborated`), or when something measured says it shows
+//!   more (`more`); otherwise neither is deleted and both are REVIEW (same
+//!   bytes or same pixels count as one picture, and a library file, being
+//!   kept whatever it is, decides as before). Taken two files at a time,
+//!   IMGS-ALL's families lost content in 2,241 of 27,355 pairs before the
+//!   rule, and in none now; taken three at a time, in 27 of 741 deletions
+//!   while any third picture would do, and in 3 now.
+//! - **No file is deleted for one that shows its picture more than half an
+//!   octave smaller** (`SHRINK`, the user's allowance for a crop stretched
+//!   back or a copy saved a little smaller): past that, that the larger
+//!   file's extra pixels are an enlargement's is a statistic, and a soft
+//!   original reads as one (`refusal`). Such a file is REVIEW.
 //! - **What no check can see is not deleted.** A lossless file is deleted
 //!   only for its own pixels, a larger frame or more detail, never for a
 //!   file of its frame and size whose pixels differ (`own_pixels`): the
@@ -70,8 +81,12 @@
 //!   an invoice is. And a file of several pictures — an animation, a TIFF's
 //!   pages — only for its own bytes, since only its first was matched. Such
 //!   a file is kept, and nothing is deleted on its strength.
-//! - **Deletion spreads from the keeps**, each file deleted by one already
-//!   settled.
+//! - **Deletion spreads from the keeps, and every deletion is a kept file's.**
+//!   A kept file deletes what it may of the files it is paired with, and of
+//!   the files those are paired with in turn: a deleted file says where to
+//!   look (the transform composed through it), and the kept file is asked,
+//!   of its own pixels over the other's whole frame (`Component::through`).
+//!   So a DELETE names a file that stays and was checked against it.
 //!
 //! How the pieces are put together: whether one file may delete another is
 //! one question (`Component::refusal`), which decides nothing itself and
@@ -88,7 +103,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::decode::Traits;
-use crate::verify::{invert_affine, linear_scale, mirrored, Affine, Thumb, Verdict};
+use crate::verify::{invert_affine, linear_scale, Affine, Thumb, Verdict};
 
 /// What the reports say to do with a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -424,6 +439,31 @@ struct Side {
     clean: bool,
 }
 
+/// The two sides of a pair whose transform `m` takes `a`'s working image to
+/// `b`'s, fitted to `points` points (`Verdict::fit_points`).
+fn edge_sides((a, pa): (usize, &Picture), (b, pb): (usize, &Picture), m: &Affine, points: f32, clean: bool, link: u32) -> (Side, Side) {
+    // Working pixels to the file's own, for each.
+    let shrink = |p: &Picture| {
+        let file = p.dims.0.max(p.dims.1) as f32;
+        if file > 0.0 { p.work.0.max(p.work.1) as f32 / file } else { 1.0 }
+    };
+    let k = shrink(pa) / shrink(pb);
+    let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
+    let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
+    let mi = invert_affine(m);
+    let a_out = outside(m, pa.work, pb.work);
+    let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
+    // A corner may land outside by what the fit may be off by
+    // (`FIT_ERROR`), and by nothing where nothing says.
+    // and past it by more than it could be (`FIT_ERROR_MOST`).
+    let (near, far) = if points > 0.0 { (FIT_ERROR / points, FIT_ERROR_MOST / points) } else { (0.0, 0.0) };
+    let (a_by, b_by) = (out_by(m, pa.work, pb.work), mi.map_or(f32::INFINITY, |mi| out_by(&mi, pb.work, pa.work)));
+    let (a_in_b, b_in_a) = (a_by <= near, b_by <= near);
+    let (a_past, b_past) = (a_by > far, b_by > far);
+    let s = Side { to: b as u32, link, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, f_past: a_past, past_f: b_past, sx, sy, f_out: a_out, clean };
+    (s, Side { to: a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, f_past: b_past, past_f: a_past, sx: -sx, sy: -sy, f_out: b_out, ..s })
+}
+
 /// The action for every file in a pair, by index; `None` for the rest.
 #[cfg(test)]
 pub fn suggest(pics: &[Picture], links: &[(usize, usize, Link)], min_correlation: f32, colour: impl Fn(usize) -> f32 + Sync) -> Vec<Option<Action>> {
@@ -479,36 +519,17 @@ pub fn suggest_pinned(
                 if *inverted {
                     return None;
                 }
-                let sx = (hypot(m[0], m[3]) * k).max(1e-6).log2();
-                let sy = (hypot(m[1], m[4]) * k).max(1e-6).log2();
-                let mi = invert_affine(m);
-                let a_out = outside(m, pa.work, pb.work);
-                let b_out = mi.map_or(1.0, |mi| outside(&mi, pb.work, pa.work));
-                // A corner may land outside by what the fit may be off by
-                // (`FIT_ERROR`), and by nothing where nothing says.
-                // and past it by more than it could be (`FIT_ERROR_MOST`).
-                let points = v.fit_points();
-                let (near, far) = if points > 0.0 { (FIT_ERROR / points, FIT_ERROR_MOST / points) } else { (0.0, 0.0) };
-                let (a_by, b_by) = (out_by(m, pa.work, pb.work), mi.map_or(f32::INFINITY, |mi| out_by(&mi, pb.work, pa.work)));
-                let (a_in_b, b_in_a) = (a_by <= near, b_by <= near);
-                let (a_past, b_past) = (a_by > far, b_by > far);
-                let s = Side { to: *b as u32, link: li as u32, forward: true, exact: false, proven: false, f_in: a_in_b, in_f: b_in_a, f_past: a_past, past_f: b_past, sx, sy, f_out: a_out, clean };
-                (s, Side { to: *a as u32, forward: false, f_in: b_in_a, in_f: a_in_b, f_past: b_past, past_f: a_past, sx: -sx, sy: -sy, f_out: b_out, ..s })
+                edge_sides((*a, pa), (*b, pb), m, v.fit_points(), clean, li as u32)
             }
         };
         let usable = match link {
             Link::Exact | Link::Twin => true,
-            // A mirror image settles nothing either way, as a negative does
-            // not. It shows all of the picture, turned the other way round,
-            // and which of the two is the right way round is not something a
-            // pair can say: the rule chose between them on quality, so a
-            // mirrored re-encode a little better than its original was kept
-            // and the original deleted — 14 of 19 photographs, a flip saved at
-            // quality 95 beside the original at 92. Left to a person, as
-            // REVIEW when it agrees as closely as a copy does.
-            Link::Edge(v, m, _) => {
-                !mirrored(m) && v.blk >= min_correlation && (fwd.clean || v.blk >= WEAK_DELETES)
-            }
+            // A mirror image holds the picture as a turned copy does (user's
+            // decision, 2026-11-12; until then it settled nothing, as a
+            // negative does not): it is one of the frame's pictures, and
+            // which of the pictures of a frame stays is asked of it as of any
+            // (`refusal`). Two alone are an undecided pair.
+            Link::Edge(v, _, _) => v.blk >= min_correlation && (fwd.clean || v.blk >= WEAK_DELETES),
         };
         Some((fwd, back, usable))
     };
@@ -613,6 +634,9 @@ struct Facts {
     /// Its class is two pictures of a frame that nothing decided between
     /// (`Refusal::Undecided`).
     undecided: bool,
+    /// A file that stays shows all of it, smaller, and but for that could
+    /// delete it (`Component::shows_smaller`).
+    shrunk: bool,
     /// The best correlation of any pair it is in, negatives aside.
     best: f32,
 }
@@ -693,6 +717,13 @@ impl Facts {
         if self.undecided && !self.deletes {
             return Action::Review;
         }
+        // So is a file that a file that stays shows all of at a smaller
+        // size: an enlargement of it, or the larger original of a reduction,
+        // and nothing the run keeps says which (`refusal`). Kept, it read as
+        // another photograph, with nothing to say a look would settle it.
+        if self.shrunk && !self.deletes {
+            return Action::Review;
+        }
         // A file that stays and was only ever matched weakly is for a person
         // to look at, whatever it was chosen as, unless a deletion rests on
         // it.
@@ -709,11 +740,13 @@ impl Facts {
 }
 
 /// For each DELETE, the file that stays and holds it: the end of its chain
-/// of keepers. Deletion spreads one holder at a time, so the file a deletion
-/// rests on (`suggest_pinned`'s second answer) may be a DELETE itself, and
-/// named as the copy that is kept it was a file suggested for deletion too:
-/// 52 of 337 DELETEs on `derived/Desktop`. `None` where `keeper` has none,
-/// or where the chain does not end on a file that stays.
+/// of keepers. Until 0.84.1 deletion spread one holder at a time, so the
+/// file a deletion rested on (`suggest_pinned`'s second answer) could be a
+/// DELETE itself (52 of 337 DELETEs on `derived/Desktop`); now it is a file
+/// that stays (`Ctx::settle`), and this is that file for a scan settled
+/// since, and still the end of the chain for one kept from before. `None`
+/// where `keeper` has none, or where the chain does not end on a file that
+/// stays.
 pub fn kept_at_end(actions: &[Option<Action>], keeper: &[Option<usize>]) -> Vec<Option<usize>> {
     (0..keeper.len())
         .map(|i| {
@@ -791,47 +824,6 @@ impl Ctx<'_> {
         s.binary_search_by_key(&(g as u32), |e| e.to).ok().map(|k| &s[k])
     }
 
-    /// All of `f`'s frame lands in `g`'s.
-    fn frame(&self, f: usize, g: usize) -> bool {
-        self.side(f, g).is_some_and(|e| e.exact || e.f_in)
-    }
-
-    fn same(&self, f: usize, g: usize) -> bool {
-        self.frame(f, g) && self.frame(g, f)
-    }
-
-    /// All of `f`'s frame lands in `g`'s, and `g`'s reaches past it.
-    fn strict_in(&self, f: usize, g: usize) -> bool {
-        self.frame(f, g) && self.side(f, g).is_some_and(|e| e.past_f)
-    }
-
-    /// `k` is the size of `d` and softer than it by more than `SOFT_GAP`:
-    /// it does not show `d` at `d`'s detail, so it may not stand in for it.
-    fn softer(&self, k: usize, d: usize) -> bool {
-        let Some(e) = self.side(d, k) else { return false };
-        !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.pics[k].traits) - softness(self.pics[d].traits) > SOFT_GAP
-    }
-
-    /// `d` is a lossless file of `k`'s frame and size whose pixels are not
-    /// `k`'s (not the same bytes, nor the same decoded pixels): two
-    /// pictures, as far as anything says.
-    ///
-    /// **The run cannot see what tells two such files apart.** Every check
-    /// it has reads the picture at a thumbnail's 128 pixels, or at a
-    /// sixty-fourth of the frame, and its keypoints at the working size: two
-    /// screenshots of an invoice, one total reading $1,250 and the other
-    /// $9,750, agreed at 1.00 and shared every keypoint at distance 0, and of
-    /// an invoice, its re-encode and the other invoice, the other was deleted;
-    /// a line of text changed, the original was. A lossy file differs from
-    /// its source by the codec everywhere, so its pixels say nothing either
-    /// way; a lossless one differs only where it was changed. No number is
-    /// read here: the formats say it.
-    fn own_pixels(&self, k: usize, d: usize) -> bool {
-        self.pics[d].traits.lossless
-            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME)
-            && self.same(k, d)
-    }
-
     /// `d` carries something besides its pixels that `k` does not: more
     /// than eight bits a sample, a colour profile, EXIF (`besides`).
     ///
@@ -845,71 +837,6 @@ impl Ctx<'_> {
     fn carries_more(&self, k: usize, d: usize) -> bool {
         let (a, b) = (besides(&self.pics[k].traits), besides(&self.pics[d].traits));
         a.iter().zip(&b).any(|(&k, &d)| d && !k)
-    }
-
-    /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
-    /// besides `d` holds no picture.
-    ///
-    /// **Read off the detail both files already measured.** Over its whole
-    /// frame `k`'s detail is `d`'s where `d` lies and the rest's elsewhere,
-    /// so if the rest is flat `k` reads `f` times `d`'s, `f` the share of
-    /// `k`'s frame that is `d`; if it is more of the picture, about `d`'s
-    /// own. `k` is a canvas when it is nearer the first, split at their
-    /// geometric middle, `sqrt(f)`. Eight pixels apart, the coarsest the
-    /// measure has: that is the structure a picture's content holds, which
-    /// two renderings of one region share, where pixel-scale detail is what
-    /// re-encoding, noise and resampling move. At one pixel apart a third of
-    /// slightly cropped photographs read as canvases.
-    ///
-    /// It decides only what nothing else can (`settle`'s `lone`): a set with
-    /// no picture copied at its own frame. On the pairs benchmark
-    /// (`benchmark/pairs.py`), composites deleted their original 971 times,
-    /// 133 of them losing content; with this, 40 and 2 — a caption bar of a
-    /// tenth of the frame is near the split — while crops and turns kept
-    /// 2,729 of their 3,014 deletions. On IMGS-ALL it never applies: every
-    /// family there has its picture copied at its own frame.
-    fn on_canvas(&self, k: usize, d: usize) -> bool {
-        let Some(e) = self.side(d, k) else { return false };
-        let (pd, pk) = (&self.pics[d], &self.pics[k]);
-        let area = |p: &Picture| p.dims.0 as f32 * p.dims.1 as f32;
-        if area(pk) <= 0.0 || area(pd) <= 0.0 {
-            return false;
-        }
-        let f = (area(pd) * (e.sx + e.sy).exp2() / area(pk)).clamp(1e-3, 1.0);
-        // How many of `d`'s pixels one of `k`'s spans.
-        let s = (-(e.sx + e.sy) / 2.0).exp2();
-        let (td, tk) = (&pd.traits.detail, &pk.traits.detail);
-        tk[3] / at_distance(&td[..4], 8.0 * s).max(1e-4) < f.sqrt()
-    }
-
-    /// `g` shows all of `f`'s picture, at `f`'s detail or finer.
-    fn holds(&self, g: usize, f: usize) -> bool {
-        let Some(e) = self.side(f, g) else { return false };
-        if e.exact {
-            return true;
-        }
-        if !e.f_in {
-            return false;
-        }
-        let l = e.sx.min(e.sy);
-        !(-l > SHRINK && extra(self.pics[g].traits, self.pics[f].traits, (-l).exp2()) > EXTRA_PER_OCTAVE * -l + EXTRA_FLOOR)
-    }
-
-    /// `g` holds `f` and shows more of it: more frame, or real detail `f`
-    /// lacks.
-    fn more(&self, g: usize, f: usize) -> bool {
-        if !self.holds(g, f) {
-            return false;
-        }
-        let e = self.side(f, g).unwrap();
-        if e.exact {
-            return false;
-        }
-        if e.past_f {
-            return true;
-        }
-        let l = e.sx.min(e.sy);
-        l > SAME && extra(self.pics[f].traits, self.pics[g].traits, l.exp2()) > EXTRA_PER_OCTAVE * l + EXTRA_FLOOR
     }
 
     /// The transform from `f`'s working image to `g`'s.
@@ -931,7 +858,9 @@ impl Ctx<'_> {
         // The pinned files are kept before anything is chosen, and deletion
         // spreads from them first: a file both a pinned file and another
         // could delete is the pinned one's.
-        let mut q: VecDeque<usize> = members.iter().copied().filter(|&f| self.is_pinned(f)).collect();
+        // Each entry is a file whose pairs are followed and the kept file
+        // that asks: itself, for a file that stays.
+        let mut q: VecDeque<(usize, usize)> = members.iter().copied().filter(|&f| self.is_pinned(f)).map(|f| (f, f)).collect();
         // Each class's choice, kept unless a file of another class may delete
         // it. A class holding a pinned file keeps that, kept already.
         let mut chosen = Vec::with_capacity(c.classes.len());
@@ -939,29 +868,49 @@ impl Ctx<'_> {
             if class.iter().any(|&f| self.is_pinned(f)) {
                 continue;
             }
-            let k = self.choose(class, colour);
+            let k = self.choose(&c, class, colour);
             chosen.push(k);
             if !self.sides[k].iter().any(|e| c.class[&(e.to as usize)] != ci && c.refusal(e.to as usize, k).is_none()) {
-                q.push_back(k);
+                q.push_back((k, k));
             }
         }
-        for &k in &q {
+        for &(k, _) in &q {
             state.insert(k, State::Keep);
         }
         loop {
-            // Every settled file deletes what it may of the open files it is
-            // paired with; each refusal is noted against the file refused.
-            while let Some(x) = q.pop_front() {
-                for e in &self.sides[x] {
+            // Every kept file deletes what it may of the open files it is
+            // paired with, and of those its deleted files are paired with
+            // (`Component::through`); each refusal is noted against the file
+            // refused.
+            //
+            // **A deletion rests on a file that stays, and was checked
+            // against it.** A deleted file used to delete in its turn, by
+            // its own pairs: each step allowed what one pair allows (a
+            // corner out by the fit's error, a size half an octave smaller,
+            // twelve grey levels a block), and nothing asked what the steps
+            // came to. A phone's screenshot of a dark photograph was deleted
+            // for a deleted copy it was the frame of to a composed fit of
+            // five points, and so for an original that shows none of its
+            // bars; 39 of IMGS-ALL2's deletions and 64 of IMGS-ALL's rested
+            // on nothing but a composite or a turned copy. Now a deleted file
+            // only says where to look: the kept file answers.
+            while let Some((r, k)) = q.pop_front() {
+                for e in &self.sides[r] {
                     let y = e.to as usize;
                     if state.contains_key(&y) {
                         continue;
                     }
-                    match c.refusal(x, y) {
+                    // A file `k` is paired with was `k`'s to answer for, and
+                    // one already looked at through another file is not
+                    // asked again.
+                    if r != k && (c.side(y, k).is_some() || !c.through(y, r, k)) {
+                        continue;
+                    }
+                    match c.refusal(k, y) {
                         None => {
-                            state.insert(y, State::Delete(x));
-                            deletes.insert(x);
-                            q.push_back(y);
+                            state.insert(y, State::Delete(k));
+                            deletes.insert(k);
+                            q.push_back((y, k));
                         }
                         Some(r) => {
                             let w = refused.entry(y).or_insert(r);
@@ -974,16 +923,64 @@ impl Ctx<'_> {
             // file of another class could delete and no settled file did
             // (what could have was never settled itself), and a file only a
             // softer one could have deleted (`Refusal::Softer`).
-            q.extend(chosen.iter().copied().filter(|k| !state.contains_key(k)));
+            q.extend(chosen.iter().copied().filter(|k| !state.contains_key(k)).map(|k| (k, k)));
             let mut softer: Vec<usize> =
-                refused.iter().filter(|&(d, &r)| r == Refusal::Softer && !state.contains_key(d) && !q.contains(d)).map(|(&d, _)| d).collect();
+                refused.iter().filter(|&(d, &r)| r == Refusal::Softer && !state.contains_key(d) && !q.contains(&(*d, *d))).map(|(&d, _)| d).collect();
             softer.sort_unstable();
-            q.extend(softer);
+            q.extend(softer.into_iter().map(|d| (d, d)));
             if q.is_empty() {
                 break;
             }
-            for &k in &q {
+            for &(k, _) in &q {
                 state.insert(k, State::Keep);
+            }
+        }
+        // A file left open stays as surely as a kept one, and what it shows
+        // all of may go for it as for a kept one: the largest first, each
+        // kept if it deletes anything. What it refuses is not noted: it
+        // was not chosen, and decides nothing about what it does not hold.
+        // Until 0.84.1 only a kept file deleted, and a file no kept file
+        // could delete (a small copy the original's fit put a corner of
+        // outside it) kept every copy of itself beside it: 377 files on
+        // IMGS-ALL2 and 213 on IMGS-ALL.
+        let mut promoted: HashSet<usize> = HashSet::new();
+        {
+            loop {
+                let mut open: Vec<usize> = members.iter().copied().filter(|f| !state.contains_key(f)).collect();
+                let pixels = |f: usize| self.pics[f].dims.0 as u64 * self.pics[f].dims.1 as u64;
+                open.sort_by_key(|&f| (std::cmp::Reverse(pixels(f)), f));
+                let mut any = false;
+                for k0 in open {
+                    if state.contains_key(&k0) {
+                        continue;
+                    }
+                    state.insert(k0, State::Keep);
+                    q.push_back((k0, k0));
+                    while let Some((r, k)) = q.pop_front() {
+                        for e in &self.sides[r] {
+                            let y = e.to as usize;
+                            // Its own bytes are left to the step below, which
+                            // keeps one of them and says nothing of the rest.
+                            if state.contains_key(&y) || (r == k && e.proven) || (r != k && (c.side(y, k).is_some() || !c.through(y, r, k))) {
+                                continue;
+                            }
+                            if c.refusal(k, y).is_none() {
+                                state.insert(y, State::Delete(k));
+                                deletes.insert(k);
+                                q.push_back((y, k));
+                            }
+                        }
+                    }
+                    if deletes.contains(&k0) {
+                        any = true;
+                        promoted.insert(k0);
+                    } else {
+                        state.remove(&k0);
+                    }
+                }
+                if !any {
+                    break;
+                }
             }
         }
         // Files left open beside their own bytes (`Side::proven`: the same
@@ -1022,7 +1019,7 @@ impl Ctx<'_> {
                 }
                 let mut cands: Vec<usize> = self.sides[y].iter().map(|e| e.to as usize).filter(|&x| self.is_pinned(x)).collect();
                 while !cands.is_empty() {
-                    let k = self.choose(&cands, colour);
+                    let k = self.choose(&c, &cands, colour);
                     if c.refusal(k, y).is_none() {
                         state.insert(y, State::Delete(k));
                         break;
@@ -1036,7 +1033,7 @@ impl Ctx<'_> {
         // likelier the original than the other.
         let mut undecided: HashSet<usize> = HashSet::new();
         for (d, &r) in &refused {
-            if r == Refusal::Undecided && !state.contains_key(d) {
+            if r == Refusal::Undecided && (!state.contains_key(d) || promoted.contains(d)) {
                 undecided.extend(c.classes[c.class[d]].iter().copied());
             }
         }
@@ -1057,6 +1054,7 @@ impl Ctx<'_> {
                 && c.whole(j, i) <= WHOLE_RESIDUAL
         };
         undecided.extend(members.iter().copied().filter(|&i| self.sides[i].iter().any(|e| unsure(i, e))));
+        let stays = |f: usize| !matches!(state.get(&f), Some(State::Delete(_)));
         members
             .iter()
             .map(|&i| {
@@ -1066,6 +1064,10 @@ impl Ctx<'_> {
                     deletes: deletes.contains(&i),
                     clean: self.sides[i].iter().any(|e| e.clean),
                     undecided: undecided.contains(&i),
+                    shrunk: stays(i) && self.sides[i].iter().any(|e| {
+                        let k = e.to as usize;
+                        stays(k) && !self.is_pinned(k) && c.shows_smaller(k, i) && c.refusal_but(k, i, false).is_none()
+                    }),
                     best: 0.0,
                 };
                 (i, facts)
@@ -1074,7 +1076,7 @@ impl Ctx<'_> {
     }
 
     /// The file of a class to keep.
-    fn choose(&self, class: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> usize {
+    fn choose(&self, of: &Component, class: &[usize], colour: &(impl Fn(usize) -> f32 + Sync)) -> usize {
         // One that decoded whole, where there is one: a cut-off file is
         // filled with grey where its data ends, and the same pixels as an
         // intact file only when nothing but its end marker was lost.
@@ -1082,7 +1084,7 @@ impl Ctx<'_> {
         let class = if whole.is_empty() { class } else { &whole[..] };
         // Not one another file of the class shows more of.
         let mut c: Vec<usize> =
-            class.iter().copied().filter(|&f| !class.iter().any(|&g| g != f && self.side(f, g).is_some() && self.more(g, f))).collect();
+            class.iter().copied().filter(|&f| !class.iter().any(|&g| g != f && self.side(f, g).is_some() && of.more(g, f))).collect();
         if c.is_empty() {
             c = class.to_vec();
         }
@@ -1133,10 +1135,13 @@ impl Ctx<'_> {
             .iter()
             .map(|&f| (lost(f), lossless(f), self.pics[f].traits.exif, self.pics[f].bytes, mid.get(&f).copied().unwrap_or(0.0), f))
             .collect();
-        // Least left out, lossless, EXIF, smaller, nearer the middle; ties
-        // to the lower index.
+        // Least left out, lossless, EXIF, nearer the middle, smaller; ties to
+        // the lower index. Smaller came before nearer until 0.84.1: of an
+        // original, its re-save and a copy saved several times over, all
+        // three one picture to every bar above, the last is the smallest
+        // and the two it was made from are the nearest each other.
         order.sort_by(|a, b| {
-            a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.4.total_cmp(&b.4)).then(a.5.cmp(&b.5))
+            a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)).then(a.4.total_cmp(&b.4)).then(a.3.cmp(&b.3)).then(a.5.cmp(&b.5))
         });
         // Colour over grey, asked in that order and only as far as needed: a
         // JPEG's colour is not measured by the decode, and is decoded here.
@@ -1162,8 +1167,15 @@ struct Component<'c, 'a> {
     /// Classes: files of one frame, each holding the other.
     class: HashMap<usize, usize>,
     classes: Vec<Vec<usize>>,
-    /// `whole_worst` by (keeper, deleted), and the blurs it read.
+    /// `whole_worst` by (keeper, deleted), under the fitted transform and
+    /// under the frames' own (`exact`), and the blurs it read.
     whole: RefCell<HashMap<(usize, usize), f32>>,
+    exact: RefCell<HashMap<(usize, usize), f32>>,
+    /// Whether two files are one frame (`same`), by the lower first.
+    one: RefCell<HashMap<(usize, usize), bool>>,
+    /// The sides made through other files (`through`), with each one's
+    /// transform and the points it is worth.
+    made: RefCell<HashMap<(usize, usize), (Side, Option<Affine>, f32)>>,
     blurs: RefCell<Blurs>,
 }
 
@@ -1190,21 +1202,22 @@ impl<'c, 'a> Component<'c, 'a> {
                 (f, !holds_plain)
             })
             .collect();
+        let mut c = Component { ctx, plain, part, any_plain, class: HashMap::new(), classes: Vec::new(), whole: Default::default(), exact: Default::default(), one: Default::default(), made: Default::default(), blurs: Default::default() };
         let mut class: HashMap<usize, usize> = HashMap::new();
         let mut classes: Vec<Vec<usize>> = Vec::new();
         for &f in members {
             if class.contains_key(&f) {
                 continue;
             }
-            let c = classes.len();
-            class.insert(f, c);
+            let n = classes.len();
+            class.insert(f, n);
             let mut list = vec![f];
             let mut q = vec![f];
             while let Some(x) = q.pop() {
                 for e in &ctx.sides[x] {
                     let y = e.to as usize;
-                    if !class.contains_key(&y) && ctx.same(x, y) && ctx.holds(x, y) && ctx.holds(y, x) {
-                        class.insert(y, c);
+                    if !class.contains_key(&y) && c.same(x, y) && c.holds(x, y) && c.holds(y, x) {
+                        class.insert(y, n);
                         list.push(y);
                         q.push(y);
                     }
@@ -1213,46 +1226,383 @@ impl<'c, 'a> Component<'c, 'a> {
             list.sort_unstable();
             classes.push(list);
         }
-        Component { ctx, plain, part, any_plain, class, classes, whole: Default::default(), blurs: Default::default() }
+        (c.class, c.classes) = (class, classes);
+        c
     }
 
-    /// How many different pictures of the frame `k` and `d` share class `c`
-    /// holds, a set of the same bytes or pixels counted once. Of two files
-    /// each the other's frame, the two and each other file that is that
-    /// frame to both: counting the class whole, a file of it framed a little
-    /// otherwise made a third picture, and a q92 file was deleted for its own
-    /// q88 re-encode, which beside each other alone were undecided.
+    /// `f`'s side to `g`: the pair's own, or the one made through the files
+    /// between them (`through`).
+    fn side(&self, f: usize, g: usize) -> Option<Side> {
+        self.ctx.side(f, g).copied().or_else(|| self.made.borrow().get(&(f, g)).map(|v| v.0))
+    }
+
+    /// The transform from `f`'s working image to `g`'s, and the points it is
+    /// worth (`Verdict::fit_points`); none between two files of the same
+    /// pixels, whose working images are one.
+    fn transform(&self, f: usize, g: usize) -> Option<Affine> {
+        match self.ctx.side(f, g) {
+            Some(_) => self.ctx.transform(f, g),
+            None => self.made.borrow().get(&(f, g)).and_then(|v| v.1),
+        }
+    }
+
+    fn points(&self, f: usize, g: usize) -> f32 {
+        match self.ctx.side(f, g) {
+            Some(e) => match &self.ctx.links[e.link as usize].2 {
+                Link::Edge(v, ..) => v.fit_points(),
+                _ => f32::INFINITY,
+            },
+            None => self.made.borrow().get(&(f, g)).map_or(0.0, |v| v.2),
+        }
+    }
+
+    /// Make `y`'s side to `k` through `r`, a file paired with both, where
+    /// the two have no pair of their own: the two transforms one after the
+    /// other, worth the points a single fit as uncertain would have, as a
+    /// transform composed by the matching is (`claims::propagate`). Whether
+    /// there is now one.
     ///
-    /// **Counted up to three**, all `refusal` asks (fewer than three or not).
-    /// Counted whole it was quadratic in the class, and asked of every pair
-    /// as deletion spreads: 600 re-encodes of one picture spent 5.0 s here,
-    /// now 0.9.
-    fn pictures_of_one_frame(&self, c: usize, k: usize, d: usize) -> usize {
-        let x = self.ctx;
-        let strict = |f: usize, g: usize| x.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f));
-        let narrow = strict(k, d);
-        let of = self.classes[c].iter().copied().filter(|&g| !narrow || g == k || g == d || (strict(g, k) && strict(g, d))).collect::<Vec<_>>();
-        of.iter().enumerate().filter(|&(i, &f)| !of[..i].iter().any(|&g| x.side(f, g).is_some_and(|e| e.exact))).take(3).count()
+    /// **It carries no evidence, only where to look.** What `k` shows of `y`
+    /// is then read off the two files themselves, as for any pair
+    /// (`refusal`): their frames, their sizes and detail, and `k`'s pixels
+    /// over `y`'s whole frame.
+    fn through(&self, y: usize, r: usize, k: usize) -> bool {
+        let (Some(a), Some(b)) = (self.side(y, r), self.side(r, k)) else { return false };
+        let (px, pk) = (&self.ctx.pics[y], &self.ctx.pics[k]);
+        if a.exact && b.exact {
+            let s = Side { to: k as u32, link: u32::MAX, forward: true, proven: a.proven && b.proven, sx: a.sx + b.sx, sy: a.sy + b.sy, ..a };
+            self.made.borrow_mut().insert((y, k), (s, None, f32::INFINITY));
+            self.made.borrow_mut().insert((k, y), (Side { to: y as u32, forward: false, sx: -s.sx, sy: -s.sy, ..s }, None, f32::INFINITY));
+            return true;
+        }
+        const SAME_IMAGE: Affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let (m1, m2) = (self.transform(y, r).unwrap_or(SAME_IMAGE), self.transform(r, k).unwrap_or(SAME_IMAGE));
+        let m: Affine = [
+            m2[0] * m1[0] + m2[1] * m1[3],
+            m2[0] * m1[1] + m2[1] * m1[4],
+            m2[0] * m1[2] + m2[1] * m1[5] + m2[2],
+            m2[3] * m1[0] + m2[4] * m1[3],
+            m2[3] * m1[1] + m2[4] * m1[4],
+            m2[3] * m1[2] + m2[4] * m1[5] + m2[5],
+        ];
+        let Some(mi) = invert_affine(&m) else { return false };
+        let points = 1.0 / (1.0 / self.points(y, r) + 1.0 / self.points(r, k));
+        let (fwd, back) = edge_sides((y, px), (k, pk), &m, points, a.clean && b.clean, u32::MAX);
+        self.made.borrow_mut().insert((y, k), (fwd, Some(m), points));
+        self.made.borrow_mut().insert((k, y), (back, Some(mi), points));
+        true
     }
 
-    /// The whole-frame check of deleting `d` for `k` (`whole_worst`).
+    /// `k` is the size of `d` and softer than it by more than `SOFT_GAP`:
+    /// it does not show `d` at `d`'s detail, so it may not stand in for it.
+    fn softer(&self, k: usize, d: usize) -> bool {
+        let Some(e) = self.side(d, k) else { return false };
+        !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME && softness(self.ctx.pics[k].traits) - softness(self.ctx.pics[d].traits) > SOFT_GAP
+    }
+
+    /// `k`, which strictly holds `d`, is `d` on a canvas: what `k` shows
+    /// besides `d` holds no picture.
+    ///
+    /// **Read off the detail both files already measured.** Over its whole
+    /// frame `k`'s detail is `d`'s where `d` lies and the rest's elsewhere,
+    /// so if the rest is flat `k` reads `f` times `d`'s, `f` the share of
+    /// `k`'s frame that is `d`; if it is more of the picture, about `d`'s
+    /// own. `k` is a canvas when it is nearer the first, split at their
+    /// geometric middle, `sqrt(f)`. Eight pixels apart, the coarsest the
+    /// measure has: that is the structure a picture's content holds, which
+    /// two renderings of one region share, where pixel-scale detail is what
+    /// re-encoding, noise and resampling move. At one pixel apart a third of
+    /// slightly cropped photographs read as canvases.
+    ///
+    /// It decides only what nothing else can (`settle`'s `lone`): a set with
+    /// no picture copied at its own frame. On the pairs benchmark
+    /// (`benchmark/pairs.py`), composites deleted their original 971 times,
+    /// 133 of them losing content; with this, 40 and 2 — a caption bar of a
+    /// tenth of the frame is near the split — while crops and turns kept
+    /// 2,729 of their 3,014 deletions. On IMGS-ALL it never applies: every
+    /// family there has its picture copied at its own frame.
+    fn on_canvas(&self, k: usize, d: usize) -> bool {
+        let Some(e) = self.side(d, k) else { return false };
+        let (pd, pk) = (&self.ctx.pics[d], &self.ctx.pics[k]);
+        let area = |p: &Picture| p.dims.0 as f32 * p.dims.1 as f32;
+        if area(pk) <= 0.0 || area(pd) <= 0.0 {
+            return false;
+        }
+        let f = (area(pd) * (e.sx + e.sy).exp2() / area(pk)).clamp(1e-3, 1.0);
+        // How many of `d`'s pixels one of `k`'s spans.
+        let s = (-(e.sx + e.sy) / 2.0).exp2();
+        let (td, tk) = (&pd.traits.detail, &pk.traits.detail);
+        tk[3] / at_distance(&td[..4], 8.0 * s).max(1e-4) < f.sqrt()
+    }
+
+    /// What `k` shows of `d` under the transform that takes `d`'s frame onto
+    /// `k`'s whole (`frame_onto_frame`), read over all of it (`whole_worst`).
+    fn exact(&self, k: usize, d: usize) -> f32 {
+        if let Some(&w) = self.exact.borrow().get(&(k, d)) {
+            return w;
+        }
+        // Both ways at once (`whole_both`), the lower file's frame the one
+        // sampled, so that the answer is the same whichever is asked first.
+        let (lo, hi) = (k.min(d), k.max(d));
+        let (hi_of_lo, lo_of_hi) = match self.transform(lo, hi) {
+            None => (0.0, 0.0),
+            Some(m) => {
+                let (pl, ph) = (&self.ctx.pics[lo], &self.ctx.pics[hi]);
+                whole_both(&mut self.blurs.borrow_mut(), (lo, pl), (hi, ph), &frame_onto_frame(&m, pl.work, ph.work))
+            }
+        };
+        let mut exact = self.exact.borrow_mut();
+        exact.insert((hi, lo), hi_of_lo);
+        exact.insert((lo, hi), lo_of_hi);
+        if k == hi { hi_of_lo } else { lo_of_hi }
+    }
+
+    /// `f` and `g` are one frame: the same bytes or pixels, or the fit puts
+    /// each inside the other (`FIT_ERROR`) and each shows the other over its
+    /// whole frame when the one is laid on the other corner to corner
+    /// (`exact`).
+    ///
+    /// **The fit and the pixels both have to say so.** The corners alone
+    /// did until 0.84.1, and a fit puts a corner where its points say: as
+    /// far out as `FIT_ERROR` over the points, which for a transform
+    /// composed of two weak fits (5.5 points) is 12.7% of the frame, more
+    /// than the bars a phone's screenshot puts round a photograph. The
+    /// screenshot was the photograph's frame, and was deleted for it
+    /// (IMGS-ALL2, `IMGS/low-light.avif`). Two files of one frame need no
+    /// fit to compare: the transform between them is their sizes', exactly,
+    /// and under it they agree or they do not. Measured on the 531,510
+    /// strong pairs of IMGS-ALL2 against the generated regions, pairs called
+    /// one frame whose frames differ by 2% or more, or of which one is a
+    /// warp or a composite (two mirror images and two rearrangements of a
+    /// picture aside, which are one frame): by the corners 151, by the
+    /// pixels within `FIT_ERROR_MOST` of the corners 65, by both 5 (a scan
+    /// and a small turn of one picture, a pincushion); and a crop missing
+    /// 2-5% of its original reads 31 grey levels laid corner to corner at
+    /// the tenth of them, where two files of one frame read 4 at the median
+    /// and 16 at p99. The price is the pairs whose fit is worse than
+    /// `FIT_ERROR` allows and whose frames are one (4% of those the pixels
+    /// pass: a dark street whose lamps are all its points, its re-encodes'
+    /// corners 2-13% out): no frame of each other's, and not deleted for
+    /// each other.
+    fn same(&self, f: usize, g: usize) -> bool {
+        let pair = (f.min(g), f.max(g));
+        if let Some(&one) = self.one.borrow().get(&pair) {
+            return one;
+        }
+        let one = self.side(f, g).is_some_and(|e| e.exact || (e.f_in && e.in_f && self.exact(f, g) <= WHOLE_RESIDUAL && self.exact(g, f) <= WHOLE_RESIDUAL));
+        self.one.borrow_mut().insert(pair, one);
+        one
+    }
+
+    /// All of `f`'s frame lands in `g`'s: they are one frame, or the fit
+    /// puts it there (`FIT_ERROR`).
+    fn frame(&self, f: usize, g: usize) -> bool {
+        self.side(f, g).is_some_and(|e| e.exact || e.f_in) || self.same(f, g)
+    }
+
+    /// All of `f`'s frame lands in `g`'s, and `g`'s reaches past it.
+    fn strict_in(&self, f: usize, g: usize) -> bool {
+        self.side(f, g).is_some_and(|e| e.f_in && e.past_f) && !self.same(f, g)
+    }
+
+    /// `d` is a lossless file of `k`'s frame and size whose pixels are not
+    /// `k`'s (not the same bytes, nor the same decoded pixels): two
+    /// pictures, as far as anything says.
+    ///
+    /// **The run cannot see what tells two such files apart.** Every check
+    /// it has reads the picture at a thumbnail's 128 pixels, or at a
+    /// sixty-fourth of the frame, and its keypoints at the working size: two
+    /// screenshots of an invoice, one total reading $1,250 and the other
+    /// $9,750, agreed at 1.00 and shared every keypoint at distance 0, and of
+    /// an invoice, its re-encode and the other invoice, the other was deleted;
+    /// a line of text changed, the original was. A lossy file differs from
+    /// its source by the codec everywhere, so its pixels say nothing either
+    /// way; a lossless one differs only where it was changed. No number is
+    /// read here: the formats say it.
+    fn own_pixels(&self, k: usize, d: usize) -> bool {
+        self.ctx.pics[d].traits.lossless
+            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SAME && e.sy.abs() <= SAME)
+            && self.same(k, d)
+    }
+
+    /// `g` shows all of `f`'s picture, at `f`'s detail or finer.
+    fn holds(&self, g: usize, f: usize) -> bool {
+        let Some(e) = self.side(f, g) else { return false };
+        if e.exact {
+            return true;
+        }
+        if !self.frame(f, g) {
+            return false;
+        }
+        let l = e.sx.min(e.sy);
+        !(-l > SHRINK && extra(self.ctx.pics[g].traits, self.ctx.pics[f].traits, (-l).exp2()) > EXTRA_PER_OCTAVE * -l + EXTRA_FLOOR)
+    }
+
+    /// `g` holds `f` and shows more of it: more frame, or real detail `f`
+    /// lacks.
+    fn more(&self, g: usize, f: usize) -> bool {
+        if !self.holds(g, f) {
+            return false;
+        }
+        let e = self.side(f, g).unwrap();
+        if e.exact {
+            return false;
+        }
+        if e.past_f {
+            return true;
+        }
+        let l = e.sx.min(e.sy);
+        l > SAME && extra(self.ctx.pics[f].traits, self.ctx.pics[g].traits, l.exp2()) > EXTRA_PER_OCTAVE * l + EXTRA_FLOOR
+    }
+
+    /// Some third picture of class `c` is `k`'s as nearly as a re-encode of
+    /// it is (`faithful`). A copy of `d`'s bytes or pixels is `d`.
+    ///
+    /// **A third picture is not a majority.** Until 0.84.1 `k` could delete
+    /// a different picture of its frame once the frame had three, on the
+    /// reasoning that the keeper is the middle of what the files agree on.
+    /// Three pictures that all differ have no middle either: an original,
+    /// its gamma copy and its noisy copy are three, the noisy one was chosen
+    /// (sharper, smaller) and the original deleted for it. Where families
+    /// are an original and two of its variants, which no corpus scored
+    /// until now (`out/v68-recall`, `small.py`), 27 of IMGS-ALL's 741
+    /// deletions lost content so, the original gone for a posterized, noisy,
+    /// sharpened or many-times-re-saved copy. What makes `k` the picture to
+    /// keep is a second file that holds its pixels, as a backup, a re-save
+    /// or a format conversion does, and an edit has none unless it was
+    /// copied in its turn. 27 -> 3, the three an edit so slight that every
+    /// measure the run keeps reads it as a re-encode (a twelve-level
+    /// posterize of a black and white photograph, a JPEG saved again several
+    /// times).
+    ///
+    /// **And a second copy on both sides decides nothing.** `refusal` asks
+    /// this of `d` as well: where `d` is not `k`'s own picture (`faithful`)
+    /// and has a copy of its own, the frame has two versions, each kept
+    /// twice, and nothing says which was made from which. No corpus had the
+    /// case, since each generates an edit once: with every edit of
+    /// IMGS-ALL that keeps its frame re-saved beside it (`out/v69-bar`,
+    /// 9,065 families of an original, its copy, an edit and the edit's
+    /// copy), the original and its copy were deleted for the edit in 2,563
+    /// families at 0.84.1 and in 2,236 with `k` alone asked; 319 now, an
+    /// edit the run reads as `k`'s picture: a faint mark in a corner, a JPEG
+    /// saved several times, and a change of colour alone, which nothing
+    /// here sees (every comparison is of grey).
+    fn corroborated(&self, c: usize, k: usize, d: usize) -> bool {
+        let x = self.ctx;
+        x.sides[k].iter().any(|e| {
+            let g = e.to as usize;
+            g != d && self.class.get(&g) == Some(&c) && !x.side(g, d).is_some_and(|e| e.exact) && self.faithful(g, k)
+        })
+    }
+
+    /// `g` is `k`'s picture as nearly as a re-encode of it is: of its frame
+    /// (`same`), its grey within `TAU` of `k`'s and its softness within
+    /// `SOFT_TIE`, the two bounds a faithful copy was measured to keep to.
+    fn faithful(&self, g: usize, k: usize) -> bool {
+        let x = self.ctx;
+        let grid = |f: usize| &x.pics[f].traits.grid;
+        self.side(g, k).is_some_and(|e| !e.exact && e.f_in && e.in_f)
+            && grid(g).iter().zip(grid(k)).map(|(a, b)| (a - b).abs()).sum::<f32>() <= TAU
+            && (softness(x.pics[g].traits) - softness(x.pics[k].traits)).abs() <= SOFT_TIE
+            && self.same(g, k)
+    }
+
+    /// The whole-frame check of deleting `d` for `k` (`whole_worst`): under
+    /// the frames' own transform where the two are one frame, the fitted one
+    /// otherwise.
     fn whole(&self, k: usize, d: usize) -> f32 {
-        let Some(m) = self.ctx.transform(d, k) else { return 0.0 };
+        if self.side(d, k).is_some_and(|e| !e.exact) && self.same(k, d) {
+            return self.exact(k, d);
+        }
+        let Some(m) = self.transform(d, k) else { return 0.0 };
         let (pd, pk) = (&self.ctx.pics[d], &self.ctx.pics[k]);
         *self.whole.borrow_mut().entry((k, d)).or_insert_with(|| whole_worst(&mut self.blurs.borrow_mut(), (d, pd), (k, pk), &m))
+    }
+
+    /// `k` holds `d`'s frame and shows its picture smaller than `d` does by
+    /// more than `SHRINK`. See `refusal`.
+    fn shows_smaller(&self, k: usize, d: usize) -> bool {
+        let Some(e) = self.side(d, k) else { return false };
+        let smaller = -e.sx.min(e.sy);
+        !e.exact && (e.f_in || self.frame(d, k)) && smaller > SHRINK
+    }
+
+    /// `k` shows `d`'s picture turned and no smaller, and nothing else: the
+    /// transform between them is no stretch along one side and no slant, as
+    /// far as its fit can say (`FIT_ERROR` over its points). A photograph
+    /// of a poster on a wall holds the poster's picture in perspective,
+    /// which a fit reads as a slant of 6 to 10% and one side stretched more
+    /// than the other; a slide, a page or a screenshot holding the picture
+    /// reads under a tenth of a percent of either.
+    fn shown_as_it_is(&self, d: usize, k: usize) -> bool {
+        let (Some(m), points) = (self.transform(d, k), self.points(d, k)) else { return false };
+        let det = m[0] * m[4] - m[1] * m[3];
+        let size = det.abs().sqrt();
+        // A turn and a resize is [a -c; c a], and its mirror image [a c; c -a].
+        let sign = if det < 0.0 { -1.0 } else { 1.0 };
+        let off = (m[0] - sign * m[4]).abs().max((m[1] + sign * m[3]).abs());
+        // And no smaller than the file shows it, to the same error: the
+        // half octave a plain picture is allowed (`SHRINK`) is not a
+        // composite's. A cell of a collage showing a dark photograph at
+        // three quarters agreed, at that size, with a copy of it whose
+        // columns had been rolled round, and against a library holding the
+        // collage the rearranged copy was a `repeat`.
+        let smaller = self.side(d, k).map_or(f32::INFINITY, |e| -e.sx.min(e.sy));
+        points > 0.0 && size > 0.0 && off / size <= FIT_ERROR / points && smaller <= (1.0 + FIT_ERROR / points).log2()
+    }
+
+    /// `d` shows all of some other file and is not its frame: a composite,
+    /// or a fuller crop of a picture. Such a file is not deleted for a
+    /// composite (`refusal`): what it shows besides the other may be what
+    /// the composite's canvas only looks like at a thumbnail's scale, as a
+    /// caption bar under a photograph looks like a slide's margin.
+    fn shows_more_than_one(&self, d: usize) -> bool {
+        self.ctx.sides[d].iter().any(|e| {
+            let g = e.to as usize;
+            !e.exact && e.in_f && !self.same(d, g) && self.whole(d, g) <= WHOLE_RESIDUAL
+        })
     }
 
     /// Why `k` may not delete `d`, or `None` where it may. Asked of every
     /// pair as deletion spreads, and it decides nothing itself: what a
     /// refusal makes of `d` is `Refusal`'s to say.
     fn refusal(&self, k: usize, d: usize) -> Option<Refusal> {
+        self.refusal_but(k, d, true)
+    }
+
+    /// `refusal`, with the size of what `k` shows asked or not: a file only
+    /// that refuses is left for a look (`Facts::shrunk`).
+    fn refusal_but(&self, k: usize, d: usize, size: bool) -> Option<Refusal> {
         let x = self.ctx;
-        if !x.holds(k, d) {
+        if !self.holds(k, d) {
+            return Some(Refusal::No);
+        }
+        // No file is deleted for one that shows its picture smaller by
+        // more than half an octave (`SHRINK`, the user's allowance: a crop
+        // stretched back to its picture's size, a copy saved a little
+        // smaller, are the picture). Past it `holds` lets a smaller file hold
+        // a larger whose extra pixels read as an enlargement's (`extra`),
+        // which is what makes the two one class and lets the class choose;
+        // but that reading is a statistic of the larger file's detail, and a
+        // soft original reads as an enlargement of its own reduction: on the
+        // two-file families 24 of the 26 deletions that lost content were an
+        // original gone for a smaller copy (enlarged back, the copy was the
+        // original at 21 to 47 dB), and where families are three files, 12
+        // of IMGS-ALL2's 994. Nothing the analysis keeps tells the two apart
+        // (softness, `extra`, their difference: true enlargements and
+        // originals overlap on each, `out/v68-recall`), so past the
+        // allowance an enlargement stays beside its source, for a look.
+        // Asked here and not in `holds`: there, each size became a class of
+        // its own and the largest file of a family won it (IMGS-ALL2 kept
+        // its original in 313 families of 364, from 349). With no allowance
+        // at all (tried: `SAME` in one frame, the fit's error in a larger
+        // one) the found corpus's 125 deletions were 7.
+        if size && !x.is_pinned(k) && self.side(d, k).is_some_and(|e| !e.exact && -e.sx.min(e.sy) > SHRINK) {
             return Some(Refusal::No);
         }
         // A file of several pictures shows more than the first, which is
         // all any match was made on: only a copy of its bytes holds it.
-        if x.pics[d].traits.frames && !x.side(d, k).is_some_and(|e| e.exact) {
+        if x.pics[d].traits.frames && !self.side(d, k).is_some_and(|e| e.exact) {
             return Some(Refusal::Held);
         }
         // Nor is a file deleted for the same pixels without what it carries
@@ -1260,15 +1610,22 @@ impl<'c, 'a> Component<'c, 'a> {
         // read alike only, the file that carries more may be the one whose
         // pixels are not the original's (a posterized PNG with the profile,
         // against a lossless WebP without it).
-        if x.side(d, k).is_some_and(|e| e.proven) && x.carries_more(k, d) {
+        if self.side(d, k).is_some_and(|e| e.proven) && x.carries_more(k, d) {
             return Some(Refusal::Held);
         }
-        // In a set with no picture copied at its own frame — a photograph
-        // and its crop, say — nothing says which file is a composite, and
-        // the larger frame may delete what it holds: unless what it has
-        // besides reads as a canvas rather than more of the picture.
-        let shape = x.same(k, d) || (x.strict_in(d, k) && self.part[&d] && (self.plain[&k] || !self.any_plain && !x.on_canvas(k, d)));
+        // A larger frame deletes what it holds: a picture copied at its own
+        // frame (`plain`) always; where no picture of the set is, one whose
+        // rest reads as more of the picture rather than a canvas
+        // (`on_canvas`); and a composite, a picture it holds whole, the
+        // user's decision of 2026-11-13 (until then a composite never stood
+        // in for the plain picture), unless that file shows more than some
+        // other itself (`shows_more_than_one`).
+        let shape = self.same(k, d) || (self.strict_in(d, k) && self.part[&d] && (self.plain[&k] || (!self.any_plain && !self.on_canvas(k, d)) || self.side(d, k).is_some_and(|e| e.clean) && self.shown_as_it_is(d, k) && !self.shows_more_than_one(d)));
         if !shape || self.whole(k, d) > WHOLE_RESIDUAL {
+            return Some(Refusal::No);
+        }
+        // Nor for a larger frame that shows it that much smaller.
+        if size && !x.is_pinned(k) && self.shows_smaller(k, d) {
             return Some(Refusal::No);
         }
         // Two different pictures of one frame and nothing else of it, and
@@ -1279,10 +1636,13 @@ impl<'c, 'a> Component<'c, 'a> {
         // pinned file is kept whatever it is, so against a library the
         // question is not asked.
         if !x.is_pinned(k)
-            && x.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
-            && self.class.get(&k).is_some_and(|&c| self.class.get(&d) == Some(&c) && self.pictures_of_one_frame(c, k, d) < 3)
-            && !x.more(k, d)
-            && !x.more(d, k)
+            && self.side(d, k).is_some_and(|e| !e.exact && e.sx.abs() <= SHRINK && e.sy.abs() <= SHRINK)
+            && self.class.get(&k).is_some_and(|&c| {
+                self.class.get(&d) == Some(&c)
+                    && (!self.corroborated(c, k, d) || (!self.faithful(d, k) && self.corroborated(c, d, k)))
+            })
+            && !self.more(k, d)
+            && !self.more(d, k)
         {
             return Some(Refusal::Undecided);
         }
@@ -1294,7 +1654,7 @@ impl<'c, 'a> Component<'c, 'a> {
         // stand in for a lossless one: against a library, whose lossy copy
         // of a picture answers for it by the user's decision, only a
         // lossless library file is asked.
-        if x.own_pixels(k, d) {
+        if self.own_pixels(k, d) {
             if x.pics[k].traits.lossless {
                 return Some(Refusal::Undecided);
             }
@@ -1305,11 +1665,40 @@ impl<'c, 'a> Component<'c, 'a> {
         // Asked last, so that what it refuses is what it alone refused. A
         // file that decoded only in part shows less than an intact file of
         // its picture, by what was cut off, as a softer one does by detail.
-        if x.softer(k, d) || x.pics[k].damaged && !x.pics[d].damaged {
+        if self.softer(k, d) || x.pics[k].damaged && !x.pics[d].damaged {
             return Some(Refusal::Softer);
         }
         None
     }
+}
+
+/// The transform that takes frame `a` onto frame `b` whole, each corner onto a
+/// corner, turned the way `m` turns it: of the four turns, the one whose
+/// corners lie nearest where `m` puts them.
+fn frame_onto_frame(m: &Affine, a: (u32, u32), b: (u32, u32)) -> Affine {
+    let (aw, ah, bw, bh) = (a.0.max(1) as f32, a.1.max(1) as f32, b.0 as f32, b.1 as f32);
+    let turns: [Affine; 8] = [
+        [bw / aw, 0.0, 0.0, 0.0, bh / ah, 0.0],
+        [0.0, -bw / ah, bw, bh / aw, 0.0, 0.0],
+        [-bw / aw, 0.0, bw, 0.0, -bh / ah, bh],
+        [0.0, bw / ah, 0.0, -bh / aw, 0.0, bh],
+        // And each of them in a mirror.
+        [-bw / aw, 0.0, bw, 0.0, bh / ah, 0.0],
+        [bw / aw, 0.0, 0.0, 0.0, -bh / ah, bh],
+        [0.0, bw / ah, 0.0, bh / aw, 0.0, 0.0],
+        [0.0, -bw / ah, bw, -bh / aw, 0.0, bh],
+    ];
+    let at = |t: &Affine, x: f32, y: f32| (t[0] * x + t[1] * y + t[2], t[3] * x + t[4] * y + t[5]);
+    let off = |t: &Affine| -> f32 {
+        [(0.0, 0.0), (aw, 0.0), (0.0, ah), (aw, ah)]
+            .iter()
+            .map(|&(x, y)| {
+                let ((u, v), (p, q)) = (at(t, x, y), at(m, x, y));
+                (u - p) * (u - p) + (v - q) * (v - q)
+            })
+            .sum()
+    };
+    *turns.iter().min_by(|s, t| off(s).total_cmp(&off(t))).unwrap()
 }
 
 /// How far a frame mapped through `m` lands outside the other, as a fraction
@@ -1431,12 +1820,29 @@ fn extra(f: &Traits, g: &Traits, s: f32) -> f32 {
 /// each thumbnail's own stretch), and the worst 8x8-sample block's mean
 /// residual must stay under `WHOLE_RESIDUAL` grey levels, on a grid of
 /// `WHOLE_GRID` samples a side.
-fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &Picture), m: &Affine) -> f32 {
+fn whole_worst(blurs: &mut Blurs, d: (usize, &Picture), k: (usize, &Picture), m: &Affine) -> f32 {
+    whole_samples(blurs, d, k, m).map_or(f32::INFINITY, |(a, b)| worst_block(&a, &b))
+}
+
+/// `whole_worst` both ways at once, of two files laid corner to corner
+/// (`frame_onto_frame`): what `k` shows of `d`, and `d` of `k`. One frame's
+/// samples land on the other's, so the two checks read the same samples and
+/// differ only in which side the tone map is fitted to: sampled once. Each
+/// way on its own, this was the whole of what deciding one frame by the
+/// pixels cost (`Component::same`: 714,000 checks on IMGS-ALL).
+fn whole_both(blurs: &mut Blurs, d: (usize, &Picture), k: (usize, &Picture), m: &Affine) -> (f32, f32) {
+    whole_samples(blurs, d, k, m).map_or((f32::INFINITY, f32::INFINITY), |(a, b)| (worst_block(&a, &b), worst_block(&b, &a)))
+}
+
+const WHOLE_SAMPLES: usize = WHOLE_GRID * WHOLE_GRID;
+
+/// `d`'s frame on `WHOLE_GRID` samples a side, and what `k` shows at each
+/// through `m`, both blurred to a sample's footprint.
+fn whole_samples(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &Picture), m: &Affine) -> Option<(Box<[f32; WHOLE_SAMPLES]>, Box<[f32; WHOLE_SAMPLES]>)> {
     let (td, wd, tk, wk) = (pd.thumb, pd.work, pk.thumb, pk.work);
     const N: usize = WHOLE_GRID;
-    const B: usize = 8;
     if wd.0 == 0 || wk.0 == 0 || td.w == 0 || tk.w == 0 {
-        return f32::INFINITY;
+        return None;
     }
     let sd = td.w as f32 / wd.0 as f32;
     let sk = tk.w as f32 / wk.0 as f32;
@@ -1449,8 +1855,8 @@ fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &
     let step_k = (step_d + (4.0 * (span_k / span_d).log2()).round() as i32).max(Blurs::FINEST);
     let bd = blurs.get(d, td, step_d);
     let bk = blurs.get(k, tk, step_k);
-    let mut a = [0f32; N * N];
-    let mut b = [0f32; N * N];
+    let mut a = Box::new([0f32; N * N]);
+    let mut b = Box::new([0f32; N * N]);
     for iy in 0..N {
         for ix in 0..N {
             let xd = (ix as f32 + 0.5) / N as f32 * wd.0 as f32;
@@ -1461,15 +1867,41 @@ fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &
             b[iy * N + ix] = bilinear(&bk, u, v);
         }
     }
-    let n = (N * N) as f32;
-    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
-    let (mut cov, mut var) = (0f32, 0f32);
-    for (x, y) in a.iter().zip(&b) {
-        cov += (x - ma) * (y - mb);
-        var += (x - ma) * (x - ma);
+    Some((a, b))
+}
+
+/// The steps the tone curve is read at (`worst_block`), eight to each of
+/// its bands.
+const TONES: usize = 256;
+
+/// The worst 8x8-sample block's mean residual of `b` against `a` under the
+/// tone curve fitted from `a` to `b` (`tone_curve`).
+fn worst_block(a: &[f32; WHOLE_SAMPLES], b: &[f32; WHOLE_SAMPLES]) -> f32 {
+    const N: usize = WHOLE_GRID;
+    const B: usize = 8;
+    let curve = tone_curve(a, b);
+    // The curve at `TONES` even steps of `a`, read between them in straight
+    // lines: found once, not searched for at every sample.
+    let first = curve[0].0;
+    let step = (curve[curve.len() - 1].0 - first) / (TONES - 1) as f32;
+    let mut table = [0f32; TONES];
+    let mut i = 1;
+    for (t, v) in table.iter_mut().enumerate() {
+        let x = first + step * t as f32;
+        while i + 1 < curve.len() && curve[i].0 < x {
+            i += 1;
+        }
+        let ((x0, y0), (x1, y1)) = (curve[i - 1], curve[i.min(curve.len() - 1)]);
+        *v = if x1 > x0 { y0 + (y1 - y0) * ((x - x0) / (x1 - x0)).clamp(0.0, 1.0) } else { y0 };
     }
-    let g = if var > 1e-6 { cov / var } else { 0.0 };
-    let o = mb - g * ma;
+    let fit = |x: f32| {
+        if !(step > 0.0) {
+            return table[0];
+        }
+        let t = ((x - first) / step).clamp(0.0, (TONES - 1) as f32);
+        let (i, u) = (t as usize, t - (t as usize) as f32);
+        table[i] + (table[(i + 1).min(TONES - 1)] - table[i]) * u
+    };
     let mut worst = 0f32;
     for by in 0..N / B {
         for bx in 0..N / B {
@@ -1477,13 +1909,52 @@ fn whole_worst(blurs: &mut Blurs, (d, pd): (usize, &Picture), (k, pk): (usize, &
             for y in by * B..(by + 1) * B {
                 for x in bx * B..(bx + 1) * B {
                     let k = y * N + x;
-                    r += (b[k] - (g * a[k] + o)).abs();
+                    r += (b[k] - fit(a[k])).abs();
                 }
             }
             worst = worst.max(r / (B * B) as f32);
         }
     }
     worst
+}
+
+/// The rising curve that best takes `a`'s tones to `b`'s, as points (a, b)
+/// in order of `a`, never empty: the mean of `b` in each of 32 bands of
+/// `a`'s range, pooled with its neighbour wherever the means would fall
+/// (isotonic regression), and read between the points in straight lines.
+///
+/// **A curve, where it was a line.** A line takes out a change of
+/// brightness and contrast, and each thumbnail's own stretch; a copy whose
+/// tones were moved along a curve (gamma, a grade, a film look) is the same
+/// picture, shows everything the other shows, and read 15 to 40 grey
+/// levels off it. Rising only: a curve that falls would make a negative
+/// the picture's own, and one free to do both, of any two pictures a
+/// match. It has 32 points to 4,096 samples, and what it cannot take out
+/// is what a deletion is refused for: a part of the frame that differs.
+/// IMGS-ALL2 deletes 694 more files for it and IMGS-ALL 394, none losing
+/// content, nor in the two- and three-file families.
+fn tone_curve(a: &[f32; WHOLE_SAMPLES], b: &[f32; WHOLE_SAMPLES]) -> Vec<(f32, f32)> {
+    const BANDS: usize = 32;
+    let (lo, hi) = a.iter().fold((f32::MAX, f32::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+    // (samples, sum of a, sum of b) a band; a flat `a` is one band.
+    let mut bands = [(0f64, 0f64, 0f64); BANDS];
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        let i = if hi > lo { (((x - lo) / (hi - lo) * BANDS as f32) as usize).min(BANDS - 1) } else { 0 };
+        bands[i] = (bands[i].0 + 1.0, bands[i].1 + x as f64, bands[i].2 + y as f64);
+    }
+    let mut pooled: Vec<(f64, f64, f64)> = Vec::with_capacity(BANDS);
+    for &band in bands.iter().filter(|t| t.0 > 0.0) {
+        pooled.push(band);
+        while pooled.len() > 1 {
+            let (p, q) = (pooled[pooled.len() - 2], pooled[pooled.len() - 1]);
+            if p.2 / p.0 <= q.2 / q.0 {
+                break;
+            }
+            pooled.truncate(pooled.len() - 2);
+            pooled.push((p.0 + q.0, p.1 + q.1, p.2 + q.2));
+        }
+    }
+    pooled.iter().map(|t| ((t.1 / t.0) as f32, (t.2 / t.0) as f32)).collect()
 }
 
 crate::simd::dispatched! {
@@ -1675,6 +2146,151 @@ mod tests {
 
     fn thumb() -> Thumb {
         Thumb::new(16, 12, 0.125, (0..16 * 12).map(|i| ((i * 37) % 251) as u8).collect())
+    }
+
+    /// A smooth picture of a working image's own size, 128 x 96, one block
+    /// of the whole-frame check lighter by `by` grey levels.
+    fn patched(by: u8) -> Thumb {
+        let px = (0..96usize).flat_map(|y| (0..128usize).map(move |x| (x + y) as u8 + if (32..48).contains(&x) && (24..36).contains(&y) { by } else { 0 }));
+        Thumb::new(128, 96, 1.0, px.collect())
+    }
+
+    /// A deletion rests on a file that stays and was checked against it. A
+    /// file paired only with a deleted file is asked of the kept one, by its
+    /// own pixels: one that drifted a step at a time from it, each step
+    /// within the bar, is not deleted for it; one the kept file does show is,
+    /// and names the kept file.
+    #[test]
+    fn a_file_reached_through_a_deleted_one_is_the_kept_files_to_answer_for() {
+        let tr = colourful();
+        let thumbs = [patched(0), patched(4), patched(9), patched(18), patched(4)];
+        let pics: Vec<Picture> =
+            thumbs.iter().enumerate().map(|(i, t)| Picture { dims: (128, 96), work: (128, 96), thumb: t, traits: &tr, bytes: 1_000 * (i as u64 + 1), damaged: false }).collect();
+        // Each step is within the bar; the two ends are not.
+        let step = whole_worst(&mut Blurs::default(), (3, &pics[3]), (2, &pics[2]), &IDENTITY);
+        let ends = whole_worst(&mut Blurs::default(), (3, &pics[3]), (0, &pics[0]), &IDENTITY);
+        assert!(step <= WHOLE_RESIDUAL && ends > WHOLE_RESIDUAL, "{step} {ends}");
+        let v = verdict(1.0, 1.0);
+        let link = |a, b| (a, b, Link::Edge(&v, IDENTITY, false));
+        // 0, 1 and 2 are paired with each other; 3 and 4 with 2 alone.
+        let (got, keeper, _) = suggest_pinned(&pics, &[link(0, 1), link(0, 2), link(1, 2), link(2, 3), link(2, 4)], 0.6, |_| 30.0, &[]);
+        use Action::*;
+        assert_eq!(got, [Some(Keep), Some(Delete), Some(Delete), Some(Review), Some(Delete)]);
+        assert_eq!(keeper, [None, Some(0), Some(0), None, Some(0)]);
+    }
+
+    /// Two files are one frame when the fit and the pixels both say so. A
+    /// file the corners put on a frame, and whose pixels are not that
+    /// frame's laid corner to corner, is no third picture of it: the two
+    /// that are stay an undecided pair.
+    #[test]
+    fn one_frame_is_the_corners_and_the_pixels() {
+        let tr = colourful();
+        let thumbs = [patched(0), patched(4), patched(60)];
+        let pics: Vec<Picture> =
+            thumbs.iter().enumerate().map(|(i, t)| Picture { dims: (128, 96), work: (128, 96), thumb: t, traits: &tr, bytes: 1_000 * (i as u64 + 1), damaged: false }).collect();
+        let v = verdict(1.0, 1.0);
+        let link = |a, b| (a, b, Link::Edge(&v, IDENTITY, false));
+        let got = suggest(&pics, &[link(0, 1), link(0, 2), link(1, 2)], 0.6, |_| 30.0);
+        assert!(!got.contains(&Some(Action::Delete)), "{got:?}");
+        assert_eq!(got[..2], [Some(Action::Review); 2]);
+        // With a third whose pixels are theirs, one is kept and two go.
+        let thumbs = [patched(0), patched(4), patched(6)];
+        let pics: Vec<Picture> =
+            thumbs.iter().enumerate().map(|(i, t)| Picture { dims: (128, 96), work: (128, 96), thumb: t, traits: &tr, bytes: 1_000 * (i as u64 + 1), damaged: false }).collect();
+        let got = suggest(&pics, &[link(0, 1), link(0, 2), link(1, 2)], 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Delete), Some(Action::Delete)]);
+    }
+
+    /// A file deletes a different picture of its frame only beside a third
+    /// that is its own as nearly as a re-encode is. Three pictures that all
+    /// differ decide nothing, though each shows the others within the bar.
+    #[test]
+    fn a_third_picture_decides_only_as_a_copy_of_the_keeper() {
+        let shifted = |by: f32| Traits { grid: [by; 16], ..colourful() };
+        let (a, b, c) = (shifted(0.0), shifted(1.0), shifted(2.0));
+        let thumbs = [patched(0), patched(4), patched(6)];
+        let pic = |i: usize, tr| Picture { dims: (128, 96), work: (128, 96), thumb: &thumbs[i], traits: tr, bytes: 1_000 * (i as u64 + 1), damaged: false };
+        let v = verdict(1.0, 1.0);
+        let links = [(0, 1, Link::Edge(&v, IDENTITY, false)), (0, 2, Link::Edge(&v, IDENTITY, false)), (1, 2, Link::Edge(&v, IDENTITY, false))];
+        // Each sixteen grey levels from the next over the grid: past `TAU`.
+        let got = suggest(&[pic(0, &a), pic(1, &b), pic(2, &c)], &links, 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Review); 3]);
+        // The third is the first's pixels: the second goes for the first,
+        // and the first and third are a pair nothing decides.
+        let got = suggest(&[pic(0, &a), pic(1, &b), pic(2, &a)], &links, 0.6, |_| 30.0);
+        assert_eq!(got, [Some(Action::Keep), Some(Action::Delete), Some(Action::Review)]);
+    }
+
+    /// Two versions of a frame that each have a copy of their own decide
+    /// nothing between them: neither pair is deleted for the other.
+    #[test]
+    fn two_versions_each_with_a_copy_are_left_for_a_look() {
+        let shifted = |by: f32| Traits { grid: [by; 16], ..colourful() };
+        let (a, b) = (shifted(0.0), shifted(1.0));
+        let thumbs = [patched(0), patched(1), patched(6), patched(7)];
+        let pic = |i: usize, tr| Picture { dims: (128, 96), work: (128, 96), thumb: &thumbs[i], traits: tr, bytes: 1_000 * (i as u64 + 1), damaged: false };
+        let pics = [pic(0, &a), pic(1, &a), pic(2, &b), pic(3, &b)];
+        let v = verdict(1.0, 1.0);
+        let link = |x, y| (x, y, Link::Edge(&v, IDENTITY, false));
+        let got = suggest(&pics, &[link(0, 1), link(0, 2), link(0, 3), link(1, 2), link(1, 3), link(2, 3)], 0.6, |_| 30.0);
+        assert!(!got.contains(&Some(Action::Delete)), "{got:?}");
+        // One of them alone is the odd one, and goes for the pair.
+        let got = suggest(&pics[..3], &[link(0, 1), link(0, 2), link(1, 2)], 0.6, |_| 30.0);
+        assert_eq!(got[2], Some(Action::Delete), "{got:?}");
+    }
+
+    /// No file is deleted for a smaller one, though its extra pixels read as
+    /// an enlargement's: the smaller file's own copy goes, the larger stays.
+    #[test]
+    fn a_file_is_not_deleted_for_a_smaller_one() {
+        let (t, small) = (patched(0), colourful());
+        // Twice the size, its detail an interpolation's (half as much a pixel apart).
+        let smooth = Traits { detail: [4.0, 8.0, 16.0, 20.0, 4.0, 8.0], ..colourful() };
+        assert!(extra(&small, &smooth, 2.0) < EXTRA_PER_OCTAVE + EXTRA_FLOOR);
+        let pic = |dims, traits, bytes| Picture { dims, work: (128, 96), thumb: &t, traits, bytes, damaged: false };
+        let pics = [pic((128, 96), &small, 1_000), pic((128, 96), &small, 1_500), pic((256, 192), &smooth, 4_000), pic((128, 96), &small, 2_000)];
+        let v = verdict(1.0, 1.0);
+        let link = |a, b| (a, b, Link::Edge(&v, IDENTITY, false));
+        let (got, keeper, _) = suggest_pinned(&pics, &[link(0, 1), link(0, 2), link(1, 2), link(0, 3), link(1, 3), link(2, 3)], 0.6, |_| 30.0, &[]);
+        use Action::*;
+        assert_eq!(got, [Some(Keep), Some(Delete), Some(Review), Some(Delete)]);
+        assert_eq!(keeper, [None, Some(0), None, Some(0)]);
+    }
+
+    /// The whole-frame check takes out a change of tone along a rising
+    /// curve, and nothing else: not a part of the frame that differs, nor a
+    /// negative.
+    #[test]
+    fn the_tone_curve_takes_out_a_grade_and_not_a_difference() {
+        let mut a = Box::new([0f32; WHOLE_SAMPLES]);
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = ((i % WHOLE_GRID) * 3 + (i / WHOLE_GRID)) as f32;
+        }
+        let graded: Box<[f32; WHOLE_SAMPLES]> = Box::new(std::array::from_fn(|i| 255.0 * (a[i] / 255.0).powf(0.45)));
+        assert!(worst_block(&a, &graded) < 4.0 && worst_block(&graded, &a) < 4.0, "{} {}", worst_block(&a, &graded), worst_block(&graded, &a));
+        let mut marked = a.clone();
+        for y in 16..24 {
+            for x in 16..24 {
+                marked[y * WHOLE_GRID + x] += 40.0;
+            }
+        }
+        assert!(worst_block(&a, &marked) > WHOLE_RESIDUAL);
+        let negative: Box<[f32; WHOLE_SAMPLES]> = Box::new(std::array::from_fn(|i| 255.0 - a[i]));
+        assert!(worst_block(&a, &negative) > WHOLE_RESIDUAL);
+    }
+
+    /// The frames' own transform is turned the way the fit turns it, and
+    /// puts each corner on a corner.
+    #[test]
+    fn a_frame_is_laid_on_a_frame_the_way_the_fit_turns_it() {
+        // A quarter turn, fitted a little off: (x, y) -> (96 - y, x).
+        let fitted: Affine = [0.02, -0.98, 95.0, 1.01, 0.01, 1.5];
+        let m = frame_onto_frame(&fitted, (128, 96), (96, 128));
+        assert_eq!(m, [0.0, -1.0, 96.0, 1.0, 0.0, 0.0]);
+        // No turn, to another shape: each axis by its own sizes.
+        let m = frame_onto_frame(&[0.52, 0.0, -1.0, 0.0, 0.74, 2.0], (128, 96), (64, 72));
+        assert_eq!(m, [0.5, 0.0, 0.0, 0.0, 0.75, 0.0]);
     }
 
     fn colourful() -> Traits {
@@ -1883,17 +2499,21 @@ mod tests {
         assert_eq!(suggest(&pics, &[], 0.6, |_| 30.0), [None, None, None], "a file in no pair has no action");
     }
 
+    /// A mirror image is one of the frame's pictures: alone with the
+    /// picture the two are an undecided pair, and beside copies that say
+    /// which is the picture it goes as an upright copy would. The transform
+    /// its frame is laid on the other's by is the mirror's.
     #[test]
-    fn a_mirror_image_settles_nothing_and_is_left_for_a_look() {
-        let (t, tr) = (thumb(), colourful());
+    fn a_mirror_image_is_one_of_the_frames_pictures() {
+        let (t, tr) = (patched(0), colourful());
+        let turned = Thumb::new(128, 96, 1.0, t.px.chunks(128).flat_map(|row| row.iter().rev().copied()).collect());
         let pic = Picture { dims: (128, 96), work: (128, 96), thumb: &t, traits: &tr, bytes: 1_000, damaged: false };
-        // The mirror is the larger file, which would win were it upright.
-        let pics = [pic, Picture { bytes: 2_000, ..pic }];
+        let mirror = Picture { thumb: &turned, bytes: 2_000, ..pic };
         let v = verdict(0.99, 0.98);
-        let flip: Affine = [-1.0, 0.0, 127.0, 0.0, 1.0, 0.0];
-        assert_eq!(suggest(&pics, &[(0, 1, Link::Edge(&v, flip, false))], 0.6, |_| 30.0), [Some(Action::Review); 2]);
-        // Beside upright copies, they settle and the mirror waits.
-        let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..pic }, Picture { bytes: 4_000, ..pic }];
+        let flip: Affine = [-1.0, 0.0, 128.0, 0.0, 1.0, 0.0];
+        assert_eq!(frame_onto_frame(&[-0.98, 0.01, 127.0, 0.0, 1.01, 0.5], (128, 96), (128, 96)), flip);
+        assert_eq!(suggest(&[pic, mirror], &[(0, 1, Link::Edge(&v, flip, false))], 0.6, |_| 30.0), [Some(Action::Review); 2]);
+        let pics = [pic, Picture { bytes: 2_000, ..pic }, Picture { bytes: 3_000, ..mirror }, Picture { bytes: 4_000, ..pic }];
         let links = [
             (0, 1, Link::Edge(&v, IDENTITY, false)),
             (0, 3, Link::Edge(&v, IDENTITY, false)),
@@ -1901,9 +2521,11 @@ mod tests {
             (1, 2, Link::Edge(&v, flip, false)),
             (0, 2, Link::Edge(&v, flip, false)),
         ];
-        let got = suggest(&pics, &links, 0.6, |_| 30.0);
-        assert_eq!(got[2], Some(Action::Review), "{got:?}");
-        assert!(got.contains(&Some(Action::Keep)) && got.contains(&Some(Action::Delete)), "{got:?}");
+        use Action::*;
+        assert_eq!(suggest(&pics, &links, 0.6, |_| 30.0), [Some(Keep), Some(Delete), Some(Delete), Some(Delete)]);
+        // A mirror image whose pixels are not the picture's, mirrored, is not its frame.
+        let got = suggest(&[pic, Picture { thumb: &t, ..mirror }], &[(0, 1, Link::Edge(&v, flip, false))], 0.6, |_| 30.0);
+        assert!(!got.contains(&Some(Delete)), "{got:?}");
     }
 
     /// Two different pictures of one frame and nothing else of it: neither

@@ -205,8 +205,8 @@ new: 1 file
 ```
 
 - `repeat`: you already have it. A file you keep, either in the library or
-  another scanned image, shows all of it at about the same detail or better,
-  the same promise as `DELETE`. When that file is itself a repeat, the last
+  another scanned image, shows all of it at about the same detail or better
+  as far as img-fp can tell, the same suggestion as `DELETE`. When that file is itself a repeat, the last
   line names the copy at the end of the chain
 - `better`: the library has the picture, but this image shows more of it:
   it is larger, less cropped, or the original of an edited copy
@@ -397,13 +397,16 @@ group_1: 4 files
 ```
 
 The second column suggests what to do with each file. img-fp never deletes
-anything itself.
+anything itself, and its suggestions can be wrong.
 
 - `KEEP`: the best copy of the picture, a file that shows something the
   others don't, such as a collage, a slide or a meme made from it, or a
   different photo that only looks similar
-- `DELETE`: everything in it is also in a file marked to stay, at about the
-  same detail or better
+- `DELETE`: as far as img-fp can tell, everything in it is also in a file
+  marked to stay, at about the same detail or better. This is a suggestion,
+  not a guarantee: an edit that is very hard to tell from the original, such
+  as a faint watermark, a colour change or a heavily re-saved copy, can be
+  the file that stays. Look before deleting anything you cannot replace
 - `REVIEW`: look at it before deciding. Either a close copy, such as one
   tinted or watermarked, that could not be confirmed, or one of two versions
   of the same picture, such as a photo and its re-save in another format,

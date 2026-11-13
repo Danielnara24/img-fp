@@ -46,6 +46,12 @@ def build(F, man):
 # keep rule's old corner tolerance, and was blind to the deletions that tolerance let through (a
 # 1-2% crop kept, its original deleted). `exact` reads the regions as generated, to a rounding.
 SLACK, EXACT = 0.02, 1e-4
+# How much smaller a holder may show the picture than the deleted file does, as a share of its size. 0.95 is
+# the measure every figure was read with; the keep rule's own allowance is half an octave (`SHRINK`, 0.707),
+# which the user set (2026-10-07, again 2026-11-13: a crop stretched back to its picture's size is redundant),
+# and `IMGFP_EFF=0.7` scores by it.
+import os
+EFF = float(os.environ.get('IMGFP_EFF', 0.95))
 
 def holds(k, d, slack=SLACK):
     if k is None or d is None: return False
@@ -53,7 +59,7 @@ def holds(k, d, slack=SLACK):
     if d['trap'] or d['host'] or k['trap'] or k['seed'] != d['seed']: return False
     rk, rd = k['region'], d['region']
     if rd[0] < rk[0]-slack or rd[1] < rk[1]-slack or rd[2] > rk[2]+slack or rd[3] > rk[3]+slack: return False
-    if k['eff'] < d['eff']*0.95: return False
+    if k['eff'] < d['eff']*EFF: return False
     if not d['edited'] and k['edited']: return False
     return True
 

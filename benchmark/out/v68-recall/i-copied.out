@@ -1,0 +1,6 @@
+== ALL2 i-copied  (in 30.56s)
+  i-copied TP  15029  FP    0  FN  12987  TN   5467   precision 100.0000%  recall 53.64%
+        recall by kind: unedited 10857/14548 (74.6%), edit 4172/13468 (31.0%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+== ALL i-copied  (in 59.37s)
+  i-copied TP  17371  FP    0  FN  10288  TN   5460   precision 100.0000%  recall 62.80%
+        recall by kind: unedited 10752/14555 (73.9%), edit 6619/13104 (50.5%), composite 0/0 (0.0%), trap 0/0 (0.0%)

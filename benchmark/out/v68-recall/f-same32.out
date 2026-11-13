@@ -1,0 +1,11 @@
+== ALL2 f-same32  (in 14.00s)
+  f-same32 TP  17234  FP    0  FN  10782  TN   5467   precision 100.0000%  recall 61.51%
+        recall by kind: unedited 11386/14548 (78.3%), edit 5848/13468 (43.4%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+== ALL f-same32  (in 13.15s)
+  f-same32 TP  19413  FP    0  FN   8246  TN   5460   precision 100.0000%  recall 70.19%
+        recall by kind: unedited 11810/14555 (81.1%), edit 7603/13104 (58.0%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+f-same32/small all2 n1: 364 deleted, 0 lost; all2 n2: 728 deleted, 0 lost; all n1: 195 deleted, 0 lost; all n2: 521 deleted, 3 lost;
+   all n2-d1 unedited, no unedited holder: ORIGINAL 1
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 1
+done f-same32

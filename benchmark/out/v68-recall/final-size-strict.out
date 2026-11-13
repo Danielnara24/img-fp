@@ -1,0 +1,105 @@
+== ALL2
+files 33483, redundant (the ideal deletes) 28016, must stay 5467
+  base  TP  15523  FP    1  FN  12493  TN   5466   precision 99.9936%  recall 55.41%
+        recall by kind: unedited 11336/14548 (77.9%), edit 4187/13468 (31.1%), composite 0/0 (0.0%), trap 0/0 (0.0%)   FP by kind {'composite': 1}
+  new   TP  15513  FP    0  FN  12503  TN   5467   precision 100.0000%  recall 55.37%
+        recall by kind: unedited 11253/14548 (77.4%), edit 4260/13468 (31.6%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+actions {'KEEP': 12607, 'DELETE': 15513, 'REVIEW': 4369}
+content lost by deletion: {} {}
+content lost, regions exact (no slack): 0 {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 0 {} {}
+families whose original or exact/lossless copy survives: 351 / 364
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 5 / 364 ['IMGS2/bw6.webp', 'IMGS4/Coles_Boorooma_in_December_2025.jpg', 'IMGS4/Locomotive.jpg', 'IMGS4/book
+== ALL
+files 33119, redundant (the ideal deletes) 27659, must stay 5460
+  base  TP  19733  FP    0  FN   7926  TN   5460   precision 100.0000%  recall 71.34%
+        recall by kind: unedited 12211/14555 (83.9%), edit 7522/13104 (57.4%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+  new   TP  18886  FP    0  FN   8773  TN   5460   precision 100.0000%  recall 68.28%
+        recall by kind: unedited 11798/14555 (81.1%), edit 7088/13104 (54.1%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+actions {'KEEP': 9718, 'DELETE': 18886, 'REVIEW': 3997}
+content lost by deletion: {} {}
+content lost, regions exact (no slack): 0 {} {}
+content lost, holders neither composites nor mirrored/rotated copies: 0 {} {}
+families whose original or exact/lossless copy survives: 357 / 364
+families whose picture survives only in a composite, a mirror image or rotation, or an edit: 2 / 364 ['IMGS/low-light2.jpg', 'IMGS2/bw1.avif']
+base [ 157.6s] pace: grouping and suggesting: 991022 images and anchors in 7.18s, 57939.6 ns a unit on each of 8 threads
+new [ 159.0s] pace: grouping and suggesting: 991022 images and anchors in 12.56s, 101369.8 ns a unit on each of 8 threads
+new [  38.7s] pace: grouping and suggesting: 32000 images and anchors in 10.39s, 2596592.9 ns a unit on each of 8 threads
+base [ 143.8s] pace: grouping and suggesting: 991022 images and anchors in 7.37s, 59498.3 ns a unit on each of 8 threads
+s-head all2 n1: 329 deleted, 5 lost; all2 n2: 665 deleted, 7 lost; all n1: 211 deleted, 0 lost; all n2: 741 deleted, 27 lost;
+   all2 n1-d1 unedited, no unedited holder: ORIGINAL 3
+   all2 n1-d2 unedited, no unedited holder: ORIGINAL 2
+   all2 n2-d1 unedited, no unedited holder: ORIGINAL 1
+   all2 n2-d2 unedited, no unedited holder: ORIGINAL 3
+   all2 n2-d3 unedited, no unedited holder: ORIGINAL 3
+   all n2-d1 unedited, no unedited holder: ORIGINAL 8
+   all n2-d1 unedited, no unedited holder: alpha_on_black 1
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d1 edit, no holder: watermark_corner 1
+   all n2-d2 unedited, no unedited holder: ORIGINAL 4
+   all n2-d2 unedited, no unedited holder: to_jxl 1
+   all n2-d3 unedited, no unedited holder: aspect_distort 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 9
+   all n2-d3 unedited, no unedited holder: scale_large 1
+new/small all2 n1: 342 deleted, 0 lost; all2 n2: 683 deleted, 0 lost; all n1: 194 deleted, 0 lost; all n2: 517 deleted, 3 lost;
+   all n2-d1 unedited, no unedited holder: ORIGINAL 1
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 1
+families: 266   DELETE: 2346
+original kept:   103 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q97: 61
+  original deleted, kept instead: reencode_q90: 45
+  original deleted, kept instead: reencode_q92: 42
+  original deleted, kept instead: noise,reencode_q97: 3
+families: 266   DELETE: 2346
+original kept:   103 / 266
+faithful kept:   266 / 266
+content lost:    0 deletions
+  original deleted, kept instead: reencode_q97: 61
+  original deleted, kept instead: reencode_q90: 45
+  original deleted, kept instead: reencode_q92: 42
+  original deleted, kept instead: noise,reencode_q97: 3
+  verdicts: {'repeat': 7156, 'better': 1131, 'review': 388, 'new': 3125}
+  found: 4,863 / 5,157 files the library has (94.30%) name a library file that has them
+  repeat: 3,486 / 4,430 files a library file holds (78.69%)
+  content lost: 0  {}
+  named keeper does not hold: 167  {'library': 148, 'scan': 19}
+  false library claims: 73 {'trap or disjoint': 64, 'cross-family': 9}; partial: 69
+  truth \ verdict      repeat   better   review      new  missing
+  holds                3,486      429      296      219        0
+  has                      0      671       51        5        0
+  none                 3,670       31       41    2,901        0
+found corpus HEAD {'REVIEW': 300, 'KEEP': 1465, 'DELETE': 125} new {'REVIEW': 418, 'KEEP': 1465, 'DELETE': 7} moved [(('DELETE', 'REVIEW'), 118), (('REVIEW', 'KEEP'), 8), (('KEEP', 'REVIEW'), 8), (('KEEP', 'DELETE'), 1), (('DELETE', 'KEEP'), 1)]
+found pairs identical True
+transform                                      pairs                          pairs
+                        oDEL  vDEL  loss lossX   REV   oDEL  vDEL  loss lossX   REV
+blur_fill                  1     0     1     1    16      0     0     0     0    17
+chromatic_aberration       0   177     0     0   354      0   154     0     0   371
+contact_sheet              4     0     0     0   257      5     0     0     0   257
+crop_half                  0   318     0     0    12      0   317     0     0    15
+crop_off_centre            0   308     0     0    12      0   310     0     0    13
+crop_quarter               0   269     0     0    46      0   271     0     0    46
+crop_slight                0   320     0     0    14      0   319     0     0    15
+halftone                   2     1     2     2   621      0     2     0     0   686
+messaging_app             13   215     0     0   271     13    13     0     0   395
+mirror_crop                0     0     0     0   696      0   252     0     0    24
+noise                      4     2     4     4   716      0     2     0     0   719
+phone_screenshot           1     0     1     1   225      0     0     0     0   226
+rotate_large               0   250     0     0     4      0   252     0     0     4
+rotate_small               0   230     0     0    58      0   228     0     0    58
+scale_large                6   326     6     6    63      0   326     0     0    64
+scale_mid                  3   357     3     3     3      0   357     0     0     5
+scale_nearest              5   336     5     5    25      0   338     0     0    29
+scale_small                1   330     1     1    28      0   335     0     0    27
+shear                      0   261     0     0    36      0   108     0     0   194
+slide_deck                 1     0     0     0   412      0     0     0     0   414
+swirl                      0    29     0     0   479      0    31     0     0   474
+thumbnail                  3   334     3     3    34      0   336     0     0    39
+upscale                   20   343     0     0     1     20     0     0     0   343
+video_call_frame           0   328     0     0    16      0   227     0     0   120
+TOTAL                    344  6304    26    26 35229    318  5748     0     0 35193
+benchmark/out/v68-recall/new/ALL2.json deletions held only by an upscale: 0 []
+benchmark/out/v68-recall/new/ALL.json deletions held only by an upscale: 0 []
+FINISHED

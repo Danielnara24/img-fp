@@ -1,0 +1,18 @@
+== ALL2 h-composite  (in 13.62s)
+  h-composite TP  16277  FP    1  FN  11739  TN   5466   precision 99.9939%  recall 58.10%
+        recall by kind: unedited 11676/14548 (80.3%), edit 4601/13468 (34.2%), composite 0/0 (0.0%), trap 0/0 (0.0%)   FP by kind {'composite': 1}
+== ALL h-composite  (in 13.04s)
+  h-composite TP  20279  FP    0  FN   7380  TN   5460   precision 100.0000%  recall 73.32%
+        recall by kind: unedited 12789/14555 (87.9%), edit 7490/13104 (57.2%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+h-composite/small all2 n1: 364 deleted, 1 lost; all2 n2: 718 deleted, 1 lost; all n1: 246 deleted, 3 lost; all n2: 614 deleted, 11 lost;
+   all2 n1-d2 unedited, no unedited holder: ORIGINAL 1
+   all2 n2-d2 unedited, no unedited holder: ORIGINAL 1
+   all n1-d2 unedited, no unedited holder: ORIGINAL 2
+   all n1-d3 unedited, no unedited holder: ORIGINAL 1
+   all n2-d1 unedited, no unedited holder: ORIGINAL 1
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d2 unedited, no unedited holder: ORIGINAL 2
+   all n2-d2 unedited, no unedited holder: jpeg_high 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 4
+   all n2-d3 unedited, no unedited holder: copy_exact 1
+   all n2-d3 edit, no holder: motion_blur 1

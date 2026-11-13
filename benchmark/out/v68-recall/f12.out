@@ -1,0 +1,22 @@
+== ALL2 f12  (in 27.02s)
+  f12   TP  15515  FP    0  FN  12501  TN   5467   precision 100.0000%  recall 55.38%
+        recall by kind: unedited 11255/14548 (77.4%), edit 4260/13468 (31.6%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+== ALL f12  (in 15.19s)
+  f12   TP  18887  FP    0  FN   8772  TN   5460   precision 100.0000%  recall 68.29%
+        recall by kind: unedited 11798/14555 (81.1%), edit 7089/13104 (54.1%), composite 0/0 (0.0%), trap 0/0 (0.0%)
+f12/small all2 n1: 342 deleted, 0 lost; all2 n2: 683 deleted, 0 lost; all n1: 194 deleted, 0 lost; all n2: 517 deleted, 3 lost;
+   all n2-d1 unedited, no unedited holder: ORIGINAL 1
+   all n2-d1 unedited, no unedited holder: webp_lossy 1
+   all n2-d3 unedited, no unedited holder: ORIGINAL 1
+transform              pairs origDEL  varDEL    loss   lossX  REVIEW
+browser_window           364      16       0       0       0     338
+caption_bar              364       7       0       0       0     344
+contact_sheet            364       5       0       0       0     257
+copy_exact               364     141     223       0       0       0
+messaging_app            364      13      13       0       0     395
+strip_metadata           359     113     246       0       0       0
+to_png                   364       1      13       0       0     700
+upscale                  364      20       0       0       0     343
+webp_lossless            364       2      12       0       0     700
+TOTAL                  32755     318    5748       0       0   34900
+done f12

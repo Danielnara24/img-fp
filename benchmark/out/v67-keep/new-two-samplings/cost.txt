@@ -1,0 +1,8 @@
+base [ 146.5s] suggested: 10959 to keep, 15524 to delete, 6006 to review
+base [ 147.0s] pace: grouping and suggesting: 991022 images and anchors in 6.83s, 55131.1 ns a unit on each of 8 threads
+new [ 150.6s] suggested: 13333 to keep, 13786 to delete, 5370 to review
+new [ 154.4s] pace: grouping and suggesting: 991022 images and anchors in 13.71s, 110685.7 ns a unit on each of 8 threads
+new [  32.1s] suggested: 13333 to keep, 13786 to delete, 5370 to review
+new [  34.9s] pace: grouping and suggesting: 32000 images and anchors in 11.46s, 2864464.5 ns a unit on each of 8 threads
+base [ 133.0s] suggested: 10959 to keep, 15524 to delete, 6006 to review
+base [ 137.1s] pace: grouping and suggesting: 991022 images and anchors in 6.91s, 55797.3 ns a unit on each of 8 threads

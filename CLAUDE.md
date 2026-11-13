@@ -9,7 +9,7 @@ Every rule below was measured; the measurements are in `HISTORY.md` and
 `benchmark/out/`. The window's notes are in `src/gui/CLAUDE.md`, the Flatpak's in
 `flatpak/CLAUDE.md`, the competitors' runners in `benchmark/CLAUDE.md`.
 
-## Where things stand (2026-11-10, 0.84.1 + the cache fix)
+## Where things stand (2026-11-13, 0.84.1 + the cache fix + the keep rule)
 
 What each version changed, how it was proved and its numbers are in
 `HISTORY.md` (from 0.47.0 on; before that, `git show 5de81bc:CLAUDE.md`).
@@ -28,9 +28,20 @@ given here. Each `benchmark/out/vNN/` holds a session's scripts, outputs and
   0.5-0.4: 8, 0.3-0.25: 9, correlation 0.4-0.2: 6, points and `-k`: 4;
   IMGS-ALL2 overlap 0.6: 6, 0.5-0.25: 8-9, correlation 0.4-0.2: 7-9, `-k`
   10: 2. Every one is two photographs of one scene.
-- Keep rule (0.84.0): 0 lost on both; originals or a lossless copy kept
-  IMGS-ALL 358 / 364, IMGS-ALL2 351 / 364; faithful copy 364 / 364;
-  `pairs.py` loss 26; IMGS-PROVENANCE 126 / 266 originals, 0 lost.
+- Keep rule (2026-11-13, `out/v68-recall`, `out/v69-bar`), as a classifier
+  of redundant files (`out/v67-keep/redundant.py`; precision / recall):
+  IMGS-ALL 100% / 69.5% (19,224 DELETE), IMGS-ALL2 100% / 56.4% (15,790).
+  Lost, counted with `IMGFP_EFF=0.7` (the half octave the rule allows; the
+  scorer's 0.95 also counts composites by a nominal coverage, 54 in
+  `pairs.py`, 51 checked by template matching to hold the photograph at
+  full size): two-file families (`pairs.py`) 1 of 7,292; an original + 1 or
+  2 variants (`out/v68-recall/small.py`) 3 of 1,890 (strict 11). Originals
+  or a lossless copy kept 357 and 351 / 364; IMGS-PROVENANCE 106 / 266
+  originals, 0 lost; IMGS-AGAINST 0 lost; found corpus 126 DELETE. Edits
+  with copies of their own (`out/v69-bar/editcopies.py`,
+  `~/Documents/IMGS-EDITCOPY`): the original and its copy deleted for the
+  edit in 319 of 9,065 families (HEAD 2,563). `--suggest correlation`:
+  88.9% / 83.9% and 80.8% / 72.0%.
 - DISC21 shard 0 (50k dev queries `--against` one 50k reference zip, 529
   true copies): µAP 66.69 at bar 0.5 (recall at 90% precision 52.74), a real
   0.7 run 57.48. Whole dev set (0.76.0, 20 shards): 65.3 at 0.5, 59.9 at 0.7;
@@ -88,8 +99,17 @@ is measured where siblings cannot meet* and *Scoring on small families*.
   the same pair passes in a folder of 60 and not of 5,460; adding one file
   to the found corpus moved 818 pairs out and 393 in. Fixed seeding was tried
   and rejected.
-- Keep rule: `pairs.py` loses 26; lossy documents (two JPEG invoices); which
-  of several lossy copies is the original (IMGS-PROVENANCE 126 / 266); grey
+- Keep rule: three losses where families are three files, an edit inside
+  every bar a re-encode keeps to (a twelve-level posterize, a JPEG saved
+  several times), and one in `pairs.py` (`IMGS/16.jpg` for a phone
+  screenshot showing it at 0.897); an edit `faithful` cannot tell from its
+  original still wins where it has a copy (319 families of
+  IMGS-EDITCOPY: corner watermarks, JPEG generations, and colour-only
+  edits, which no comparison sees since all are on grey; a `faithful` that
+  reads colour needs chroma kept per file); an enlargement cannot be proven
+  one, so past half an octave it stays beside its source (REVIEW); recall is
+  bounded by what `out/v68-recall/RESULTS.md` section 5 lists; lossy documents (two JPEG invoices); which
+  of several lossy copies is the original (IMGS-PROVENANCE 106 / 266); grey
   originals beaten by a tinted copy on "colour over grey"; IMGS5's keep rule
   never scored (DELETEs resting on a sibling).
 - N copies of one picture are stated as N(N-1)/2 pairs (3,000 copies: 4.5 M
@@ -110,9 +130,6 @@ is measured where siblings cannot meet* and *Scoring on small families*.
   it has the sign of every loss tried at a half to all of the shard's
   size, but read `h1`'s -11 copies as -4, and level builds differ by a
   few copies there.
-- The keep rule loses content once on IMGS-ALL2 at HEAD (a
-  `phone_screenshot` composite deleted; `validate.py`'s first run), where
-  the baseline above says 0. Not looked into.
 
 Docs split: `benchmark/BASELINE.md` (competition; the held-out experiment's
 write-up, `VALIDATION.md`, was deleted 2026-10-28), `README.md` is **users only**: install and usage, no
@@ -823,7 +840,9 @@ Each was measured; changing one needs a re-measure.
 
 ### Keep, delete, review (`suggest.rs`)
 
-User requirement: **a deletion never loses picture content.** Keeps may be
+User requirement: **a deletion never loses picture content.** It is the aim the
+rule is scored by, not a promise made to users (user, 2026-11-13: it was not
+reached, see *Open*; the README says a DELETE is a suggestion that can be wrong). Keeps may be
 the original, a lossless copy, a re-encode, or a composite holding the whole
 photo. REVIEW is for weak matches close to a copy; nothing acts on it.
 Current figures: *Where things stand*. Scored by `suggest_score.py`
@@ -835,14 +854,22 @@ the pair regime**, where every majority the rule chooses by is missing
 
 Rules (constants in `suggest.rs` with reasons): clean pair at 0.85 (its own
 bar now, not `Standing::Clean`'s; 0.85/0.9/0.95 lose the same, delete ~the
-same); a mirrored pair, like a negative, deletes nothing either way (a flip at
-q95 was kept over its q92 original 14/19 times); weak pair
+same); a negative deletes nothing either way; a mirrored pair is one of the
+frame's pictures (until 2026-11-13 it deleted nothing: a flip at q95 was
+kept over its q92 original 14/19 times, which by the user's ruling loses
+nothing); weak pair
 deletes at >= 0.95 (`WEAK_DELETES`), REVIEW at >= 0.9 (`REVIEW`); two crops
 each missing a strip the other has are two frames, however thin (`CROPS`,
-10%, made them one until the audit after 0.79.0); *holds* by frame corners, a
+10%, made them one until the audit after 0.79.0); two files are one frame
+when the fit puts each in the other *and* each shows the other laid corner
+to corner, under the transform their sizes give (`Component::same`,
+`frame_onto_frame`: corners alone called a phone's screenshot the frame of
+its photograph on a 5.5-point fit; pixels alone, a slightly turned scan);
+*holds* by frame corners, a
 corner outside by at most `FIT_ERROR` / the pair's points, and a frame is the
 larger only past `FIT_ERROR_MOST` / points, neither deleting the other between
-(audit after 0.79.0; was 2% + 3 px either way), keeper may shrink <= 0.5 octave (`SHRINK`) unless the extra
+(audit after 0.79.0; was 2% + 3 px either way), keeper may shrink <= 0.5 octave (`SHRINK`); past it nothing is deleted
+(`shows_smaller`, 2026-11-13), though a file still *holds* another when the extra
 pixels hold no detail (`Traits::detail`, `extra` above 0.2 an octave + 0.03,
 `EXTRA_PER_OCTAVE`: enlargements read <= 0.3/octave at p99, real originals
 >= 0.44 at p01; at 0.1 a 3x Lanczos upscale beat its original; originals
@@ -853,15 +880,16 @@ every deletion (`whole_worst`, 12 grey levels on a 64-sample grid,
 composites of one photograph deleted each other; losses at 32/48/64/96:
 3/1/0/0), every holder asked in turn
 (a cap of three tries, removed: it cost 108 safe deletions and no time);
-composites are deleted only by their own copies; where no picture of a set
+composites are deleted only by their own copies, and delete a photograph
+only shown as it is (`shown_as_it_is`, below); where no picture of a set
 is copied at its own frame, a larger frame deletes what it holds only if its
 8-px detail reads nearer "the rest is more picture" than "the rest is flat"
 (`on_canvas`, split at sqrt of the share: at 1 px a third of slight crops
 read as canvas; composites deleting their original in pairs 971 -> 40, losing
-content 133 -> 2); a class of two different pictures of one frame (twins
-count once) that neither `more` nor a size gap past `SHRINK` separates
-deletes nothing and is REVIEW, both files, however they agree (not against a
-library: a pinned file decides); no file is deleted by one
+content 133 -> 2); different pictures of one frame and size (twins count once) that `more`
+does not separate delete nothing and are REVIEW, however they agree, unless
+a third file corroborates the keeper (`Component::corroborated`; not against
+a library: a pinned file decides); no file is deleted by one
 of its size softer by more than `SOFT_GAP` = 0.15 (the p95 softening of a
 faithful lossy re-encode; the keeper is chosen by majority, and nine soft
 enlargements outvoted their original; a file held back only by this is
@@ -898,10 +926,47 @@ edit delete its original.
 `Refusal`'s order (what it makes of a file nothing deleted), never a new
 list or a pass after settling. The action is read in `Facts::action` only.
 
+**Judged as a classifier, precision first** (user, 2026-11-12): a DELETE no
+file that stays holds is a false positive, and recall is raised only at
+100% precision; a composite or a mirrored / turned copy holds the picture.
+Score a change with `out/v67-keep/redundant.py` on both corpora **and** on
+`pairs.py` and `out/v68-recall/small.py` (an original + 1 or 2 variants):
+the full corpora showed 0 lost where three-file families lost 27 of 741.
+What that brought (2026-11-13, `Component::refusal`, `corroborated`,
+`shows_smaller`): a file deletes a different picture of its frame only
+beside a third file that is its own as nearly as a re-encode is (`TAU`,
+`SOFT_TIE`), not beside any third picture, and not when that different
+picture has such a copy of its own (two versions, both REVIEW: without it
+an edit with a copy took the original and its copy in 2,236 of 9,065
+families); no file is deleted for one that shows its picture more than
+`SHRINK` smaller, whatever `extra` says, since it cannot prove an
+enlargement, and such a file is REVIEW (a stricter allowance, `SAME` and
+the fit's error, took the found corpus's stretched crops to REVIEW, 125 ->
+7 DELETE, which the user wants deleted); a composite stands in for the
+photograph it fully contains (user, 2026-11-13): a larger frame that is no
+plain picture deletes what it holds when the pair is clean, the transform
+is a similarity showing it no smaller within the fit's error
+(`shown_as_it_is`; without it originals went for perspective
+`wall_poster`s) and the held file is one picture (`shows_more_than_one`);
+a file left open deletes what it holds, as a kept one; a
+mirrored pair is a pair like any other; the whole-frame check fits a rising
+tone curve (`tone_curve`), not a line; `choose` takes the file nearest the
+rest before the smaller.
+
+**Every deletion is a kept file's, checked against it** (2026-11-12,
+`Ctx::settle`, `Component::through`). Deletion spreads from the kept files:
+a deleted file deletes nothing itself, it hands on its keeper, which is
+asked of the next file directly (`refusal`: frames, sizes, its pixels over
+the other's whole frame), the transform composed through the files between.
+A file the kept file is paired with itself is not asked again through
+another. Until then each deleted file deleted by its own pairs, each step
+within one pair's tolerances and the sum unchecked: the one loss on
+IMGS-ALL2, and 39 and 64 deletions resting only on a composite or a turned
+copy. **Do not let a deleted file delete again.**
+
 A DELETE row carries `kept_copy` (JSON only), which the window shows: the
-end of its chain of holders (`suggest::kept_at_end`), which stays. Deletion
-spreads one holder at a time, and the nearest holder was itself a DELETE for
-15% of deletions. A deletion whose kept copy is gone (`--last`, or the
+file it was deleted for, which stays (`suggest::kept_at_end` still walks a
+chain, for a scan kept from before). A deletion whose kept copy is gone (`--last`, or the
 window after the Trash or on restore) becomes REVIEW: carried out, it would
 take the last copy (`Outcome::lapse`, shared by `--last` and the window). The window labels it "review: its kept copy is gone", not
 a weak match. The two group rules judge only by representatives still there
@@ -1153,6 +1218,28 @@ Do not retry without new evidence:
   k-means update, mip pyramid instead of blur in `whole_worst`, one-file
   bridge test (`IMGFP_CUT`), cosine retrieval, best-edge-first propagation
   tree, k-truss / biconnected grouping, plain-tap pixel sampling.
+- **Finer pixel evidence against siblings** (2026-11-12, `out/v67-keep`
+  section 5): the pixel check on 96 or 192 samples a side, on thumbnails of
+  128, 256 and 512 px, and the inliers' residual over their keypoints' size.
+  On original + 2 variants, at equal true pairs kept, the finer grids pass
+  as many sibling pairs as the 48 grid on 128 px or more, the residual two
+  to three times as many. A hard copy (noise, blur, a warp) loses fine
+  agreement faster than two photographs of one scene do.
+- **Keep rule, one frame by the pixels alone** (2026-11-12, `out/v67-keep`
+  section 3): a slightly turned `print_scan` was its original's frame
+  (`pairs.py` 26 -> 28). **"No file for a smaller one" asked in `holds`**:
+  every size became a class of its own, the largest won, and originals went
+  for inflated copies (IMGS-ALL2 349 -> 313 kept); asked in `refusal` it is
+  the rule now.
+- **Keep rule, a looser whole-frame bar** (2026-11-13, `out/v68-recall`
+  section 4): for crops, 16 loses 4 in `pairs.py` (an original for a
+  composite); for one frame, 20-48 gains 1,200-1,950 edits on IMGS-ALL2 and
+  loses nothing measured. On edits copied in their turn (`out/v69-bar`)
+  no bar is below the first wrong deletion: 2 / 4 / 8 / 12 / 24 give 192 /
+  276 / 306 / 319 / 332 wrong families of 9,065, a ramp; 12 stays. And
+  **telling an enlargement by the
+  statistics** (`extra`, softness, their difference): true enlargements and
+  soft originals overlap on each.
 - Corroboration from the second look's verdicts (0.57.0; turned verdicts
   above the corroborating bar and below an anchor's, admitted inside
   clusters like direct ones): +437 true pairs on IMGS-ALL, IMGS3, IMGS5

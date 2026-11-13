@@ -151,6 +151,104 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
 ## Versions and sessions, 0.47.0 to 0.84.0
 
+- **The keep rule as a classifier, precision first, 2026-11-13** (after
+  0.84.1, `out/v68-recall`, on top of the entry below; `suggest.rs` only).
+  User: recall as high as it goes with precision at 100%; a composite or a
+  mirrored / turned copy holds the picture.
+  - **Measure** (`out/v67-keep/redundant.py`): TP a DELETE a file that stays
+    holds, FP one none holds, against the smallest set of files that hold
+    all the others. HEAD: IMGS-ALL2 99.994% / 55.4% (precision / recall),
+    IMGS-ALL 100% / 71.3%; `--suggest correlation` 80.8% / 72.0% and 88.9% /
+    83.9%; `representative` 71.2% / 80.3% and 80.9% / 92.7%.
+  - **The full corpora hid the losses.** Original + 1 or 2 variants
+    (`small.py`): HEAD lost 12 of IMGS-ALL2's 994 deletions and 27 of
+    IMGS-ALL's 952, the original gone for a copy 0.18-0.74 its size or for
+    the edit `choose` picked of three different pictures.
+  - **Changes**: a file left open deletes what it holds; mirrored pairs take
+    part (two alone undecided); the whole-frame check fits a rising tone
+    curve, not a line; a different picture of the frame is deleted only for
+    a keeper a third file corroborates (`Component::corroborated`); no file
+    for one showing its picture more than `SHRINK` (half an octave)
+    smaller (`shows_smaller`), whatever `extra` says, such a file REVIEW;
+    `choose` takes the nearest the rest before the smaller. A stricter
+    allowance (`SAME`, the fit's error) took the found corpus's stretched
+    crops to REVIEW (DELETE 125 -> 7); the user wants them deleted.
+  - **A composite stands in** for the photograph it fully contains (user,
+    2026-11-13): clean pair, a similarity showing it no smaller within the
+    fit's error (`shown_as_it_is`), the held file one picture
+    (`shows_more_than_one`). Without the first, originals went for
+    perspective `wall_poster`s and a captioned copy.
+  - **Edits with copies of their own** (`out/v69-bar`,
+    `~/Documents/IMGS-EDITCOPY`: 9,065 families of original, its copy, an
+    edit, the edit's re-save). HEAD deleted the original and its copy for
+    the edit in 2,563. The same-frame bar swept 2-24: 192-332 wrong
+    families, no cliff, 12 stays. The rule was the hole: a different
+    picture that has a faithful copy of its own is now not deleted (both
+    REVIEW): 319. Left: corner watermarks, JPEG generations, colour-only
+    edits (every comparison is on grey).
+  - **Result**, plain build: IMGS-ALL2 100% / 56.4% (15,790 deleted), IMGS-ALL
+    100% / 69.5% (19,224). Lost by the half-octave allowance
+    (`IMGFP_EFF=0.7` in `suggest_score.py`): `pairs.py` 25 -> 1 (7,292
+    deleted, from 6,648); original + 1 or 2: 35 -> 3 (1,890 deleted, from
+    1,946). By the scorer's 0.95: 26 -> 54 and 39 -> 11; of the 54, 51 were
+    checked by template matching to hold the photograph at full size (the
+    manifest's coverage for a composite is nominal). IMGS-PROVENANCE 0
+    lost, originals 126 -> 106 / 266; IMGS-AGAINST 0 lost, held files
+    `repeat` 3,317 -> 3,520, named keeper does not hold 443 -> 183; found
+    corpus DELETE 125 -> 126, pairs identical; suggestion stage 7.0 -> 12.5
+    s on IMGS-ALL2.
+  - **Not taken**: a looser whole-frame bar (crops at 16: +618 on IMGS-ALL2,
+    `pairs.py` loses 4; one frame at 20-48: +1,200 to +1,950, nothing lost
+    anywhere measured, every gain an edit).
+  - **Open**: the three left (a twelve-level posterize, a JPEG saved several
+    times: inside every bar a re-encode keeps to); what still stays and why,
+    `RESULTS.md` section 5.
+- **The keep rule answers to the file that stays, 2026-11-12** (after
+  0.84.1, `out/v67-keep`; `suggest.rs` only, pairs untouched).
+  - **The loss**: IMGS-ALL2 `IMGS/low-light.avif`, a `phone_screenshot`
+    deleted. A deleted file had deleted it, through a propagated pair worth
+    5.5 points, where `FIT_ERROR` / points is 12.7% of the frame and the
+    phone's bars 8%: the screenshot was "the frame" of the photograph.
+  - **Every deletion is a kept file's** (`Ctx::settle`,
+    `Component::through`): a deleted file no longer deletes by its own
+    pairs; it hands on its keeper, which is asked of the next file directly
+    (frames, sizes, pixels over the whole frame), the transform composed
+    through the files between. Each step used to allow what one pair
+    allows, and nothing asked what the steps came to.
+  - **One frame is the corners and the pixels** (`Component::same`): the
+    fit puts each frame in the other and each shows the other laid corner
+    to corner, under the transform the two sizes give
+    (`frame_onto_frame`), with no fit in it. On IMGS-ALL2's 531,510 strong
+    pairs, wrongly called one frame: corners 151, pixels within
+    `FIT_ERROR_MOST` 65, both 5. A same-frame deletion is checked under
+    that transform too.
+  - Plain builds, cached: IMGS-ALL2 lost 1 -> 0, deletions resting only on a
+    composite or a turned copy 39 -> 0, originals or lossless 351 -> 350 /
+    364, DELETE 15,524 -> 13,819; IMGS-ALL 0 lost both, 64 -> 0, 358 -> 363,
+    19,733 -> 17,607. `pairs.py` 26 lost both, 6,304 -> 6,309 variants
+    deleted. IMGS-PROVENANCE 126 / 266 both, 0 lost. IMGS-AGAINST 0 lost,
+    named keeper does not hold 443 -> 286, `repeat` 7,165 -> 6,735 (402 files
+    with no library copy, repeats of another scanned file by a chain, are
+    `new`). Found corpus: no action moved. Given up: 4-7% of unedited
+    copies' deletions, 22-26% of edits', three in four to REVIEW.
+  - Cost, the suggestion stage: IMGS-ALL2 7.3 -> 9.5 s, IMGS-ALL 8.6 -> 9.0 s.
+    It was 13.6 and 18.2 s until both ways of a corner-to-corner check came
+    of one sampling (`whole_both`) and a third picture of a frame was looked
+    for only until met.
+  - **Rejected**: pixels alone for one frame (a slightly turned `print_scan`
+    was its original's frame, `pairs.py` 28); a file never deleted for a
+    smaller one (the larger then wins every size class: IMGS-ALL2 originals
+    kept 349 -> 313).
+  - **Open**: 24 of `pairs.py`'s 26 are an original deleted for a smaller
+    copy that `extra` says it adds nothing to. Enlarged back, the kept copy
+    is the original at 21 dB (`pedestrian`, a thumbnail 4% its size), 29
+    (`logo`), 31-33 (`selfie2`), others 40-47: some are real losses.
+  - **Finer evidence does not separate siblings** (section 5): on original
+    + 2 variants, a pixel check on 96 or 192 samples a side, on thumbnails
+    of 128, 256 and 512 px, passes as many siblings at equal true pairs kept
+    as the 48 grid on 128 (IMGS-ALL2 at 92% kept: 136 by `blk`, 148-181 by
+    the finer ones); inlier residual over keypoint size 350. No sibling is a
+    clean anchor there.
 - **The field, 2026-10-28** (`benchmark/BASELINE.md`, `out/v54-field`), cold,
   one session, img-fp 0.75.0 plain build. IMGS-ALL (five corpora, 33,136
   files): img-fp F1 **0.974**, 54 / 87 perfect, 590 s, 3,751 CPU-s, 606 MB
