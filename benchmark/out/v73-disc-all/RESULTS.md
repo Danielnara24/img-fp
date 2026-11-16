@@ -8,8 +8,9 @@ Build: `img-fp` here (v72's `img-fp-new`: correlation 0.65, aligned points 5).
 `pershard.py` scores each shard alone.
 
 The first pass wrote text reports (`-o shardN.json.part` chose the layout by
-extension), which state one match per query and cannot be scored; kept as
-`shardN.txt` and `loop-text.log`. Every shard was rerun with `--format json`.
+extension), which state one match per query and cannot be scored; they were
+deleted 2026-11-16 (`loop-text.log` is the pass's log). Every shard was rerun
+with `--format json`.
 
 ## Whole dev set (1,000,000 references, 10,000 true copies)
 

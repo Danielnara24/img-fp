@@ -27,3 +27,19 @@ peak either way (the run still holds the pairs; only the report is smaller).
 defaults + this format). All three builds read each other's cache records (one
 analysis), so both share `cache/` and `disc-cache/`. Results in `validate/`,
 `validate.report`.
+
+Finished 2026-11-16 07:5x, exit 1 (marks below). The base/new difference is
+the 0.65 / 5 defaults (the format is checked in section 1).
+- DISC21 shard 0: 0.5 true copies 382 -> 386 (none of base's lost), µAP 66.89
+  -> 67.28, false 393 -> 450; 0.7: 317 -> 321, µAP 57.48 -> 58.08.
+- F1 IMGS-ALL 0.9749 -> 0.9802, IMGS-ALL2 0.9417 -> 0.9566 (as `v72-defaults`);
+  `--fast` 0.9500 -> 0.9680, 0.9046 -> 0.9372. Seed pairs past 300 at the
+  default level (4, 3).
+- WORSE: small families total joined 65.3 -> 86.0, 63.0 -> 85.7 (the cost
+  `v72-defaults` recorded); keep rule original or lossless kept 357 -> 356,
+  351 -> 349, content lost 0 both; IMGS-ALL perfect transforms 53 -> 52
+  (IMGS-ALL2 12 -> 18). New: under `--fast` one more seed pair past 300 on
+  each corpus (IMGS-ALL Mural1/2 327, IMGS-ALL2 Floriana1/2 343), which
+  `v72-defaults` did not measure. Accepted (user, 2026-11-16).
+- Detail steps: 0 true pairs lost at each step on both corpora.
+- Cost: level everywhere (cached IMGS-ALL2 -2.9% CPU).

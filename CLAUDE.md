@@ -67,7 +67,10 @@ earlier (0.76.0, 20 shards): 65.3 at 0.5, 59.9 at 0.7 / 10;
   -ALL3 63.0 -> 85.0, IMGS5 40.7 -> 51.7, HOLI-DEV 969.7 -> 1,114.0, and the
   first different-scene joins there (IMGS-ALL2 one draw: `club` with `6`
   and `cross1`; HOLI-DEV 1264 | 1265 at 0.67-0.70); all of it from the
-  correlation bar, the points bar alone costs ~0.6%. History of 0.7, which
+  correlation bar, the points bar alone costs ~0.6%. Under `--fast` it also
+  takes one more seed pair past 300 on each corpus (IMGS-ALL Mural1/2 327,
+  IMGS-ALL2 Floriana1/2 343; `out/v75-format`), accepted 2026-11-16 (user's
+  decision; `--fast` F1 0.9500 -> 0.9680, 0.9046 -> 0.9372). History of 0.7, which
   was chosen for what users want grouped, not for F1: 0.5 grouped merely similar photos, 0.6 paired five of IMGS5's
   sixty seeds with their near-miss sibling directly. 0.8 was tried and
   reverted (four times the recall cost of 0.6 -> 0.7; DISC21 µAP 0.607 ->

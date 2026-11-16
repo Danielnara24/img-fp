@@ -1,0 +1,108 @@
+base /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v75-format/img-fp-085
+new  /home/daniel/Documents/Vscode_repositories/img-fp/benchmark/out/v75-format/img-fp-new
+
+                                                                                                     base                  new
+DISC21 0.5 true copies of 529                                                                         382                  386  +
+DISC21 0.5 base's true copies not found                                                                                      0  =
+DISC21 0.5 µAP                                                                                      66.89                67.28  +
+DISC21 0.5 recall at 90% precision                                                                  53.12                53.12  =
+DISC21 0.5 false copies                                                                               393                  450  more
+DISC21 0.7 true copies of 529                                                                         317                  321  +
+DISC21 0.7 base's true copies not found                                                                                      0  =
+DISC21 0.7 µAP                                                                                      57.48                58.08  +
+DISC21 0.7 recall at 90% precision                                                                  47.83                47.83  =
+DISC21 0.7 false copies                                                                                81                   87  more
+all2 default F1                                                                                    0.9417               0.9566  +
+all2 default true pairs (recall 90.11 / 92.95%)                                                 1,247,528            1,286,862  +
+all2 default false pairs (precision 98.61 / 98.53%)                                                17,621               19,172  more
+all2 default traps                                                                                  4,128                4,886  more
+all2 default cross-family                                                                          13,493               14,286  more
+all2 default merges                                                                                    69                   75  more
+all2 default seed pairs past 300                                                                        3                    3  =
+    Floriana3 / Floriana4                                                                             372                  380  
+    Fountain3 / Fountain5                                                                           6,254                6,476  
+    bird1 / bird2                                                                                   5,760                6,098  
+all2 default perfect transforms                                                                        12                   18  +
+all2 default keep rule: content lost                                                                    0                    0  =
+all2 default keep rule: original or lossless kept                                                     351                  349  WORSE
+all2 default keep rule: faithful copy kept                                                            361                  362  +
+all2 --fast F1                                                                                     0.9046               0.9372  +
+all2 --fast true pairs (recall 83.58 / 89.37%)                                                  1,157,202            1,237,293  +
+all2 --fast false pairs (precision 98.58 / 98.52%)                                                 16,660               18,643  more
+all2 --fast traps                                                                                   3,059                3,863  more
+all2 --fast cross-family                                                                           13,601               14,780  more
+all2 --fast merges                                                                                     54                   80  more
+all2 --fast seed pairs past 300                                                                         4                    5  WORSE
+    Floriana1 / Floriana2                                                                           under                  343  new
+    Floriana3 / Floriana4                                                                             571                  603  
+    Fountain3 / Fountain5                                                                           5,992                6,323  
+    Mural1 / Mural2                                                                                   837                  997  
+    bird1 / bird2                                                                                   5,330                5,637  
+all2 --fast perfect transforms                                                                          8                   13  +
+all2 512 -> 1024: true pairs lost (of 0 pairs lost)                                                                          0  =
+all2 --detail 1024: F1 0.9580, precision 98.51, recall 93.23, 3,864 true pairs added                                            
+all2 1024 -> 2048: true pairs lost (of 0 pairs lost)                                                                         0  =
+all2 --detail 2048: F1 0.9584, precision 98.51, recall 93.32, 1,246 true pairs added                                            
+all2 2048 -> 4096: true pairs lost (of 0 pairs lost)                                                                         0  =
+all2 --detail 4096: F1 0.9586, precision 98.50, recall 93.36, 557 true pairs added                                              
+all default F1                                                                                     0.9749               0.9802  +
+all default true pairs (recall 96.18 / 97.28%)                                                  1,316,691            1,331,790  +
+all default false pairs (precision 98.83 / 98.77%)                                                 15,541               16,589  more
+all default traps                                                                                   3,207                3,977  more
+all default cross-family                                                                           12,334               12,612  more
+all default merges                                                                                     59                   64  more
+all default seed pairs past 300                                                                         4                    4  =
+    Floriana1 / Floriana2                                                                           3,042                3,115  
+    Floriana3 / Floriana4                                                                             491                  492  
+    Fountain3 / Fountain5                                                                           6,793                6,862  
+    bird1 / bird2                                                                                     853                  897  
+all default perfect transforms                                                                         53                   52  WORSE
+all default keep rule: content lost                                                                     0                    0  =
+all default keep rule: original or lossless kept                                                      357                  356  WORSE
+all default keep rule: faithful copy kept                                                             363                  363  =
+all --fast F1                                                                                      0.9500               0.9680  +
+all --fast true pairs (recall 91.37 / 94.85%)                                                   1,250,912            1,298,509  +
+all --fast false pairs (precision 98.93 / 98.82%)                                                  13,475               15,450  more
+all --fast traps                                                                                    2,261                3,285  more
+all --fast cross-family                                                                            11,214               12,165  more
+all --fast merges                                                                                      68                   92  more
+all --fast seed pairs past 300                                                                          4                    5  WORSE
+    Floriana1 / Floriana2                                                                           2,658                3,002  
+    Floriana3 / Floriana4                                                                             451                  461  
+    Fountain3 / Fountain5                                                                           6,507                6,717  
+    Mural1 / Mural2                                                                                 under                  327  new
+    bird1 / bird2                                                                                     847                  964  
+all --fast perfect transforms                                                                          51                   52  +
+all 512 -> 1024: true pairs lost (of 0 pairs lost)                                                                           0  =
+all --detail 1024: F1 0.9810, precision 98.75, recall 97.45, 2,281 true pairs added                                             
+all 1024 -> 2048: true pairs lost (of 0 pairs lost)                                                                          0  =
+all --detail 2048: F1 0.9811, precision 98.75, recall 97.49, 526 true pairs added                                               
+all 2048 -> 4096: true pairs lost (of 0 pairs lost)                                                                          0  =
+all --detail 4096: F1 0.9812, precision 98.75, recall 97.50, 156 true pairs added                                               
+small families, all: total joined                                                                    65.3                 86.0  WORSE
+small families, all2: total joined                                                                   63.0                 85.7  WORSE
+cost all: CPU (CPU-s)                                                                         2,991 2,980          2,979 2,958  level (-0.6%)
+cost all: wall (s)                                                                                418 409              408 405  level (-1.8%)
+cost all: peak RSS (MB)                                                                       3,052 3,084          3,081 3,081  level (+0.4%)
+cost all2: CPU (CPU-s)                                                                        2,310 2,308          2,284 2,248  under (-1.9%)
+cost all2: wall (s)                                                                               318 317              315 309  level (-1.7%)
+cost all2: peak RSS (MB)                                                                      2,781 2,771          2,778 2,782  level (+0.1%)
+cost cached-all2: CPU (CPU-s)                                                                     783 791              762 765  under (-2.9%)
+cost cached-all2: wall (s)                                                                        124 126              123 121  level (-2.2%)
+cost cached-all2: peak RSS (MB)                                                               3,229 3,366          3,261 3,332  level (-0.0%)
+cost desktop: CPU (CPU-s)                                                             48.6 49.5 49.6 49.5  49.0 49.0 48.5 49.8  level (-0.5%)
+cost desktop: wall (s)                                                                    7.0 7.2 6.9 7.1      7.0 7.2 7.1 7.3  level (+1.5%)
+cost desktop: peak RSS (MB)                                                               321 325 392 355      378 326 350 342  level (+0.2%)
+cost found: CPU (CPU-s)                                                                           798 904              853 896  level (+2.8%)
+cost found: wall (s)                                                                              105 120              113 119  level (+2.8%)
+cost found: peak RSS (MB)                                                                     1,115 1,114          1,116 1,115  level (+0.1%)
+found: pair lists                                                                                   2,954                4,164  differ
+cost found-fast: CPU (CPU-s)                                                                      214 214              214 215  level (+0.3%)
+cost found-fast: wall (s)                                                                       28.8 28.8            28.8 28.7  level (-0.1%)
+cost found-fast: peak RSS (MB)                                                                    513 513              513 513  level (+0.1%)
+found-fast: pair lists                                                                              2,291                3,327  differ
+cost r10k: CPU (CPU-s)                                                                          850 1,001              830 934  level (-4.7%)
+cost r10k: wall (s)                                                                               113 134              111 124  level (-5.0%)
+cost r10k: peak RSS (MB)                                                                      1,061 1,057          1,067 1,070  more (+0.9%)
+
+WORSE or over: all2 default keep rule: original or lossless kept; all2 --fast seed pairs past 300; all default perfect transforms; all default keep rule: original or lossless kept; all --fast seed pairs past 300; small families, all: total joined; small families, all2: total joined
