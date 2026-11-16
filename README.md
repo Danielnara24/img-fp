@@ -552,7 +552,6 @@ by micro average precision (µAP) on its dev set:
 
 | | µAP |
 | --- | ---: |
-| img-fp, `--min-pixel-correlation 0.5`, ranked by aligned points | 65.3 |
 | img-fp, default settings | 63.6 |
 | [SSCD](https://github.com/facebookresearch/sscd-copy-detection) ResNet50, as published | 61.5 |
 | SSCD ResNeXt-101, as published | 63.7 |

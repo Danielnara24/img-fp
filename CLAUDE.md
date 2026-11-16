@@ -9,7 +9,7 @@ Every rule below was measured; the measurements are in `HISTORY.md` and
 `benchmark/out/`. The window's notes are in `src/gui/CLAUDE.md`, the Flatpak's in
 `flatpak/CLAUDE.md`, the competitors' runners in `benchmark/CLAUDE.md`.
 
-## Where things stand (2026-11-13, 0.84.1 + the cache fix + the keep rule)
+## Where things stand (2026-11-16, 0.86.0)
 
 What each version changed, how it was proved and its numbers are in
 `HISTORY.md` (from 0.47.0 on; before that, `git show 5de81bc:CLAUDE.md`).

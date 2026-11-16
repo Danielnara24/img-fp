@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.86.0" date="2026-11-16">
+      <description>
+        <p>More copies are found by default, as the default bars are a little looser. In a JSON report, files that are identical are listed once as a set rather than as every pair among them.</p>
+      </description>
+    </release>
     <release version="0.85.0" date="2026-11-13">
       <description>
         <p>Suggested deletions are more careful: every one is checked against the file that stays, a picture is not deleted for a much smaller copy, and a collage or slide showing a whole photo at full size can stand in for it. A scan after one with more detail no longer analyses its pictures again.</p>

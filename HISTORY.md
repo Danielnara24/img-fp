@@ -149,7 +149,19 @@ found mix +16% CPU, full IMGS5 +70% (78 -> 132 CPU-s; `cost5.out`). On
 IMGS5 guided is +45 s (its own refinement, not the pixel check), `-k` +13.5
 s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
-## Versions and sessions, 0.47.0 to 0.84.0
+## Versions and sessions, 0.47.0 to 0.86.0
+
+- **0.86.0, 2026-11-16**: the 0.65 / 5 defaults (`out/v71-bars`,
+  `out/v72-defaults`) and an identical set stated once in the JSON
+  (`identical`; `pairs` names each set's first file, `out/v75-format`
+  section 1: expanded, every pair the previous build's on IMGS-ALL,
+  IMGS-ALL2 and IMGS-AGAINST; 2,000 copies 741 MB -> 1.3 MB). Validated
+  against 0.85.0 (`out/v75-format` section 2): DISC21 shard 0 at 0.5 382 ->
+  386 true copies, none lost, µAP 66.89 -> 67.28; F1 0.9749 -> 0.9802, 0.9417
+  -> 0.9566; small families joined 65.3 -> 86.0, 63.0 -> 85.7; keep rule 0
+  lost; under `--fast` one more seed pair past 300 on each corpus,
+  accepted; cost level. README: the 0.5 DISC21 row (0.76.0's whole dev set,
+  never re-measured) dropped.
 
 - **Reaching DISC21's missed copies in the full scan, 2026-11-15/16** (after
   0.85.0 and the 0.65 / 5 defaults, `out/v74-reach`; nothing shipped, the
