@@ -1,0 +1,16 @@
+
+stated alone: 51
+  ranked < 150 either way: 13; < 1000: 24; < 5000: 37
+  level  seeds(med)  nn(med)  nn>=3  nn>=3 among <150   geo beats null: <1k  <5k   (top of 1k / 5k by peak)
+  up0          7        4     36     10                 3    5   (3 / 2)
+  up1          9        5     40     10                 3    5   (1 / 1)
+  up2         21        9     48     11                 3    3   (1 / 1)
+  up3        112       22     51     13                 3    6   (0 / 0)
+
+not stated alone: 92
+  ranked < 150 either way: 36; < 1000: 45; < 5000: 56
+  level  seeds(med)  nn(med)  nn>=3  nn>=3 among <150   geo beats null: <1k  <5k   (top of 1k / 5k by peak)
+  up0          7        4     61     34                 1    1   (0 / 0)
+  up1          9        6     66     34                 0    1   (0 / 0)
+  up2         24       10     78     36                 2    3   (0 / 0)
+  up3        129       25     86     36                 3    4   (1 / 1)

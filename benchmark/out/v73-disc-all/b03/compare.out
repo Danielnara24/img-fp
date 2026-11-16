@@ -1,0 +1,14 @@
+shard 0: 529 true copies; ranked by aligned points
+  run  0.3 at  0.3: true  393 false  37528  uAP 49.32  R@P90 32.89
+  run  0.3 at  0.4: true  390 false   6272  uAP 63.22  R@P90 46.69
+  run  0.3 at  0.5: true  385 false    983  uAP 67.17  R@P90 52.93
+  run  0.3 at  0.6: true  366 false    234  uAP 65.48  R@P90 52.36
+  run  0.3 at 0.65: true  348 false    147  uAP 62.49  R@P90 50.09
+  run  0.3 at  0.7: true  322 false    100  uAP 58.26  R@P90 49.53
+  run  0.5 at  0.5: true  386 false    458  uAP 67.29  R@P90 53.12
+  run  0.5 at  0.6: true  366 false    186  uAP 65.44  R@P90 52.36
+  run  0.5 at 0.65: true  348 false    135  uAP 62.45  R@P90 50.09
+  run  0.5 at  0.7: true  322 false     95  uAP 58.24  R@P90 49.53
+  run 0.65 at 0.65: true  348 false    125  uAP 62.52  R@P90 50.09
+  run 0.65 at  0.7: true  322 false     89  uAP 58.30  R@P90 49.53
+true only at 0.3 vs 0.5: 7, only at 0.5 vs 0.3: 0

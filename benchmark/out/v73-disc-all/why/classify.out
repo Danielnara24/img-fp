@@ -1,0 +1,151 @@
+143 missed true copies; full scan  ->  of which stated when scanned alone
+  not verified                              115    50
+  fails overlap                              15     0
+  fails correlation                           8     0
+  fails centre                                2     1
+  fails correlation+centre                    2     0
+  fails correlation+overlap                   1     0
+stated alone: 51; alone, no verdict of 3 points at all: 39
+Q00061 R020965 not verified None False None
+Q00906 R014120 not verified None False None
+Q01139 R040062 not verified None False (3, 0.2538, 0.5781, True)
+Q01200 R043984 not verified None False None
+Q01663 R043507 not verified None False None
+Q01893 R017945 not verified None True (21, 0.8316, 1.0, True)
+Q02160 R028223 not verified None True (83, 0.8958, 1.0, True)
+Q02275 R030372 not verified None True (10, 0.7098, 1.0, True)
+Q03053 R046712 not verified None True (13, 0.7376, 1.0, True)
+Q03218 R033871 not verified None True (17, 0.5186, 1.0, True)
+Q03285 R025235 not verified None True (32, 0.8784, 1.0, True)
+Q03440 R019268 not verified None False (23, 0.6807, 0.7617, True)
+Q03854 R005527 not verified None False None
+Q04111 R022514 not verified None False (6, 0.4752, 0.8711, True)
+Q05925 R019908 not verified None True (6, 0.7378, 1.0, True)
+Q06835 R003935 not verified None False (14, 0.6894, 0.75, True)
+Q06997 R030777 fails correlation (5, 0.3305, 1.0, True) False None
+Q07423 R035985 not verified None False None
+Q07791 R031316 fails correlation (61, 0.4509, 0.9375, True) False (61, 0.4509, 0.9375, True)
+Q07946 R004332 not verified None False (5, 0.4212, 0.9766, True)
+Q08111 R021605 not verified None False None
+Q08257 R040002 not verified None False (10, 0.6683, 1.0, False)
+Q08559 R020188 not verified None True (52, 0.6784, 1.0, True)
+Q08571 R002133 not verified None True (11, 0.8363, 1.0, True)
+Q08853 R020064 not verified None True (72, 0.8002, 1.0, True)
+Q08950 R049233 not verified None False (9, 0.3498, 0.9688, True)
+Q08959 R019400 not verified None True (44, 0.9341, 1.0, True)
+Q09536 R006387 not verified None False None
+Q09665 R026619 not verified None False (19, 0.422, 0.4688, True)
+Q10858 R018750 not verified None False None
+Q10911 R017072 not verified None False (43, 0.5914, 0.75, True)
+Q10915 R034159 not verified None False None
+Q11119 R017793 not verified None False None
+Q11515 R001360 not verified None True (13, 0.6201, 1.0, True)
+Q11877 R032662 not verified None True (17, 0.7918, 1.0, True)
+Q12079 R033081 not verified None False None
+Q12218 R046729 fails correlation (77, 0.3624, 1.0, True) False (77, 0.3624, 1.0, True)
+Q12458 R029605 not verified None True (17, 0.6862, 1.0, True)
+Q12994 R047833 not verified None False None
+Q13532 R035753 fails overlap (141, 0.9425, 0.75, True) False (141, 0.9425, 0.75, True)
+Q13759 R016435 not verified None True (21, 0.5348, 1.0, True)
+Q13876 R048801 fails overlap (63, 0.8795, 0.75, True) False (63, 0.8795, 0.75, True)
+Q14078 R013518 fails correlation (38, 0.414, 1.0, True) False (38, 0.414, 1.0, True)
+Q14468 R030362 not verified None False None
+Q14726 R027354 not verified None False None
+Q15599 R007037 not verified None True (10, 0.7063, 1.0, True)
+Q15842 R029478 not verified None True (19, 0.802, 1.0, True)
+Q16067 R001075 not verified None True (10, 0.8658, 1.0, True)
+Q16680 R002963 not verified None False None
+Q17281 R012653 not verified None False None
+Q17716 R018607 not verified None True (70, 0.885, 1.0, True)
+Q18595 R031096 not verified None True (59, 0.638, 1.0, True)
+Q19829 R011487 not verified None False None
+Q19962 R027234 not verified None False (10, 0.3595, 0.875, True)
+Q20388 R042857 fails overlap (97, 0.6596, 0.8125, True) False (96, 0.6674, 0.8125, True)
+Q20541 R033570 fails overlap (78, 0.5791, 0.8086, True) False (78, 0.5791, 0.8086, True)
+Q20885 R024270 not verified None False None
+Q21250 R005068 not verified None False None
+Q21632 R049071 not verified None True (6, 0.7963, 1.0, True)
+Q21995 R022135 not verified None False None
+Q22533 R042339 not verified None True (12, 0.9537, 1.0, True)
+Q22728 R003916 fails correlation (16, 0.4159, 0.8516, True) False (16, 0.4159, 0.8516, True)
+Q23004 R044205 fails correlation (35, 0.4005, 1.0, True) False (35, 0.4005, 1.0, True)
+Q23488 R023401 not verified None False (54, 0.7276, 0.625, True)
+Q23823 R039335 not verified None False (7, 0.4473, 1.0, False)
+Q25224 R016654 fails correlation+overlap (46, 0.2525, 0.75, True) False (47, 0.252, 0.75, True)
+Q25250 R021737 not verified None True (21, 0.625, 1.0, True)
+Q25641 R029018 not verified None False (5, 0.2589, 1.0, True)
+Q25681 R006185 not verified None False (4, 0.7206, 1.0, True)
+Q25761 R046413 fails overlap (114, 0.8221, 0.7656, True) False (114, 0.8221, 0.7656, True)
+Q26270 R023956 fails overlap (45, 0.9479, 0.6875, True) False (45, 0.9479, 0.6875, True)
+Q26482 R024882 not verified None True (11, 0.7309, 0.9375, True)
+Q27356 R027805 fails overlap (143, 0.8193, 0.8125, True) False (143, 0.8193, 0.8125, True)
+Q27378 R012077 not verified None False (25, 0.4533, 1.0, True)
+Q27472 R036888 not verified None False None
+Q27556 R019979 not verified None True (27, 0.9309, 1.0, True)
+Q27806 R035758 not verified None True (15, 0.779, 1.0, True)
+Q27858 R019007 not verified None False (18, 0.4844, 0.625, True)
+Q28179 R015546 not verified None False None
+Q28214 R048560 fails centre (9, 0.6878, 0.9961, False) True (14, 0.6522, 1.0, True)
+Q28374 R002499 not verified None True (14, 0.6702, 1.0, True)
+Q28955 R008712 not verified None True (5, 0.7469, 1.0, True)
+Q29120 R032819 not verified None False None
+Q29419 R013681 not verified None False (15, 0.3289, 0.9141, True)
+Q30051 R021157 not verified None False (13, 0.4749, 0.9453, True)
+Q30514 R023898 not verified None False None
+Q30615 R008697 not verified None False (11, 0.4507, 0.375, True)
+Q31515 R031838 fails correlation (13, 0.3767, 0.9375, True) False (21, 0.4516, 0.9844, True)
+Q31549 R038600 fails overlap (20, 0.5391, 0.7617, True) False (20, 0.5391, 0.7617, True)
+Q31713 R021176 not verified None False (5, 0.3454, 0.5898, False)
+Q31899 R001553 not verified None True (11, 0.6554, 1.0, True)
+Q31934 R002283 fails overlap (124, 0.9877, 0.5625, True) False (124, 0.9877, 0.5625, True)
+Q32449 R043761 not verified None True (12, 0.5109, 1.0, True)
+Q32502 R049574 fails centre (30, 0.5142, 1.0, False) False (30, 0.5142, 1.0, False)
+Q33160 R006103 not verified None False None
+Q33169 R041471 fails overlap (93, 0.7162, 0.8125, True) False (93, 0.7162, 0.8125, True)
+Q33961 R012460 not verified None False (10, 0.2712, 1.0, False)
+Q35225 R004635 not verified None True (16, 0.9452, 1.0, True)
+Q35352 R014100 fails correlation (37, 0.4769, 1.0, True) False (37, 0.4769, 1.0, True)
+Q35466 R001746 fails correlation+centre (34, 0.434, 1.0, False) False (34, 0.434, 1.0, False)
+Q35474 R047919 not verified None False None
+Q35712 R027867 not verified None True (12, 0.3098, 0.6914, True)
+Q35735 R020951 fails overlap (199, 0.9484, 0.5625, True) False (199, 0.9484, 0.5625, True)
+Q36033 R021167 not verified None False None
+Q36209 R035426 not verified None True (26, 0.5527, 0.9336, True)
+Q37489 R022690 not verified None True (15, 0.8321, 1.0, True)
+Q38713 R018813 not verified None False None
+Q38752 R011477 not verified None False (66, 0.52, 0.8359, True)
+Q38972 R026432 not verified None True (29, 0.5016, 0.957, True)
+Q39862 R022461 not verified None True (33, 0.5095, 0.9805, True)
+Q40099 R045611 not verified None True (21, 0.8167, 1.0, True)
+Q40465 R010112 not verified None False (3, 0.2376, 0.793, True)
+Q40671 R005192 fails overlap (130, 0.8482, 0.8281, True) False (128, 0.8642, 0.8281, True)
+Q41027 R022743 not verified None True (9, 0.7083, 1.0, True)
+Q41235 R045089 not verified None False None
+Q41309 R030753 not verified None True (8, 0.7682, 1.0, True)
+Q41493 R035679 not verified None True (9, 0.8558, 1.0, True)
+Q41853 R010266 fails overlap (53, 0.9683, 0.8125, True) False (53, 0.9683, 0.8125, True)
+Q41984 R036548 not verified None True (43, 0.6324, 0.875, True)
+Q42116 R010660 not verified None False None
+Q42382 R023167 not verified None True (20, 0.569, 1.0, True)
+Q42497 R016334 fails correlation+centre (21, 0.4132, 1.0, False) False (22, 0.3983, 1.0, False)
+Q42875 R003082 not verified None True (23, 0.9114, 1.0, True)
+Q42883 R049056 not verified None True (18, 0.6019, 0.8516, True)
+Q43014 R026608 not verified None False (7, 0.4511, 1.0, True)
+Q43994 R023879 not verified None True (57, 0.9775, 1.0, True)
+Q44272 R034250 not verified None False None
+Q44380 R021479 not verified None False None
+Q44604 R038838 not verified None True (15, 0.5847, 1.0, True)
+Q45298 R023797 not verified None True (14, 0.8242, 1.0, True)
+Q45723 R002361 not verified None True (7, 0.9116, 1.0, True)
+Q45927 R010938 not verified None False None
+Q46047 R040606 not verified None True (16, 0.796, 0.9375, True)
+Q46118 R021124 not verified None False (4, 0.6264, 1.0, True)
+Q47219 R009787 fails overlap (45, 0.7297, 0.7578, True) False (44, 0.7266, 0.8125, True)
+Q47855 R021764 fails overlap (58, 0.9256, 0.8125, True) False (58, 0.9256, 0.8125, True)
+Q48948 R023436 not verified None False (9, 0.3627, 1.0, True)
+Q49007 R019758 not verified None False (4, 0.2804, 1.0, True)
+Q49112 R032038 not verified None False None
+Q49190 R015028 not verified None True (23, 0.9496, 1.0, True)
+Q49347 R009714 not verified None False None
+Q49418 R017815 not verified None False None
+Q49873 R003942 not verified None False None

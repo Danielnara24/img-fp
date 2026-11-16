@@ -1,0 +1,40 @@
+== all
+                                    base                                p5                                p3                             c0.65
+n0      17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R  23.0 j 23.0 o      - P      - R
+n1      16.7 j 15.7 o  85.31 P  96.87 R  16.7 j 15.7 o  85.15 P  97.81 R  16.7 j 15.7 o  85.18 P  98.00 R  20.0 j 19.0 o  82.59 P  97.53 R
+n2      16.7 j 13.7 o  89.22 P  95.63 R  16.7 j 13.7 o  89.26 P  96.27 R  16.7 j 13.7 o  89.26 P  96.27 R  21.0 j 17.3 o  86.65 P  96.91 R
+f       15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R  22.0 j 22.0 o      - P      - R
+total     65.3 joined                        65.3 joined                        65.3 joined                        86.0 joined                    
+sibs      65.3 joined                        65.3 joined                        65.3 joined                        86.0 joined                    
+== i5
+                                    base                                p5                                p3                             c0.65
+n0       9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R  12.0 j 12.0 o      - P      - R
+n1      10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R  10.0 j  8.0 o  64.42 P  98.27 R  13.7 j 12.0 o  54.92 P  98.27 R
+n2      12.7 j 10.7 o  64.78 P  96.48 R  12.7 j 10.7 o  64.78 P  96.48 R  12.7 j 10.7 o  64.78 P  96.48 R  14.0 j 12.0 o  62.02 P  98.05 R
+f        9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R   9.0 j  9.0 o      - P      - R  12.0 j 12.0 o      - P      - R
+total     40.7 joined                        40.7 joined                        40.7 joined                        51.7 joined                    
+sibs      40.7 joined                        40.7 joined                        40.7 joined                        51.7 joined                    
+== all2
+                                    base                                p5                                p3                             c0.65
+n0      17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R  23.0 j 23.0 o      - P      - R
+n1      13.7 j 12.0 o  89.25 P  93.15 R  13.7 j 12.0 o  89.31 P  93.72 R  13.7 j 12.0 o  89.31 P  93.72 R  20.0 j 18.0 o  84.44 P  94.48 R
+n2      17.3 j 14.3 o  89.81 P  91.30 R  17.7 j 14.7 o  89.67 P  91.91 R  17.7 j 14.7 o  89.69 P  92.10 R  20.3 j 17.0 o  88.15 P  93.27 R
+f       15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R  22.0 j 22.0 o      - P      - R
+total     63.0 joined                        63.3 joined                        63.3 joined                        85.3 joined                    
+sibs      63.0 joined                        63.3 joined                        63.3 joined                        84.7 joined                    
+== all3
+                                    base                                p5                                p3                             c0.65
+n0      17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R  17.0 j 17.0 o      - P      - R  23.0 j 23.0 o      - P      - R
+n1      16.3 j 14.7 o  87.04 P  93.03 R  16.3 j 14.7 o  87.06 P  93.13 R  16.3 j 14.7 o  87.06 P  93.13 R  20.3 j 18.3 o  84.58 P  94.85 R
+n2      14.7 j 11.3 o  91.30 P  90.80 R  14.7 j 11.3 o  91.31 P  90.93 R  14.7 j 11.3 o  91.31 P  90.93 R  19.7 j 16.0 o  88.15 P  92.30 R
+f       15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R  15.0 j 15.0 o      - P      - R  22.0 j 22.0 o      - P      - R
+total     63.0 joined                        63.0 joined                        63.0 joined                        85.0 joined                    
+sibs      63.0 joined                        63.0 joined                        63.0 joined                        85.0 joined                    
+== hdev
+                                    base                                p5                                p3                             c0.65
+n0     249.0 j 249.0 o      - P      - R 249.0 j 249.0 o      - P      - R 249.0 j 249.0 o      - P      - R 291.0 j 291.0 o      - P      - R
+n1     240.3 j 216.7 o  50.74 P  97.46 R 241.0 j 217.0 o  50.65 P  97.83 R 241.0 j 216.7 o  50.68 P  97.91 R 271.3 j 246.3 o  47.30 P  97.58 R
+n2     249.3 j 207.0 o  58.41 P  95.66 R 254.7 j 210.7 o  57.95 P  96.28 R 255.0 j 211.0 o  57.95 P  96.35 R 281.0 j 235.3 o  54.90 P  95.73 R
+f      231.0 j 231.0 o      - P      - R 231.0 j 231.0 o      - P      - R 232.0 j 232.0 o      - P      - R 263.0 j 263.0 o      - P      - R
+total    969.7 joined                       975.7 joined                       977.0 joined                      1106.3 joined                    
+sibs     969.7 joined                       975.7 joined                       977.0 joined                      1104.3 joined                    

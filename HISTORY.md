@@ -151,6 +151,33 @@ s (candidates verified 487 k -> 866 k), the rule nothing (`prof5/`).
 
 ## Versions and sessions, 0.47.0 to 0.84.0
 
+- **Reaching DISC21's missed copies in the full scan, 2026-11-15/16** (after
+  0.85.0 and the 0.65 / 5 defaults, `out/v74-reach`; nothing shipped, the
+  code is `scaffolding.patch` there). Of shard 0's 143 true copies missed at
+  bar 0.5, 51 are stated when the two files are scanned alone. User's bar:
+  all 51, at most +10% CPU on any corpus.
+  - **Where they are lost**: best rank either way < 150: 13, < 1,000: 24,
+    < 5,000: 37; the pair shares 7 leaf words (median), about 4 of them
+    true, where an unrelated file shares about as many by chance.
+  - **Seed agreement in the geometric look** (in place of the rotation x
+    scale peak): 386 -> 393 true, 458 -> 481 false, µAP 67.29 -> 68.06 (at
+    0.65: 62.45 -> 63.22); IMGS-ALL 1-3 F1 level, families level but
+    HOLI-DEV 1,114.0 -> 1,116.0; found corpus +31% CPU (best word only: +3
+    copies, +9%). Not accepted: 44 of the 51 remain.
+  - **The oracle** (section 5): no score read off these features ranks the
+    rest. With real descriptor distances in cells up to three levels above
+    the leaves, by count or by geometric agreement, the true reference is
+    in the first 150 for at most 16 of 51 and first for at most 6 (9 under
+    any of twelve scores); a whole-frame thumbnail, 11. Seeds decide as
+    well: leaf words pass verification for 10 of 51, all pairs within a
+    distance bar for 47-48.
+  - **Why**: alone, the two-file vocabulary pairs each keypoint with its
+    nearest in the other file whatever the distance; among 60 M descriptors
+    those matches are not near, and widening the cells brings chance
+    matches back faster than true ones. The evidence a pair has is fixed
+    and the files that match as well by chance grow with the scan.
+  - **Left open**: seeding an already retrieved candidate by its
+    descriptors (the 13 retrieved; untried, uncosted).
 - **The keep rule as a classifier, precision first, 2026-11-13** (after
   0.84.1, `out/v68-recall`, on top of the entry below; `suggest.rs` only).
   User: recall as high as it goes with precision at 100%; a composite or a

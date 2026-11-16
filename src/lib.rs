@@ -225,7 +225,9 @@ struct Args {
     /// Higher is stricter. Below 3 behaves as 3. An image that is the whole of
     /// the other, only resized, needs 3 if every part of it agrees: a plain
     /// picture such as an icon or a logo has few points to match.
-    #[arg(long, value_name = "N", default_value_t = 10)]
+    // 5 since 2026-11-14 (it was 10): swept 3-14 on IMGS-ALL, -ALL2, -ALL3 and
+    // DISC21 shard 0, monotone and nearly flat (benchmark/out/v71-bars).
+    #[arg(long, value_name = "N", default_value_t = 5)]
     min_aligned_points: u32,
 
     /// How much of one image must lie inside the other, from 0 to 1.
@@ -237,9 +239,10 @@ struct Args {
     /// How closely the pixels of that shared area must agree, from 0 to 1.
     ///
     /// Higher is stricter.
-    // 0.7 is set for what a user wants grouped rather than for F1; see
-    // CLAUDE.md for the sweep and the cliff (and for 0.8, tried on DISC21).
-    #[arg(long, value_name = "F", default_value_t = 0.7, value_parser = parse_fraction)]
+    // 0.65 since 2026-11-14 (user's decision; it was 0.7, set for what a user
+    // wants grouped rather than for F1): see CLAUDE.md and
+    // benchmark/out/v71-bars for the sweep, and for 0.8, tried on DISC21.
+    #[arg(long, value_name = "F", default_value_t = 0.65, value_parser = parse_fraction)]
     min_pixel_correlation: f32,
 
     /// Don't search again for mirrored or inverted (negative) copies.

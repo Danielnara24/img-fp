@@ -1,0 +1,5 @@
+shards 20 (0-19), 1,000,000 references, 10,000 true copies in reach, 9,719 pairs stated
+  points           run bar : true  6657 false   3062  uAP 63.64  recall 66.57  R@P90 55.33
+  points           bar 0.7 : true  6276 false   2040  uAP 60.55  recall 62.76  R@P90 54.60
+  points + corr/2  run bar : true  6657 false   3062  uAP 63.61  recall 66.57  R@P90 55.21
+  points + corr/2  bar 0.7 : true  6276 false   2040  uAP 60.53  recall 62.76  R@P90 54.58

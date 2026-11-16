@@ -140,8 +140,9 @@ pub enum Mode {
 }
 
 /// Where, between the run's correlation bar and 1, `Mode::Correlation` stops
-/// keeping and starts deleting: 0.9 at the default bar of 0.7 (it was 0.75
-/// of the way when the bar was 0.6, and the cut is what was chosen). Swept on the
+/// keeping and starts deleting: 0.9 at the default bar of 0.65 (it was 0.75
+/// of the way when the bar was 0.6 and 2/3 when it was 0.7: the cut is what
+/// was chosen, and moves with the default). Swept on the
 /// found corpus by eye, since its ground truth is no help (below): of
 /// matches agreeing with their representative at 0.80-0.90, ten in sixteen
 /// were another specimen of the species; at 0.90-0.95 one in sixteen; above
@@ -149,7 +150,7 @@ pub enum Mode {
 /// a collage, a slide or a crop's original agrees with its representative
 /// over the part they share: 3,875 deletions lose some at 0.8, 3,183 at 0.9,
 /// 987 at 0.98, against 3 for `Mode::Content`.
-pub const CUT: f32 = 2.0 / 3.0;
+pub const CUT: f32 = 5.0 / 7.0;
 
 /// One file's place in one group: the file, whether it is the group's
 /// representative, and how well it agrees with it (1 for the same bytes or
@@ -2581,7 +2582,7 @@ mod tests {
         // Two groups: 0 heads one, 3 the other, and 1 is in both.
         let seats = || [seat(0, true, 1.0), seat(1, false, 0.7), seat(2, false, 0.95), seat(3, true, 1.0), seat(1, false, 0.92), seat(4, false, 0.5)];
         let (k, d, r) = (Some(Action::Keep), Some(Action::Delete), Some(Action::Review));
-        // The cut at 0.7 is 0.9: file 1 is judged by its better match.
+        // The cut at 0.7 is 0.914: file 1 is judged by its better match (0.92).
         assert_eq!(by_group(Mode::Correlation, 6, seats(), 0.7), [k, d, d, k, r, None]);
         assert_eq!(by_group(Mode::Representative, 6, seats(), 0.6), [k, d, d, k, d, None]);
         // A representative of one group is kept though it matched another.

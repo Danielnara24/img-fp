@@ -333,7 +333,16 @@ def main():
                          "background drawn per seed, and ALPHA_CATALOGUE runs too")
     ap.add_argument("--clean", action="store_true",
                     help="delete the derived tree first")
+    ap.add_argument("--catalogue", choices=("standard", "third"), default="standard",
+                    help="third: `transforms3.py`, the transformations of "
+                         "IMGS-ALL3 (none of the standard catalogue's, and "
+                         "chains of two)")
     args = ap.parse_args()
+    base = CATALOGUE
+    if args.catalogue == "third":
+        import transforms3
+        global DYNAMIC_REGIONS
+        base, DYNAMIC_REGIONS = transforms3.CATALOGUE, transforms3.DYNAMIC_REGIONS
 
     corpus = os.path.abspath(args.corpus)
     derived_root = os.path.join(corpus, args.out_subdir)
@@ -346,7 +355,7 @@ def main():
     seeds = find_seeds(corpus, excl)
     if not seeds:
         sys.exit(f"no seed images found in {corpus}")
-    catalogue = CATALOGUE + ALPHA_CATALOGUE if args.alpha else CATALOGUE
+    catalogue = base + ALPHA_CATALOGUE if args.alpha else base
     if args.only:
         wanted = set(args.only.split(","))
         catalogue = [v for v in catalogue if v.name in wanted]

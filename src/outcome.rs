@@ -509,7 +509,7 @@ mod tests {
         let o = outcome();
         let (k, d) = (Some(Action::Keep), Some(Action::Delete));
         assert_eq!(o.actions(Mode::Representative), [k, d, d, k, d]);
-        // 0.9 is the cut at a bar of 0.7: deleted at 1 and 0.95, kept at 0.75.
+        // The cut at a bar of 0.7 is 0.914: deleted at 1 and 0.95, kept at 0.75.
         assert_eq!(o.actions(Mode::Correlation), [k, d, d, k, k]);
     }
 

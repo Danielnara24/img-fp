@@ -1,0 +1,14 @@
+shard 0: 529 true copies
+points
+  0.5 run   own bar : true  386 false   458  uAP 67.29  R@P90 53.12
+  0.5 run   at 0.65 : true  348 false   135  uAP 62.45  R@P90 50.09
+  0.5 run   at 0.7  : true  322 false    95  uAP 58.24  R@P90 49.53
+  0.65 run  own bar : true  348 false   125  uAP 62.52  R@P90 50.09
+  0.65 run  at 0.7  : true  322 false    89  uAP 58.30  R@P90 49.53
+points + corr/2
+  0.5 run   own bar : true  386 false   458  uAP 67.25  R@P90 53.12
+  0.5 run   at 0.65 : true  348 false   135  uAP 62.42  R@P90 49.72
+  0.5 run   at 0.7  : true  322 false    95  uAP 58.22  R@P90 49.34
+  0.65 run  own bar : true  348 false   125  uAP 62.49  R@P90 49.72
+  0.65 run  at 0.7  : true  322 false    89  uAP 58.28  R@P90 49.34
+true copies only the 0.5 run states: 38, only the 0.65 run: 0

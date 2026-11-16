@@ -36,6 +36,8 @@ import argparse, collections, csv, glob, json, os, random, subprocess, sys
 CORPORA = {'all': os.path.expanduser('~/Documents/IMGS-ALL'), 'i5': os.path.expanduser('~/Documents/IMGS5'),
            # the hard generation (IMGS-v2): same 364 seeds as IMGS-ALL, other transforms
            'all2': os.path.expanduser('~/Documents/IMGS-ALL2'),
+           # the third catalogue (IMGS-v3): same seeds, transforms neither of the above holds
+           'all3': os.path.expanduser('~/Documents/IMGS-ALL3'),
            # Fresh seeds (session v56): INRIA Holidays, 1,491 photos in 500 scene groups, split
            # by group hash into a dev half and a held-out test half; 12 transforms a seed.
            'hdev': os.path.expanduser('~/Documents/HOLI-DEV'), 'htest': os.path.expanduser('~/Documents/HOLI-TEST')}

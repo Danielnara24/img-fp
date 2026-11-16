@@ -1,0 +1,10 @@
+shard 0: 529 true copies; ranked by aligned points
+  0.5 d1024 at  0.5: true  388 false    471  uAP 67.52  R@P90 53.12
+  0.5 d1024 at  0.6: true  368 false    187  uAP 65.73  R@P90 52.36
+  0.5 d1024 at 0.65: true  350 false    135  uAP 62.76  R@P90 50.09
+  0.5 d1024 at  0.7: true  323 false     95  uAP 58.41  R@P90 49.53
+  0.5 d512  at  0.5: true  386 false    458  uAP 67.29  R@P90 53.12
+  0.5 d512  at  0.6: true  366 false    186  uAP 65.44  R@P90 52.36
+  0.5 d512  at 0.65: true  348 false    135  uAP 62.45  R@P90 50.09
+  0.5 d512  at  0.7: true  322 false     95  uAP 58.24  R@P90 49.53
+true only at 1024: 2, only at 512: 0

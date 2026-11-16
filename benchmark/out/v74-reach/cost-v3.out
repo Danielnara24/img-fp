@@ -1,0 +1,6 @@
+A1 IMGFP_SEEDS=0 user 350.02 variants: 577 more pairs from 8879 unmatched images (6078 deeper candidates)
+B1 IMGFP_SEEDS=1 user 382.12 variants: 577 more pairs from 8879 unmatched images (4490 deeper candidates)
+C1 IMGFP_SEEDS=1 IMGFP_FULLSEEDS=1 user 462.42 variants: 581 more pairs from 8879 unmatched images (3925 deeper candidates)
+C2 IMGFP_SEEDS=1 IMGFP_FULLSEEDS=1 user 463.19 variants: 581 more pairs from 8879 unmatched images (3925 deeper candidates)
+B2 IMGFP_SEEDS=1 user 378.09 variants: 577 more pairs from 8879 unmatched images (4490 deeper candidates)
+A2 IMGFP_SEEDS=0 user 347.53 variants: 577 more pairs from 8879 unmatched images (6078 deeper candidates)

@@ -44,7 +44,10 @@ given here. Each `benchmark/out/vNN/` holds a session's scripts, outputs and
   88.9% / 83.9% and 80.8% / 72.0%.
 - DISC21 shard 0 (50k dev queries `--against` one 50k reference zip, 529
   true copies): µAP 66.69 at bar 0.5 (recall at 90% precision 52.74), a real
-  0.7 run 57.48. Whole dev set (0.76.0, 20 shards): 65.3 at 0.5, 59.9 at 0.7;
+  0.7 run 57.48. Whole dev set at the 0.65 / 5 defaults (`out/v73-disc-all`,
+2026-11-15): µAP **63.64**, 6,657 true / 3,062 false of 10,000, R@P90 55.33
+(0.7 read off the same runs, points bar 5: 60.55; shards 60.2-66.6);
+earlier (0.76.0, 20 shards): 65.3 at 0.5, 59.9 at 0.7 / 10;
   SSCD's published 61.5-63.7 (72.5-75.3 with score normalization).
 - The field (`benchmark/BASELINE.md`, `out/v54-field`, 0.75.0): img-fp F1
   0.974 / 0.939 on IMGS-ALL / IMGS-ALL2; SSCD, the best of the rest, 0.729 /
@@ -53,8 +56,19 @@ given here. Each `benchmark/out/vNN/` holds a session's scripts, outputs and
   ~840 CPU-s.
 
 **Defaults, and why**:
-- `--min-pixel-correlation` **0.7**, chosen for what users want grouped,
-  not for F1: 0.5 grouped merely similar photos, 0.6 paired five of IMGS5's
+- `--min-pixel-correlation` **0.65** and `--min-aligned-points` **5**
+  since 2026-11-14 (user's decision, `out/v71-bars`, `out/v72-defaults`;
+  `--suggest correlation`'s `CUT` moved to 5/7 so its cut stays 0.9). At
+  0.65 / 5 against 0.7 / 10: F1 IMGS-ALL 0.9749 -> 0.9802, IMGS-ALL2 0.9417
+  -> 0.9566, IMGS-ALL3 0.9213 -> 0.9377; DISC21 shard 0 317 / 81 true / false
+  copies, µAP 57.48 -> 348 / 125, 62.49; same seed pairs past 300; keep rule
+  100% precision, recall level. The cost is where siblings meet:
+  `families.py` total joined IMGS-ALL 65.3 -> 86.0, -ALL2 63.0 -> 85.7,
+  -ALL3 63.0 -> 85.0, IMGS5 40.7 -> 51.7, HOLI-DEV 969.7 -> 1,114.0, and the
+  first different-scene joins there (IMGS-ALL2 one draw: `club` with `6`
+  and `cross1`; HOLI-DEV 1264 | 1265 at 0.67-0.70); all of it from the
+  correlation bar, the points bar alone costs ~0.6%. History of 0.7, which
+  was chosen for what users want grouped, not for F1: 0.5 grouped merely similar photos, 0.6 paired five of IMGS5's
   sixty seeds with their near-miss sibling directly. 0.8 was tried and
   reverted (four times the recall cost of 0.6 -> 0.7; DISC21 µAP 0.607 ->
   0.494). It does not stop IMGS5's merges: those go through clean anchors.
@@ -98,7 +112,12 @@ is measured where siblings cannot meet* and *Scoring on small families*.
 - A verdict depends on what else is scanned (the vocabulary is the scan's):
   the same pair passes in a folder of 60 and not of 5,460; adding one file
   to the found corpus moved 818 pairs out and 393 in. Fixed seeding was tried
-  and rejected.
+  and rejected. On DISC21 shard 0, 51 of the 143 true copies missed at bar
+  0.5 are stated when the two files are scanned alone: 13 are retrieved and
+  fail on their seeds (seeding a candidate by its descriptors rather than
+  shared words is untried and uncosted), 38 are never candidates and no
+  score off an index of these features ranks them (*Tried and rejected*,
+  `out/v74-reach`).
 - Keep rule: three losses where families are three files, an edit inside
   every bar a re-encode keeps to (a twelve-level posterize, a JPEG saved
   several times), and one in `pairs.py` (`IMGS/16.jpg` for a phone
@@ -269,6 +288,16 @@ vendor/         third-party tools and venvs (gitignored)
   IMGS-ALL **66.0** (n0 17, n1 16.0, n2 17.0, f 16), IMGS-ALL2 **63.7** (n0
   17, n1 14.0, n2 16.7, f 16); n0 and f are the same seeds in both, so they
   agree by construction. Pass `--corpus` explicitly; defaults name IMGS-ALL.
+- **IMGS-ALL3** `/home/daniel/Documents/IMGS-ALL3` (built 2026-11-13): the
+  same 364 seeds through `corpus/transforms3.py` (`make_variants.py
+  --catalogue third`; `IMGS-v3/generate.sh`, ~25 min): 60 transformations
+  neither earlier corpus holds and 30 chains of two, 33,124 files. Its
+  amounts were set once and **are not to be tuned after a run**; nothing was
+  fitted on it. 0.85.0 cold (`out/v70-all3`): F1 **0.9213**, precision
+  98.53%, recall 86.50% (single transforms 97.9%, chains 92.0%), perfect 23
+  / 86, traps 3,625, cross-family 13,487 (Mural1/2 6,366, bird1/2 5,201,
+  Floriana1/2 413, Floriana3/4 353 past 300), 3,772 CPU-s; the field there:
+  SSCD 0.464, imagededup_phash 0.370. Keep rule not scored on it.
 - **IMGS** `/home/daniel/Documents/IMGS`: 62 seeds. Seed `beach` has no
   extension, so comparable runs need `-x '*'` (`bench.py` passes it).
 - **IMGS2** (design), **IMGS3**, **IMGS4**: photographs chosen in near-miss
@@ -1248,6 +1277,28 @@ Do not retry without new evidence:
   mirrored match of two specimens of a butterfly species by eye (a subject
   with two sides alike matches its kind mirrored). Kept out:
   `pipeline::cluster` reads `Variant::SAME` verdicts for corroboration.
+- **Reaching DISC21's missed copies in the full scan** (2026-11-15/16,
+  `out/v74-reach/RESULTS.md`, code in `scaffolding.patch` there; user's
+  bar: all 51 stated alone, at most +10% CPU on any corpus). The geometric
+  look scored by seed agreement (each seed a similarity from its keypoints'
+  place, angle and scale, the most keypoints another seed puts within the
+  inlier tolerance; 8 bytes a keypoint) instead of the peak: shard 0 at 0.5
+  386 -> 393 true, 458 -> 481 false, µAP 67.29 -> 68.06, IMGS-ALL 1-3 and
+  families level (HOLI-DEV +2 sibling joins), found corpus +31% CPU; with
+  the candidate's best word only +3 copies at +9%. Not accepted. Then an
+  oracle with the descriptors themselves over every file of the shard: by
+  query keypoints with a descriptor within 200-400 in the same cell, leaf
+  to three levels up, the true reference is in the first 150 for at most 11
+  of 51 (it has a third of the best wrong file's matches: 22 against 60
+  three up); those matches scored by agreement, at most 16, first for at
+  most 6; a 16 x 16 whole-frame thumbnail, 11 (half the 51 are a picture
+  shrunk 2-6x into another). The pair's own seeds verified: leaf words 10
+  of 51, three levels up 27, every keypoint pair within 320 / 400: 47 / 48.
+  What tells these pairs is the fit and the pixel check on all-pairs seeds
+  (alone, a two-file vocabulary gives each keypoint its nearest in the
+  other file whatever the distance), a comparison of the two files; their
+  matches are not near among 60 M descriptors, so a coarser vocabulary, a
+  fixed one or none ranks them no better.
 - **Fixed seeding** (after 0.82.0, reverted 2026-11-08, user's decision;
   `out/v57-fixed/RESULTS.md` sections 1-7, code in `scaffolding.patch` and
   `fixed.vocab.zst` there): a verdict's first correspondences from a

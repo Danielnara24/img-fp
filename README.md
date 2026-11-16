@@ -459,9 +459,9 @@ to stderr.
 | `--format <FORMAT>` | Write the report as `txt`, `csv` or `json`, whatever `--output` is called | from the extension |
 | `--detail <PX>` | How fine a detail is looked for: `512`, `1024`, `2048` or `4096`. Each step up finds everything the step below finds, and more, mostly small pictures inside large ones and copies cut from a small part of a photo. It is slower, but only for pictures large enough to show the finer detail. At `4096` a large picture takes much memory to analyse, so fewer are analysed at once and the scan takes longer | `512` |
 | `--fast` | Analyse every picture at less detail: about twice as fast, and finds less, mostly small and cropped copies | off |
-| `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3. An image that is all of the other, only resized, needs 3 if every part of it agrees | `10` |
+| `--min-aligned-points <N>` | Matching points two images must share. Higher is stricter; below 3 behaves as 3. An image that is all of the other, only resized, needs 3 if every part of it agrees | `5` |
 | `--min-frame-overlap <F>` | How much of one image must lie inside the other, from 0 to 1. Higher is stricter | `0.85` |
-| `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.7` |
+| `--min-pixel-correlation <F>` | How closely the pixels of that shared area must agree, from 0 to 1. Higher is stricter | `0.65` |
 | `--skip-mirrored` | Don't search again for mirrored or inverted (negative) copies. Much faster on a library with few duplicates. Misses most mirrored and inverted copies, and a group they linked together can split in two | off |
 | `--suggest <RULE>` | How each file's `KEEP`, `DELETE` or `REVIEW` is decided: `content`, `correlation` or `representative` (see Output) | `content` |
 | `--last` | Write the last scan's report again without scanning, in another format with `-o` or `--format`, or with another `--suggest` rule (see Usage); after a comparison with a library, its verdicts, or with `--list` their paths | |
@@ -551,7 +551,7 @@ by micro average precision (µAP) on its dev set:
 | | µAP |
 | --- | ---: |
 | img-fp, `--min-pixel-correlation 0.5`, ranked by aligned points | 65.3 |
-| img-fp, default (0.7) | 59.9 |
+| img-fp, default settings | 63.6 |
 | [SSCD](https://github.com/facebookresearch/sscd-copy-detection) ResNet50, as published | 61.5 |
 | SSCD ResNeXt-101, as published | 63.7 |
 

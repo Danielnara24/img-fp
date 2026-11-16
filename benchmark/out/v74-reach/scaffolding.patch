@@ -1,0 +1,660 @@
+diff --git a/src/index.rs b/src/index.rs
+index 26081c9..751e00e 100644
+--- a/src/index.rs
++++ b/src/index.rs
+@@ -622,6 +622,28 @@ impl Vocabulary {
+         self
+     }
+ 
++    /// SCAFFOLDING (v74 trace): each word's ancestor `up` levels above its
++    /// leaf (a slot of that level), by word.
++    pub fn ancestors(&self, up: usize) -> Vec<u32> {
++        let leaves = self.alias.len();
++        let mut map: Vec<u32> = (0..leaves as u32).collect();
++        for l in (self.depth.saturating_sub(1 + up)..self.depth - 1).rev() {
++            let n_below = if l + 1 == self.depth - 1 { leaves } else { self.down[l + 1].len() };
++            let mut parent = vec![0u32; n_below];
++            for (s, k) in self.down[l].iter().enumerate() {
++                for c in k.first..k.first + k.n {
++                    if (c as usize) < n_below {
++                        parent[c as usize] = s as u32;
++                    }
++                }
++            }
++            for m in map.iter_mut() {
++                *m = parent[*m as usize];
++            }
++        }
++        map
++    }
++
+     /// Quantise one descriptor to up to `max_paths` words, best first.
+     ///
+     /// The frontier never exceeds `max_paths * branching` entries and the
+@@ -1321,6 +1343,11 @@ impl WordList {
+     pub const BYTES_PER_ENTRY: usize = std::mem::size_of::<u32>();
+ 
+     /// A list from (word, keypoint) pairs already sorted.
++    /// SCAFFOLDING (v74): the entries, for prefetching.
++    pub fn raw(&self) -> &[u32] {
++        &self.e
++    }
++
+     pub fn from_sorted(pairs: &[(u32, u32)]) -> WordList {
+         WordList {
+             e: pairs
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 09aaaa4..aa901dd 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -521,6 +521,15 @@ pub(crate) fn run(args: &Args, outputs: &Outputs, log: &Log, problems: &mut Prob
+ /// finest graph's alone.
+ fn match_all(cx: &Ctx, scope: &Scope, files: &[PathBuf], items: &mut [Item], matched: &[bool], sizes: &[usize], outputs: &Outputs) -> Result<matched::Matched> {
+     let args = cx.args;
++    // SCAFFOLDING (v74 trace): IMGFP_TRACE names a file of "A B" basename pairs.
++    if let Ok(t) = std::env::var("IMGFP_TRACE") {
++        let at: HashMap<String, usize> = files.iter().enumerate().filter_map(|(i, p)| Some((p.file_stem()?.to_string_lossy().into_owned(), i))).collect();
++        let pairs = std::fs::read_to_string(t).unwrap_or_default().lines().filter_map(|l| {
++            let mut w = l.split_whitespace();
++            Some((*at.get(w.next()?)?, *at.get(w.next()?)?, l.to_string()))
++        }).collect();
++        let _ = crate::retrieve::TRACE.set(pairs);
++    }
+     let policy = verify::Policy::new(aligned_points(args), args.min_frame_overlap, args.min_pixel_correlation);
+     // What a verdict must already have before its pixels are worth reading:
+     // what the lowest standing asks (`Policy::gate`), or everything a dump
+@@ -1280,6 +1289,7 @@ fn index_all<'a>(cx: &Ctx, scope: &Scope, pass: &Pass<'a>) -> Result<Index<'a>>
+     progress.begin(Stage::InvertedFile);
+     too_many_postings(&lists)?;
+     let index = Index::new(items, matched, vocab, lists, shapes, scope.against);
++    if std::env::var_os("IMGFP_ORACLE").is_some() { index.oracle(); std::process::exit(0); }
+     stage!(cx, "inverted file");
+     Ok(index)
+ }
+@@ -1619,6 +1629,13 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct:
+     let bar = progress.begin_counted(Stage::Variants, total_weight, askers.len(), "images");
+     index.turn(&askers);
+     let index = &*index;
++    // SCAFFOLDING (v74 trace)
++    if let Some(t) = crate::retrieve::TRACE.get() {
++        let lines: Vec<String> = t.par_iter().map_init(|| index.asking(), |a, (q, r, name)| format!("TRACE {name} {}", index.trace(*q, *r, args.candidates, askers.binary_search(q).is_ok(), a))).collect();
++        for l in lines {
++            eprintln!("{l}");
++        }
++    }
+     let n_deeper = std::sync::atomic::AtomicUsize::new(0);
+     let turned: Vec<Edge> = askers
+         .par_iter()
+@@ -1654,6 +1671,7 @@ fn second_look(cx: &Ctx, scope: &Scope, pass: &Pass, index: &mut Index, direct:
+     if args.skip_mirrored {
+         stage!(cx, "variants: skipped");
+     } else {
++        eprintln!("SEEDS {} candidates, {} seeds", crate::retrieve::SEEDN.load(std::sync::atomic::Ordering::Relaxed), crate::retrieve::SEEDSUM.load(std::sync::atomic::Ordering::Relaxed));
+         stage!(cx, "variants: {} more pairs from {} unmatched images ({} deeper candidates)", anchors(&turned, policy).count(), askers.len(), n_deeper.into_inner());
+     }
+     // Nothing after this matches a descriptor against another, so the
+diff --git a/src/retrieve.rs b/src/retrieve.rs
+index 214891f..c5ca6e9 100644
+--- a/src/retrieve.rs
++++ b/src/retrieve.rs
+@@ -118,6 +118,11 @@ impl<'a> Index<'a> {
+     /// `shapes` where the second look will ask deeper (`deeper`).
+     pub(crate) fn new(items: &'a [Item], matched: &'a [bool], vocab: Vocabulary, lists: Vec<WordList>, shapes: Option<Vec<Shape>>, both_ways: bool) -> Index<'a> {
+         let n_live = vocab.n_live_words();
++        // SCAFFOLDING (v74 trace)
++        if std::env::var_os("IMGFP_TRACE").is_some() && ANC.get().is_none() {
++            let _ = ANC.set((1..=3).map(|u| vocab.ancestors(u)).collect());
++            eprintln!("TRACE vocab depth {} branching {} leaves {} live words {}", vocab.depth, vocab.branching, ANC.get().unwrap()[0].len(), n_live);
++        }
+         let postings = timed!(13, InvertedFile::build(&lists, n_live));
+         let mass = both_ways.then(|| lists.iter().map(|wl| postings.mass(wl)).collect());
+         Index { items, matched, vocab: Some(vocab), n_live, lists, mass, postings: Some(postings), turned: None, keep_vocab: false, shapes }
+@@ -253,19 +258,480 @@ impl<'a> Index<'a> {
+     /// So the budget is the file's, not a constant.
+     pub(crate) fn deeper(&self, i: usize, k: usize, a: &mut Asking) -> Vec<u32> {
+         let Some(shapes) = &self.shapes else { return Vec::new() };
+-        let ranked: Vec<u32> = self.candidates(i, &[&self.lists[i]], GEOMETRIC_DEPTH, a).iter().map(|&(j, ..)| j).collect();
++        let depth = depth();
++        let ranked: Vec<u32> = self.candidates(i, &[&self.lists[i]], depth, a).iter().map(|&(j, ..)| j).collect();
+         let k = k.min(ranked.len());
+-        let asker = Asker::new(&self.lists[i], &shapes[i].geo);
+-        let mut above: Vec<(u32, u32)> = timed!(46, {
+-            let null = ranked[..k].iter().map(|&j| asker.peak(&shapes[j as usize])).max().unwrap_or(0);
+-            ranked[k..].iter().map(|&j| (asker.peak(&shapes[j as usize]), j)).filter(|&(peak, _)| peak > null && peak >= LEAST_PEAK).collect()
+-        });
++        let mut above: Vec<(u32, u32)> = if seeds_mode() {
++            timed!(46, {
++                let mut seeds = Vec::new();
++                let best_only = std::env::var("IMGFP_FULLSEEDS").is_err();
++                let vote = std::env::var("IMGFP_VOTE").is_ok();
++                let mut votes = Votes::default();
++                let mut score = |j: u32, need: u32| {
++                    let other = if best_only { &shapes[j as usize].best } else { &self.lists[j as usize] };
++                    crate::index::shared(&self.lists[i], other, &mut seeds, 60_000);
++                    if noagree() {
++                        SEEDSUM.fetch_add(seeds.len(), std::sync::atomic::Ordering::Relaxed);
++                        SEEDN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                        return 0;
++                    }
++                    if vote {
++                        // A generous vote bounds the agreement from above:
++                        // only a candidate it lets reach `need` is counted.
++                        if votes.most(&seeds, &shapes[i], &shapes[j as usize]) < need.max(LEAST_PEAK) { return 0 }
++                    }
++                    agree(&seeds, &shapes[i], &shapes[j as usize], need)
++                };
++                let pf = std::env::var("IMGFP_PF").is_ok();
++                let ahead = |n: usize| {
++                    if !pf { return }
++                    if let Some(&j) = ranked.get(n) {
++                        let other = if best_only { &shapes[j as usize].best } else { &self.lists[j as usize] };
++                        prefetch_run(other.raw(), 8);
++                        prefetch_run(&shapes[j as usize].pts, 4);
++                    }
++                };
++                let mut null = 0;
++                for (n, &j) in ranked[..k].iter().enumerate() {
++                    ahead(n + 4);
++                    null = null.max(score(j, null + 1));
++                }
++                let need = (null + 1).max(LEAST_PEAK);
++                ranked[k..].iter().enumerate().map(|(n, &j)| { ahead(k + n + 4); (score(j, need), j) }).filter(|&(g, _)| g >= need).collect()
++            })        } else {
++            let asker = Asker::new(&self.lists[i], &shapes[i].geo);
++            timed!(46, {
++                let null = ranked[..k].iter().map(|&j| asker.peak(&shapes[j as usize])).max().unwrap_or(0);
++                ranked[k..].iter().map(|&j| (asker.peak(&shapes[j as usize]), j)).filter(|&(peak, _)| peak > null && peak >= LEAST_PEAK).collect()
++            })
++        };
+         // Stable: a tie keeps the ranking's order.
+         above.sort_by(|x, y| y.0.cmp(&x.0));
+         above.into_iter().map(|(_, j)| j).collect()
+     }
+ }
+ 
++/// SCAFFOLDING (v74): IMGFP_SEEDS=1 scores the geometric look by `agree`;
++/// IMGFP_DEPTH its depth.
++fn seeds_mode() -> bool {
++    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *S.get_or_init(|| std::env::var("IMGFP_SEEDS").is_ok_and(|v| v == "1"))
++}
++pub(crate) static SEEDSUM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++pub(crate) static SEEDN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++fn noagree() -> bool {
++    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *S.get_or_init(|| std::env::var("IMGFP_NOAGREE").is_ok())
++}
++/// SCAFFOLDING (v74): ask for the first `lines` cache lines of `v`.
++fn prefetch_run<T>(v: &[T], lines: usize) {
++    #[cfg(target_arch = "x86_64")]
++    unsafe {
++        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
++        let p = v.as_ptr() as *const i8;
++        let bytes = std::mem::size_of_val(v);
++        let mut at = 0;
++        while at < bytes && at < lines * 64 {
++            _mm_prefetch(p.add(at), _MM_HINT_T0);
++            at += 64;
++        }
++    }
++}
++fn depth() -> usize {
++    static S: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    *S.get_or_init(|| std::env::var("IMGFP_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(GEOMETRIC_DEPTH))
++}
++
++/// Transform agreement among two files' seeds (keypoint pairs sharing a
++/// word): each seed read as a similarity from its keypoints' place, angle
++/// and scale, and the most of `a`'s keypoints another seed puts within the
++/// inlier tolerance of where that similarity carries them. Verification's
++/// first step (`verify::best_transform`) on the seeds themselves, from
++/// positions held in the index rather than the analysis.
++fn agree(seeds: &[(u32, u32)], a: &Shape, b: &Shape, need: u32) -> u32 {
++    // Seeds come sorted by `a`'s keypoint: the distinct ones bound any count.
++    let mut distinct = 0u32;
++    let mut prev = u32::MAX;
++    for &(p, _) in seeds {
++        distinct += (p != prev) as u32;
++        prev = p;
++    }
++    if distinct < need.max(LEAST_PEAK) {
++        return 0;
++    }
++    let (bw, bh) = (b.wh.0 as f32, b.wh.1 as f32);
++    let tol = (0.015 * (bw * bw + bh * bh).sqrt()).max(3.0);
++    let tol2 = tol * tol;
++    let pa = |k: u32| a.pts[k as usize].place(a.wh);
++    let pb = |k: u32| b.pts[k as usize].place(b.wh);
++    let mut best = 0u32;
++    for &(i, j) in seeds.iter().take(600) {
++        let (ka, kb) = (&a.pts[i as usize], &b.pts[j as usize]);
++        let s = ((kb.scale as f32 - ka.scale as f32) / 256.0).exp2();
++        let t = (kb.angle.wrapping_sub(ka.angle)) as f32 * (std::f32::consts::TAU / 65536.0);
++        let (c, sn) = (s * t.cos(), s * t.sin());
++        let (ax, ay) = pa(i);
++        let (bx, by) = pb(j);
++        let mut n = 0u32;
++        // What is left to count can still lift `n` by at most the distinct
++        // keypoints not yet passed.
++        let mut left = distinct;
++        let mut last = u32::MAX;
++        let mut prev = u32::MAX;
++        for &(p, q) in seeds {
++            if p != prev {
++                left -= 1;
++                prev = p;
++            }
++            if p == last {
++                continue;
++            }
++            let (x, y) = pa(p);
++            let (dx, dy) = (x - ax, y - ay);
++            let (u, v) = (bx + c * dx - sn * dy, by + sn * dx + c * dy);
++            let (qx, qy) = pb(q);
++            if (u - qx) * (u - qx) + (v - qy) * (v - qy) <= tol2 {
++                n += 1;
++                last = p;
++            } else if n + left + 1 <= best.max(need - 1) {
++                // Even this keypoint and every one left agreeing could not
++                // beat the best, nor reach `need`.
++                break;
++            }
++        }
++        best = best.max(n);
++    }
++    best
++}
++
++/// Transform agreement by vote: each seed read as a similarity puts the
++/// asker's frame centre somewhere in the candidate, and votes for that place
++/// (an eighth of the candidate's diagonal a cell, each way and its nearer
++/// neighbour) at its rotation (16ths of a turn) and scale (octaves); the
++/// most distinct asker keypoints in one cell.
++#[derive(Default)]
++struct Votes {
++    slots: Vec<(u32, u32, u32)>,
++    used: Vec<usize>,
++}
++
++impl Votes {
++    const EMPTY: u32 = u32::MAX;
++
++    fn most(&mut self, seeds: &[(u32, u32)], a: &Shape, b: &Shape) -> u32 {
++        if seeds.len() < LEAST_PEAK as usize {
++            return 0;
++        }
++        let size = (seeds.len() * 32).next_power_of_two().max(64);
++        if self.slots.len() < size {
++            self.slots = vec![(Self::EMPTY, 0, 0); size];
++        }
++        let mask = size - 1;
++        let (cx, cy) = (a.wh.0 as f32 / 2.0, a.wh.1 as f32 / 2.0);
++        let (bw, bh) = (b.wh.0 as f32, b.wh.1 as f32);
++        let cell = ((bw * bw + bh * bh).sqrt() / 4.0).max(8.0);
++        let mut best = 0u32;
++        for &(p, q) in seeds {
++            let (ka, kb) = (&a.pts[p as usize], &b.pts[q as usize]);
++            let dscale = (kb.scale as i32 - ka.scale as i32) as f32 / 256.0;
++            let turn = kb.angle.wrapping_sub(ka.angle);
++            let s = dscale.exp2();
++            let t = turn as f32 * (std::f32::consts::TAU / 65536.0);
++            let (c, sn) = (s * t.cos(), s * t.sin());
++            let (ax, ay) = ka.place(a.wh);
++            let (bx, by) = kb.place(b.wh);
++            let (dx, dy) = (cx - ax, cy - ay);
++            let (u, v) = ((bx + c * dx - sn * dy) / cell, (by + sn * dx + c * dy) / cell);
++            if !(u.abs() < 1000.0 && v.abs() < 1000.0) {
++                continue;
++            }
++            let (ux, vy) = (u.floor(), v.floor());
++            let nx = if u - ux < 0.5 { ux - 1.0 } else { ux + 1.0 };
++            let ny = if v - vy < 0.5 { vy - 1.0 } else { vy + 1.0 };
++            // Rotation in eighths and scale in octaves, each with its nearer
++            // neighbour: a seed votes in sixteen cells.
++            let r = turn as u32 * 8;
++            let rot = r >> 16;
++            let rn = if (r & 0xffff) < 0x8000 { (rot + 7) & 7 } else { (rot + 1) & 7 };
++            let o = dscale.floor();
++            let oct = ((o as i32).clamp(-8, 7) + 8) as u32;
++            let on = if dscale - o < 0.5 { oct.saturating_sub(1) } else { (oct + 1).min(15) };
++            for rr in [rot, rn] {
++                for oo in [oct, on] {
++                    for (x, y) in [(ux, vy), (nx, vy), (ux, ny), (nx, ny)] {
++                        let key = rr | oo << 3 | (((x as i32 + 1024) as u32) & 2047) << 7 | (((y as i32 + 1024) as u32) & 2047) << 18;
++                        let mut h = (key.wrapping_mul(0x9e37_79b1) >> 7) as usize & mask;
++                        loop {
++                            let e = &mut self.slots[h];
++                            if e.0 == Self::EMPTY {
++                                *e = (key, 1, p);
++                                self.used.push(h);
++                                best = best.max(1);
++                                break;
++                            }
++                            if e.0 == key {
++                                if e.2 != p {
++                                    e.1 += 1;
++                                    e.2 = p;
++                                    best = best.max(e.1);
++                                }
++                                break;
++                            }
++                            h = (h + 1) & mask;
++                        }
++                    }
++                }
++            }
++        }
++        for &h in &self.used {
++            self.slots[h] = (Self::EMPTY, 0, 0);
++        }
++        self.used.clear();
++        best
++    }
++}
++
++/// SCAFFOLDING (v74 trace): pairs to trace, by file index, and their line.
++pub(crate) static TRACE: std::sync::OnceLock<Vec<(usize, usize, String)>> = std::sync::OnceLock::new();
++
++impl Index<'_> {
++    /// SCAFFOLDING (v74 trace): where `r` stands in `q`'s ranking and `q` in
++    /// `r`'s, by score and by geometric peak.
++    pub(crate) fn trace(&self, q: usize, r: usize, k: usize, asker: bool, a: &mut Asking) -> String {
++        let n = self.items.len();
++        let mut out = format!("asker={asker} kps_q={} kps_r={} words_q={} words_r={}", self.items[q].feats.len(), self.items[r].feats.len(), self.lists[q].len(), self.lists[r].len());
++        for (x, y, tag) in [(q, r, "q->r"), (r, q, "r->q")] {
++            let ranked: Vec<(u32, f32)> = self.candidates(x, &[&self.lists[x]], n, a).iter().map(|&(j, s, _)| (j, s)).collect();
++            let pos = ranked.iter().position(|&(j, _)| j as usize == y);
++            let score = pos.map(|p| ranked[p].1).unwrap_or(0.0);
++            let top = ranked.first().map(|e| e.1).unwrap_or(0.0);
++            let kth = ranked.get(k.saturating_sub(1)).map(|e| e.1).unwrap_or(0.0);
++            let (mut peak, mut null, mut prank, mut prank1000) = (0u32, 0u32, 0usize, 0usize);
++            if let Some(shapes) = &self.shapes {
++                let asker = Asker::new(&self.lists[x], &shapes[x].geo);
++                let peaks: Vec<u32> = ranked.iter().map(|&(j, _)| asker.peak(&shapes[j as usize])).collect();
++                peak = asker.peak(&shapes[y]);
++                null = peaks.iter().take(k).copied().max().unwrap_or(0);
++                prank = peaks.iter().filter(|&&p| p > peak).count();
++                prank1000 = peaks.iter().take(GEOMETRIC_DEPTH).filter(|&&p| p > peak).count();
++            }
++            let touched = ranked.len();
++            out += &format!(" | {tag} rank={} of {touched} score={score:.5} top={top:.5} kth={kth:.5} peak={peak} null={null} peakrank={prank} peakrank1000={prank1000}", pos.map(|p| p as i64).unwrap_or(-1));
++            // Verification's first step (seeds at the leaves, best transform)
++            // over the first 5,000 of the ranking.
++            {
++                let (mut sh, mut mt, mut sc) = (Vec::new(), Vec::new(), crate::verify::Scratch::default());
++                let t0 = std::time::Instant::now();
++                let mut ag = |j: usize| {
++                    crate::index::shared(&self.lists[x], &self.lists[j], &mut sh, 60_000);
++                    if sh.len() < 3 { return 0 }
++                    crate::verify::agreeing(&self.items[x].feats, &self.items[j].feats, &sh, &mut mt, &mut sc)
++                };
++                let ags: Vec<usize> = ranked.iter().take(5000).map(|&(j, _)| ag(j as usize)).collect();
++                let us = t0.elapsed().as_secs_f64() * 1e6 / ags.len().max(1) as f64;
++                let mine = ag(y);
++                let null = ags.iter().take(k).copied().max().unwrap_or(0);
++                let above = |d: usize| ags.iter().take(d).skip(k).filter(|&&g| g > null && g >= 3).count();
++                let r5 = ags.iter().filter(|&&g| g > mine).count();
++                out += &format!(" AG mine={mine} null={null} r5k={r5} above1k={} above5k={} us={us:.1}", above(1000), above(5000));
++            }
++            // At coarser levels of the same tree: seeds, mutual nearest
++            // within GUIDE_D2 among them, and the peak's place among the
++            // first 1,000 and 5,000 of the leaf ranking (null: first k).
++            let Some(shapes) = &self.shapes else { continue };
++            let anc = ANC.get().unwrap();
++            let leaf: Vec<u32> = (0..anc[0].len() as u32).collect();
++            for (u, map) in std::iter::once(&leaf).chain(anc.iter()).enumerate() {
++                let m = |wl: &WordList| remap(wl, map);
++                let (lx, ly) = (m(&self.lists[x]), m(&self.lists[y]));
++                let mut sh = Vec::new();
++                crate::index::shared(&lx, &ly, &mut sh, 60_000);
++                let nn = mutual(&self.items[x].feats, &self.items[y].feats, &sh);
++                let asker = Asker::new(&lx, &shapes[x].geo);
++                let sp = |j: usize| Shape { best: m(&shapes[j].best), geo: shapes[j].geo.clone(), pts: Vec::new(), wh: (0, 0) };
++                let peak = asker.peak(&sp(y));
++                let peaks: Vec<u32> = ranked.iter().take(5000).map(|&(j, _)| asker.peak(&sp(j as usize))).collect();
++                let null = peaks.iter().take(k).copied().max().unwrap_or(0);
++                let r1 = peaks.iter().take(GEOMETRIC_DEPTH).filter(|&&p| p > peak).count();
++                let r5 = peaks.iter().filter(|&&p| p > peak).count();
++                let p = crate::verify::Pair { fa: &self.items[x].feats, fb: &self.items[y].feats, ta: &self.items[x].thumb, tb: &self.items[y].thumb };
++                let (mut mt, mut sc) = (Vec::new(), crate::verify::Scratch::default());
++                let v = crate::verify::verify(&p, &sh, Variant::SAME, (3, 0.0), &mut mt, &mut sc);
++                out += &format!(" up{u} seeds={} nn={nn} peak={peak} null={null} pr1k={r1} pr5k={r5} vin={} vblk={:.3} vov={:.3} vmatch={}", sh.len(), v.n_in, v.blk, v.ov_a.max(v.ov_b), v.n_match);
++            }
++        }
++        out
++    }
++}
++
++/// SCAFFOLDING (v74 oracle): for each traced pair's query, every file's
++/// count of query keypoints with a descriptor within T sharing an ancestor
++/// cell at level <= L; the true reference's count and its place.
++impl Index<'_> {
++    pub(crate) fn oracle(&self) {
++        use crate::index::dist2;
++        let Some(t) = TRACE.get() else { return };
++        let shapes = self.shapes.as_ref().expect("shapes");
++        let anc = ANC.get().unwrap();
++        const TS: [u32; 6] = [200, 240, 280, 320, 360, 400];
++        const NC: usize = 24;
++        let tmax = TS[5] * TS[5];
++        let n_cells = anc[2].iter().copied().max().unwrap_or(0) as usize + 1;
++        let mut cells: Vec<Vec<(u16, u16, u32)>> = vec![Vec::new(); n_cells];
++        let qdesc: Vec<Vec<u8>> = t.iter().map(|(q, ..)| { let f = &self.items[*q].feats; (0..f.len()).flat_map(|i| f.d(i).iter().copied()).collect() }).collect();
++        for (qi, (q, ..)) in t.iter().enumerate() {
++            let wl = &self.lists[*q];
++            for e in 0..wl.len() {
++                let w = wl.word(e);
++                cells[anc[2][w as usize] as usize].push((qi as u16, wl.kp(e) as u16, w));
++            }
++        }
++        eprintln!("ORACLE cells {n_cells} entries {}", cells.iter().map(|c| c.len()).sum::<usize>());
++        let level = |a: u32, b: u32| -> u8 {
++            if a == b { 0 } else if anc[0][a as usize] == anc[0][b as usize] { 1 } else if anc[1][a as usize] == anc[1][b as usize] { 2 } else { 3 }
++        };
++        let counts = |m: &[(u16, u8, u32)]| -> [u16; NC] {
++            // m: one query's matches (kq, level, d2), sorted by kq.
++            let mut c = [0u16; NC];
++            let mut at = 0;
++            while at < m.len() {
++                let mut end = at;
++                let mut best = [u32::MAX; 4];
++                while end < m.len() && m[end].0 == m[at].0 {
++                    for l in m[end].1 as usize..4 { best[l] = best[l].min(m[end].2); }
++                    end += 1;
++                }
++                for l in 0..4 { for (ti, &tt) in TS.iter().enumerate() { if best[l] <= tt * tt { c[l * 6 + ti] += 1; } } }
++                at = end;
++            }
++            c
++        };
++        const NA: usize = 12;
++        const AT: [u32; 3] = [280, 320, 400];
++        type Acc = (Vec<[[u32; 64]; NC]>, Vec<[u16; NC]>, Vec<[[u32; 64]; NA]>, Vec<[u16; NA]>);
++        let zero = || -> Acc { (vec![[[0u32; 64]; NC]; t.len()], vec![[0u16; NC]; t.len()], vec![[[0u32; 64]; NA]; t.len()], vec![[0u16; NA]; t.len()]) };
++        let (hist, truth, ahist, atruth) = (0..self.items.len()).into_par_iter().fold(zero, |mut acc: Acc, j| {
++            if !self.matched[j] { return acc }
++            let wl = &shapes[j].best;
++            let f = &self.items[j].feats;
++            let mut m: Vec<(u16, u16, u16, u8, u32)> = Vec::new();
++            let mut seeds: Vec<(u32, u32)> = Vec::new();
++            for e in 0..wl.len() {
++                let w = wl.word(e);
++                let b = &cells[anc[2][w as usize] as usize];
++                if b.is_empty() { continue }
++                let d: &[u8; 128] = f.d(wl.kp(e) as usize).try_into().unwrap();
++                for &(qi, kq, wq) in b {
++                    let d2 = dist2(d, &qdesc[qi as usize][kq as usize * 128..kq as usize * 128 + 128]);
++                    if d2 <= tmax { m.push((qi, kq, wl.kp(e) as u16, level(w, wq), d2)); }
++                }
++            }
++            m.sort_unstable();
++            let mut at = 0;
++            let mut one: Vec<(u16, u8, u32)> = Vec::new();
++            while at < m.len() {
++                let qi = m[at].0 as usize;
++                one.clear();
++                let from = at;
++                while at < m.len() && m[at].0 as usize == qi { one.push((m[at].1, m[at].3, m[at].4)); at += 1; }
++                if t[qi].0 == j { continue }
++                let c = counts(&one);
++                for x in 0..NC { acc.0[qi][x][(c[x] as usize).min(63)] += 1; }
++                if t[qi].1 == j { acc.1[qi] = c; }
++                for l in 0..4usize { for (ti, &tt) in AT.iter().enumerate() {
++                    seeds.clear();
++                    seeds.extend(m[from..at].iter().filter(|x| x.3 as usize <= l && x.4 <= tt * tt).map(|x| (x.1 as u32, x.2 as u32)));
++                    seeds.dedup();
++                    let g = if seeds.len() >= 3 { agree(&seeds, &shapes[t[qi].0], &shapes[j], 1) } else { 0 };
++                    acc.2[qi][l * 3 + ti][(g as usize).min(63)] += 1;
++                    if t[qi].1 == j { acc.3[qi][l * 3 + ti] = g as u16; }
++                } }
++            }
++            acc
++        }).reduce(zero, |mut a, b| {
++            for q in 0..a.0.len() { for x in 0..NC { for h in 0..64 { a.0[q][x][h] += b.0[q][x][h]; } a.1[q][x] = a.1[q][x].max(b.1[q][x]); } }
++            for q in 0..a.2.len() { for x in 0..NA { for h in 0..64 { a.2[q][x][h] += b.2[q][x][h]; } a.3[q][x] = a.3[q][x].max(b.3[q][x]); } }
++            a
++        });
++        for (qi, (q, r, name)) in t.iter().enumerate() {
++            let mut out = format!("ORACLE {name}");
++            for x in 0..NC {
++                let tc = truth[qi][x] as usize;
++                let above: u32 = hist[qi][x][(tc + 1).min(64)..].iter().sum();
++                let ties = hist[qi][x][tc.min(63)];
++                let top = (1..64).rev().find(|&h| hist[qi][x][h] > 0).unwrap_or(0);
++                out += &format!(" L{}T{}={tc}/{above}/{ties}/{top}", x / 6, TS[x % 6]);
++            }
++            for x in 0..NA {
++                let tc = atruth[qi][x] as usize;
++                let above: u32 = ahist[qi][x][(tc + 1).min(64)..].iter().sum();
++                let ties = ahist[qi][x][tc.min(63)];
++                let top = (1..64).rev().find(|&h| ahist[qi][x][h] > 0).unwrap_or(0);
++                out += &format!(" L{}A{}={tc}/{above}/{ties}/{top}", x / 3, AT[x % 3]);
++            }
++            // The pair's own seeds under each bar, verified.
++            let (fa, fb) = (&self.items[*q].feats, &self.items[*r].feats);
++            let (la, lb) = (&self.lists[*q], &shapes[*r].best);
++            let mut all: Vec<(u32, u32, u8, u32)> = Vec::new();
++            for ea in 0..la.len() { for eb in 0..lb.len() {
++                let (wa, wb) = (la.word(ea), lb.word(eb));
++                if anc[2][wa as usize] != anc[2][wb as usize] { continue }
++                let d2 = dist2(fb.d(lb.kp(eb) as usize).try_into().unwrap(), fa.d(la.kp(ea) as usize));
++                if d2 <= tmax { all.push((la.kp(ea), lb.kp(eb), level(wa, wb), d2)); }
++            } }
++            all.sort_unstable();
++            let p = crate::verify::Pair { fa, fb, ta: &self.items[*q].thumb, tb: &self.items[*r].thumb };
++            let (mut mt, mut sc) = (Vec::new(), crate::verify::Scratch::default());
++            let mut ver = |tag: &str, seeds: &[(u32, u32)], out: &mut String| {
++                let v = crate::verify::verify(&p, seeds, Variant::SAME, (3, 0.0), &mut mt, &mut sc);
++                *out += &format!(" V{tag}={}/{}/{:.3}/{:.3}", seeds.len(), v.n_in, v.blk, v.ov_a.max(v.ov_b));
++            };
++            for l in 0..4u8 { for tt in [240u32, 320, 400] {
++                let mut s: Vec<(u32, u32)> = all.iter().filter(|m| m.2 <= l && m.3 <= tt * tt).map(|m| (m.0, m.1)).collect();
++                s.dedup();
++                ver(&format!("L{l}T{tt}"), &s, &mut out);
++            } }
++            // Brute force: every pair within 400, and the mutual nearest.
++            let mut bf: Vec<(u32, u32, u32)> = Vec::new();
++            for i in 0..fa.len() { for j in 0..fb.len() {
++                let d2 = dist2(fa.d(i).try_into().unwrap(), fb.d(j));
++                if d2 <= tmax { bf.push((i as u32, j as u32, d2)); }
++            } }
++            for tt in [240u32, 320, 400] {
++                let s: Vec<(u32, u32)> = bf.iter().filter(|m| m.2 <= tt * tt).map(|m| (m.0, m.1)).collect();
++                ver(&format!("BF{tt}"), &s, &mut out);
++            }
++            eprintln!("{out}");
++        }
++    }
++}
++
++/// SCAFFOLDING (v74 trace): ancestor maps 1-3 levels up, by word.
++pub(crate) static ANC: std::sync::OnceLock<Vec<Vec<u32>>> = std::sync::OnceLock::new();
++
++/// SCAFFOLDING (v74 trace): `wl` with each word mapped, re-sorted, deduped.
++fn remap(wl: &WordList, map: &[u32]) -> WordList {
++    let mut p: Vec<(u32, u32)> = (0..wl.len()).map(|e| (map[wl.word(e) as usize], wl.kp(e))).collect();
++    p.sort_unstable();
++    p.dedup();
++    WordList::from_sorted(&p)
++}
++
++/// SCAFFOLDING (v74 trace): mutual nearest pairs within 320 among `pairs`.
++fn mutual(a: &Features, b: &Features, pairs: &[(u32, u32)]) -> usize {
++    use std::collections::HashMap;
++    let d2 = |i: u32, j: u32| a.d(i as usize).iter().zip(b.d(j as usize)).map(|(&x, &y)| { let d = x as i32 - y as i32; (d * d) as u32 }).sum::<u32>();
++    let (mut ba, mut bb): (HashMap<u32, (u32, u32)>, HashMap<u32, (u32, u32)>) = Default::default();
++    for &(i, j) in pairs {
++        let d = d2(i, j);
++        let e = ba.entry(i).or_insert((u32::MAX, 0));
++        if d < e.0 { *e = (d, j); }
++        let e = bb.entry(j).or_insert((u32::MAX, 0));
++        if d < e.0 { *e = (d, i); }
++    }
++    ba.iter().filter(|(i, (d, j))| *d <= 320 * 320 && bb.get(j).map(|x| x.1) == Some(**i)).count()
++}
++
+ /// How far down its ranking the geometric look reads (`Index::deeper`).
+ /// Measured on two DISC21 shards (`out/v58-reach` section 6): true copies
+ /// gained at bars 0.5 / 0.7, 300: 7 / 4, 500: 10 / 6, 750: 12 / 8, 1,000:
+@@ -284,12 +750,42 @@ const LEAST_PEAK: u32 = 3;
+ pub(crate) struct Shape {
+     best: WordList,
+     geo: Vec<(u8, u8)>,
++    /// Each keypoint's place, angle and scale (`Pt`), and the frame, for
++    /// `agree`.
++    pts: Vec<Pt>,
++    wh: (u16, u16),
++}
++
++/// A keypoint as `agree` reads it: place in eighths of a working pixel,
++/// angle in 65,536ths of a turn, log2 scale in 256ths of an octave.
++#[derive(Clone, Copy, Default)]
++struct Pt {
++    x: u16,
++    y: u16,
++    angle: u16,
++    scale: i16,
++}
++
++impl Pt {
++    fn new(k: &crate::sift::Keypoint) -> Pt {
++        Pt {
++            x: (k.x * 8.0).round().clamp(0.0, 65535.0) as u16,
++            y: (k.y * 8.0).round().clamp(0.0, 65535.0) as u16,
++            angle: ((k.angle.rem_euclid(360.0) / 360.0 * 65536.0) as u32 & 0xffff) as u16,
++            scale: (k.sigma.max(1e-3).log2() * 256.0).round().clamp(-32768.0, 32767.0) as i16,
++        }
++    }
++
++    #[inline(always)]
++    fn place(&self, _wh: (u16, u16)) -> (f32, f32) {
++        (self.x as f32 / 8.0, self.y as f32 / 8.0)
++    }
+ }
+ 
+ impl Shape {
+     /// `best` is `quantise_with_best`'s second list for `f`.
+     pub(crate) fn new(f: &Features, best: WordList) -> Shape {
+-        Shape { best, geo: f.kps.iter().map(|k| bin(k.angle, k.sigma)).collect() }
++        Shape { best, geo: f.kps.iter().map(|k| bin(k.angle, k.sigma)).collect(), pts: f.kps.iter().map(Pt::new).collect(), wh: (f.w.min(65535) as u16, f.h.min(65535) as u16) }
+     }
+ }
+ 
+diff --git a/src/verify.rs b/src/verify.rs
+index df41b7b..4c1ebb0 100644
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -2168,6 +2168,13 @@ crate::simd::dispatched! {
+     pub fn verify(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict => verify_any;
+ }
+ 
++/// SCAFFOLDING (v74 trace): the correspondences' best transform's
++/// agreeing count, verification's first step without the pixels.
++pub fn agreeing(a: &Features, b: &Features, cands: &[(u32, u32)], matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> usize {
++    correspond(a, b, cands, matches);
++    best_transform(a, b, matches, b.w as f32, b.h as f32, scratch).map(|x| x.1).unwrap_or(0)
++}
++
+ /// `verify`, for whichever copy `dispatched!` chose.
+ #[cfg_attr(dispatch, inline(always))]
+ fn verify_any(p: &Pair, cands: &[(u32, u32)], var: Variant, gate: (u32, f32), matches: &mut Vec<(u32, u32)>, scratch: &mut Scratch) -> Verdict {

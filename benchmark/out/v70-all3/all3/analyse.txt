@@ -1,0 +1,105 @@
+== imgfp.json ==
+   config: {"candidates": 150, "detail": 512, "fast": false, "features": 600, "min_aligned_points": 10, "min_frame_overlap": 0.85, "min_pixel_correlation": 0.7, "mirrored_inverted": true, "stages": "anchor, propagate, corroborate", "suggest": "content"}
+   F1 0.9213  precision 98.53%  recall 86.50%
+   proposed 1,164,173  TP 1,147,061  FP 17,112  FN 178,990  groups 1328
+   FP: trap 3,625  cross-family 13,487  seed-pairs 33  merges 31
+     cross IMGS5/Mural1.jpg <-> IMGS5/Mural2.jpg: 6,366 pairs
+     cross IMGS5/bird1.jpg <-> IMGS5/bird2.jpg: 5,201 pairs
+     cross IMGS5/Floriana1.jpg <-> IMGS5/Floriana2.jpg: 413 pairs
+     cross IMGS5/Floriana3.jpg <-> IMGS5/Floriana4.jpg: 353 pairs
+     cross IMGS5/Puerto3.jpg <-> IMGS5/Puerto4.jpg: 257 pairs
+     cross IMGS5/Parish Church1.jpg <-> IMGS5/Parish Church2.jpg: 194 pairs
+     cross IMGS5/Fountain3.jpg <-> IMGS5/Fountain5.jpg: 155 pairs
+     cross IMGS3/Segovia1.jpg <-> IMGS3/Segovia2.jpg: 111 pairs
+     cross IMGS3/game2.jpg <-> IMGS3/game3.jpg: 107 pairs
+     cross IMGS5/Tree1.jpg <-> IMGS5/Tree2.jpg: 82 pairs
+   half[alt] F1 0.9234  P 99.67%  R 86.02%  (182 seeds)
+   half[hash] F1 0.9247  P 99.65%  R 86.26%  (184 seeds)
+   perfect transforms: 23 of 86
+     tiled_repeat+solarize    242/364
+     triptych+film_grain      247/364
+     triptych                 259/364
+     proof_stamp+fax          266/364
+     crop_band+ghost          284/364
+     solarize                 286/364
+     crop_corner+social_post  287/364
+     threshold_bw+rotate_canvas 312/364
+     threshold_bw             316/364
+     liquify+palette_dither   323/364
+     crop_circle+haze         329/364
+     chat_bubble+glitch_bands 335/364
+     grid_overlay+affine_free 336/364
+     liquify                  338/364
+     fax                      339/364
+     digital_zoom+meme_text   341/364
+     digital_zoom+equalize    343/364
+     crop_circle              347/364
+     proof_stamp              348/364
+     mirror_extend+glare_spot 349/364
+     crop_band+channel_drop   350/364
+     old_photo+rotate_canvas  351/364
+     fold+photocopy           352/364
+     scribble+cylinder        352/364
+     crop_corner+fade_matte   355/364
+     digital_zoom             355/364
+     false_colour             355/364
+     glitch_bands             355/364
+     old_photo                355/364
+     channel_drop             356/364
+     false_colour+letterbox   356/364
+     broadcast_overlay+vhs    357/364
+     emoji_stickers+rotate_canvas 357/364
+     exposure_gradient        357/364
+     grid_overlay             357/364
+     broadcast_overlay        358/364
+     crop_band                358/364
+     equalize                 358/364
+     scribble                 358/364
+     affine_free+film_grain   359/364
+     meme_text                359/364
+     desktop_window+salt_pepper 360/364
+     haze                     360/364
+     letterbox+h264_frame     360/364
+     light_leak               360/364
+     meme_text+pixelate       360/364
+     photocopy                360/364
+     chat_bubble              361/364
+     crop_corner              361/364
+     emoji_stickers           361/364
+     glare_spot               361/364
+     tiled_repeat             361/364
+     before_after+light_leak  363/364
+     desktop_window           363/364
+     fold                     363/364
+     ghost                    363/364
+     h264_frame               363/364
+     letterbox                363/364
+     palette_dither           363/364
+     ripple+bloom             363/364
+     rotate_canvas            363/364
+     rotate_canvas+split_tone 363/364
+     salt_pepper              363/364
+     affine_free              364/364
+     before_after             364/364
+     bloom                    364/364
+     curves                   364/364
+     cylinder                 364/364
+     cylinder+curves          364/364
+     dither_bw                364/364
+     exif_turned              364/364
+     fade_matte               364/364
+     film_grain               364/364
+     jxl_lossless             364/364
+     mirror_extend            364/364
+     mosaic_patch             364/364
+     pixelate                 364/364
+     png_16bit                364/364
+     ripple                   364/364
+     social_post              364/364
+     split_tone               364/364
+     tiff_jpeg                364/364
+     to_bmp                   364/364
+     to_gif                   364/364
+     vhs                      364/364
+     zoom_blur                364/364
+
