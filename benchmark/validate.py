@@ -59,6 +59,8 @@ what is judged. Accuracy reproduces to the pair, so any difference is the build'
 not, and within those ranges it is `level`.
 """
 import argparse, csv, json, os, re, statistics, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import imgfp_json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.expanduser('~/Documents')
@@ -129,7 +131,7 @@ def cost_of(err):
 
 def write_pairs(report, dest):
     """A report's pairs, one a line, each and all sorted: what two runs are compared by."""
-    rows = sorted('\t'.join(sorted((p['a'], p['b']))) for p in json.load(open(report))['pairs'])
+    rows = sorted('\t'.join(sorted((p['a'], p['b']))) for p in imgfp_json.pairs(json.load(open(report))))
     with open(dest, 'w') as f:
         f.write('\n'.join(rows) + '\n')
 
@@ -210,7 +212,7 @@ def disc_score(report, kind, bar):
     gt = {(r[0], r[1]) for r in csv.reader(open(f'{DISC}/gt/dev_ground_truth.csv'))
           if len(r) > 1 and r[1] in refs and (queries is None or r[0] in queries)}
     best = {}
-    for p in json.load(open(report))['pairs']:
+    for p in imgfp_json.pairs(json.load(open(report))):
         a, b = ident(p['a']), ident(p['b'])
         if {a[0], b[0]} != {'Q', 'R'}:
             continue

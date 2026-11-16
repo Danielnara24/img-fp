@@ -8,6 +8,8 @@ and the same run re-scored on two disjoint halves of the seeds.
 """
 import csv, json, os, sys, hashlib
 from collections import defaultdict
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import imgfp_json
 
 # `--corpus=DIR`, repeatable, scores a run against several corpora at once: a
 # second set of seeds alone, or merged with this one to test a rule at twice
@@ -58,7 +60,7 @@ def build(manifest, pairs):
 def load_pairs(path):
     with open(path) as fh:
         data = json.load(fh)
-    found = {key(p["a"], p["b"]) for p in data.get("pairs", [])}
+    found = {key(p["a"], p["b"]) for p in imgfp_json.pairs(data)}
     groups = data.get("groups", [])
     return found, len(groups), data.get("runtime_seconds"), data.get("config", {})
 

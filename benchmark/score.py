@@ -51,6 +51,8 @@ import json
 import os
 import sys
 from collections import defaultdict
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import imgfp_json
 
 DEFAULT_CORPUS = "/home/daniel/Documents/IMGS-ALL"
 
@@ -82,8 +84,8 @@ def load_tool(path):
     runtime, config = None, {}
     if isinstance(data, dict):
         runtime, config = data.get("runtime_seconds"), data.get("config", {})
-    if isinstance(data, dict) and data.get("pairs"):
-        found = {key(p["a"], p["b"]) for p in data["pairs"]}
+    if isinstance(data, dict) and (data.get("pairs") or data.get("identical")):
+        found = {key(p["a"], p["b"]) for p in imgfp_json.pairs(data)}
     elif isinstance(data, dict) and data.get("groups"):
         found = set()
         for g in data["groups"]:

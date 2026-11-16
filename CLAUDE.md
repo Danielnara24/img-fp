@@ -131,9 +131,8 @@ is measured where siblings cannot meet* and *Scoring on small families*.
   of several lossy copies is the original (IMGS-PROVENANCE 106 / 266); grey
   originals beaten by a tinted copy on "colour over grey"; IMGS5's keep rule
   never scored (DELETEs resting on a sibling).
-- N copies of one picture are stated as N(N-1)/2 pairs (3,000 copies: 4.5 M
-  pairs, a 1.65 GB JSON); stating an identical set once is the user's call
-  (the format).
+- N copies of one picture are still N(N-1)/2 pairs inside the run (the keep
+  rule, the groups, `--against`), though the JSON states the set once.
 - `WHOLE_RESIDUAL` (12) is a ramp with no cliff: faithful crops, turns and
   resizes read 5-37, same-frame re-encodes p99 2.1.
 - A 48 px thumbnail of a 700 px photo agrees at 0.87 (both sides hold a pixel
@@ -548,6 +547,18 @@ list. Before 0.63.0 each reader stated its pairs again: the JSON's records
 member's evidence was looked up, last in name order; the compare view's
 place was a second map (`placements`) copying that order by comparing
 names; `--against` took the first pair met.
+
+**An identical set is written once** (2026-11-16, user's decision): the
+JSON's `identical` lists each set of byte-identical stated files (against a
+library, scanned files only: two library files are no pair, and a set says
+each two of its files are), and `pairs` names
+only each set's first file by name; every other member has the same pairs
+(`Same::expand` gave them the first's verdict) and each two members are an
+`identical` pair (`report::write_pairs`). 3,000 copies were 4.5 M pairs, a
+1.65 GB report. Every benchmark reader of img-fp's pairs goes through
+`benchmark/imgfp_json.py`'s `pairs(doc)`, which expands them back (a report
+from before reads as it is). Only the bytes: same-pixels sets are still
+pairs.
 
 **Adding something a pair says**: a field of `Pair`, set in
 `Stated::pair`. Not a side table keyed by its two files.
@@ -1357,7 +1368,8 @@ Do not retry without new evidence:
 
 - **Canonical runner output**: `{"tool", "config", "runtime_seconds",
   "groups", "pairs"}`. **`pairs` wins over `groups`** everywhere (expanding
-  a closure invents matches). img-fp's groups are representative + matches,
+  a closure invents matches); img-fp's `pairs` are read through
+  `imgfp_json.pairs`. img-fp's groups are representative + matches,
   each file entry the CSV row; `score.py` reads both bare paths and dicts.
 - Reports give one overlap per pair, the larger direction (user's choice);
   `--dump` has both.

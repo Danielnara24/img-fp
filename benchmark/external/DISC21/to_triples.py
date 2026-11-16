@@ -7,6 +7,8 @@ verifier wrote (gate loosened to 3 points / 0.2), scored by `blk` or `n_in`.
 A pair of two queries or two references is left out.
 """
 import csv, json, os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+import imgfp_json
 
 src, out = sys.argv[1], sys.argv[2]
 score = sys.argv[4] if len(sys.argv) > 4 else "correlation"
@@ -21,7 +23,7 @@ def qr(a, b):
 n = 0
 with open(out, "w") as f:
     if src.endswith(".json"):
-        for p in json.load(open(src))["pairs"]:
+        for p in imgfp_json.pairs(json.load(open(src))):
             k = qr(p["a"], p["b"])
             if k:
                 s = p["pixel_correlation"] if score == "correlation" else p["aligned_points"]

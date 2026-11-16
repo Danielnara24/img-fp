@@ -32,6 +32,8 @@ Usage:
   families.py compare OUTDIR OUTDIR ...  the summaries side by side
 """
 import argparse, collections, csv, glob, json, os, random, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import imgfp_json
 
 CORPORA = {'all': os.path.expanduser('~/Documents/IMGS-ALL'), 'i5': os.path.expanduser('~/Documents/IMGS5'),
            # the hard generation (IMGS-v2): same 364 seeds as IMGS-ALL, other transforms
@@ -130,7 +132,7 @@ def score_one(rep, files, man, rel):
     tp = fp = found = 0
     xpairs = 0
     joined, orig = collections.Counter(), set()
-    for p in d['pairs']:
+    for p in imgfp_json.pairs(d):
         a, b = p['a'], p['b']
         ka, kb = a in man, b in man
         if not (ka and kb):

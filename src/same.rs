@@ -124,6 +124,11 @@ impl Same {
         }
     }
 
+    /// The sets of identical bytes, each in index order.
+    pub(crate) fn byte_sets(&self) -> &[Vec<usize>] {
+        &self.groups
+    }
+
     /// The file matched for `i`, from the vocabulary to corroboration.
     pub(crate) fn answers_for(&self, i: usize) -> usize {
         self.analysis[i]

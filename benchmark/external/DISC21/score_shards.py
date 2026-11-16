@@ -2,6 +2,8 @@
 score them against the ground truth limited to those shards' references, at
 bars 0.5-0.8, ranked by aligned points."""
 import csv, json, os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+import imgfp_json
 ident = lambda p: os.path.splitext(os.path.basename(p))[0]
 ns = sys.argv[1:]
 refs = set()
@@ -10,7 +12,7 @@ for n in ns:
 gt = {(r[0], r[1]) for r in csv.reader(open("gt/dev_ground_truth.csv")) if len(r) > 1 and r[1] in refs}
 best = {}
 for n in ns:
-    for p in json.load(open(f"shard{n}/report.json"))["pairs"]:
+    for p in imgfp_json.pairs(json.load(open(f"shard{n}/report.json"))):
         a, b = ident(p["a"]), ident(p["b"])
         if {a[0], b[0]} != {"Q", "R"}: continue
         k = (a, b) if a[0] == "Q" else (b, a)

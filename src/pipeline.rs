@@ -1941,7 +1941,19 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
     // `.jpg`s (a picture's head, a decode that failed) is still stated: those
     // are images. Two alike only in grey are the match they are, made here
     // since no pass verified one.
-    let one_file = same.pairs(|i| !not_asked[i] && !matches!(items[i].read, Read::Refused(Refused::NotAnImage)));
+    let is_stated = |i: usize| !not_asked[i] && !matches!(items[i].read, Read::Refused(Refused::NotAnImage));
+    let one_file = same.pairs(is_stated);
+    // The same sets as the JSON states them, each once (`report::Pairs`):
+    // the files of one set that `Same::pairs` states, and of a library only
+    // the scanned ones. Two library files are no pair (`Scope::speaks_of`),
+    // so a set of them would say what the run does not; each keeps its own
+    // pairs with the scanned files, as many as theirs, not their square.
+    let identical: Vec<Vec<u32>> = same
+        .byte_sets()
+        .iter()
+        .map(|g| g.iter().copied().filter(|&i| is_stated(i) && !scope.library[i]).map(|i| i as u32).collect::<Vec<_>>())
+        .filter(|s| s.len() > 1)
+        .collect();
     let grey: Vec<Claim> = one_file
         .iter()
         .filter(|p| p.2 == same::Kind::SameGrey)
@@ -2026,6 +2038,7 @@ fn assemble(cx: &Ctx, scope: &Scope, files: &[PathBuf], stats: &[walk::Stat], an
         .collect();
     Found {
         pairs,
+        identical,
         grouping,
         asked,
         actions,
@@ -2122,6 +2135,9 @@ fn suggest_content(
 struct Found {
     /// Every stated pair, sorted by name.
     pairs: Vec<Pair>,
+    /// The sets of identical bytes whose files are stated, by side, each a
+    /// set of two or more; see `report::Pairs`.
+    identical: Vec<Vec<u32>>,
     /// The groups `group::find` makes of the stated pairs; `None` against a
     /// library, and for a walk that found nothing.
     grouping: Option<Vec<group::Group>>,
@@ -2184,6 +2200,7 @@ fn finish(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], mut fo
         failures: Vec::new(),
         runtime_seconds: (runtime * 1000.0).round() / 1000.0,
     };
+    let identical = std::mem::take(&mut found.identical);
     let (scan, pairs) = timed!(36, outcome(args, files, &scope.library, grouping, n_library, head, found));
     let answers = against::answers(&scan);
     let summary = if scan.against.is_some() {
@@ -2230,7 +2247,7 @@ fn finish(cx: &Ctx, scope: &Scope, gui: Option<&Path>, files: &[PathBuf], mut fo
     // Where `outputs::plan` says.
     let mut went = None;
     if let Some(r) = &cx.outputs.report {
-        timed!(36, report::write_with(r, &scan, args.suggest, Some(report::Pairs { files, list: &pairs })))?;
+        timed!(36, report::write_with(r, &scan, args.suggest, Some(report::Pairs { files, list: &pairs, identical: &identical })))?;
         went = r.to.file();
     }
     if cx.outputs.list {

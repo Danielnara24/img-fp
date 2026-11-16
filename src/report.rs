@@ -34,8 +34,17 @@ pub enum Format {
     Json,
 }
 
-/// The stated pairs, as the JSON's `pairs` list writes them: by the run's
-/// file numbers, named from `files` as they are written.
+/// The stated pairs, as the JSON's `identical` and `pairs` lists write them:
+/// by the run's file numbers, named from `files` as they are written.
+///
+/// **A set of identical files is stated once** (`identical`), and `pairs`
+/// names only its first file, by name: every other file of the set has the
+/// same pairs, each with its own name in place of the first's (their
+/// verdicts are the first's, `Same::expand`), and every two files of the set
+/// are an `identical` pair. Each pair used to be written: 3,000 copies of one
+/// picture were 4.5 M pairs and a 1.65 GB report, and each file matched to
+/// them 3,000 more. Against a library only scanned files make a set: two
+/// library files are no pair.
 ///
 /// A pair used to be held as its record here, two names and two byte
 /// strings beside its evidence, from the end of the analysis to the end of
@@ -45,6 +54,16 @@ pub enum Format {
 pub struct Pairs<'a> {
     pub files: &'a [PathBuf],
     pub list: &'a [Pair],
+    /// The sets of identical files, each two or more.
+    pub identical: &'a [Vec<u32>],
+}
+
+/// A file of an identical set as the JSON names it.
+#[derive(Serialize)]
+struct Named<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name_bytes: &'a Option<Vec<u8>>,
 }
 
 /// A pair as the JSON writes it: `aligned_points` 0 where no keypoint was
@@ -102,10 +121,38 @@ impl<'a> Written<'a> {
     }
 }
 
-/// The JSON's `pairs`, its last key.
+/// The JSON's `identical` and `pairs`, its last keys: each set in name
+/// order, the sets by their first names, and of the pairs those naming no
+/// file of a set but its first, nor two of one set.
 fn write_pairs(w: &mut dyn Write, pairs: Pairs) -> std::io::Result<()> {
     let names: Vec<(String, Option<Vec<u8>>)> = pairs.files.par_iter().map(|f| (f.display().to_string(), raw_bytes(f))).collect();
-    list_par(w, "pairs", pairs.list, |p| Written::of(p, &names), true)
+    let by_name = |x: &u32, y: &u32| names[*x as usize].0.cmp(&names[*y as usize].0).then(x.cmp(y));
+    let mut sets: Vec<Vec<u32>> = pairs.identical.to_vec();
+    for s in &mut sets {
+        s.sort_by(by_name);
+    }
+    sets.sort_by(|x, y| by_name(&x[0], &y[0]));
+    const NONE: u32 = u32::MAX;
+    let mut set_of = vec![NONE; names.len()];
+    let mut first = vec![true; names.len()];
+    for (k, s) in sets.iter().enumerate() {
+        for (j, &f) in s.iter().enumerate() {
+            set_of[f as usize] = k as u32;
+            first[f as usize] = j == 0;
+        }
+    }
+    let written: Vec<Vec<Named>> =
+        sets.iter().map(|s| s.iter().map(|&f| Named { name: &names[f as usize].0, name_bytes: &names[f as usize].1 }).collect()).collect();
+    list(w, "identical", &written, false)?;
+    let stated: Vec<&Pair> = pairs
+        .list
+        .iter()
+        .filter(|p| {
+            let (a, b) = p.ends();
+            first[a] && first[b] && (set_of[a] == NONE || set_of[a] != set_of[b])
+        })
+        .collect();
+    list_par(w, "pairs", &stated, |p| Written::of(p, &names), true)
 }
 
 /// Write the report of `scan` where `report` says, in the layout it says,
@@ -553,9 +600,26 @@ mod tests {
     fn json(o: &Outcome, pairs: Option<&[Pair]>) -> serde_json::Value {
         let mut buf = Vec::new();
         let files: Vec<PathBuf> = o.files.iter().map(|f| f.path.clone()).collect();
-        let pairs = pairs.map(|list| Pairs { files: &files, list });
+        let pairs = pairs.map(|list| Pairs { files: &files, list, identical: &[] });
         write_layout(&mut buf, Format::Json, o, Mode::Content, pairs).unwrap();
         serde_json::from_slice(&buf).unwrap()
+    }
+
+    /// Three identical files, `/c`, `/a` and `/b`, each matched to `/d`:
+    /// the set is stated once, in name order, and `pairs` names `/a` alone
+    /// of it, once against `/d` and never against `/b` or `/c`.
+    #[test]
+    fn an_identical_set_is_stated_once() {
+        let o = scan();
+        let files: Vec<PathBuf> = ["/c.jpg", "/a.jpg", "/b.jpg", "/d.jpg"].iter().map(PathBuf::from).collect();
+        let same = |a, b| Pair { ev: ev(Relation::Identical), ..pair(a, b) };
+        let list = [same(0, 1), same(0, 2), same(1, 2), pair(0, 3), pair(1, 3), pair(2, 3)];
+        let mut buf = Vec::new();
+        write_layout(&mut buf, Format::Json, &o, Mode::Content, Some(Pairs { files: &files, list: &list, identical: &[vec![0, 1, 2]] })).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["identical"], serde_json::json!([[{"name": "/a.jpg"}, {"name": "/b.jpg"}, {"name": "/c.jpg"}]]));
+        let named: Vec<(&str, &str)> = v["pairs"].as_array().unwrap().iter().map(|p| (p["a"].as_str().unwrap(), p["b"].as_str().unwrap())).collect();
+        assert_eq!(named, [("/a.jpg", "/d.jpg")]);
     }
 
     #[test]

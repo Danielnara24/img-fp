@@ -438,8 +438,10 @@ members. A file that matches two representatives appears in both groups.
 `-o` picks the format from the file extension (`.txt`, `.csv` or `.json`), and
 `--format` sets it explicitly. CSV has the same rows, `;`-separated, with the
 suggestion in the `action` column. JSON also
-lists every matched pair. The report goes to stdout; progress and the summary go
-to stderr.
+lists every matched pair. Files that are byte-for-byte identical are listed
+once as a set under `identical`, and the pairs name only the first file of
+each set: every other file of the set has the same pairs. The report goes to
+stdout; progress and the summary go to stderr.
 
 ## Options
 
