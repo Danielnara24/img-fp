@@ -4,8 +4,9 @@
 [![crates.io](https://img.shields.io/crates/v/img-fp?logo=rust)](https://crates.io/crates/img-fp)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-**Find duplicate images from the Linux command line**, including crops, resizes
-and pictures pasted into other pictures.
+**Find duplicate and near-duplicate images on Linux**, from the command line or
+a desktop app, including crops, resizes and pictures pasted into other
+pictures.
 
 `img-fp` compares images by their local features rather than by a single hash of
 the whole picture, so it still finds a match after an image has been
@@ -25,21 +26,14 @@ reported.
 The command line only reports; nothing is moved or deleted. The desktop app
 shows each group and moves the images you choose to the Trash.
 
-## Requirements
-
-Linux on x86_64 with glibc 2.28 or newer: Ubuntu 20.04+, Debian 10+, Fedora
-29+, Arch, openSUSE Tumbleweed and Leap 15.3+, RHEL 8+ and its rebuilds. The
-desktop app needs a newer system; see below.
-img-fp runs on any x86_64 CPU and uses AVX2 when the CPU has it (Intel Haswell
-or newer, any AMD Zen).
-
-HEIC, HEIF and AVIF files are read through the system's libheif (1.12 or
-newer), when it is installed. Without it those files are reported as
-unreadable and every other format works.
-
 ## Installation
 
-### Prebuilt binary
+### Command line
+
+Linux on x86_64 with glibc 2.28 or newer: Ubuntu 20.04+, Debian 10+, Fedora
+29+, Arch, openSUSE Tumbleweed and Leap 15.3+, RHEL 8+ and its rebuilds. It
+runs on any x86_64 CPU and uses AVX2 when the CPU has it (Intel Haswell or
+newer, any AMD Zen).
 
 ```bash
 curl -L -o img-fp \
@@ -48,7 +42,15 @@ chmod +x img-fp
 sudo install -m 755 img-fp /usr/local/bin/img-fp
 ```
 
-To read HEIC and AVIF files, install libheif and its decoders:
+Each release also ships a `.sha256` file if you want to verify the download:
+
+```bash
+sha256sum -c img-fp-x86_64-linux-gnu.sha256
+```
+
+HEIC, HEIF and AVIF files are read through the system's libheif (1.12 or
+newer). Without it those files are reported as unreadable and every other
+format works. To install it with its decoders:
 
 ```bash
 sudo apt install libheif1 libheif-plugin-libde265 libheif-plugin-dav1d  # Ubuntu 24.04+, Debian 13+
@@ -58,23 +60,82 @@ sudo pacman -S libheif                                                  # Arch
 sudo zypper install libheif1 libheif-dav1d                              # openSUSE
 ```
 
-Fedora, openSUSE and RHEL leave out the HEIC decoder. Without it HEIC files are
-reported as unreadable and everything else works. On Fedora it is
+Fedora, openSUSE and RHEL leave out the HEIC decoder: on Fedora it is
 `libheif-freeworld` from RPM Fusion; on openSUSE, install `libheif1` and
 `libheif-HEIF` from Packman.
 
-Each release also ships a `.sha256` file if you want to verify the download:
+### Desktop app: Flatpak
+
+The Flatpak runs on any distribution with Flatpak, Ubuntu 22.04 included, and
+reads HEIC and AVIF files with nothing else installed. Download
+`img-fp-x86_64.flatpak` from the
+[latest release](https://github.com/Danielnara24/img-fp/releases/latest) and
+install it:
 
 ```bash
-sha256sum -c img-fp-x86_64-linux-gnu.sha256
+flatpak install --user img-fp-x86_64.flatpak
+flatpak run io.github.danielnara24.img-fp
+```
+
+Flatpak itself is installed on Fedora, Linux Mint and most other desktops
+already; on Ubuntu, `sudo apt install flatpak` first, then add Flathub as
+[its setup page](https://flathub.org/setup) shows.
+
+The command line comes with it. To start either by its short name from a
+terminal, add these lines to `~/.bashrc` (or your shell's own file):
+
+```bash
+alias img-fp='flatpak run --command=img-fp io.github.danielnara24.img-fp'
+alias img-fp-gui='flatpak run io.github.danielnara24.img-fp'
+```
+
+The Flatpak keeps its cache, settings and last scan in
+`~/.var/app/io.github.danielnara24.img-fp/`, apart from those of an `img-fp`
+installed otherwise.
+
+### Desktop app: binary
+
+The same requirements as the command line, plus GTK 4.10 or newer (Ubuntu
+24.04+, Debian 13+, Fedora 38+, RHEL 9+, openSUSE Tumbleweed and Leap 15.6+,
+Arch):
+
+```bash
+sudo apt install libgtk-4-1          # Ubuntu, Debian
+sudo dnf install gtk4                # Fedora, RHEL 9+
+sudo pacman -S gtk4                  # Arch
+sudo zypper install libgtk-4-1       # openSUSE
+curl -L -o img-fp-gui \
+  https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-gui-x86_64-linux-gnu
+chmod +x img-fp-gui
+sudo install -m 755 img-fp-gui /usr/local/bin/img-fp-gui
+```
+
+To add it to the applications menu, install the desktop entry and its icon
+from the release's extras archive (`img-fp-<version>-extras.tar.gz`):
+
+```bash
+install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
+  ~/.local/share/applications/io.github.danielnara24.img-fp.desktop
+install -Dm644 icons/io.github.danielnara24.img-fp.svg \
+  ~/.local/share/icons/hicolor/scalable/apps/io.github.danielnara24.img-fp.svg
 ```
 
 ### From source
 
-Requires the Rust toolchain:
+Requires the Rust toolchain. The command line alone:
 
 ```bash
 cargo install img-fp --locked
+```
+
+With the desktop app, which installs both `img-fp` and `img-fp-gui`:
+
+```bash
+sudo apt install libgtk-4-dev pkg-config                # Ubuntu, Debian
+sudo dnf install gtk4-devel pkgconf-pkg-config         # Fedora, RHEL 10
+sudo pacman -S gtk4 pkgconf                            # Arch
+sudo zypper install gtk4-devel pkg-config              # openSUSE
+cargo install img-fp --locked --features gui
 ```
 
 libheif is not needed to build; it is loaded when the first HEIC or AVIF file
@@ -142,14 +203,11 @@ img-fp --from-file paths.txt
 
 A file reached through a symlink, a hard link or two overlapping folders is
 scanned once. Symlinks met inside a folder are skipped unless you pass
-`--follow-symlinks`. Trash folders and thumbnail caches met inside a folder are
-skipped too, since they hold copies of pictures that are elsewhere or were
-deleted; so are a Synology or QNAP NAS's recycle bin, thumbnail and snapshot
-folders (`#recycle`, `@eaDir`, `#snapshot`, `@Recycle`, `@__thumb`,
-`@Recently-Snapshot`) and a drive's `lost+found`. Name one directly to scan it. Hidden folders (names starting with a
-dot) are skipped unless you pass `--hidden`, since in a home folder they hold
-programs' icons and themes rather than photos; a hidden folder named directly is
-scanned.
+`--follow-symlinks`. Trash folders, thumbnail caches, NAS recycle bins and
+snapshot folders, and a drive's `lost+found` are skipped too, since they hold
+copies of pictures that are elsewhere or were deleted; name one directly to
+scan it. Hidden folders (names starting with a dot) are skipped unless you pass
+`--hidden`; a hidden folder named directly is scanned.
 
 `-o` and `--log-file` never write over an image, nor over the list
 `--from-file` reads: naming one is refused before anything runs.
@@ -162,16 +220,69 @@ img-fp --last -o dupes.csv
 img-fp --last --suggest representative
 ```
 
-The last scan is the last one to finish, from the command line or the
-desktop app, which opens on it. It is kept in `last-scan/` beside the cache,
-so a scan run with `--cache` is written again by `--last` with the same
-`--cache`; `--last` names the folders its scan was of. Files deleted since
-are left out. A file suggested for deletion because
-another file shows all of it becomes REVIEW if that other file has been
-deleted since. A JSON report written this way has no list of pairs. Scans
-run with `--no-cache` are not kept, and neither are scans that found no
-images. A scan `--against` a library is kept too, and written again with its
-verdicts (see Comparing with a library); the desktop app does not open one.
+It is kept beside the cache (in `last-scan/`), from the command line or the
+desktop app, whichever finished last, and files deleted since are left out.
+Scans run with `--no-cache` are not kept.
+
+## Output
+
+Each group has one representative, followed by every file that matched it.
+The representative is not necessarily the original.
+
+```
+group_1: 4 files
+	REP,   KEEP,   2000x3000, 2.1MB, /photos/beach.jpg
+	MATCH, DELETE, 2000x3000, 2.1MB, identical, /backup/beach.jpg
+	MATCH, DELETE, 1000x1500, 250.8KB, 43 points, overlap 1.00, correlation 0.99, /phone/beach-crop.jpg
+	MATCH, DELETE, 666x1000, 85.4KB, 172 points, overlap 1.00, correlation 1.00, /phone/beach-small.jpg
+```
+
+- `points`: matching points the two images share
+- `overlap`: how much of one image lies inside the other
+- `correlation`: how closely the pixels of that shared area agree
+
+A match can also be marked `mirrored` or `inverted`.
+
+Every member was checked against the representative, not against the other
+members. A file that matches two representatives appears in both groups.
+
+The second column suggests what to do with each file. img-fp never deletes
+anything itself, and its suggestions can be wrong.
+
+- `KEEP`: the best copy of the picture, a file that shows something the
+  others don't, such as a collage, a slide or a meme made from it, or a
+  different photo that only looks similar
+- `DELETE`: as far as img-fp can tell, everything in it is also in a file
+  marked to stay, at about the same detail or better. This is a suggestion,
+  not a guarantee: an edit that is very hard to tell from the original, such
+  as a faint watermark, a colour change or a heavily re-saved copy, can be
+  the file that stays. Look before deleting anything you cannot replace
+- `REVIEW`: look at it before deciding. Either a close copy, such as one
+  tinted or watermarked, that could not be confirmed, or one of two versions
+  of the same picture, such as a photo and its re-save in another format,
+  where nothing says which one is the original
+
+A file has the same suggestion in every group it appears in. That is the
+default rule, `--suggest content`. Two simpler rules read only the groups:
+
+- `--suggest correlation`: each group's representative is `KEEP`. Another
+  file is `DELETE` when it agrees with a representative closely, from two
+  thirds of the way between `--min-pixel-correlation` and 1 (0.9 by
+  default), `KEEP` when it agrees less, and `REVIEW` below
+  `--min-pixel-correlation`
+- `--suggest representative`: each group's representative is `KEEP` and
+  every other file is `DELETE`
+
+Both can suggest deleting a file that holds something the representative
+doesn't, such as a collage or the uncropped photo.
+
+`-o` picks the format from the file extension (`.txt`, `.csv` or `.json`), and
+`--format` sets it explicitly. CSV has the same rows, `;`-separated, with the
+suggestion in the `action` column. JSON also lists every matched pair. Files
+that are byte-for-byte identical are listed once as a set under `identical`,
+and the pairs name only the first file of each set: every other file of the
+set has the same pairs. The report goes to stdout; progress and the summary go
+to stderr.
 
 ## Comparing with a library
 
@@ -243,9 +354,13 @@ since is answered by the rest of the library.
 
 ## Desktop app
 
+![The results of a scan: one photograph and its copies](https://raw.githubusercontent.com/Danielnara24/img-fp/main/flatpak/screenshots/results.png)
+
 `img-fp-gui` is a window over the same scan. Pick folders and options, start
 the scan, then go through the groups and choose which images to move to the
-Trash.
+Trash. Folders given on its command line are the ones to scan
+(`img-fp-gui ~/Pictures`), and a file manager can open a folder with it
+through "Open With Other Application".
 
 Under *Exclude*, add folders to leave out, or type a pattern as `--exclude`
 takes one: a name to leave out wherever it is (`*.tmp`, `Thumb?`), or a whole
@@ -264,14 +379,10 @@ path, which may hold `*` and `**` (`~/Pictures/**/raw`).
   Double click or Enter opens it large. There, *Compare with reference* (or
   C) shows it beside its group's reference image, with the part each shows
   of the other outlined and the rest dimmed: where a crop lies in the photo,
-  or a photo in a slide. Two arrows from the middle of the outline (of the
-  part of it on the picture), X in red and Y in green, show the reference's
-  right and up (towards the top side of its outline): as they are on the
-  reference, and turned or reversed on a copy that is turned or mirrored.
-  Each reaches half way to the side of the outline it points at.
-  The caption says so in words too. *Actual size* (or 1) shows the image
-  pixel for pixel, to tell a sharp copy from a softer one; drag it to move
-  around. Press it again to fit the image to the window.
+  or a photo in a slide. Arrows on the outline show which way the reference
+  faces, so a turned or mirrored copy is plain to see. *Actual size* (or 1)
+  shows the image pixel for pixel, to tell a sharp copy from a softer one;
+  drag it to move around. Press it again to fit the image to the window.
   Shift and a click marks or unmarks every image from the last one you
   marked or unmarked to the one clicked; Shift and an arrow key marks or
   unmarks each image it moves over the same way.
@@ -294,154 +405,14 @@ path, which may hold `*` and `**` (`~/Pictures/**/raw`).
   are noticed before anything is marked or moved: a deleted one leaves its
   group, and an image suggested for deletion because a deleted or changed
   one shows all of it becomes `REVIEW`.
-- The results of the last scan are kept in `~/.cache/img-fp/last-scan/` and
-  shown again the next time the window opens, with the images you marked still
-  marked and without the images already moved to the Trash. The next scan to
-  finish replaces them, including one run from the command line with the
-  default cache, so a scan run in a terminal can be gone through here.
+- The results of the last scan are shown again the next time the window
+  opens, with the images you marked still marked and without the images
+  already moved to the Trash. The next scan to finish replaces them,
+  including one run from the command line with the default cache, so a scan
+  run in a terminal can be gone through here.
 
 Every control can be reached from the keyboard. Underlined letters are Alt
 shortcuts, the menu shows its own, and F1 lists every key.
-
-### As a Flatpak
-
-The Flatpak runs on any distribution with Flatpak, Ubuntu 22.04 included, and
-reads HEIC and AVIF files with nothing else installed. Download
-`img-fp-x86_64.flatpak` from the
-[latest release](https://github.com/Danielnara24/img-fp/releases/latest) and
-install it:
-
-```bash
-flatpak install --user img-fp-x86_64.flatpak
-flatpak run io.github.danielnara24.img-fp
-```
-
-It appears in the applications menu as img-fp, and a file manager can open
-a folder with it through "Open With Other Application". Flatpak itself is installed on Fedora, Linux
-Mint and most other desktops already; on Ubuntu, `sudo apt install flatpak`
-first, then add Flathub as [its setup page](https://flathub.org/setup) shows.
-
-The command line comes with it. To start either by its short name from a
-terminal, add these lines to `~/.bashrc` (or your shell's own file):
-
-```bash
-alias img-fp='flatpak run --command=img-fp io.github.danielnara24.img-fp'
-alias img-fp-gui='flatpak run io.github.danielnara24.img-fp'
-```
-
-Then `img-fp ~/Pictures` scans from the terminal and `img-fp-gui ~/Pictures`
-opens the window on that folder.
-
-The Flatpak keeps its cache, settings and last scan in
-`~/.var/app/io.github.danielnara24.img-fp/`, apart from those of an `img-fp`
-installed otherwise, so the window shows the last scan of the command line
-above, not of another `img-fp`.
-
-### As a binary
-
-It has the same requirements as `img-fp`, plus GTK 4.10 or newer (Ubuntu
-24.04+, Debian 13+, Fedora 38+, RHEL 9+, openSUSE Tumbleweed and Leap 15.6+,
-Arch):
-
-```bash
-sudo apt install libgtk-4-1          # Ubuntu, Debian
-sudo dnf install gtk4                # Fedora, RHEL 9+
-sudo pacman -S gtk4                  # Arch
-sudo zypper install libgtk-4-1       # openSUSE
-curl -L -o img-fp-gui \
-  https://github.com/Danielnara24/img-fp/releases/latest/download/img-fp-gui-x86_64-linux-gnu
-chmod +x img-fp-gui
-sudo install -m 755 img-fp-gui /usr/local/bin/img-fp-gui
-```
-
-From source, with the `gui` feature, which installs both `img-fp` and
-`img-fp-gui`:
-
-```bash
-sudo apt install libgtk-4-dev pkg-config                # Ubuntu, Debian
-sudo dnf install gtk4-devel pkgconf-pkg-config         # Fedora, RHEL 10
-sudo pacman -S gtk4 pkgconf                            # Arch
-sudo zypper install gtk4-devel pkg-config              # openSUSE
-cargo install img-fp --locked --features gui
-```
-
-To add it to the applications menu, install the desktop entry and its icon
-from the extras archive:
-
-```bash
-install -Dm644 applications/io.github.danielnara24.img-fp.desktop \
-  ~/.local/share/applications/io.github.danielnara24.img-fp.desktop
-install -Dm644 icons/io.github.danielnara24.img-fp.svg \
-  ~/.local/share/icons/hicolor/scalable/apps/io.github.danielnara24.img-fp.svg
-```
-
-Folders given on its command line are the ones to scan, in place of the ones
-remembered from last time: `img-fp-gui ~/Pictures`. It then opens on the scan
-settings, with the last scan's results one click away. With the desktop entry
-installed, a file manager can open a folder with it through "Open With Other
-Application". It does not register itself as an application for folders,
-since on a desktop that names no default one for them, that could make it
-the program every folder opens in.
-
-## Output
-
-Each group has one representative, followed by every file
-that matched it (don't interpret the representative as the source image):
-
-```
-group_1: 4 files
-	REP,   KEEP,   2000x3000, 2.1MB, /photos/beach.jpg
-	MATCH, DELETE, 2000x3000, 2.1MB, identical, /backup/beach.jpg
-	MATCH, DELETE, 1000x1500, 250.8KB, 43 points, overlap 1.00, correlation 0.99, /phone/beach-crop.jpg
-	MATCH, DELETE, 666x1000, 85.4KB, 172 points, overlap 1.00, correlation 1.00, /phone/beach-small.jpg
-```
-
-The second column suggests what to do with each file. img-fp never deletes
-anything itself, and its suggestions can be wrong.
-
-- `KEEP`: the best copy of the picture, a file that shows something the
-  others don't, such as a collage, a slide or a meme made from it, or a
-  different photo that only looks similar
-- `DELETE`: as far as img-fp can tell, everything in it is also in a file
-  marked to stay, at about the same detail or better. This is a suggestion,
-  not a guarantee: an edit that is very hard to tell from the original, such
-  as a faint watermark, a colour change or a heavily re-saved copy, can be
-  the file that stays. Look before deleting anything you cannot replace
-- `REVIEW`: look at it before deciding. Either a close copy, such as one
-  tinted or watermarked, that could not be confirmed, or one of two versions
-  of the same picture, such as a photo and its re-save in another format,
-  where nothing says which one is the original
-
-A file has the same suggestion in every group it appears in. That is the
-default rule, `--suggest content`. Two simpler rules read only the groups:
-
-- `--suggest correlation`: each group's representative is `KEEP`. Another
-  file is `DELETE` when it agrees with a representative closely, from two
-  thirds of the way between `--min-pixel-correlation` and 1 (0.9 by
-  default), `KEEP` when it agrees less, and `REVIEW` below
-  `--min-pixel-correlation`
-- `--suggest representative`: each group's representative is `KEEP` and
-  every other file is `DELETE`
-
-Both can suggest deleting a file that holds something the representative
-doesn't, such as a collage or the uncropped photo.
-
-- `points`: matching points the two images share
-- `overlap`: how much of one image lies inside the other
-- `correlation`: how closely the pixels of that shared area agree
-
-A match can also be marked `mirrored` or `inverted`.
-
-Every member was checked against the representative, not against the other
-members. A file that matches two representatives appears in both groups.
-
-`-o` picks the format from the file extension (`.txt`, `.csv` or `.json`), and
-`--format` sets it explicitly. CSV has the same rows, `;`-separated, with the
-suggestion in the `action` column. JSON also
-lists every matched pair. Files that are byte-for-byte identical are listed
-once as a set under `identical`, and the pairs name only the first file of
-each set: every other file of the set has the same pairs. The report goes to
-stdout; progress and the summary go to stderr.
 
 ## Options
 
@@ -520,17 +491,9 @@ analysed again as they are scanned, and the old analyses are dropped after 30
 days unused.
 Use `--clear-cache` to start over.
 
-The part of the name after `analysis-` is the cache format, which changes
-between some versions. Each format has its own default file, and after an
-upgrade the new version starts a new one and deletes the old one (unless a
-scan of the old version is using it). Two versions installed side by side
-therefore each start afresh after the other has run; give one of them a cache
-of its own with `--cache`.
-
-A file named with `--cache` that was written by another version is left as it
-is, and the run keeps nothing in it. Use `--clear-cache` to replace it. A file
-that is not a cache at all is never written over or deleted: the run uses no
-cache, and says so.
+An upgrade that changes the cache's format (the part of its name after
+`analysis-`) starts a new cache and deletes the old one. To run two versions
+side by side, give one of them a cache of its own with `--cache`.
 
 Pressing Ctrl-C keeps every image analysed so far.
 
