@@ -1,0 +1,61 @@
+# img-fp on 64-bit ARM Linux, on a native ARM runner: does it build, do the
+# tests pass, and does the feature extractor give the x86-64 build's
+# answer. Nothing ships from here; the Flatpak is x86_64 only until this has
+# run clean (flathub.json), and then it can be dropped.
+#
+# The extractor's check (`sift::bench::extract_threads`) prints a checksum of
+# every keypoint and descriptor byte over synthetic pictures, and its time per
+# picture. The x86-64 build's checksums are below; a different one is not a
+# failure of the job, since the pictures are drawn with `sin` and `cos` and an
+# ARM libm may round them otherwise, but it is the first thing to look at.
+name: aarch64
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: aarch64 Linux build and tests
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config libheif1 libheif-plugin-libde265 libheif-plugin-dav1d
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the command line and the window
+        run: cargo build --release --locked --features gui
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Run on an empty folder
+        run: |
+          mkdir -p "$RUNNER_TEMP/empty"
+          ./target/release/img-fp --version
+          ./target/release/img-fp --no-cache "$RUNNER_TEMP/empty"
+
+      - name: The extractor against the x86-64 build
+        run: |
+          cargo test --release --locked --lib -- --ignored --nocapture extract_threads 2>&1 | tee extract.txt
+          for want in "224x224.*checksum b8e5341a1d7b5cad" "384x288.*checksum 5c2fd85ed71708a8"; do
+            if grep -Eq "$want" extract.txt; then
+              echo "matches x86-64: $want"
+            else
+              echo "::warning::the extractor's checksum differs from x86-64 ($want)"
+            fi
+          done

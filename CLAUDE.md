@@ -1157,7 +1157,10 @@ Other targets are checked from here without their C (SQLite, zstd and
 blake3 build C, and there is no cross C toolchain): `LIBSQLITE3_SYS_USE_PKG_CONFIG=1
 ZSTD_SYS_USE_PKG_CONFIG=1 PKG_CONFIG_ALLOW_CROSS=1 cargo check --target
 aarch64-unknown-linux-gnu --all-targets`, and `CARGO_FEATURE_PURE=1` as well
-for `aarch64-apple-darwin`.
+for `aarch64-apple-darwin`. ARM Linux is built and tested on a native runner by
+`.github/workflows/aarch64.yml` (2026-11-16: tests, an empty scan, and the
+extractor's checksums against x86-64's, a warning when they differ); the
+Flatpak goes to Flathub x86_64 only until that has run clean.
 
 glibc floor is **2.28** for the CLI and **2.34** for the window; `release.yml` fails if
 either moves. A binary asks for the glibc it was linked against, not what

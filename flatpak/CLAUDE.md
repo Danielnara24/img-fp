@@ -52,3 +52,24 @@ host's 1.17.6 decoding other pixels, which moves the vocabulary and so every
 pair a little: the host binary run inside the sandbox gives the Flatpak's
 result exactly. Not tested here: the portal file chooser, drag and drop,
 "open folder", Wayland.
+
+## Flathub (2026-11-16)
+
+Not submitted. Flathub's requirements
+(https://docs.flathub.org/docs/for-app-authors/requirements#generative-ai-policy)
+say a Flathub manifest must not contain AI-generated or AI-assisted content,
+that AI tools must not open or automate the submission PR nor write its
+description, commits or replies (nor a linter-exception PR), and that
+AI-generated code, documentation and packaging in the app must be disclosed,
+with acceptance at the reviewers' discretion. So **Claude does not write
+Flathub's manifest, `flathub.json`, the submission PR or its permission
+justification**; the user does, by hand. This folder's manifest (`type: dir`,
+used for local builds and the release's bundle) is not what Flathub gets.
+
+Submission: fork `flathub/flathub` (all branches), branch from `new-pr`, add
+`io.github.danielnara24.img-fp.yml` (a `git` or `archive` source pinned by
+tag and commit), `cargo-sources.json`, and `flathub.json` for x86_64 only
+until `.github/workflows/aarch64.yml` runs clean; PR against `new-pr`;
+`bot, build` for a test build. Permissions are approved by moderators apart
+from the linter. Precedent for `--filesystem=host`: Czkawka
+(`com.github.qarmin.czkawka`) has it.
