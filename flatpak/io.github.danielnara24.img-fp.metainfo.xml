@@ -94,6 +94,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.86.1" date="2026-11-27">
+      <description>
+        <p>The progress bar no longer runs ahead at a finer detail. The Detail choices show the size each one looks at.</p>
+      </description>
+    </release>
     <release version="0.86.0" date="2026-11-16">
       <description>
         <p>More copies are found by default, as the default bars are a little looser. In a JSON report, files that are identical are listed once as a set rather than as every pair among them.</p>
