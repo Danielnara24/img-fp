@@ -269,6 +269,18 @@ jobs:
               raise SystemExit("::error::flatpak/cargo-sources.json is out of date; regenerate it from Cargo.lock. Missing: " + ", ".join(missing))
           PY
 
+      - name: Make the image's Flatpak installation writable
+        # The image ships the SDK in a lower overlayfs layer, and flatpak's
+        # update renames directories there, which overlayfs refuses (EXDEV,
+        # "Invalid cross-device link"). Once Flathub has a newer SDK than the
+        # image, `--install-deps-from=flathub` fails on it (v0.86.1, SDK of
+        # 2026-11-23 against the image's 2026-09-22; flatpak-github-actions
+        # #267). Copied into the container's own layer, the update works.
+        run: |
+          cp -a /var/lib/flatpak /var/lib/flatpak.new
+          rm -rf /var/lib/flatpak
+          mv /var/lib/flatpak.new /var/lib/flatpak
+
       - name: Build
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
