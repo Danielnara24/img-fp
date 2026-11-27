@@ -1234,7 +1234,7 @@ fn line(path: &Path) -> String {
     let probe = guarded(|| probe(path)).ok().flatten();
     let len = std::fs::metadata(path).map_or(0, |m| m.len());
     out.push(match &probe {
-        Some(p) => format!("probe {}x{} cost {:?}", p.w, p.h, crate::progress::file_cost(Some(p), len, 512, 512)),
+        Some(p) => format!("probe {}x{} cost {:?}", p.w, p.h, crate::progress::file_cost(Some(p), len, 512, 512, 512)),
         None => "probe none".into(),
     });
     for work in [512, 160] {

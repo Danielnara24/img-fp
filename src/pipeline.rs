@@ -759,6 +759,7 @@ fn analyse_all(
         k.cache_bytes = cache_path.as_deref().map_or(0, cache::bytes);
         k.cache_write = cache_path.is_some();
         k.work_size = args.work_size();
+        k.detail = args.detail();
         k.candidates = args.candidates;
         k.steps = (args.detail() / args.work_size()).ilog2() as usize + 1;
         if args.skip_mirrored {
@@ -875,7 +876,7 @@ fn analyse_all(
                 return Default::default();
             }
             let probe = decode::probe(&files[i]);
-            (progress::file_cost(probe.as_ref(), stats[i].len, args.work_size(), sp.upsample_below), probe)
+            (progress::file_cost(probe.as_ref(), stats[i].len, args.work_size(), args.detail(), sp.upsample_below), probe)
         })
         .unzip();
     stage!(cx, "{todo} files to analyse");

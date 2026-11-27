@@ -104,7 +104,13 @@ pub static DETAIL: Opt = Opt {
     ..plain(
         "detail",
         None,
-        Kind::Choice(&[("Fast", Some("fast"), "Fast"), ("Normal", None, "Normal"), ("Fine", Some("1024"), "Fine"), ("Finer", Some("2048"), "Finer"), ("Finest", Some("4096"), "Finest")]),
+        Kind::Choice(&[
+            ("Fast", Some("fast"), "Fast (256)"),
+            ("Normal", None, "Normal (512)"),
+            ("Fine", Some("1024"), "Fine (1024)"),
+            ("Finer", Some("2048"), "Finer (2048)"),
+            ("Finest", Some("4096"), "Finest (4096)"),
+        ]),
         l::DETAIL,
     )
 };

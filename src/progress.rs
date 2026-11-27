@@ -249,8 +249,9 @@ pub struct Known {
     pub cache_bytes: u64,
     /// Whether the cache will be rewritten at the end of the analysis.
     pub cache_write: bool,
-    /// The working size and `-k`.
+    /// The working size, `--detail` and `-k`.
     pub work_size: usize,
+    pub detail: usize,
     pub candidates: usize,
     /// How many times the matching runs: once, and once more for each
     /// doubling a finer `--detail` adds (`pipeline::match_all`). 0 is
@@ -306,11 +307,19 @@ impl Known {
             Stage::CacheRead => self.cache_bytes as f64,
             Stage::Headers => files,
             // No picture is analysed at more pixels than a square one at the
-            // working size (the area rule gives a wider one a 4:3 one's).
-            // With no working size, a twelve-megapixel photograph.
+            // working size (the area rule gives a wider one a 4:3 one's),
+            // and a square one at each doubling of it up to `--detail`
+            // (`analysis::finer_levels`; a picture held whole at a level is
+            // smaller than that level). With no working size, a
+            // twelve-megapixel photograph.
             Stage::Describe => {
-                let work = self.work_size as f64;
-                to_describe * if work > 0.0 { work * work } else { 12e6 }
+                let mut px = 0.0;
+                let mut size = self.work_size;
+                while size > 0 && (size == self.work_size || size <= self.detail) {
+                    px += (size * size) as f64;
+                    size *= 2;
+                }
+                to_describe * if px > 0.0 { px } else { 12e6 }
             }
             Stage::CacheWrite => {
                 if self.cache_write {
@@ -342,13 +351,19 @@ pub struct FileCost {
 }
 
 /// What analysing a file will be, from its header: `decode::working_size`
-/// fitted to `--work-size` and `sift::enlargement` of that, as the analysis
-/// itself sizes it.
-pub fn file_cost(probe: Option<&Probe>, bytes: u64, work: usize, upsample_below: usize) -> FileCost {
+/// fitted to `--work-size` and `sift::enlargement` of that, and each level
+/// finer than it up to `--detail` (`analysis::finer_levels`), as the analysis
+/// itself sizes them.
+pub fn file_cost(probe: Option<&Probe>, bytes: u64, work: usize, detail: usize, upsample_below: usize) -> FileCost {
     let Some(p) = probe else { return FileCost { kind: None, source: bytes, analysed: 0 } };
-    let (w, h) = crate::decode::working_size(p.w as usize, p.h as usize, work);
+    let (pw, ph) = (p.w as usize, p.h as usize);
+    let (w, h) = crate::decode::working_size(pw, ph, work);
     let f = crate::sift::enlargement(w.max(h), crate::analysis::enlarge_below(work, upsample_below));
-    FileCost { kind: Some(p.kind), source: p.w as u64 * p.h as u64, analysed: (w * h * f * f) as u64 }
+    let finer: usize = crate::analysis::finer_levels(pw, ph, work, detail)
+        .iter()
+        .map(|l| if l.whole { pw * ph } else { let (w, h) = crate::decode::working_size(pw, ph, l.size); w * h })
+        .sum();
+    FileCost { kind: Some(p.kind), source: pw as u64 * ph as u64, analysed: (w * h * f * f + finer) as u64 }
 }
 
 /// The analysis as it goes, file by file: what is left of it in each format,
@@ -869,7 +884,7 @@ mod tests {
         // the decode and the extractor themselves size them.
         for (w, h) in [(4000, 3000), (3000, 4000), (1080, 11520), (11520, 1080), (224, 224), (100, 30), (512, 384), (513, 2), (7, 9)] {
             for work in [0, 128, 384, 512, 640] {
-                let c = file_cost(Some(&probe(w, h)), 1, work, 512);
+                let c = file_cost(Some(&probe(w, h)), 1, work, work, 512);
                 let (ww, wh) = crate::decode::working_size(w as usize, h as usize, work);
                 let f = crate::sift::enlargement(ww.max(wh), crate::analysis::enlarge_below(work, 512));
                 assert_eq!(c.analysed, (ww * wh * f * f) as u64);
@@ -878,12 +893,23 @@ mod tests {
         }
         // A panorama is analysed at a 4:3 picture's pixels, not its long
         // side's share of them (`decode::area_factor`).
-        let pano = file_cost(Some(&probe(11520, 1080)), 1, 512, 512).analysed;
-        let photo = file_cost(Some(&probe(4000, 3000)), 1, 512, 512).analysed;
+        let pano = file_cost(Some(&probe(11520, 1080)), 1, 512, 512, 512).analysed;
+        let photo = file_cost(Some(&probe(4000, 3000)), 1, 512, 512, 512).analysed;
         assert!((pano as f64 / photo as f64 - 1.0).abs() < 0.05, "{pano} {photo}");
         // A thumbnail is enlarged, but never past the working size.
-        assert_eq!(file_cost(Some(&probe(224, 224)), 1, 512, 512).analysed, 448 * 448);
-        assert_eq!(file_cost(Some(&probe(224, 224)), 1, 384, 512).analysed, 224 * 224);
+        assert_eq!(file_cost(Some(&probe(224, 224)), 1, 512, 512, 512).analysed, 448 * 448);
+        assert_eq!(file_cost(Some(&probe(224, 224)), 1, 384, 384, 512).analysed, 224 * 224);
+        // A finer `--detail` costs each level the analysis describes beyond
+        // the working size, the picture itself where it stops between two.
+        let at = |w, h, detail| file_cost(Some(&probe(w, h)), 1, 512, detail, 512).analysed;
+        assert_eq!(at(4000, 3000, 4096), at(4000, 3000, 512) + 1024 * 768 + 2048 * 1536 + 4000 * 3000);
+        assert_eq!(at(400, 300, 4096), at(400, 300, 512), "held whole at 512: no finer level");
+        // And until the headers have counted them, no more than a square
+        // picture at each size from the working size to the detail.
+        let k = |detail| Known { files: 2, work_size: 512, detail, ..Default::default() }.units(Stage::Describe);
+        assert_eq!(k(512), 2.0 * 512.0 * 512.0);
+        assert_eq!(k(4096), 2.0 * (512.0f64.powi(2) + 1024.0f64.powi(2) + 2048.0f64.powi(2) + 4096.0f64.powi(2)));
+        assert!(at(4000, 3000, 4096) as f64 <= k(4096) / 2.0);
     }
 
     #[test]
